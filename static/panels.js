@@ -206,6 +206,7 @@ async function switchPanel(name, opts = {}) {
     await loadProfilesPanel();
     if (typeof renderNeoPersonalPanel === 'function') renderNeoPersonalPanel();
   }
+  if (nextPanel === 'projects' && typeof loadProjectsCommandCenter === 'function') await loadProjectsCommandCenter();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'settings') {
     if (typeof mountDashboardSettings === 'function') mountDashboardSettings();

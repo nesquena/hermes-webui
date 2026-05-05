@@ -18,7 +18,8 @@
 | [EP-03](#ep-03--painel-dashboard) | Página Dashboard | P0 | Sprint 2 |
 | [EP-08](#ep-08--configurações-neo-embutidas-no-dashboard) | Configurações Neo (embutidas no dashboard) | P0 | Sprint 3 |
 | [EP-09](#ep-09--skills-neo-embutidas-no-dashboard) | Skills Neo (embutidas no dashboard) | P0 | Sprint 4 |
-| [EP-04](#ep-04--página-projetos-kanban) | Página Projetos (Kanban 4 colunas) | P0 | Sprint 5 |
+| [EP-04](#ep-04--página-projetos-command-center-local-first) | Página Projetos (Command Center local-first) | P0 | Sprint 5 |
+| [EP-10](#ep-10--sincronização-jira-e-fontes-externas) | Sincronização Jira e fontes externas | P0 futuro | Sprint 6+ |
 | [EP-05](#ep-05--ações-rápidas-e-integrações-locais) | Ações rápidas e integrações locais | P1 | Sprint 6 |
 | [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 6 |
 | [EP-07](#ep-07--qualidade-testes-e-evidências) | Qualidade, testes e evidências | P0 | Transversal |
@@ -175,33 +176,34 @@ mais simples: sem dirty guard, sem autosave, sem session state.
 
 ---
 
-## EP-04 — Página Projetos (Kanban)
+## EP-04 — Página Projetos (Command Center local-first)
 
-**Objetivo:** Página dedicada full-page com Kanban de **4 colunas** (Backlog /
-Em Andamento / Em Revisão / Concluído), barra de status com pills clicáveis,
-cards com chips de categoria/prioridade e barra de progresso. Conforme
-[DESIGN-SPEC §7](./DESIGN-SPEC.md#7-página-projetos-kanban-full-page).
+**Objetivo:** Página dedicada full-page para acompanhamento diário dos projetos
+operados pelo Neo. Não é um clone de Jira: é uma central local-first que agrega
+projetos, tarefas, sessões Neo e referências externas. A Sprint 5 entrega
+Kanban e Lista com persistência local e campos `external_ref`; sincronização real
+com Jira/GitHub/Obsidian fica no épico futuro [EP-10](#ep-10--sincronização-jira-e-fontes-externas).
 
 ### HUs
 
 | HU | Descrição | Prioridade |
 |---|---|---|
-| HU-04.1 | Como Júnior, quero uma página "Projetos" na sidebar com header (título 24px + subtítulo + botões Filtros/Kanban▾/+ Novo Projeto) | P0 |
+| HU-04.1 | Como Júnior, quero uma página "Projetos" na sidebar com header (título 24px + subtítulo + botões Filtros/Kanban/Lista/+ Novo Projeto) | P0 |
 | HU-04.2 | Como Júnior, quero **4 colunas** Kanban: Backlog, Em Andamento, Em Revisão, Concluído — com top-border colorido (slate/amber/blue/green) e contagem | P0 |
-| HU-04.3 | Como Júnior, quero criar projeto via modal (nome, categoria, prioridade, descrição) | P0 |
-| HU-04.4 | Como Júnior, quero arrastar cards entre colunas (drag: glow cyan + rotate 2deg; drop: persiste via `POST /api/projects/{id}`) | P0 |
-| HU-04.5 | Como Júnior, quero cards com: título, chip de categoria colorido, chip de prioridade, barra de progresso com % (exceto coluna Concluído) | P0 |
+| HU-04.3 | Como Júnior, quero criar projeto via modal (nome, descrição, domínio, cor, fonte externa padrão opcional) | P0 |
+| HU-04.4 | Como Júnior, quero criar tarefas vinculadas a projetos, com categoria, prioridade, responsável, prazo e `external_ref` opcional | P0 |
+| HU-04.5 | Como Júnior, quero arrastar cards entre colunas (drag: glow cyan + rotate 2deg; drop: persiste via `PATCH /api/project-tasks/{id}`) | P0 |
 | HU-04.6 | Como Júnior, quero barra de status (pills) com contadores clicáveis: Total, Backlog, Em Andamento, Revisão, Concluído | P0 |
-| HU-04.7 | Como Júnior, quero botão "+ Adicionar tarefa" no footer de cada coluna (cria card inline) | P0 |
-| HU-04.8 | Como Júnior, quero vincular uma sessão existente a um projeto | P1 |
-| HU-04.9 | Como Júnior, quero arquivar projetos concluídos (filtro "Mostrar arquivados") | P1 |
-| HU-04.10 | Como Júnior, no mobile quero Kanban empilhado em 1 coluna com tabs no topo | P1 |
+| HU-04.7 | Como Júnior, quero uma vista Lista agrupada por status com colunas ID, tarefa, prioridade, responsável e estado | P0 |
+| HU-04.8 | Como Júnior, quero filtros por texto, projeto, status, prioridade, fonte externa, responsável e data | P0 |
+| HU-04.9 | Como Júnior, quero vincular sessões Neo e refs GitHub/Obsidian a uma tarefa | P1 |
+| HU-04.10 | Como Júnior, no mobile quero Kanban empilhado em 1 coluna com tabs no topo e fallback de mover por menu | P1 |
 
 **Dependências:** EP-01, EP-02, EP-08. Reaproveita modelo `Session.project` existente.
 **Arquivos tocados:**
-- Novo: `static/kanban.js`, `api/projects.py` (novo módulo, CRUD de projetos)
+- Novo: `static/kanban.js`, `api/projects.py` (novo módulo, CRUD local-first de projetos/tarefas)
 - Persistência: `~/.hermes/webui/projects.json`
-- Aditivo: rotas em `api/routes.py` (`GET/POST /api/projects`, etc.)
+- Aditivo: rotas em `api/routes.py` (`GET/POST/PATCH /api/projects`, `GET/POST/PATCH /api/project-tasks`, etc.)
 - Aditivo: `static/i18n.js` (chaves `projects_*`)
 - Aditivo: `static/style.css` (`.kanban-*`)
 
@@ -210,6 +212,31 @@ Database, Infra, DevOps, Docs, QA, Segurança. Cores conforme DESIGN-SPEC §2.
 
 **Prioridades:** Baixa (slate), Média (amber), Alta (vermelho). Cores conforme
 DESIGN-SPEC §2.
+
+**Fontes externas no MVP:** Sprint 5 só persiste metadados (`external_ref`) e
+links. Não chama APIs de Jira/GitHub/Obsidian.
+
+---
+
+## EP-10 — Sincronização Jira e fontes externas
+
+**Objetivo:** Conectar a central de projetos do Neo aos sistemas de origem que
+Júnior já usa: múltiplos Jiras, GitHub, Obsidian e sessões Neo. Este épico é
+próximo ao MVP, mas fora da Sprint 5.
+
+### HUs
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-10.1 | Como Júnior, quero cadastrar múltiplas fontes Jira com nome, base URL, projeto/chave padrão e credencial referenciada fora do repo | P0 futuro |
+| HU-10.2 | Como Júnior, quero que o Neo crie uma issue Jira a partir do chat e vincule a tarefa local via `external_ref` | P0 futuro |
+| HU-10.3 | Como Júnior, quero importar issues existentes por projeto/filtro para a central Projetos | P0 futuro |
+| HU-10.4 | Como Júnior, quero sincronizar status remoto do Jira com status local mapeado | P0 futuro |
+| HU-10.5 | Como Júnior, quero reconciliar conflitos entre status local e remoto sem sobrescrever trabalho silenciosamente | P1 futuro |
+| HU-10.6 | Como Júnior, quero anexar refs GitHub, Obsidian e sessões Neo automaticamente quando o Neo operar uma tarefa | P1 futuro |
+
+**Dependências:** Sprint 5 concluída; política de credenciais definida para os
+três Jiras; decisão de mapeamento de status por fonte.
 
 ---
 

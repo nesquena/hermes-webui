@@ -493,6 +493,8 @@ def _resolve_effective_session_model_for_display(session) -> str:
     return effective_model or original_model
 
 
+# NEO Sprint 5: local-first Projects Command Center module.
+from api import projects as neo_projects
 from api.models import (
     Session,
     get_session,
@@ -1187,7 +1189,18 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/projects":
-        return j(handler, {"projects": load_projects()})
+        # NEO Sprint 5: snapshot v2 (projects + tasks + sources + counts).
+        # Backward compatible: upstream callers that read `data.projects`
+        # keep working; new callers can use tasks/sources/counts.
+        # ?include_archived=1 brings archived items for the
+        # "Mostrar arquivados" toggle (HU-04.10).
+        try:
+            qs = parse_qs(parsed.query)
+            include_archived = qs.get("include_archived", [""])[0] in ("1", "true", "yes")
+            return j(handler, neo_projects.snapshot(include_archived=include_archived))
+        except Exception:
+            logger.exception("NEO projects snapshot failed; falling back to legacy list")
+            return j(handler, {"projects": load_projects()})
 
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
@@ -2066,28 +2079,21 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
+    # NEO Sprint 5: legacy /api/projects/{create,rename,delete} now delegate to
+    # the local-first module (api.projects) so the v2 schema is preserved on
+    # disk while upstream callers keep their existing contracts.
     if parsed.path == "/api/projects/create":
         try:
             require(body, "name")
         except ValueError as e:
             return bad(handler, str(e))
-        import re as _re
-
-        name = body["name"].strip()[:128]
-        if not name:
-            return bad(handler, "name required")
-        color = body.get("color")
-        if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
-            return bad(handler, "Invalid color format")
-        projects = load_projects()
-        proj = {
-            "project_id": uuid.uuid4().hex[:12],
-            "name": name,
-            "color": color,
-            "created_at": time.time(),
-        }
-        projects.append(proj)
-        save_projects(projects)
+        try:
+            proj = neo_projects.create_project(
+                {"name": body["name"], "color": body.get("color")},
+                legacy=True,
+            )
+        except ValueError as e:
+            return bad(handler, str(e))
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/rename":
@@ -2095,21 +2101,15 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id", "name")
         except ValueError as e:
             return bad(handler, str(e))
-        import re as _re
-
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
-            return bad(handler, "Project not found", 404)
-        proj["name"] = body["name"].strip()[:128]
+        patch = {"name": body["name"]}
         if "color" in body:
-            color = body["color"]
-            if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
-                return bad(handler, "Invalid color format")
-            proj["color"] = color
-        save_projects(projects)
+            patch["color"] = body["color"]
+        try:
+            proj = neo_projects.update_project(body["project_id"], patch)
+        except KeyError:
+            return bad(handler, "Project not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e))
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
@@ -2117,15 +2117,12 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
+        try:
+            neo_projects.delete_project(body["project_id"])
+        except KeyError:
             return bad(handler, "Project not found", 404)
-        projects = [p for p in projects if p["project_id"] != body["project_id"]]
-        save_projects(projects)
-        # Unassign all sessions that belonged to this project
+        # Unassign all sessions that belonged to this project (preserves the
+        # upstream behaviour from before Sprint 5).
         if SESSION_INDEX_FILE.exists():
             try:
                 index = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
@@ -2140,6 +2137,39 @@ def handle_post(handler, parsed) -> bool:
             except Exception:
                 logger.debug("Failed to load session index for project unlink")
         return j(handler, {"ok": True})
+
+    # ── NEO Sprint 5: Projects Command Center (v2) ──
+    if parsed.path == "/api/projects":
+        try:
+            require(body, "name")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            project = neo_projects.create_project(body)
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, "project": project})
+
+    if parsed.path == "/api/project-tasks":
+        try:
+            require(body, "title")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            task = neo_projects.create_task(body)
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, "task": task})
+
+    if parsed.path.startswith("/api/project-tasks/") and parsed.path.endswith("/archive"):
+        task_id = parsed.path[len("/api/project-tasks/"):-len("/archive")]
+        if not task_id or "/" in task_id:
+            return bad(handler, "Invalid task_id", 404)
+        try:
+            task = neo_projects.archive_task(task_id)
+        except KeyError:
+            return bad(handler, "Task not found", 404)
+        return j(handler, {"ok": True, "task": task})
 
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":
@@ -4669,3 +4699,42 @@ def _handle_mcp_server_update(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+
+# ── PATCH dispatcher ─────────────────────────────────────────────────────────
+# NEO Sprint 5: PATCH support is intentionally narrow. Only the resource-style
+# project/task routes use it today; everything else continues to use POST so
+# the upstream contract is untouched.
+def handle_patch(handler, parsed) -> bool:
+    """Handle all PATCH routes. Returns True if handled, False for 404."""
+    # CSRF: reject cross-origin browser requests
+    if not _check_csrf(handler):
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+
+    body = read_body(handler)
+
+    if parsed.path.startswith("/api/projects/"):
+        project_id = parsed.path[len("/api/projects/"):]
+        if not project_id or "/" in project_id:
+            return bad(handler, "Invalid project_id", 404)
+        try:
+            project = neo_projects.update_project(project_id, body)
+        except KeyError:
+            return bad(handler, "Project not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, "project": project})
+
+    if parsed.path.startswith("/api/project-tasks/"):
+        task_id = parsed.path[len("/api/project-tasks/"):]
+        if not task_id or "/" in task_id:
+            return bad(handler, "Invalid task_id", 404)
+        try:
+            task = neo_projects.update_task(task_id, body)
+        except KeyError:
+            return bad(handler, "Task not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e))
+        return j(handler, {"ok": True, "task": task})
+
+    return False  # 404
