@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo widget manager now shows a safe prompt-queued status card immediately after the visible Ask Capy action posts the metadata-only `agent.prompt` widget event, while preserving prompt-body redaction after the widget list reload. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather demo install completion card now includes a visible `Run weather smoke` action that immediately exercises the metadata-only weather acceptance path from the installed demo card, while preserving safe open/manage actions and generated/source/API-auth redaction. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link weather install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo install status includes a `Run weather smoke` action wired to the existing `demo_weather_widget` smoke route, while preserving `Open weather demo` / `Manage weather widget` actions and omitting hostile renderer/script/API-auth markers from DOM.
+  - Validation at completion before commit: focused RED failed because `Run weather smoke` was absent; focused GREEN passed (`1 passed`), Spaces UI behavior + demo parity suites passed (`84 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): show weather prompt queued status`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo Ask Capy button uses the shared prompt dialog, posts the user prompt only in the typed request, reloads widgets, then prepends `Weather prompt queued` with the safe `weather · agent.prompt · evt1` summary while omitting the raw prompt, hostile renderer/script/API-auth markers, and secret-looking values from DOM.

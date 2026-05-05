@@ -1469,8 +1469,10 @@ def test_spaces_ui_install_weather_demo_posts_template_and_shows_safe_open_manag
     assert "1 widget" in out["rootHtml"]
     assert "Open weather demo" in out["rootHtml"]
     assert "Manage weather widget" in out["rootHtml"]
+    assert "Run weather smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="weather-demo"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="weather-demo"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_weather_widget"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "weather"}
     assert out["calls"][-1]["path"] == "api/spaces"
