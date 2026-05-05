@@ -1916,6 +1916,21 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    if parsed.path == "/api/dashboard/status":
+        from api import dashboard_probe
+
+        j(handler, dashboard_probe.get_dashboard_status())
+        return True
+
+    if parsed.path == "/api/dashboard/config":
+        from api import dashboard_probe
+
+        try:
+            j(handler, dashboard_probe.get_dashboard_config())
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        return True
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
@@ -2621,6 +2636,18 @@ def handle_post(handler, parsed) -> bool:
         return handle_transcribe(handler)
 
     body = read_body(handler)
+
+    if parsed.path == "/api/dashboard/config":
+        from api import dashboard_probe
+
+        try:
+            j(handler, dashboard_probe.save_dashboard_config(body))
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("dashboard config save failed")
+            bad(handler, str(exc), status=500)
+        return True
 
     if parsed.path == "/api/session/new":
         try:

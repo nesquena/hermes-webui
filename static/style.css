@@ -627,6 +627,11 @@
   .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
   .rail .nav-tab:hover::after{content:none;}
   .rail .nav-tab.active::before{content:'';position:absolute;left:-6px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
+  .dashboard-link{position:relative;}
+  .dashboard-link-visible{display:flex!important;}
+  .dashboard-external-badge{position:absolute;right:5px;top:5px;width:9px;height:9px;border-radius:2px;border:1px solid var(--accent);background:var(--sidebar);box-shadow:0 0 0 2px var(--sidebar);opacity:.95;}
+  .dashboard-external-badge::after{content:'';position:absolute;right:-2px;top:-2px;width:5px;height:5px;border-top:1.5px solid var(--accent);border-right:1.5px solid var(--accent);}
+  .sidebar-nav .dashboard-external-badge{right:8px;top:7px;width:8px;height:8px;}
   @media(min-width:641px){.rail{display:flex;}.sidebar > .sidebar-nav{display:none;}}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}

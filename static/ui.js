@@ -90,6 +90,96 @@ function _renderUserFencedBlocks(text){
   return s;
 }
 
+const DASHBOARD_STATUS_TTL_MS=60000;
+let _dashboardStatusCache=null;
+let _dashboardStatusFetchedAt=0;
+
+function _dashboardIsBrowserLoopback(){
+  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+}
+function _dashboardBrowserUrl(status){
+  if(!status||!status.running||!status.port) return '';
+  let source;
+  try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
+  catch(_){source=new URL('http://127.0.0.1:'+status.port);}
+  const browserHost=window.location.hostname||source.hostname;
+  const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
+  return source.protocol+'//'+displayHost+':'+status.port;
+}
+function _applyDashboardStatus(status){
+  const running=!!(status&&status.running);
+  const url=running?_dashboardBrowserUrl(status):'';
+  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
+    btn.classList.toggle('dashboard-link-visible',running);
+    btn.style.display=running?'':'none';
+    btn.dataset.dashboardUrl=url;
+    btn.title=warning||t('tab_dashboard');
+    btn.setAttribute('aria-label',warning||t('tab_dashboard'));
+  });
+}
+async function refreshDashboardStatus(force=false){
+  const now=Date.now();
+  if(!force&&_dashboardStatusCache&&(now-_dashboardStatusFetchedAt)<DASHBOARD_STATUS_TTL_MS){
+    _applyDashboardStatus(_dashboardStatusCache);
+    return _dashboardStatusCache;
+  }
+  try{
+    const status=await api('/api/dashboard/status');
+    _dashboardStatusCache=status||{running:false};
+  }catch(_){
+    _dashboardStatusCache={running:false};
+  }
+  _dashboardStatusFetchedAt=Date.now();
+  _applyDashboardStatus(_dashboardStatusCache);
+  return _dashboardStatusCache;
+}
+async function loadDashboardSettings(){
+  const modeEl=$('settingsDashboardMode');
+  const urlEl=$('settingsDashboardUrl');
+  if(!modeEl&&!urlEl) return;
+  try{
+    const cfg=await api('/api/dashboard/config');
+    if(modeEl) modeEl.value=cfg.enabled||'auto';
+    if(urlEl) urlEl.value=cfg.url||'';
+  }catch(_){/* leave defaults visible */}
+}
+async function saveDashboardSettings(){
+  const modeEl=$('settingsDashboardMode');
+  const urlEl=$('settingsDashboardUrl');
+  const statusEl=$('settingsDashboardStatus');
+  const payload={enabled:(modeEl&&modeEl.value)||'auto',url:(urlEl&&urlEl.value||'').trim()};
+  try{
+    const saved=await api('/api/dashboard/config',{method:'POST',body:JSON.stringify(payload)});
+    if(modeEl) modeEl.value=saved.enabled||'auto';
+    if(urlEl) urlEl.value=saved.url||'';
+    if(statusEl) statusEl.textContent='Dashboard link settings saved.';
+    await refreshDashboardStatus(true);
+  }catch(err){
+    if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
+    else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+  }
+}
+function openHermesDashboard(event){
+  if(event){event.preventDefault();event.stopPropagation();}
+  const btn=event&&event.currentTarget?event.currentTarget:document.querySelector('[data-dashboard-link]');
+  const url=(btn&&btn.dataset&&btn.dataset.dashboardUrl)||_dashboardBrowserUrl(_dashboardStatusCache);
+  if(!url) return false;
+  window.open(url,'_blank','noopener,noreferrer');
+  return false;
+}
+function _initDashboardLinkProbe(){
+  loadDashboardSettings();
+  refreshDashboardStatus(true);
+  setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
+}
+if(document.readyState==='complete'){
+  _initDashboardLinkProbe();
+}else{
+  document.addEventListener('DOMContentLoaded',_initDashboardLinkProbe,{once:true});
+}
+
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
 function _openImgLightbox(src, alt) {
   const lb = document.createElement('div');

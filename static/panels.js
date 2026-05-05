@@ -3262,6 +3262,7 @@ async function loadSettingsPanel(){
       if(disableBtn) disableBtn.style.display='none';
     }
     _syncHermesPanelSessionActions();
+    if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
     switchSettingsSection(_settingsSection);
   }catch(e){
