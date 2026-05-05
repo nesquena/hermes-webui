@@ -3211,8 +3211,30 @@ function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
+function _isUpdateApplyNetworkError(error){
+  if(error && error.status) return false;
+  const message=(error&&error.message)||String(error||'');
+  return /Failed to fetch|NetworkError|Load failed/i.test(message);
+}
+function _formatUpdateApplyExceptionMessage(error){
+  if(_isUpdateApplyNetworkError(error)){
+    return 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.';
+  }
+  const message=(error&&error.message)||String(error||'unknown error');
+  return 'Update failed: '+message;
+}
 async function applyUpdates(){
+  if(window._updateApplyInFlight) return;
+  window._updateApplyInFlight=true;
   const btn=$('btnApplyUpdate');
+  const resetApplyButton=(delayMs)=>{
+    const reset=()=>{
+      window._updateApplyInFlight=false;
+      if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    };
+    if(delayMs>0) setTimeout(reset,delayMs);
+    else reset();
+  };
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
@@ -3228,7 +3250,7 @@ async function applyUpdates(){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
         _showUpdateError(target,res);
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
+        resetApplyButton(0);
         return;
       }
     }
@@ -3237,9 +3259,10 @@ async function applyUpdates(){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload();
   }catch(e){
-    if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
-    else showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    const msg=_formatUpdateApplyExceptionMessage(e);
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg);
+    resetApplyButton(_isUpdateApplyNetworkError(e)?5000:0);
   }
 }
 function _showUpdateError(target,res){
