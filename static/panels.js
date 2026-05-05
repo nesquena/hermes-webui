@@ -31,10 +31,12 @@ function syncAppTitlebar() {
   const panel = (typeof _currentPanel === 'string' && _currentPanel) ? _currentPanel : 'chat';
   let mainText = '';
   let subText = '';
+  let sourceLabel = '';
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
     if (typeof t === 'function') subText = t('n_messages', vis.length);
+    if (S.session.is_cli_session) sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
@@ -47,7 +49,17 @@ function syncAppTitlebar() {
 
   titleEl.textContent = mainText;
   if (subEl) {
-    if (subText) { subEl.textContent = subText; subEl.hidden = false; }
+    if (subText) {
+      subEl.textContent = subText;
+      if (sourceLabel) {
+        const badge = document.createElement('span');
+        badge.className = 'topbar-source-badge';
+        badge.textContent = sourceLabel + (S.session && S.session.read_only ? ' · read-only' : '');
+        subEl.appendChild(document.createTextNode(' '));
+        subEl.appendChild(badge);
+      }
+      subEl.hidden = false;
+    }
     else { subEl.textContent = ''; subEl.hidden = true; }
   }
 
@@ -55,7 +67,7 @@ function syncAppTitlebar() {
   // as double-clicking a session title in the sidebar).  Only active on the chat
   // panel when a session is open.
   titleEl.ondblclick = null;  // remove any previous handler before adding a fresh one
-  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
+  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session && !(S.session.read_only || S.session.is_read_only)) {
     titleEl.ondblclick = (e) => {
       e.stopPropagation();
       e.preventDefault();

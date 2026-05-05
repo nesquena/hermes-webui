@@ -2122,6 +2122,7 @@ def handle_get(handler, parsed) -> bool:
                     "raw_source": (cli_meta or {}).get("raw_source"),
                     "session_source": (cli_meta or {}).get("session_source"),
                     "source_label": (cli_meta or {}).get("source_label"),
+                    "read_only": bool((cli_meta or {}).get("read_only")),
                     "messages": msgs,
                     "tool_calls": [],
                 }
@@ -2908,6 +2909,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required")
         if not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return bad(handler, "Invalid session_id", 400)
+        cli_meta_for_delete = _lookup_cli_session_metadata(sid)
+        if cli_meta_for_delete.get("read_only"):
+            return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
         # Delete from WebUI session store
         with LOCK:
@@ -3509,6 +3513,8 @@ def handle_post(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
+            if cli_meta.get("read_only"):
+                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
                 s = Session(
                     session_id=sid,
@@ -6997,6 +7003,7 @@ def _handle_session_import_cli(handler, body):
                 | {
                     "messages": existing.messages,
                     "is_cli_session": True,
+                    "read_only": bool((cli_meta or {}).get("read_only")),
                 },
                 "imported": False,
             },
@@ -7023,6 +7030,7 @@ def _handle_session_import_cli(handler, body):
     cli_thread_id = None
     cli_session_key = None
     cli_platform = None
+    cli_read_only = False
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
@@ -7040,6 +7048,7 @@ def _handle_session_import_cli(handler, body):
             cli_thread_id = cs.get("thread_id")
             cli_session_key = cs.get("session_key")
             cli_platform = cs.get("platform")
+            cli_read_only = bool(cs.get("read_only"))
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
@@ -7049,6 +7058,31 @@ def _handle_session_import_cli(handler, body):
     cron_project_id = None
     if is_cron_session(sid, cli_source_tag):
         cron_project_id = ensure_cron_project()
+
+    if cli_read_only:
+        session_payload = {
+            "session_id": sid,
+            "title": title,
+            "workspace": str(get_last_workspace()),
+            "model": model,
+            "message_count": len(msgs),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "last_message_at": updated_at or created_at,
+            "pinned": False,
+            "archived": False,
+            "project_id": None,
+            "profile": profile,
+            "is_cli_session": True,
+            "source_tag": cli_source_tag,
+            "raw_source": cli_raw_source or cli_source_tag,
+            "session_source": cli_session_source,
+            "source_label": cli_source_label,
+            "read_only": True,
+            "messages": msgs,
+            "tool_calls": [],
+        }
+        return j(handler, {"session": session_payload, "imported": False})
 
     s = import_cli_session(
         sid,

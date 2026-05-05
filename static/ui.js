@@ -3092,7 +3092,19 @@ function syncTopbar(){
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
+  const _topbarMeta=$('topbarMeta');
+  if(_topbarMeta){
+    const sourceLabel=(S.session&&S.session.is_cli_session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
+    const metaText=t('n_messages',vis.length);
+    _topbarMeta.textContent=metaText;
+    if(sourceLabel){
+      const badge=document.createElement('span');
+      badge.className='topbar-source-badge';
+      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      _topbarMeta.appendChild(document.createTextNode(' '));
+      _topbarMeta.appendChild(badge);
+    }
+  }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.

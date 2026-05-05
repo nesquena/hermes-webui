@@ -576,6 +576,14 @@ function _isMessagingSession(session) {
   return _MESSAGING_RAW_SOURCES.has(raw);
 }
 
+function _isReadOnlySession(session) {
+  return !!(session && (session.read_only || session.is_read_only));
+}
+
+function _sourceKeyForSession(session) {
+  return (session && (session.raw_source || session.source_tag || session.source || '') || '').toLowerCase();
+}
+
 function _normalizeMessageForCliImportComparison(message) {
   if (!message || typeof message !== 'object') return message;
   const clone = { ...message };
@@ -1256,6 +1264,7 @@ function _appendSessionDuplicateAction(menu, session){
 }
 
 function _openSessionActionMenu(session, anchorEl){
+  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
     closeSessionActionMenu();
     return;
@@ -2070,7 +2079,14 @@ function renderSessionListFromCache(){
     _rememberRenderedStreamingState(s, isStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
+    if(s.is_cli_session){
+      el.classList.add('cli-session');
+      el.dataset.source=_getChannelLabel(s)||'CLI';
+      el.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
+    }
+    if(readOnly) el.classList.add('read-only-session');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -2080,7 +2096,7 @@ function renderSessionListFromCache(){
       cleanTitle='Session';
     }
     // Checkbox for batch select mode
-    if(_sessionSelectMode){
+    if(_sessionSelectMode&&!readOnly){
       const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
       const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
       cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
@@ -2115,7 +2131,7 @@ function renderSessionListFromCache(){
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
-    title.title='Double-click to rename';
+    title.title=readOnly?'Read-only imported session':'Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread;
@@ -2166,6 +2182,9 @@ function renderSessionListFromCache(){
       metaBits.push(msgLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       if(s.model) metaBits.push(s.model);
+      const sourceLabel=_getChannelLabel(s);
+      if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
+      if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
       meta.className='session-meta';
@@ -2216,6 +2235,7 @@ function renderSessionListFromCache(){
 
     // Rename: called directly when we confirm it's a double-click
     const startRename=()=>{
+      if(_isReadOnlySession(s)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
 
@@ -2288,22 +2308,25 @@ function renderSessionListFromCache(){
     state.setAttribute('aria-hidden','true');
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
-    const actions=document.createElement('div');
-    actions.className='session-actions';
-    const menuBtn=document.createElement('button');
-    menuBtn.type='button';
-    menuBtn.className='session-actions-trigger';
-    menuBtn.title='Conversation actions';
-    menuBtn.setAttribute('aria-haspopup','menu');
-    menuBtn.setAttribute('aria-label','Conversation actions');
-    menuBtn.innerHTML=ICONS.more;
-    menuBtn.onclick=(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      _openSessionActionMenu(s, menuBtn);
-    };
-    actions.appendChild(menuBtn);
-    el.appendChild(actions);
+    let actions=null;
+    if(!readOnly){
+      actions=document.createElement('div');
+      actions.className='session-actions';
+      const menuBtn=document.createElement('button');
+      menuBtn.type='button';
+      menuBtn.className='session-actions-trigger';
+      menuBtn.title='Conversation actions';
+      menuBtn.setAttribute('aria-haspopup','menu');
+      menuBtn.setAttribute('aria-label','Conversation actions');
+      menuBtn.innerHTML=ICONS.more;
+      menuBtn.onclick=(e)=>{
+        e.stopPropagation();
+        e.preventDefault();
+        _openSessionActionMenu(s, menuBtn);
+      };
+      actions.appendChild(menuBtn);
+      el.appendChild(actions);
+    }
 
     // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
     // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
@@ -2338,9 +2361,9 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(_renamingSid) return;
-      if(actions.contains(e.target)) return;
+      if(actions&&actions.contains(e.target)) return;
       if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session')) return;
-      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
+      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
       if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);return;}
       const now=Date.now();
@@ -2376,8 +2399,8 @@ function renderSessionListFromCache(){
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
       if(_renamingSid) return;
-      if(actions.contains(e.target)) return;
-      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
+      if(actions&&actions.contains(e.target)) return;
+      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
