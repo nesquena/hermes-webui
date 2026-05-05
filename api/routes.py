@@ -2570,6 +2570,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
 
+    # ── MCP Tools (GET) ──
+    if parsed.path == "/api/mcp/tools":
+        return _handle_mcp_tools_list(handler)
+
     # ── Checkpoints / Rollback (GET) ──
     if parsed.path == "/api/rollback/list":
         qs = parse_qs(parsed.query)
@@ -7220,6 +7224,186 @@ def _server_summary(name, cfg, runtime_status=None):
         out["status"] = "configured"
     out["tool_count"] = runtime_status.get("tools") if runtime_status else None
     return out
+
+
+def _mcp_safe_display_text(value, *, limit: int) -> str:
+    """Return redacted, bounded MCP text safe for WebUI inventory rows."""
+    if not isinstance(value, str):
+        value = "" if value is None else str(value)
+    value = _redact_text(value).strip()
+    value = re.sub(r"Authorization:\s*Bearer\s+\S+", "[REDACTED CREDENTIAL]", value, flags=re.I)
+    if len(value) > limit:
+        value = value[: max(0, limit - 1)].rstrip() + "…"
+    return value
+
+
+def _mcp_schema_type(schema) -> str:
+    """Return a compact, non-sensitive display type for a JSON schema node."""
+    if not isinstance(schema, dict):
+        return "unknown"
+    typ = schema.get("type")
+    if isinstance(typ, list):
+        typ = "/".join(str(t) for t in typ if t)
+    if isinstance(typ, str) and typ:
+        return typ
+    for composite in ("anyOf", "oneOf", "allOf"):
+        if isinstance(schema.get(composite), list) and schema[composite]:
+            return composite
+    if "enum" in schema:
+        return "enum"
+    return "unknown"
+
+
+def _mcp_schema_summary(schema, *, limit: int = 12) -> list[dict]:
+    """Summarize an MCP input schema without exposing raw defaults/examples.
+
+    The WebUI only needs searchable/displayable argument hints. Returning raw
+    JSON Schema can overexpose server-provided defaults, examples, enums, or
+    vendor extensions, so this strips each parameter down to name/type/required
+    and a redacted description.
+    """
+    if not isinstance(schema, dict):
+        return []
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    required = schema.get("required")
+    required_names = set(required) if isinstance(required, list) else set()
+    out = []
+    for name, prop in properties.items():
+        if len(out) >= limit:
+            break
+        if not isinstance(name, str):
+            continue
+        prop = prop if isinstance(prop, dict) else {}
+        desc = prop.get("description", "")
+        if not isinstance(desc, str):
+            desc = ""
+        desc = _mcp_safe_display_text(desc, limit=180)
+        out.append({
+            "name": name,
+            "type": _mcp_schema_type(prop),
+            "required": name in required_names,
+            "description": desc,
+        })
+    return out
+
+
+def _mcp_tool_schema_from_payload(tool):
+    if not isinstance(tool, dict):
+        return {}
+    for key in ("parameters", "inputSchema", "input_schema", "schema"):
+        value = tool.get(key)
+        if isinstance(value, dict):
+            if key == "schema" and isinstance(value.get("parameters"), dict):
+                return value["parameters"]
+            return value
+    return {}
+
+
+def _mcp_tool_summary(name, tool, server_summary):
+    """Return a safe global inventory row for one MCP tool."""
+    server_summary = server_summary if isinstance(server_summary, dict) else {}
+    if isinstance(tool, str):
+        tool = {"name": tool}
+    elif not isinstance(tool, dict):
+        tool = {}
+    tool_name = str(tool.get("name") or name or "")
+    description = tool.get("description") or ""
+    if not isinstance(description, str):
+        description = str(description)
+    description = _mcp_safe_display_text(description, limit=360)
+    return {
+        "name": tool_name,
+        "server": str(server_summary.get("name") or ""),
+        "description": description,
+        "active": bool(server_summary.get("active")),
+        "enabled": bool(server_summary.get("enabled")),
+        "status": server_summary.get("status") or "unknown",
+        "schema_summary": _mcp_schema_summary(_mcp_tool_schema_from_payload(tool)),
+    }
+
+
+def _mcp_tools_from_runtime_status(runtime_by_name, server_summaries):
+    """Read detailed MCP tool payloads from runtime status when available."""
+    tools = []
+    if not isinstance(runtime_by_name, dict):
+        return tools
+    for server_name, runtime in runtime_by_name.items():
+        if not isinstance(runtime, dict):
+            continue
+        raw_tools = runtime.get("tools")
+        if not isinstance(raw_tools, list):
+            raw_tools = runtime.get("tool_schemas")
+        if not isinstance(raw_tools, list):
+            continue
+        server_summary = server_summaries.get(str(server_name), {"name": str(server_name)})
+        for index, tool in enumerate(raw_tools):
+            fallback_name = f"{server_name}:{index}"
+            summary = _mcp_tool_summary(fallback_name, tool, server_summary)
+            if summary["name"]:
+                tools.append(summary)
+    return tools
+
+
+def _mcp_tools_from_registry(server_summaries):
+    """Read already-registered MCP tool schemas without probing MCP servers."""
+    try:
+        from tools.registry import registry
+    except Exception:
+        return []
+    tools = []
+    try:
+        names = registry.get_all_tool_names()
+    except Exception:
+        return []
+    for tool_name in names:
+        try:
+            toolset = registry.get_toolset_for_tool(tool_name)
+        except Exception:
+            continue
+        if not isinstance(toolset, str) or not toolset.startswith("mcp-"):
+            continue
+        server_name = toolset[len("mcp-"):]
+        schema = registry.get_schema(tool_name) or {}
+        server_summary = server_summaries.get(server_name, {
+            "name": server_name,
+            "enabled": True,
+            "active": False,
+            "status": "configured",
+        })
+        tools.append(_mcp_tool_summary(tool_name, schema, server_summary))
+    return tools
+
+
+def _handle_mcp_tools_list(handler):
+    """List known MCP tools from already-available runtime inventory only."""
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    runtime = _mcp_runtime_status_by_name()
+    server_summaries = {
+        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        for name, scfg in servers.items()
+    }
+    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    source = "mcp_runtime_status"
+    if not tools:
+        tools = _mcp_tools_from_registry(server_summaries)
+        source = "tool_registry" if tools else "none"
+    tools.sort(key=lambda row: (row.get("server", ""), row.get("name", "")))
+    unavailable_servers = [
+        summary["name"] for summary in server_summaries.values()
+        if summary.get("enabled") and not summary.get("active")
+    ]
+    return j(handler, {
+        "tools": tools,
+        "total": len(tools),
+        "source": source,
+        "inventory_scope": "already_known_runtime_only",
+        "unavailable_servers": unavailable_servers,
+    })
 
 
 def _handle_mcp_servers_list(handler):

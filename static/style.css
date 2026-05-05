@@ -2287,6 +2287,12 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .mcp-status-invalid_config,.mcp-status-unknown{background:rgba(239,68,68,.12);color:#f87171;}
 .mcp-tool-count{color:var(--text);}
 .mcp-readonly-note,.mcp-restart-hint{margin-top:8px;color:var(--muted);font-size:11px;line-height:1.45;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;padding:8px 10px;}
+.mcp-tool-search{width:100%;margin:0 0 8px 0;padding:8px 10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:12px;outline:none;}
+.mcp-tool-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-soft);}
+.mcp-tool-row{display:flex;flex-direction:column;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;background:var(--surface);}
+.mcp-tool-name{font-weight:600;color:var(--text);overflow-wrap:anywhere;}
+.mcp-tool-server{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:999px;padding:2px 6px;}
+.mcp-tool-schema{margin:2px 0 0 0;padding:7px 8px;white-space:pre-wrap;max-height:140px;overflow:auto;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--muted);font-size:11px;line-height:1.45;}
 
 /* Picker grids (theme / skin / font-size): make the card chrome use
    tokens so all skins flip correctly. */

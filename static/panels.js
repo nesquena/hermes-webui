@@ -3920,6 +3920,60 @@ function loadMcpServers(){
     }).join('')+toggleNote;
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
+let _mcpToolsCache=[];
+function _filterMcpToolsForSearch(tools, query){
+  const q=(query||'').trim().toLowerCase();
+  if(!q) return Array.isArray(tools)?tools:[];
+  return (Array.isArray(tools)?tools:[]).filter(tool=>{
+    const hay=[tool.name,tool.server,tool.description].map(v=>String(v||'').toLowerCase()).join(' ');
+    return hay.includes(q);
+  });
+}
+function _mcpToolSchemaText(schemaSummary){
+  if(!Array.isArray(schemaSummary)||!schemaSummary.length) return t('mcp_tools_schema_empty');
+  return schemaSummary.map(p=>{
+    const req=p.required?'*':'';
+    const desc=p.description?` — ${p.description}`:'';
+    return `${p.name}${req}: ${p.type||'unknown'}${desc}`;
+  }).join('\n');
+}
+function _renderMcpTools(tools, query){
+  const list=$('mcpToolList');
+  if(!list) return;
+  const filtered=_filterMcpToolsForSearch(tools, query);
+  if(!filtered.length){
+    const key=query?'mcp_tools_no_matches':'mcp_tools_no_tools';
+    list.innerHTML=`<div class="mcp-tool-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t(key))}</div>`;
+    return;
+  }
+  list.innerHTML=filtered.map(tool=>{
+    const status=tool.status||'unknown';
+    const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
+    const schemaText=_mcpToolSchemaText(tool.schema_summary);
+    return `<div class="mcp-tool-row">
+      <div class="mcp-server-row-head">
+        <span class="mcp-tool-name">${esc(tool.name)}</span>
+        <span class="mcp-tool-server">${esc(tool.server||'unknown')}</span>
+        ${statusBadge}
+      </div>
+      <div class="mcp-server-detail">${esc(tool.description||'')}</div>
+      <pre class="mcp-tool-schema">${esc(schemaText)}</pre>
+    </div>`;
+  }).join('');
+}
+function filterMcpTools(){
+  const input=$('mcpToolSearch');
+  _renderMcpTools(_mcpToolsCache,input?input.value:'');
+}
+function loadMcpTools(){
+  const list=$('mcpToolList');
+  if(!list) return;
+  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
+  api('/api/mcp/tools').then(r=>{
+    _mcpToolsCache=(r&&Array.isArray(r.tools))?r.tools:[];
+    filterMcpTools();
+  }).catch(()=>{list.innerHTML=`<div class="mcp-tool-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_tools_load_failed'))}</div>`});
+}
 function loadGatewayStatus(){
   const card=$('gatewayStatusCard');
   if(!card) return;
@@ -3946,7 +4000,7 @@ function loadGatewayStatus(){
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system'){loadMcpServers();loadGatewayStatus();}
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────
