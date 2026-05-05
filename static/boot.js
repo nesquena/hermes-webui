@@ -975,10 +975,17 @@ $('msg').addEventListener('paste',e=>{
   const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
   if(!imageItems.length||hasText)return;
   e.preventDefault();
-  const files=imageItems.map(i=>{
+  // Date.now() returns the SAME ms-resolution timestamp for every iteration of
+  // a synchronous .map(), so without an index suffix the dedup-by-name in
+  // addFiles() (`if S.pendingFiles.find(p => p.name === f.name)`) silently
+  // drops images 2..N when N images are pasted at once. See #1697.
+  const ts=Date.now();
+  const multi=imageItems.length>1;
+  const files=imageItems.map((i,idx)=>{
     const blob=i.getAsFile();
     const ext=i.type.split('/')[1]||'png';
-    return new File([blob],`screenshot-${Date.now()}.${ext}`,{type:i.type});
+    const suffix=multi?`-${idx+1}`:'';
+    return new File([blob],`screenshot-${ts}${suffix}.${ext}`,{type:i.type});
   });
   addFiles(files);
   setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));

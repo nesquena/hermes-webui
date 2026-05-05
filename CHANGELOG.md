@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **#1697 — pasting multiple images at once only attaches one (silent data loss).** `static/boot.js` paste handler synthesized filenames via `screenshot-${Date.now()}.${ext}` inside a `.map()` callback. `Date.now()` returns the same millisecond timestamp for every iteration of a synchronous loop within the same event tick, so all N pasted images ended up with the same filename. `addFiles()` then deduped by name and silently dropped images 2..N. Fix: capture `Date.now()` once outside the `.map()` and append a 1-based index suffix when there are 2+ images (`screenshot-<ts>-2.png`, `screenshot-<ts>-3.png`, etc.). Single-image paste path is unchanged (`screenshot-<ts>.png` — no `-1` suffix). Reported by @Cygnus via WebUI Discord testers thread (May 5 2026). 6 regression tests in `tests/test_1697_paste_multiple_images.py` pin the handler shape.
+
 ## [v0.51.3] — 2026-05-04 — 3-PR follow-up batch (#1671, #1673, #1676) + test-fragility fix
 
 ### Added
