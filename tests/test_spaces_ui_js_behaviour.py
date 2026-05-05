@@ -362,7 +362,8 @@ global.fetch = async function(path, opts = {}) {
     return response({ deleted: true, space_id: 'lab', key: 'research-summary', revision_event_id: 'rev-data-delete', renderer: '<script>bad()</script>', api_key: 'SECRET' });
   }
   if (path === 'api/spaces/widget/event') {
-    return response({ queued: true, space_id: 'lab', widget_id: 'weather', event_name: 'agent.prompt', event_id: 'evt1' });
+    const eventBody = opts.body ? JSON.parse(opts.body) : {};
+    return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
   }
   if (path === 'api/spaces/recovery/disable-widget') {
     return response({ disabled: true, space_id: 'broken', widget_id: 'bad-widget', revision_event_id: 'rev-disable' });
@@ -1407,6 +1408,9 @@ def test_spaces_ui_refresh_widget_queues_metadata_only_refresh_event(driver_path
     }
     assert out["dialogs"] == []
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "Weather refresh queued" in out["rootHtml"]
+    assert "weather · widget.refresh · evt1" in out["rootHtml"]
+    assert "Agent bridge: 2 queued" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

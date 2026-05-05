@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo widget manager now renders an inline safe Agent bridge status for queued widget events, so the visible weather vertical shows the observation metadata and latest agent-mediated refresh bridge together without exposing prompts, generated bodies, or credential-like fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather demo widget manager now shows a safe refresh-queued status card immediately after the visible Refresh action posts the metadata-only widget event, while preserving the inline Agent bridge status after the widget list reload. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show weather refresh queued status`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo Refresh button posts only `{space_id, widget_id, event_name, payload}` metadata, reloads the widget list, then prepends `Weather refresh queued` with the safe `weather · widget.refresh · evt1` summary while omitting hostile renderer/script/API-auth markers from DOM.
 
 - `feat(spaces): show inline weather bridge status`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the widget manager renders `Agent bridge: 2 queued` plus the latest `widget.refresh` event for the Weather demo, while omitting prompt text, generated/source markers, API-auth fields, and secret-looking values from DOM.
