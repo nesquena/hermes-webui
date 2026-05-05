@@ -1478,7 +1478,18 @@ def space_demo_run(name: str) -> dict[str, Any]:
         }
         patch_widget(space_id, "weather-current", {"weather": weather_patch})
         action = "weather-observation-recorded"
-        extra = {"weather_observation": {"widget": read_widget_detail(space_id, "weather-current")}}
+        extra = {
+            "weather_observation": {"widget": read_widget_detail(space_id, "weather-current")},
+            "prompt_flow": {
+                "blank_space": True,
+                "query": "What is the weather in Prague?",
+                "chat_answer_status": "recorded",
+                "widget_request": "show it to me in a widget",
+                "widget_created": True,
+                "reload_verified": True,
+                "network_mode": "agent-mediated",
+            },
+        }
     elif demo == "demo_notes_app":
         editor_notes = {
             "status": "draft-saved",

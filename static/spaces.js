@@ -128,6 +128,24 @@
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
+  function renderWeatherPromptFlow(flow){
+    if (!flow || typeof flow !== 'object' || Array.isArray(flow)) return '';
+    const blankSpace = flow.blank_space ? 'yes' : 'no';
+    const widgetCreated = flow.widget_created ? 'created' : 'not created';
+    const reloadVerified = flow.reload_verified ? 'verified' : 'not verified';
+    const query = flow.query ? String(flow.query) : '';
+    const chatAnswer = flow.chat_answer_status ? String(flow.chat_answer_status) : '';
+    const widgetRequest = flow.widget_request ? String(flow.widget_request) : '';
+    const networkMode = flow.network_mode ? String(flow.network_mode) : '';
+    return '<div class="capy-spaces-card capy-spaces-demo-flow"><h4>Prompt → widget flow</h4>' +
+      '<div class="capy-spaces-muted">Blank space: '+escapeHtml(blankSpace)+' · Widget: '+escapeHtml(widgetCreated)+' · Widget after reload: '+escapeHtml(reloadVerified)+'</div>' +
+      (query ? '<div class="capy-spaces-muted">Query: '+escapeHtml(query)+'</div>' : '') +
+      (chatAnswer ? '<div class="capy-spaces-muted">Chat answer: '+escapeHtml(chatAnswer)+'</div>' : '') +
+      (widgetRequest ? '<div class="capy-spaces-muted">Widget request: '+escapeHtml(widgetRequest)+'</div>' : '') +
+      (networkMode ? '<div class="capy-spaces-muted">Network mode: '+escapeHtml(networkMode)+'</div>' : '') +
+      '</div>';
+  }
+
   function renderDemoSmokeResult(data){
     const space = data && data.space && typeof data.space === 'object' ? data.space : {};
     const demo = data && data.demo ? String(data.demo) : 'demo';
@@ -154,6 +172,7 @@
       ? weatherObservation.widget
       : {};
     const weatherPreview = renderWeatherObservation(weatherWidget.metadata || {});
+    const promptFlowPreview = weatherPreview ? renderWeatherPromptFlow(data && data.prompt_flow) : '';
     const notesArtifact = data && data.notes_artifact && typeof data.notes_artifact === 'object' && !Array.isArray(data.notes_artifact)
       ? data.notes_artifact
       : {};
@@ -173,7 +192,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+notesPreview+kanbanPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){

@@ -89,6 +89,15 @@ def test_weather_demo_smoke_records_visible_weather_observation(monkeypatch, tmp
     detail = spaces.read_widget_detail(result["space"]["space_id"], "weather-current")
 
     assert result["action"] == "weather-observation-recorded"
+    assert result["prompt_flow"] == {
+        "blank_space": True,
+        "query": "What is the weather in Prague?",
+        "chat_answer_status": "recorded",
+        "widget_request": "show it to me in a widget",
+        "widget_created": True,
+        "reload_verified": True,
+        "network_mode": "agent-mediated",
+    }
     assert result["weather_observation"]["widget"]["metadata"]["weather"]["status"] == "observation-ready"
     assert result["weather_observation"]["widget"]["metadata"]["weather"]["current"] == {
         "condition": "partly cloudy",
