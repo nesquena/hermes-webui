@@ -189,13 +189,30 @@ def test_dashboard_right_sidebar_hero_has_reference_proportions():
         "min-height:30px;font-size:9.5px;",
         ".hero-status-dot{width:7px;height:7px;",
         "animation:hero-status-pulse 1.05s ease-in-out infinite;",
-        ".dashboard-quick-actions{display:flex;flex:1 1 auto;min-height:0;",
+        ".dashboard-quick-actions{display:flex;flex:1 1 auto;min-height:200px;",
     ]:
         assert rule in STYLE_CSS
-    assert ".hero-card{height:300px;}" in STYLE_CSS
+    assert "@media (max-height: 900px) and (min-width: 901px)" in STYLE_CSS
+    assert ".hero-card{height:200px;}" in STYLE_CSS
     assert "@media (max-height: 760px) and (min-width: 901px)" in STYLE_CSS
-    assert ".hero-card{height:250px;}" in STYLE_CSS
+    assert ".hero-card{height:160px;}" in STYLE_CSS
     assert "@keyframes hero-status-pulse" in STYLE_CSS
+
+
+def test_dashboard_right_sidebar_matches_reference_vertical_rhythm():
+    """The right rail should align its bottom edge while preserving compact rows."""
+    for rule in [
+        ".dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow:hidden;}",
+        ".dashboard-quick-actions{display:flex;flex:1 1 auto;min-height:200px;",
+        ".dashboard-quick-actions h3{margin:0;font-size:12px;font-weight:700;letter-spacing:0;text-transform:none;",
+        ".dashboard-quick-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}",
+        ".dashboard-quick-action{min-height:46px;display:flex;align-items:center;gap:8px;padding:8px 10px;",
+        ".hero-card{height:200px;}",
+        ".dashboard-kpi-card{min-height:92px;padding:10px;}",
+        ".dashboard-quick-actions{min-height:150px;padding:10px;overflow-y:auto;}",
+        ".dashboard-quick-action{min-height:34px;padding:6px 8px;font-size:10px;line-height:1.12;}",
+    ]:
+        assert rule in STYLE_CSS
 
 
 def test_dashboard_uses_exclusive_desktop_shell():
