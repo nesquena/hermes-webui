@@ -3789,7 +3789,7 @@ function ensureActivityGroup(inner, opts){
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     if(live) group.setAttribute('data-live-tool-call-group','1');
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-duration"></span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
     else inner.appendChild(group);
@@ -4874,27 +4874,12 @@ function _syncToolCallGroupSummary(group){
   if(!group) return;
   const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
   const toolCount=cards.length;
-  const thinkingCount=group.querySelectorAll('.agent-activity-thinking .thinking-card').length;
-  const names=cards.map(card=>{
-    const el=card.querySelector('.tool-card-name');
-    return el?String(el.textContent||'').trim():'';
-  }).filter(Boolean);
-  const uniqueNames=[...new Set(names)];
   const label=group.querySelector('.tool-call-group-label');
-  const list=group.querySelector('.tool-call-group-list');
-  const badge=group.querySelector('.tool-call-group-count');
   const durationEl=group.querySelector('.tool-call-group-duration');
-  const parts=[];
-  if(thinkingCount) parts.push('thinking');
-  if(uniqueNames.length) parts.push(uniqueNames.slice(0,5).join(', ')+(uniqueNames.length>5?'…':''));
-  const total=toolCount+thinkingCount;
   if(label){
-    if(thinkingCount&&toolCount) label.textContent=`Activity: thinking + ${toolCount} tool${toolCount===1?'':'s'}`;
-    else if(thinkingCount) label.textContent='Activity: thinking';
-    else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
+    if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
     else label.textContent='Activity';
   }
-  if(list) list.textContent=parts.join(' · ')||'tools / thinking';
   if(durationEl){
     if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
@@ -4908,7 +4893,6 @@ function _syncToolCallGroupSummary(group){
       durationEl.style.display=durationText?'':'none';
     }
   }
-  if(badge) badge.textContent=String(total);
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──

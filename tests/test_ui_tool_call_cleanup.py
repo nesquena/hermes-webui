@@ -128,6 +128,30 @@ class TestToolCallGroupingStatic:
             "The expand/collapse control must expose aria-expanded."
         )
 
+    def test_activity_summary_omits_redundant_trailing_count_badge(self):
+        helper = _function_body(UI_JS, "ensureActivityGroup")
+        sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
+        assert "tool-call-group-count" not in helper, (
+            "Compact Activity summaries already state tool counts in the label; "
+            "do not render a second trailing count badge."
+        )
+        assert "tool-call-group-count" not in sync_fn, (
+            "The summary sync path should not update a hidden/removed trailing count badge."
+        )
+
+    def test_activity_summary_keeps_header_compact_without_tool_names_or_thinking_prefix(self):
+        helper = _function_body(UI_JS, "ensureActivityGroup")
+        sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
+        assert "tool-call-group-list" not in helper, (
+            "The compact Activity row should not allocate a secondary tool-name/thinking summary span."
+        )
+        assert "tool-call-group-list" not in sync_fn, (
+            "The summary sync path should not populate a redundant tool-name/thinking list."
+        )
+        assert "Activity: thinking +" not in sync_fn, (
+            "When tools are present, thinking is expected and should not be repeated in the label."
+        )
+
     def test_live_tool_cards_use_grouping_only_when_simplified(self):
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
         settled_fn = _function_body(UI_JS, "renderMessages")
