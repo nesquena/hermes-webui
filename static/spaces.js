@@ -42,6 +42,27 @@
     }
   }
 
+  function renderTemplateInstallStatus(result){
+    const template = String(result && result.template || '').trim().toLowerCase();
+    const space = result && result.space && typeof result.space === 'object' ? result.space : {};
+    const widgets = Array.isArray(result && result.installed_widgets) ? result.installed_widgets : [];
+    const spaceId = space.space_id ? String(space.space_id) : '';
+    const spaceName = space.name || spaceId || 'Demo Space';
+    const widgetCount = widgets.length || Number(space.widget_count || 0);
+    const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
+    const title = template === 'weather' ? 'Weather demo installed' : 'Template installed';
+    const openLabel = template === 'weather' ? 'Open weather demo' : 'Open Space';
+    const manageLabel = template === 'weather' ? 'Manage weather widget' : 'Manage widgets';
+    const widgetItems = widgets.slice(0, 6).map(function(w){
+      return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
+    }).join('');
+    const actions = spaceId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(openLabel)+'</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(manageLabel)+'</button></div>' : '';
+    return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+' · '+escapeHtml(widgetLabel)+' · safe metadata-only install</div>' +
+      (widgetItems ? '<ul>'+widgetItems+'</ul>' : '') + actions +
+      '</div>';
+  }
+
   function renderTemplateResetStatus(result){
     const space = result && result.space ? result.space : {};
     const widgets = Array.isArray(result && result.installed_widgets) ? result.installed_widgets : [];
@@ -903,8 +924,10 @@
       return;
     }
     if (action === 'installWeatherTemplate') {
-      await postSpacesJson('api/spaces/templates/install', {template: 'weather'});
+      const result = await postSpacesJson('api/spaces/templates/install', {template: 'weather'});
       await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateInstallStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'installResearchTemplate') {

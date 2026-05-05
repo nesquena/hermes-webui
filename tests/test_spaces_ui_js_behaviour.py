@@ -1398,16 +1398,25 @@ def test_spaces_ui_create_space_from_chat_posts_current_session_and_syncs_active
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_weather_demo_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_weather_demo_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installWeatherDemo")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install weather demo" in out["rootHtml"]
+    assert "Weather demo installed" in out["rootHtml"]
+    assert "Weather Demo" in out["rootHtml"]
+    assert "1 widget" in out["rootHtml"]
+    assert "Open weather demo" in out["rootHtml"]
+    assert "Manage weather widget" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="weather-demo"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="weather-demo"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "weather"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_install_research_harness_posts_template_and_refreshes_without_widget_code(driver_path):
