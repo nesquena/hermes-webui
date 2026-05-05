@@ -211,8 +211,11 @@ sem regressão das capacidades upstream.
 
 **Tasks**
 
-- [x] Substituir `static/favicon.svg`.
+- [x] Remover `static/favicon.svg` do favicon ativo.
+- [x] Criar `static/favicon-16.png`.
 - [x] Substituir `static/favicon-32.png`.
+- [x] Criar `static/favicon-192.png`.
+- [x] Criar `static/favicon-512.png`.
 - [x] Substituir `static/favicon.ico`.
 - [x] Criar/atualizar `static/apple-touch-icon.png`.
 - [x] Atualizar `static/manifest.json`.
