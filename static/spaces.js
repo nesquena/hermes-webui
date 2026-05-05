@@ -50,9 +50,9 @@
     const spaceName = space.name || spaceId || 'Demo Space';
     const widgetCount = widgets.length || Number(space.widget_count || 0);
     const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
-    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : 'Template installed');
-    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : 'Open Space');
-    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : 'Manage widgets');
+    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : (template === 'kanban' ? 'Kanban board installed' : 'Template installed'));
+    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : (template === 'kanban' ? 'Open kanban board' : 'Open Space'));
+    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : (template === 'kanban' ? 'Manage kanban widgets' : 'Manage widgets'));
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
@@ -974,8 +974,10 @@
       return;
     }
     if (action === 'installKanbanTemplate') {
-      await postSpacesJson('api/spaces/templates/install', {template: 'kanban'});
+      const result = await postSpacesJson('api/spaces/templates/install', {template: 'kanban'});
       await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateInstallStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'installNotesTemplate') {

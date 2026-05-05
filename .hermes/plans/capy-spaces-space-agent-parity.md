@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 21:53 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 23:00 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Notes App from the visible Spaces list now leaves a safe status card with direct `Open notes app` and `Manage notes widgets` actions, and the `demo_notes_app` smoke result now routes directly to notes widget management instead of the generic demo label. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Kanban Board from the visible Spaces list now leaves a safe status card with direct `Open kanban board` and `Manage kanban widgets` actions, advancing the next visible demo vertical after Weather and Notes. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show kanban install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install kanban board` posts `{template: "kanban"}`, refreshes the Spaces list, prepends a safe `Kanban board installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
+  - Validation at completion before commit: focused RED failed because `Kanban board installed` was absent; focused GREEN passed (`1 passed`). Run `git log -1 --oneline` and the final sprint report for the full validation bundle.
 
 - `feat(spaces): show notes demo status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install notes app` posts `{template: "notes"}`, refreshes the Spaces list, prepends a safe `Notes app installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
