@@ -7,7 +7,9 @@ PRIMARY badge until the cache is manually cleared or expires.
 """
 
 import json
+import sys
 import time
+import types
 
 import api.config as config
 
@@ -65,17 +67,21 @@ def _configure_isolated_sources(tmp_path, monkeypatch, provider_id: str) -> None
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: hermes_home)
     monkeypatch.setattr(config, "_models_cache_path", cache_path)
 
-    # Keep the test hermetic: do not let real host credentials/providers leak
-    # into provider detection while exercising the auth-store active_provider path.
-    import hermes_cli.auth as hermes_auth
-    import hermes_cli.models as hermes_models
-
-    monkeypatch.setattr(hermes_models, "list_available_providers", lambda: [])
-    monkeypatch.setattr(
-        hermes_auth,
-        "get_auth_status",
-        lambda provider_id: {"logged_in": False, "key_source": ""},
-    )
+    # Keep the test hermetic without requiring hermes-agent to be installed in
+    # CI: inject the tiny hermes_cli surface get_available_models() imports.
+    fake_pkg = types.ModuleType("hermes_cli")
+    fake_pkg.__path__ = []
+    fake_models = types.ModuleType("hermes_cli.models")
+    fake_models._PROVIDER_ALIASES = {}
+    fake_models.list_available_providers = lambda: []
+    fake_auth = types.ModuleType("hermes_cli.auth")
+    fake_auth.get_auth_status = lambda provider_id: {
+        "logged_in": False,
+        "key_source": "",
+    }
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
 
     _write_auth_store(hermes_home, provider_id)
     config.reload_config()
