@@ -81,11 +81,11 @@
     const eventName = String(result && result.event_name || 'widget.event').trim();
     const widgetId = String(result && result.widget_id || '').trim();
     const eventId = String(result && result.event_id || '').trim();
-    const title = eventName === 'widget.refresh' ? 'Weather refresh queued' : 'Widget event queued';
+    const title = eventName === 'widget.refresh' ? 'Weather refresh queued' : (eventName === 'agent.prompt' ? 'Weather prompt queued' : 'Widget event queued');
     const meta = [widgetId, eventName, eventId].filter(Boolean).join(' · ');
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(meta || 'Metadata-only event queued')+'</div>' +
-      '<div class="capy-spaces-muted">Agent-mediated bridge event queued; generated widget code was not executed.</div></div>';
+      '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div></div>';
   }
 
   function renderSpacesList(spaces, demos){
@@ -1257,7 +1257,7 @@
         confirmLabel: 'Queue event',
       });
       if (!promptText) return;
-      await postSpacesJson('api/spaces/widget/event', {
+      const result = await postSpacesJson('api/spaces/widget/event', {
         space_id: spaceId,
         widget_id: widgetId,
         event_name: 'agent.prompt',
@@ -1265,6 +1265,8 @@
         payload: {source: 'widget-manager', widget_title: widgetTitle},
       });
       await loadSpaceWidgets(spaceId);
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderWidgetEventQueuedStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'refreshWidget') {

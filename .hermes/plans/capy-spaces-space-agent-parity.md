@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo widget manager now shows a safe refresh-queued status card immediately after the visible Refresh action posts the metadata-only widget event, while preserving the inline Agent bridge status after the widget list reload. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather demo widget manager now shows a safe prompt-queued status card immediately after the visible Ask Capy action posts the metadata-only `agent.prompt` widget event, while preserving prompt-body redaction after the widget list reload. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show weather prompt queued status`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo Ask Capy button uses the shared prompt dialog, posts the user prompt only in the typed request, reloads widgets, then prepends `Weather prompt queued` with the safe `weather · agent.prompt · evt1` summary while omitting the raw prompt, hostile renderer/script/API-auth markers, and secret-looking values from DOM.
 
 - `feat(spaces): show weather refresh queued status`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo Refresh button posts only `{space_id, widget_id, event_name, payload}` metadata, reloads the widget list, then prepends `Weather refresh queued` with the safe `weather · widget.refresh · evt1` summary while omitting hostile renderer/script/API-auth markers from DOM.

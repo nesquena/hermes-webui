@@ -1393,8 +1393,13 @@ def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_p
         "payload": {"source": "widget-manager", "widget_title": "<Weather>"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "Weather prompt queued" in out["rootHtml"]
+    assert "weather · agent.prompt · evt1" in out["rootHtml"]
+    assert "Refresh the weather widget" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_ask_widget_fails_closed_without_shared_prompt(driver_path):
