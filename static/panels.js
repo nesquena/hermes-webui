@@ -215,6 +215,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
+  if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
@@ -2118,6 +2119,8 @@ async function loadInsights(animate) {
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
     ]);
     _renderInsights(data, box, wikiStatus);
+    if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
+    if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
@@ -2132,6 +2135,34 @@ function _formatLlmWikiTimestamp(value) {
   if (!value) return 'Never';
   try { return new Date(value).toLocaleString(); }
   catch (_) { return String(value); }
+}
+
+function _renderSystemHealthPanel() {
+  return `
+    <section class="insights-card system-health-panel loading" id="systemHealthPanel" aria-label="Host resource health" aria-live="polite">
+      <div class="system-health-head">
+        <div>
+          <div class="insights-card-title">System health</div>
+          <div class="system-health-sub">Current VPS resource usage</div>
+        </div>
+        <span class="system-health-status" id="systemHealthStatus"><span class="system-health-dot" aria-hidden="true"></span>Loading…</span>
+      </div>
+      <div class="system-health-metrics">
+        <div class="system-health-metric" data-system-health-metric="cpu">
+          <div class="system-health-label"><span>CPU</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="CPU usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+        <div class="system-health-metric" data-system-health-metric="memory">
+          <div class="system-health-label"><span>RAM</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="RAM usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+        <div class="system-health-metric" data-system-health-metric="disk">
+          <div class="system-health-label"><span>Disk</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="Disk usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+      </div>
+      <div class="system-health-foot">Live snapshot only; historical resource charts can build on this surface later.</div>
+    </section>`;
 }
 
 function _renderLlmWikiStatus(d) {
@@ -2279,6 +2310,7 @@ function _renderInsights(d, box, wikiStatus) {
     </div>`;
 
   box.innerHTML = `
+    ${_renderSystemHealthPanel()}
     ${_renderLlmWikiStatus(wikiStatus)}
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}

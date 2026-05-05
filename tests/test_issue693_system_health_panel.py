@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
@@ -137,27 +138,36 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
     assert set(payload) == {"status", "available", "checked_at", "cpu", "memory", "disk", "errors"}
 
 
-def test_system_health_panel_markup_and_styles_exist():
-    assert 'id="systemHealthPanel"' in INDEX_HTML
-    assert 'aria-label="Host resource health"' in INDEX_HTML
-    assert 'data-system-health-metric="cpu"' in INDEX_HTML
-    assert 'data-system-health-metric="memory"' in INDEX_HTML
-    assert 'data-system-health-metric="disk"' in INDEX_HTML
-    assert ".system-health-panel" in STYLE_CSS
+def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrome():
+    top_shell = INDEX_HTML[: INDEX_HTML.index('<div class="layout">')]
+    assert 'id="systemHealthPanel"' not in top_shell
+    assert 'aria-label="Host resource health"' not in top_shell
+    assert 'function _renderSystemHealthPanel()' in PANELS_JS
+    assert 'id="systemHealthPanel"' in PANELS_JS
+    assert 'aria-label="Host resource health"' in PANELS_JS
+    assert 'System health' in PANELS_JS
+    assert 'Current VPS resource usage' in PANELS_JS
+    assert PANELS_JS.index('_renderSystemHealthPanel()') < PANELS_JS.index('_renderLlmWikiStatus(wikiStatus)')
+    assert 'data-system-health-metric="cpu"' in PANELS_JS
+    assert 'data-system-health-metric="memory"' in PANELS_JS
+    assert 'data-system-health-metric="disk"' in PANELS_JS
+    assert ".system-health-panel.insights-card" in STYLE_CSS
     assert ".system-health-bar-fill" in STYLE_CSS
     assert ".system-health-panel.unavailable" in STYLE_CSS
-    assert "@media(max-width:640px)" in STYLE_CSS and ".system-health-panel" in STYLE_CSS
+    assert "@media(max-width:640px)" in STYLE_CSS and ".system-health-panel.insights-card" in STYLE_CSS
 
 
 def test_system_health_frontend_polls_visible_and_renders_progress_labels():
     assert "const SYSTEM_HEALTH_INTERVAL_MS=5000" in UI_JS
     assert "api('/api/system/health')" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
+    assert "document.querySelector('main.main.showing-insights')" in UI_JS
     assert "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)" in UI_JS
+    assert "typeof _syncSystemHealthMonitorVisibility === 'function'" in PANELS_JS
     assert "function renderSystemHealth(payload)" in UI_JS
     assert "setSystemHealthUnavailable" in UI_JS
-    assert "data-system-health-metric" in INDEX_HTML
-    assert "CPU" in INDEX_HTML and "RAM" in INDEX_HTML and "Disk" in INDEX_HTML
+    assert "data-system-health-metric" in PANELS_JS
+    assert "CPU" in PANELS_JS and "RAM" in PANELS_JS and "Disk" in PANELS_JS
     assert "aria-valuenow" in UI_JS
     assert "style.width=`${percent}%`" in UI_JS
 

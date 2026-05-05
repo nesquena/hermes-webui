@@ -3129,6 +3129,7 @@ function renderSystemHealth(payload){
 }
 async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
+  if(!_systemHealthPanelIsVisible()) return;
   try{
     const payload=await api('/api/system/health');
     renderSystemHealth(payload);
@@ -3136,8 +3137,13 @@ async function pollSystemHealth(){
     setSystemHealthUnavailable('Unavailable');
   }
 }
+function _systemHealthPanelIsVisible(){
+  return document.visibilityState === 'visible' &&
+    !!document.querySelector('main.main.showing-insights') &&
+    !!$('systemHealthPanel');
+}
 function startSystemHealthMonitor(){
-  if(document.visibilityState !== 'visible') return;
+  if(!_systemHealthPanelIsVisible()) return;
   if(_systemHealthTimer) return;
   void pollSystemHealth();
   _systemHealthTimer=setInterval(pollSystemHealth,SYSTEM_HEALTH_INTERVAL_MS);
@@ -3146,7 +3152,7 @@ function stopSystemHealthMonitor(){
   if(_systemHealthTimer){clearInterval(_systemHealthTimer);_systemHealthTimer=null;}
 }
 function _syncSystemHealthMonitorVisibility(){
-  if(document.visibilityState === 'visible') startSystemHealthMonitor();
+  if(_systemHealthPanelIsVisible()) startSystemHealthMonitor();
   else stopSystemHealthMonitor();
 }
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
