@@ -245,52 +245,119 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
     return text[-limit:]
 
 
-def _run_cron_tracked(job, profile_home=None):
+
+
+def _cron_job_for_api(job: dict) -> dict:
+    """Return a cron job payload with the #617 optional profile field present.
+
+    Legacy jobs intentionally persist without ``profile`` so they keep the
+    scheduler's server-default behavior. The API still returns ``profile: None``
+    so the UI can label that state explicitly instead of guessing.
+    """
+    payload = dict(job or {})
+    payload.setdefault("profile", None)
+    return payload
+
+
+def _cron_jobs_for_api(jobs) -> list[dict]:
+    return [_cron_job_for_api(job) for job in (jobs or [])]
+
+
+def _available_cron_profile_names() -> set[str]:
+    from api.profiles import list_profiles_api
+
+    names = {"default"}
+    for profile in list_profiles_api():
+        try:
+            name = str(profile.get("name") or "").strip()
+        except AttributeError:
+            continue
+        if name:
+            names.add(name)
+    return names
+
+
+def _normalize_cron_profile_value(value) -> str | None:
+    if value is None:
+        return None
+    profile = str(value).strip()
+    if not profile:
+        return None
+    if profile not in _available_cron_profile_names():
+        raise ValueError(f"Unknown profile: {profile}")
+    return profile
+
+
+def _profile_home_for_cron_job(job: dict):
+    """Resolve the execution profile for a cron job, with graceful fallback.
+
+    A missing/blank profile preserves legacy server-default behavior. If a job
+    points at a profile that was deleted after save, fall back to the active
+    server profile and log a warning instead of crashing the Run Now path.
+    """
+    from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
+
+    raw = str((job or {}).get("profile") or "").strip()
+    if not raw:
+        return get_active_hermes_home()
+    if raw not in _available_cron_profile_names():
+        logger.warning(
+            "Cron job %s references missing profile %r; falling back to server default",
+            (job or {}).get("id", "?"), raw,
+        )
+        return get_active_hermes_home()
+    return get_hermes_home_for_profile(raw)
+
+
+def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     """Wrapper that tracks running state around cron.scheduler.run_job.
 
-    ``profile_home`` pins HERMES_HOME for this worker thread so output files
-    and run metadata land in the profile that triggered the run, not the
-    process-global default. Captured at dispatch time because the thread runs
-    after the HTTP request (and its TLS profile) has already been cleared.
+    ``profile_home`` is the cron store that owns the job row/output metadata.
+    ``execution_profile_home`` is the selected per-job profile used to load
+    agent config/.env while running. When no job profile is selected, both homes
+    are the same and legacy server-default behavior is preserved.
     """
     from cron.scheduler import run_job  # import here — runs inside a worker thread
     from cron.jobs import mark_job_run, save_job_output
 
     job_id = job.get("id", "")
+    execution_profile_home = execution_profile_home or profile_home
 
-    # Pin HERMES_HOME for the duration of this thread using a dedicated
-    # context manager variant that accepts the profile home directly
-    # (threads have no TLS, so get_active_hermes_home() can't resolve).
-    ctx = None
-    if profile_home is not None:
+    def _with_cron_home(home, fn):
+        if home is None:
+            return fn()
         from api.profiles import cron_profile_context_for_home
 
-        ctx = cron_profile_context_for_home(profile_home)
-        ctx.__enter__()
+        with cron_profile_context_for_home(home):
+            return fn()
 
     try:
-        success, output, final_response, error = run_job(job)
-        save_job_output(job_id, output)
+        success, output, final_response, error = _with_cron_home(
+            execution_profile_home, lambda: run_job(job)
+        )
 
-        # Match the scheduled cron path: an apparently successful run with no
-        # final response should not leave the job looking healthy.
-        if success and not final_response:
-            success = False
-            error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+        # Persist output and run metadata back to the job's owning cron store,
+        # even when the selected execution profile is different.
+        def _persist_success():
+            save_job_output(job_id, output)
 
-        mark_job_run(job_id, success, error)
+            # Match the scheduled cron path: an apparently successful run with no
+            # final response should not leave the job looking healthy.
+            _success, _error = success, error
+            if _success and not final_response:
+                _success = False
+                _error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+
+            mark_job_run(job_id, _success, _error)
+
+        _with_cron_home(profile_home, _persist_success)
     except Exception as e:
         logger.exception("Manual cron run failed for job %s", job_id)
         try:
-            mark_job_run(job_id, False, str(e))
+            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))
         except Exception:
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
-        if ctx is not None:
-            try:
-                ctx.__exit__(None, None, None)
-            except Exception:
-                logger.debug("Failed to release cron_profile_context for %s", job_id)
         _mark_cron_done(job_id)
 
 _PROVIDER_ALIASES = {
@@ -2430,7 +2497,7 @@ def handle_get(handler, parsed) -> bool:
         from api.profiles import cron_profile_context
 
         with cron_profile_context():
-            return j(handler, {"jobs": list_jobs(include_disabled=True)})
+            return j(handler, {"jobs": _cron_jobs_for_api(list_jobs(include_disabled=True))})
 
     if parsed.path == "/api/crons/output":
         from api.profiles import cron_profile_context
@@ -5518,8 +5585,9 @@ def _handle_cron_create(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        from cron.jobs import create_job
+        from cron.jobs import create_job, update_job
 
+        profile = _normalize_cron_profile_value(body.get("profile"))
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
@@ -5528,7 +5596,9 @@ def _handle_cron_create(handler, body):
             skills=body.get("skills") or [],
             model=body.get("model") or None,
         )
-        return j(handler, {"ok": True, "job": job})
+        if profile is not None:
+            job = update_job(job["id"], {"profile": profile}) or job
+        return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=400)
 
@@ -5540,11 +5610,21 @@ def _handle_cron_update(handler, body):
         return bad(handler, str(e))
     from cron.jobs import update_job
 
-    updates = {k: v for k, v in body.items() if k != "job_id" and v is not None}
+    try:
+        updates = {}
+        for k, v in body.items():
+            if k == "job_id":
+                continue
+            if k == "profile":
+                updates[k] = _normalize_cron_profile_value(v)
+            elif v is not None:
+                updates[k] = v
+    except ValueError as e:
+        return bad(handler, str(e))
     job = update_job(body["job_id"], updates)
     if not job:
         return bad(handler, "Job not found", 404)
-    return j(handler, {"ok": True, "job": job})
+    return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
 
 
 def _handle_cron_delete(handler, body):
@@ -5590,7 +5670,8 @@ def _handle_cron_run(handler, body):
     from api.profiles import get_active_hermes_home
 
     _profile_home = get_active_hermes_home()
-    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home), daemon=True).start()
+    _execution_profile_home = _profile_home_for_cron_job(job)
+    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home), daemon=True).start()
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 

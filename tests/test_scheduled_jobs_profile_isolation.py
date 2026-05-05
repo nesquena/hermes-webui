@@ -215,7 +215,7 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
 
-    idx = src.find("def _run_cron_tracked(job, profile_home=None):")
+    idx = src.find("def _run_cron_tracked(job")
     assert idx != -1, "_run_cron_tracked not found"
     body = src[idx : idx + 2000]
 

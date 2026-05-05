@@ -258,6 +258,24 @@ class cron_profile_context_for_home:
                 _cj.OUTPUT_DIR = _cj.CRON_DIR / 'output'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context_for_home: cron.jobs unavailable")
+
+            # cron.scheduler snapshots _hermes_home at import time and run_job()
+            # reads config/.env from that module global. Patch it alongside
+            # cron.jobs so manual WebUI runs actually execute under the selected
+            # profile, not merely write output metadata there (#617).
+            self._prev_cs = None
+            try:
+                import cron.scheduler as _cs
+                self._prev_cs = (
+                    getattr(_cs, '_hermes_home', None),
+                    getattr(_cs, '_LOCK_DIR', None),
+                    getattr(_cs, '_LOCK_FILE', None),
+                )
+                _cs._hermes_home = self._home
+                _cs._LOCK_DIR = self._home / 'cron'
+                _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
+            except (ImportError, AttributeError):
+                logger.debug("cron_profile_context_for_home: cron.scheduler unavailable")
         except Exception:
             _cron_env_lock.release()
             raise
@@ -273,6 +291,12 @@ class cron_profile_context_for_home:
                 try:
                     import cron.jobs as _cj
                     _cj.HERMES_DIR, _cj.CRON_DIR, _cj.JOBS_FILE, _cj.OUTPUT_DIR = self._prev_cj
+                except (ImportError, AttributeError):
+                    pass
+            if getattr(self, '_prev_cs', None) is not None:
+                try:
+                    import cron.scheduler as _cs
+                    _cs._hermes_home, _cs._LOCK_DIR, _cs._LOCK_FILE = self._prev_cs
                 except (ImportError, AttributeError):
                     pass
         finally:
@@ -313,6 +337,20 @@ class cron_profile_context:
                 _cj.OUTPUT_DIR = _cj.CRON_DIR / 'output'
             except (ImportError, AttributeError):
                 logger.debug("cron_profile_context: cron.jobs unavailable; env-var only")
+
+            self._prev_cs = None
+            try:
+                import cron.scheduler as _cs
+                self._prev_cs = (
+                    getattr(_cs, '_hermes_home', None),
+                    getattr(_cs, '_LOCK_DIR', None),
+                    getattr(_cs, '_LOCK_FILE', None),
+                )
+                _cs._hermes_home = home
+                _cs._LOCK_DIR = home / 'cron'
+                _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
+            except (ImportError, AttributeError):
+                logger.debug("cron_profile_context: cron.scheduler unavailable; env-var only")
         except Exception:
             _cron_env_lock.release()
             raise
@@ -331,6 +369,12 @@ class cron_profile_context:
                 try:
                     import cron.jobs as _cj
                     _cj.HERMES_DIR, _cj.CRON_DIR, _cj.JOBS_FILE, _cj.OUTPUT_DIR = self._prev_cj
+                except (ImportError, AttributeError):
+                    pass
+            if getattr(self, '_prev_cs', None) is not None:
+                try:
+                    import cron.scheduler as _cs
+                    _cs._hermes_home, _cs._LOCK_DIR, _cs._LOCK_FILE = self._prev_cs
                 except (ImportError, AttributeError):
                     pass
         finally:
@@ -461,6 +505,14 @@ def _set_hermes_home(home: Path):
         _cj.OUTPUT_DIR = _cj.CRON_DIR / 'output'
     except (ImportError, AttributeError):
         logger.debug("Failed to patch cron.jobs module")
+
+    try:
+        import cron.scheduler as _cs
+        _cs._hermes_home = home
+        _cs._LOCK_DIR = home / 'cron'
+        _cs._LOCK_FILE = _cs._LOCK_DIR / '.tick.lock'
+    except (ImportError, AttributeError):
+        logger.debug("Failed to patch cron.scheduler module")
 
 
 def _reload_dotenv(home: Path):

@@ -247,6 +247,58 @@ function _cronStatusMeta(job) {
   };
 }
 
+
+function _cronProfileName(profile){
+  return (profile || '').toString().trim();
+}
+
+function _cronProfileLabel(profile){
+  const name = _cronProfileName(profile);
+  return name || (t('cron_profile_server_default') || 'server default');
+}
+
+function _cronProfileTitle(profile){
+  const name = _cronProfileName(profile);
+  if (name) return (t('cron_profile_label') || 'Profile') + ': ' + name;
+  return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
+}
+
+async function loadCronProfiles(){
+  if (_cronProfilesCache) return _cronProfilesCache;
+  try {
+    const data = await api('/api/profiles');
+    _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
+  } catch(e) {
+    _cronProfilesCache = [];
+  }
+  return _cronProfilesCache;
+}
+
+function _cronProfileOptions(selected){
+  const current = _cronProfileName(selected);
+  const profiles = Array.isArray(_cronProfilesCache) ? _cronProfilesCache : [];
+  const seen = new Set(['']);
+  const opts = [`<option value=""${current ? '' : ' selected'}>${esc(t('cron_profile_server_default') || 'server default')}</option>`];
+  for (const p of profiles) {
+    const name = _cronProfileName(p && p.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const label = p && p.is_default ? `${name} (${t('default') || 'default'})` : name;
+    opts.push(`<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(label)}</option>`);
+  }
+  if (current && !seen.has(current)) {
+    opts.push(`<option value="${esc(current)}" selected>${esc(current)} (${esc(t('not_available') || 'not available')})</option>`);
+  }
+  return opts.join('');
+}
+
+function _refreshCronProfileSelect(selected){
+  const sel = $('cronFormProfile');
+  if (!sel) return;
+  const keep = selected === undefined ? sel.value : selected;
+  sel.innerHTML = _cronProfileOptions(keep);
+}
+
 function _cronDiagnostics(job) {
   const fields = {
     id: job.id,
@@ -274,6 +326,7 @@ async function loadCrons(animate) {
     refreshBtn.disabled = true;
   }
   try {
+    await loadCronProfiles();
     const data = await api('/api/crons');
     _cronList = data.jobs || [];
     if (!_cronList.length) {
@@ -288,10 +341,13 @@ async function loadCrons(animate) {
       item.id = 'cron-' + job.id;
       const status = _cronStatusMeta(job);
       const isNewRun = _cronNewJobIds.has(String(job.id));
+      const profileLabel = _cronProfileLabel(job.profile);
+      const profileTitle = _cronProfileTitle(job.profile);
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
+          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
       item.onclick = () => openCronDetail(job.id, item);
@@ -326,6 +382,8 @@ function _renderCronDetail(job){
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
+  const profileLabel = _cronProfileLabel(job.profile);
+  const profileTitle = _cronProfileTitle(job.profile);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
@@ -352,6 +410,7 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
       </div>
@@ -534,6 +593,7 @@ function duplicateCurrentCron(){
     schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
+    profile: job.profile || '',
     isEdit: false,
   });
   if (!_cronSkillsCache) {
@@ -558,6 +618,7 @@ async function deleteCurrentCron(){
 let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
+let _cronProfilesCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -566,9 +627,10 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
 }
 
 function openCronEdit(job){
@@ -582,6 +644,7 @@ function openCronEdit(job){
     schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
+    profile: job.profile || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -589,9 +652,10 @@ function openCronEdit(job){
   } else {
     _bindCronSkillPicker();
   }
+  loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -621,6 +685,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
             ${deliverOpt('discord','Discord')}
             ${deliverOpt('telegram','Telegram')}
           </select>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormProfile">${esc(t('cron_profile_label') || 'Profile')}</label>
+          <select id="cronFormProfile">
+            ${_cronProfileOptions(profile)}
+          </select>
+          <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
         </div>
         <div class="detail-form-row">
           <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
@@ -706,18 +777,20 @@ async function saveCronForm(){
   const schEl=$('cronFormSchedule');
   const promptEl=$('cronFormPrompt');
   const delivEl=$('cronFormDeliver');
+  const profileEl=$('cronFormProfile');
   const errEl=$('cronFormError');
   if(!schEl||!promptEl||!errEl) return;
   const name=(nameEl?nameEl.value:'').trim();
   const schedule=schEl.value.trim();
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
+  const profile=profileEl?profileEl.value:'';
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, prompt};
+      const updates = {job_id: _editingCronId, schedule, prompt, profile: profile};
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
@@ -729,7 +802,7 @@ async function saveCronForm(){
       if (job) openCronDetail(editedId);
       return;
     }
-    const body={schedule,prompt,deliver};
+    const body={schedule,prompt,deliver,profile: profile};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
