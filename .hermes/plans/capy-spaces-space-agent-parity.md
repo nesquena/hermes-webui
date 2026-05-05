@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo install completion card now includes a visible `Run weather smoke` action that immediately exercises the metadata-only weather acceptance path from the installed demo card, while preserving safe open/manage actions and generated/source/API-auth redaction. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Notes app install completion card now includes a visible `Run notes smoke` action that immediately exercises the metadata-only notes app acceptance path from the installed demo card, while preserving safe open/manage actions and generated/source/API-auth redaction. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link notes install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes app install status includes a `Run notes smoke` action wired to the existing `demo_notes_app` smoke route, while preserving `Open notes app` / `Manage notes widgets` actions and omitting hostile renderer/script/API-auth markers from DOM.
+  - Validation at completion before commit: focused RED failed because `Run notes smoke` was absent; focused GREEN passed (`1 passed`), focused install/smoke regressions passed (`2 passed`), Spaces UI behavior + demo parity suites passed (`84 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): link weather install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo install status includes a `Run weather smoke` action wired to the existing `demo_weather_widget` smoke route, while preserving `Open weather demo` / `Manage weather widget` actions and omitting hostile renderer/script/API-auth markers from DOM.

@@ -56,7 +56,9 @@
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
-    const smokeAction = template === 'weather' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_weather_widget">Run weather smoke</button>' : '';
+    const smokeAction = template === 'weather'
+      ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_weather_widget">Run weather smoke</button>'
+      : (template === 'notes' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_notes_app">Run notes smoke</button>' : '');
     const actions = spaceId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(openLabel)+'</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(manageLabel)+'</button>'+smokeAction+'</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+' · '+escapeHtml(widgetLabel)+' · safe metadata-only install</div>' +

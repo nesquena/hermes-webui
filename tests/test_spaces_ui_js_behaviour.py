@@ -1554,8 +1554,10 @@ def test_spaces_ui_install_notes_app_posts_template_and_shows_safe_open_manage_s
     assert "Notes App" in out["rootHtml"]
     assert "Open notes app" in out["rootHtml"]
     assert "Manage notes widgets" in out["rootHtml"]
+    assert "Run notes smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="notes-app"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="notes-app"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_notes_app"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "notes"}
     assert out["calls"][-1]["path"] == "api/spaces"
