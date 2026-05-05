@@ -110,6 +110,10 @@ async function send(){
     }
     return;
   }
+  if(S.session&&(S.session.read_only||S.session.is_read_only)){
+    if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000);
+    return;
+  }
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push

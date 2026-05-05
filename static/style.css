@@ -1084,8 +1084,10 @@
   .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;gap:6px;overflow:hidden;}
   .panel-header > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:2;}
   .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:3;overflow:hidden;min-width:0;}
+  .topbar-source-badge{display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;font-weight:700;letter-spacing:.02em;vertical-align:middle;}
   .git-badge.dirty{color:var(--accent-text);background:var(--accent-bg);}
   .panel-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
+
   /* Crisp display:none at narrow widths so the header doesn't show a sliver
      of an ellipsised label or git badge — icons survive longest. */
   @container rightpanel (max-width: 220px){
@@ -2577,19 +2579,24 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   flex-shrink: 0;
   pointer-events: none; /* don't block clicks on session-actions beneath */
 }
-.session-item.cli-session:hover::after {
+.session-item.cli-session:not(.read-only-session):hover::after {
   display: none; /* hide badge on hover so the session menu trigger stays clear */
+}
+.session-item.cli-session.read-only-session:hover::after {
+  opacity: .75;
 }
 .session-item.cli-session.menu-open::after {
   display: none;
 }
 /* Source-specific colors for gateway sessions */
-.session-item.cli-session[data-source="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
-.session-item.cli-session[data-source="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
-.session-item.cli-session[data-source="discord"] { border-left-color: #5865F2; }
-.session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
-.session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
-.session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
+.session-item.cli-session[data-source-key="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
+.session-item.cli-session[data-source-key="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
+.session-item.cli-session[data-source-key="discord"] { border-left-color: #5865F2; }
+.session-item.cli-session[data-source-key="discord"]::after { color: #5865F2; }
+.session-item.cli-session[data-source-key="slack"] { border-left-color: #4A154B; }
+.session-item.cli-session[data-source-key="slack"]::after { color: #4A154B; }
+.session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
+.session-item.cli-session[data-source-key="claude_code"]::after { color: rgba(217, 119, 6, 0.85); }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.
