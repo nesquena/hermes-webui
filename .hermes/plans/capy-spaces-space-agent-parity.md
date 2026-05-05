@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 23:00 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-05 01:22 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Kanban Board from the visible Spaces list now leaves a safe status card with direct `Open kanban board` and `Manage kanban widgets` actions, advancing the next visible demo vertical after Weather and Notes. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Research Harness from the visible Spaces list now leaves a safe status card with direct `Open research harness` and `Manage research widgets` actions, continuing the visible demo-vertical work after Weather, Notes, and Kanban. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show research install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install research harness` posts `{template: "research"}`, refreshes the Spaces list, prepends a safe `Research harness installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
+  - Validation at completion before commit: focused RED failed because `Research harness installed` was absent; focused GREEN passed (`1 passed`), Spaces UI JS behavior plus research template regressions passed (`77 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): show kanban install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install kanban board` posts `{template: "kanban"}`, refreshes the Spaces list, prepends a safe `Kanban board installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
