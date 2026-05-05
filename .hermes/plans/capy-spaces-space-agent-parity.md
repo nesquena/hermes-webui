@@ -9,11 +9,14 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-05 05:47 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Stock Chart demo from the visible Spaces list now leaves a safe status card with direct `Open stock chart` and `Manage stock widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, and Browser Surface. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Camera Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open camera dashboard` and `Manage camera widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, Browser Surface, and Stock Chart. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show camera dashboard install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install camera dashboard` posts `{template: "camera"}`, refreshes the Spaces list, prepends a safe `Camera dashboard installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
 
 - `feat(spaces): show stock chart install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install stock chart` posts `{template: "stock"}`, refreshes the Spaces list, prepends a safe `Stock chart installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.

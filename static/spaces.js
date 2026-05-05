@@ -50,9 +50,9 @@
     const spaceName = space.name || spaceId || 'Demo Space';
     const widgetCount = widgets.length || Number(space.widget_count || 0);
     const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
-    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : (template === 'kanban' ? 'Kanban board installed' : (template === 'research' ? 'Research harness installed' : (template === 'dashboard' ? 'Dashboard demo installed' : (template === 'browser' ? 'Browser surface installed' : (template === 'stock' ? 'Stock chart installed' : 'Template installed'))))));
-    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : (template === 'kanban' ? 'Open kanban board' : (template === 'research' ? 'Open research harness' : (template === 'dashboard' ? 'Open dashboard demo' : (template === 'browser' ? 'Open browser surface' : (template === 'stock' ? 'Open stock chart' : 'Open Space'))))));
-    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : (template === 'kanban' ? 'Manage kanban widgets' : (template === 'research' ? 'Manage research widgets' : (template === 'dashboard' ? 'Manage dashboard widgets' : (template === 'browser' ? 'Manage browser widgets' : (template === 'stock' ? 'Manage stock widgets' : 'Manage widgets'))))));
+    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : (template === 'kanban' ? 'Kanban board installed' : (template === 'research' ? 'Research harness installed' : (template === 'dashboard' ? 'Dashboard demo installed' : (template === 'camera' ? 'Camera dashboard installed' : (template === 'browser' ? 'Browser surface installed' : (template === 'stock' ? 'Stock chart installed' : 'Template installed')))))));
+    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : (template === 'kanban' ? 'Open kanban board' : (template === 'research' ? 'Open research harness' : (template === 'dashboard' ? 'Open dashboard demo' : (template === 'camera' ? 'Open camera dashboard' : (template === 'browser' ? 'Open browser surface' : (template === 'stock' ? 'Open stock chart' : 'Open Space')))))));
+    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : (template === 'kanban' ? 'Manage kanban widgets' : (template === 'research' ? 'Manage research widgets' : (template === 'dashboard' ? 'Manage dashboard widgets' : (template === 'camera' ? 'Manage camera widgets' : (template === 'browser' ? 'Manage browser widgets' : (template === 'stock' ? 'Manage stock widgets' : 'Manage widgets')))))));
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
@@ -1004,8 +1004,10 @@
       return;
     }
     if (action === 'installCameraTemplate') {
-      await postSpacesJson('api/spaces/templates/install', {template: 'camera'});
+      const result = await postSpacesJson('api/spaces/templates/install', {template: 'camera'});
       await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateInstallStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'installKanbanTemplate') {
