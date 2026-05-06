@@ -229,8 +229,12 @@
       const persistedWidgetCount = Number(item && item.persisted_widget_count || 0);
       const persistence = item && item.persistence_checked ? 'checked' : 'not checked';
       const rollbackPoint = item && item.rollback_point ? 'yes' : 'no';
+      const flow = item && item.prompt_flow && typeof item.prompt_flow === 'object' && !Array.isArray(item.prompt_flow) ? item.prompt_flow : null;
+      const flowSummary = demo === 'demo_weather_widget' && flow
+        ? '<div class="capy-spaces-muted"><strong>Weather demo checklist</strong></div><div class="capy-spaces-muted">Weather flow: chat answer '+escapeHtml(flow.chat_answer_status ? String(flow.chat_answer_status) : 'not recorded')+' · widget '+(flow.widget_created ? 'created' : 'not created')+' · reload '+(flow.reload_verified ? 'verified' : 'not verified')+'</div>'
+        : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + '</div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
