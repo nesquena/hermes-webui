@@ -2731,6 +2731,20 @@ def get_available_models() -> dict:
             if not _has_unnamed:
                 detected_providers.discard("custom")
 
+        # Resolve bare "custom" active_provider to the actual custom provider
+        # slug (e.g. "custom:llama-swap") so the frontend can match it to the
+        # correct model group.  Without this, active_provider remains the
+        # literal string "custom" while the groups use "custom:*" IDs — the
+        # frontend's provider-matching logic sees no match and falls back to
+        # the first available provider (GitHub Copilot), which is the bug
+        # behind the "shows Copilot when model.provider=custom" symptom.
+        if active_provider == "custom" and _named_custom_groups:
+            # Pick the first named custom provider group as the target.
+            # Named groups are keyed by the full slug ("custom:name"),
+            # whereas the auto-detected path only adds bare "custom".
+            _first_custom_slug = next(iter(_named_custom_groups))
+            active_provider = _first_custom_slug
+
         # Filter providers if providers.only_configured is set
         providers_cfg = cfg.get("providers", {})
         only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
