@@ -2681,6 +2681,16 @@ body.dashboard-shell-mode .main{background:var(--bg);}
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-header,
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-body,
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-empty{flex:1;min-width:0;}
+  /* ── Conversas (showing-chat) — same sidecar pattern as skills ──
+     panelChat moves into #mainChat via mountDashboardChatList(); the
+     transcript (#messages) and composer stay in their natural slot to the
+     right, so the user keeps the Neo shell chrome (menu, topbar, hero)
+     instead of falling back to the legacy hermes layout. */
+  body.dashboard-shell-mode main.main.showing-chat>#mainChat{flex-direction:row;overflow:hidden;padding:0;display:flex;flex:1;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-chat #mainChat>#panelChat{width:260px;min-width:260px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
+  body.dashboard-shell-mode main.main.showing-chat #mainChat>#panelChat .session-list{flex:1;overflow-y:auto;}
+  body.dashboard-shell-mode main.main.showing-chat #mainChat>.messages{flex:1;min-width:0;}
+  body.dashboard-shell-mode main.main.showing-chat #mainChat>.composer-wrap{flex-shrink:0;}
 }
 main.main.showing-dashboard .main-view-body{overflow:hidden;padding:16px;}
 main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
