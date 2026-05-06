@@ -205,6 +205,24 @@ def main() -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+    # Recover sidecar JSONs for any state.db row tagged source='webui' whose
+    # ~/.hermes/webui/sessions/<sid>.json is missing. Idempotent: only sids
+    # without a sidecar are written. Without this, sessions whose sidecar was
+    # lost in a state-dir migration stay invisible in the sidebar even though
+    # the agent runtime still has the full transcript.
+    try:
+        from api.models import hydrate_orphan_webui_sessions
+        report = hydrate_orphan_webui_sessions()
+        if report["restored"] or report["failed"]:
+            print(
+                "  [hydrate] webui session sidecars: "
+                f"{report['restored']} restored, {report['skipped']} already present, "
+                f"{report['failed']} failed (of {report['candidates']} candidates)",
+                flush=True,
+            )
+    except Exception as e:
+        print(f'[!!] WARNING: orphan session hydrate skipped: {e}', flush=True)
+
     # Start the gateway session watcher for real-time SSE updates
     try:
         from api.gateway_watcher import start_watcher

@@ -1268,6 +1268,92 @@ def hydrate_session_from_state_db(sid):
     return s
 
 
+def hydrate_orphan_webui_sessions(*, max_restores: int = 500) -> dict:
+    """Restore sidecar JSONs for any state.db row tagged source='webui' whose
+    ``~/.hermes/webui/sessions/<sid>.json`` is missing.
+
+    Symptom this targets: after a state-dir migration or a half-completed save
+    the agent runtime kept the row in ``state.db`` but the WebUI sidecar is
+    gone. Without that file the sidebar list (which globs the directory)
+    silently drops the conversation, and ``Session.load`` returns ``None`` for
+    direct lookups too. Restoring the sidecar brings the conversation back in
+    full — same effect as ``hydrate_session_from_state_db`` does on demand,
+    just done in bulk at startup so the user does not have to "click into"
+    each lost session for it to come back.
+
+    Idempotent: only sids missing a sidecar trigger a hydrate. ``max_restores``
+    is a defensive cap against runaway runs (e.g. an empty ``webui/sessions/``
+    on a freshly migrated host with thousands of state.db rows would otherwise
+    block boot for minutes).
+
+    Returns a small dict ``{candidates, restored, skipped, failed}`` so the
+    caller can log a one-line summary.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return {"candidates": 0, "restored": 0, "skipped": 0, "failed": 0}
+
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not db_path.exists():
+        return {"candidates": 0, "restored": 0, "skipped": 0, "failed": 0}
+
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # If we cannot even create the sidecar dir we cannot hydrate anything.
+        # Bail quietly — the next start will retry.
+        return {"candidates": 0, "restored": 0, "skipped": 0, "failed": 0}
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            cols = {row[1] for row in cur.fetchall()}
+            if 'source' not in cols:
+                return {"candidates": 0, "restored": 0, "skipped": 0, "failed": 0}
+            cur.execute(
+                """
+                SELECT id FROM sessions
+                WHERE source = 'webui'
+                ORDER BY COALESCE(ended_at, started_at) DESC
+                """
+            )
+            sids = [row['id'] for row in cur.fetchall() if row['id']]
+    except Exception:
+        logger.exception("hydrate_orphan_webui_sessions: state.db scan failed")
+        return {"candidates": 0, "restored": 0, "skipped": 0, "failed": 0}
+
+    restored = skipped = failed = 0
+    for sid in sids[:max_restores]:
+        path = SESSION_DIR / f'{sid}.json'
+        if path.exists():
+            skipped += 1
+            continue
+        try:
+            session = hydrate_session_from_state_db(sid)
+            if session is None:
+                failed += 1
+            else:
+                restored += 1
+        except Exception:
+            logger.exception("hydrate_orphan_webui_sessions: %s failed", sid)
+            failed += 1
+    return {
+        "candidates": len(sids),
+        "restored": restored,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session from state.db (messages + session row).
     Returns True if deleted, False if not found or error.
