@@ -4230,11 +4230,12 @@ def test_install_notes_template_creates_safe_notes_app_widgets(monkeypatch, tmp_
     assert "secret" not in serialized
 
 
-def test_notes_demo_smoke_exposes_safe_folder_preview(monkeypatch, tmp_path):
+def test_notes_demo_smoke_exposes_safe_folder_and_attachment_previews(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
     result = spaces.space_demo_run("demo_notes_app")
     folders_widget = result["notes_artifact"]["folders"]
+    attachments_widget = result["notes_artifact"]["attachments"]
     serialized = json.dumps(result).lower()
 
     assert folders_widget["id"] == "notes-folders"
@@ -4247,8 +4248,18 @@ def test_notes_demo_smoke_exposes_safe_folder_preview(monkeypatch, tmp_path):
         "create_folder": "metadata-only",
         "active_folder_id": "folder-demo",
     }
+    assert attachments_widget["id"] == "notes-attachments"
+    assert attachments_widget["metadata"]["attachments"] == {
+        "status": "agent-mediated",
+        "storage": "agent-mediated",
+        "items": [
+            {"id": "attachment-demo-markdown", "name": "demo-note.md", "kind": "markdown", "status": "ready"},
+            {"id": "attachment-whiteboard", "name": "whiteboard.png", "kind": "image", "status": "planned"},
+        ],
+    }
     assert result["notes_flow"]["folder_count"] == 2
     assert result["notes_flow"]["active_folder"] == "Demo Project"
+    assert result["notes_flow"]["attachment_count"] == 2
     assert "renderer" not in serialized
     assert "html" not in serialized
     assert "<script" not in serialized

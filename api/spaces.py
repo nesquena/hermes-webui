@@ -104,6 +104,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "export",
     "interaction",
     "folders",
+    "attachments",
     "event_bridge",
     "permissions",
     "capabilities",
@@ -1517,6 +1518,14 @@ def space_demo_run(name: str) -> dict[str, Any]:
             {"id": "folder-inbox", "title": "Inbox"},
             {"id": "folder-demo", "title": "Demo Project"},
         ]
+        demo_attachments = {
+            "status": "agent-mediated",
+            "storage": "agent-mediated",
+            "items": [
+                {"id": "attachment-demo-markdown", "name": "demo-note.md", "kind": "markdown", "status": "ready"},
+                {"id": "attachment-whiteboard", "name": "whiteboard.png", "kind": "image", "status": "planned"},
+            ],
+        }
         folder_widget = read_widget(space_id, "notes-folders")
         folder_widget["folders"] = demo_folders
         folder_widget["interaction"] = {
@@ -1527,12 +1536,14 @@ def space_demo_run(name: str) -> dict[str, Any]:
         upsert_widget(space_id, folder_widget)
         patch_widget(space_id, "notes-editor", {"notes": editor_notes})
         patch_widget(space_id, "notes-preview", {"notes": preview_notes})
+        patch_widget(space_id, "notes-attachments", {"attachments": demo_attachments})
         action = "notes-draft-saved"
         extra = {
             "notes_artifact": {
                 "folders": read_widget_detail(space_id, "notes-folders"),
                 "editor": read_widget_detail(space_id, "notes-editor"),
                 "preview": read_widget_detail(space_id, "notes-preview"),
+                "attachments": read_widget_detail(space_id, "notes-attachments"),
             },
             "notes_flow": {
                 "folders_ready": True,
@@ -1541,6 +1552,7 @@ def space_demo_run(name: str) -> dict[str, Any]:
                 "editor_saved": True,
                 "markdown_preview_saved": True,
                 "attachments_agent_mediated": True,
+                "attachment_count": len(demo_attachments["items"]),
             },
         }
     elif demo == "demo_kanban_board":
@@ -3264,6 +3276,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "chart",
         "table",
         "notes",
+        "attachments",
         "browser",
         "kanban",
         "markdown",
@@ -3276,7 +3289,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown", "export"}:
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:
