@@ -5940,6 +5940,27 @@ def _handle_chat_start(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    requested_profile = str(body.get("profile") or "").strip()
+    if requested_profile:
+        try:
+            from api.profiles import _PROFILE_ID_RE
+
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile", 400)
+        except ImportError:
+            requested_profile = ""
+    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+        has_persisted_turns = bool(
+            getattr(s, "messages", None)
+            or getattr(s, "context_messages", None)
+            or getattr(s, "pending_user_message", None)
+        )
+        if not has_persisted_turns:
+            # Empty sessions are placeholders. If the user switches profiles
+            # before sending the first turn, run the placeholder under the
+            # currently-selected profile instead of the stale one stamped at
+            # creation time.
+            s.profile = requested_profile
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
