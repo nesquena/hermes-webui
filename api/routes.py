@@ -937,12 +937,30 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/health":
         with STREAMS_LOCK:
             n_streams = len(STREAMS)
+        # SSE subscriber counts let oncall see at a glance whether the modal
+        # for approvals/clarifies is reaching real clients (they're not the
+        # same as active /chat/stream connections).
+        with _lock:
+            n_approval_subs = sum(
+                len(subs) for subs in _approval_sse_subscribers.values()
+            )
+        try:
+            from api.clarify import _clarify_sse_subscribers as _clarify_subs
+            from api.clarify import _lock as _clarify_lock
+            with _clarify_lock:
+                n_clarify_subs = sum(len(subs) for subs in _clarify_subs.values())
+        except Exception:
+            n_clarify_subs = 0
+        from api.health import stream_latency_snapshot
         return j(
             handler,
             {
                 "status": "ok",
                 "sessions": len(SESSIONS),
                 "active_streams": n_streams,
+                "approval_sse_subscribers": n_approval_subs,
+                "clarify_sse_subscribers": n_clarify_subs,
+                "stream_latency_ms": stream_latency_snapshot(),
                 "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
             },
         )

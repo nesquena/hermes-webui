@@ -39,6 +39,25 @@ def test_health_still_works(cleanup_test_sessions):
     assert "uptime_seconds" in data
     assert "active_streams" in data
 
+
+def test_health_exposes_neo_observability_fields(cleanup_test_sessions):
+    """Wave 4 enrichment: /health must surface SSE subscriber counts and
+    per-stream latency snapshots so oncall can diagnose 'modal travado' /
+    'chat lento' incidents without tail-grepping journalctl."""
+    data, status = get("/health")
+    assert status == 200
+    assert "approval_sse_subscribers" in data
+    assert "clarify_sse_subscribers" in data
+    assert isinstance(data["approval_sse_subscribers"], int)
+    assert isinstance(data["clarify_sse_subscribers"], int)
+    snap = data.get("stream_latency_ms")
+    assert isinstance(snap, dict)
+    for path in ("/api/chat/stream", "/api/approval/stream",
+                 "/api/clarify/stream", "/api/cmd/stream"):
+        assert path in snap, f"{path} bucket missing in stream_latency_ms"
+        bucket = snap[path]
+        assert "count" in bucket and "p50_ms" in bucket and "p95_ms" in bucket
+
 def test_api_modules_exist(cleanup_test_sessions):
     """All api/ module files must exist on disk."""
     base = REPO_ROOT / "api"

@@ -56,14 +56,30 @@ class Handler(BaseHTTPRequestHandler):
         """Structured JSON logs for each request."""
         import json as _json
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
+        path = self.path or '-'
         record = _json.dumps({
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'method': self.command or '-',
-            'path': self.path or '-',
+            'path': path,
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         })
-        print(f'[webui] {record}', flush=True)
+        # stdout is line-buffered (configured in main()), so a plain print
+        # flushes once per record without paying flush=True per byte.
+        print(f'[webui] {record}')
+
+        # Sample SSE endpoint duration for /health p50/p95 reporting.
+        # The path on the URL line includes a query string (?session_id=...),
+        # so strip it to match the constant entries in is_tracked_stream_path.
+        try:
+            base = path.split('?', 1)[0]
+            from api.health import is_tracked_stream_path, record_stream_duration
+            if is_tracked_stream_path(base):
+                record_stream_duration(base, duration_ms)
+        except Exception:
+            # Sampling is best-effort. A failure here must not affect the
+            # actual response that's already been served.
+            pass
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
@@ -123,6 +139,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+
+    # Switch stdout/stderr to line-buffered so the per-request access log lines
+    # written by Handler.log_request() flush as soon as a newline is produced.
+    # The previous code passed `flush=True` on every print, which meant the
+    # interpreter spent cycles flushing on every byte of every long-lived SSE
+    # response. Doing it once here is cheaper and matches what systemd /
+    # journalctl already expect from a long-running daemon.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        # `reconfigure` only exists on TextIOWrapper. If something replaces
+        # stdout (e.g. a test runner capture stream) we silently move on —
+        # the explicit flush=True calls remain as a safety net.
+        pass
 
     print_startup_config()
 
