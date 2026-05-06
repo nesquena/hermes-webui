@@ -152,7 +152,7 @@ def test_hero_visual_weight_matches_reference():
 def test_right_column_refinement_matches_reference():
     css = (STATIC / "style.css").read_text()
     assert ".dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px" in css
-    assert ".dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow:hidden;}" in css
+    assert ".dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow-x:hidden;overflow-y:auto;" in css
     assert ".hero-card{position:relative;height:clamp(300px,34vh,330px);flex:0 0 auto;border:1px solid rgba(0,229,255,.42)" in css
     assert ".hero-status-dot{width:7px;height:7px;border-radius:999px;background:var(--accent);box-shadow:0 0 10px rgba(0,229,255,1),0 0 18px rgba(0,229,255,.72);animation:hero-status-pulse" in css
     assert ".hero-greeting{display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}" in css
