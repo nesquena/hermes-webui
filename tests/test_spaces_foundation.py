@@ -3894,6 +3894,19 @@ def test_install_weather_template_creates_safe_persistent_weather_widget(monkeyp
             "kind": "weather",
             "title": "Weather in Prague",
             "layout": {"x": 0, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "metadata": {
+                "weather": {
+                    "location": "Prague",
+                    "country": "CZ",
+                    "units": "metric",
+                    "status": "ready-for-agent-refresh",
+                },
+                "event_bridge": {"event_name": "widget.refresh", "status": "ready-for-user-confirmation"},
+                "prompt": {
+                    "placeholder": "Ask Capy to refresh or explain the Prague weather widget",
+                    "suggested_event": "widget.refresh",
+                },
+            },
         }
     ]
     full = spaces.read_widget(installed["space"]["space_id"], "weather-current")
@@ -3939,6 +3952,33 @@ def test_weather_template_public_detail_exposes_safe_prompt_metadata(monkeypatch
         "suggested_event": "widget.refresh",
     }
     serialized = json.dumps(detail).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_weather_template_widget_list_exposes_safe_prompt_and_ready_state(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("weather")
+    widgets = spaces.list_widgets(installed["space"]["space_id"])
+
+    assert widgets[0]["metadata"] == {
+        "weather": {
+            "location": "Prague",
+            "country": "CZ",
+            "units": "metric",
+            "status": "ready-for-agent-refresh",
+        },
+        "event_bridge": {"event_name": "widget.refresh", "status": "ready-for-user-confirmation"},
+        "prompt": {
+            "placeholder": "Ask Capy to refresh or explain the Prague weather widget",
+            "suggested_event": "widget.refresh",
+        },
+    }
+    serialized = json.dumps(widgets).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
     assert "<script" not in serialized

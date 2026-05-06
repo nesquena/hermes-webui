@@ -3027,10 +3027,14 @@ def list_widgets(space_id: str) -> list[dict[str, Any]]:
     for widget in widgets:
         if isinstance(widget, dict):
             summary = _widget_summary(widget)
-            if isinstance(widget.get("weather"), dict) and isinstance(widget["weather"].get("current"), dict):
-                weather = _payload_summary(widget.get("weather"))
-                if weather not in ({}, [], ""):
-                    summary["metadata"] = {"weather": weather}
+            metadata: dict[str, Any] = {}
+            for field in ("weather", "event_bridge", "prompt"):
+                if isinstance(widget.get(field), dict):
+                    field_summary = _payload_summary(widget.get(field))
+                    if field_summary not in ({}, [], ""):
+                        metadata[field] = field_summary
+            if metadata:
+                summary["metadata"] = metadata
             summaries.append(summary)
     return summaries
 

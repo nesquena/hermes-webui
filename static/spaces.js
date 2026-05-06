@@ -577,7 +577,7 @@
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
         '<div><strong>'+escapeHtml(title)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
-        renderWeatherObservation(w.metadata || {}) + renderWidgetAgentBridgeStatus(widgetId, events || []) + '</div>' +
+        renderWidgetPrompt(w.metadata || {}) + renderWeatherObservation(w.metadata || {}) + renderWidgetAgentBridgeStatus(widgetId, events || []) + '</div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="refreshWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Refresh</button>' +

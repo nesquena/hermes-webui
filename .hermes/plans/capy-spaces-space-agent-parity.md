@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the demo parity all-smokes result now surfaces a safe weather vertical checklist for the Space Agent-style blank-space chat answer → weather widget → reload flow directly in the suite summary. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the weather demo widget manager now surfaces the starter prompt hint and ready-for-agent-refresh metadata directly from the safe widget list, so the visible Weather Demo path has a clearer next action before/after smoke runs. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show weather prompt hint in widget list`
+  - Added RED/GREEN backend coverage proving the installed Weather Demo widget list exposes safe `weather`, `event_bridge`, and `prompt` metadata even before the first observation refresh, while omitting generated/source/API-auth markers.
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the widget manager renders a visible `Suggested prompt` card (`Ask Capy to refresh or explain the Prague weather widget` / `widget.refresh`) from list metadata without fetching or executing generated widget bodies.
 
 - `feat(spaces): summarize weather flow in smoke suite`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now surfaces a compact safe `Weather demo checklist` row for the weather vertical (`chat answer recorded · widget created · reload verified`) while omitting raw prompt/answer text, hostile renderer/script/API-auth markers, and secret-looking values from DOM.

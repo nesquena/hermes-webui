@@ -270,6 +270,12 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        prompt: {
+          placeholder: 'Ask Capy to refresh or explain the Prague weather widget',
+          suggested_event: 'widget.refresh',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
       },
       renderer: '<script>bad()</script>',
     }] });
@@ -1078,6 +1084,19 @@ def test_spaces_ui_widget_manager_shows_weather_observation_preview(driver_path)
     assert "partly cloudy" in out["rootHtml"]
     assert "Observation status: observation-ready" in out["rootHtml"]
     assert "Partly cloudy in Prague; refreshed through agent-mediated weather metadata." in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_widget_manager_shows_weather_prompt_hint(driver_path):
+    out = _run_spaces_scenario(driver_path, "list")
+
+    assert "Suggested prompt" in out["rootHtml"]
+    assert "Ask Capy to refresh or explain the Prague weather widget" in out["rootHtml"]
+    assert "Suggested event: widget.refresh" in out["rootHtml"]
+    assert "Metadata-only prompt hint" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
