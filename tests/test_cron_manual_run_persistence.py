@@ -23,6 +23,11 @@ def test_manual_cron_run_saves_output_and_marks_job(monkeypatch):
     cron_scheduler = types.ModuleType("cron.scheduler")
     cron_scheduler.run_job = lambda job: (True, "manual output", "done", None)
 
+    monkeypatch.setattr(
+        routes,
+        "_run_cron_job_in_profile_subprocess",
+        lambda job, execution_profile_home: cron_scheduler.run_job(job),
+    )
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
@@ -56,6 +61,11 @@ def test_manual_cron_run_marks_empty_response_as_failure(monkeypatch):
     cron_scheduler = types.ModuleType("cron.scheduler")
     cron_scheduler.run_job = lambda job: (True, "manual output", "", None)
 
+    monkeypatch.setattr(
+        routes,
+        "_run_cron_job_in_profile_subprocess",
+        lambda job, execution_profile_home: cron_scheduler.run_job(job),
+    )
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
