@@ -1,3 +1,4 @@
+import multiprocessing
 import sys
 import threading
 import types
@@ -26,6 +27,85 @@ def _install_fake_cron(monkeypatch, run_job, events):
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
     return cron_jobs, cron_scheduler
+
+
+def _write_fake_large_payload_cron_package(root: Path):
+    cron_dir = root / "cron"
+    cron_dir.mkdir(parents=True)
+    (cron_dir / "__init__.py").write_text("", encoding="utf-8")
+    (cron_dir / "jobs.py").write_text(
+        "from pathlib import Path\n"
+        "HERMES_DIR = Path('/tmp/hermes')\n"
+        "CRON_DIR = HERMES_DIR / 'cron'\n"
+        "JOBS_FILE = CRON_DIR / 'jobs.json'\n"
+        "OUTPUT_DIR = CRON_DIR / 'output'\n",
+        encoding="utf-8",
+    )
+    (cron_dir / "scheduler.py").write_text(
+        "from pathlib import Path\n"
+        "_hermes_home = Path('/tmp/hermes')\n"
+        "_LOCK_DIR = _hermes_home / 'cron'\n"
+        "_LOCK_FILE = _LOCK_DIR / '.tick.lock'\n"
+        "def run_job(job):\n"
+        "    payload = 'x' * 200_000\n"
+        "    return True, payload, payload, None\n",
+        encoding="utf-8",
+    )
+
+
+def _large_cron_payload_runner(fake_pkg_root, profile_home, result_queue):
+    try:
+        import api.routes as routes
+
+        # api.routes/config may prepend the real hermes-agent path while importing.
+        # Re-prepend the fake cron package afterward and clear any already-loaded
+        # cron modules so the helper's child process imports the large-payload fake.
+        sys.path.insert(0, str(fake_pkg_root))
+        for module_name in ("cron.scheduler", "cron.jobs", "cron"):
+            sys.modules.pop(module_name, None)
+
+        success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
+            {"id": "large-payload"}, Path(profile_home)
+        )
+        result_queue.put(("ok", success, len(output), len(final_response), error))
+    except BaseException as exc:  # pragma: no cover - surfaced in parent process
+        import traceback
+
+        result_queue.put(("error", repr(exc), traceback.format_exc()))
+
+
+def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
+    """A >100 KB result must not deadlock the parent before it can persist output."""
+    fake_pkg_root = tmp_path / "fake-cron-pkg"
+    _write_fake_large_payload_cron_package(fake_pkg_root)
+
+    # Use fork only for the outer test harness so this pytest module does not
+    # need to be importable as a package. The product helper under test owns its
+    # own multiprocessing context.
+    ctx = multiprocessing.get_context("fork")
+    result_queue = ctx.Queue()
+    runner = ctx.Process(
+        target=_large_cron_payload_runner,
+        args=(fake_pkg_root, tmp_path / "exec-profile", result_queue),
+    )
+    runner.start()
+    runner.join(10)
+    if runner.is_alive():
+        runner.terminate()
+        runner.join(5)
+        result_queue.close()
+        result_queue.join_thread()
+        raise AssertionError(
+            "manual cron subprocess deadlocked on a >100 KB Queue payload; "
+            "the parent must drain result_queue before process.join()"
+        )
+
+    try:
+        result = result_queue.get(timeout=2)
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+    assert result == ("ok", True, 200_000, 200_000, None)
 
 
 def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, monkeypatch):

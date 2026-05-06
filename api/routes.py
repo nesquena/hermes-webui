@@ -335,6 +335,23 @@ def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
         result_queue.put(("error", f"{type(exc).__name__}: {exc}", traceback.format_exc()))
 
 
+def _cron_subprocess_result_timeout_seconds(job):
+    """Return how long the manual-run parent waits for child result payloads."""
+    for key in ("timeout_seconds", "max_runtime_seconds", "timeout"):
+        raw = (job or {}).get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return max(60.0, value + 30.0)
+    # Manual cron jobs can legitimately run for a long time.  Keep a recovery
+    # path for wedged children without truncating normal long-running jobs.
+    return 6 * 60 * 60.0
+
+
 def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     """Execute cron.scheduler.run_job without holding the parent cron env lock.
 
@@ -354,16 +371,42 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
         args=(job, execution_profile_home, result_queue),
     )
     process.start()
-    process.join()
 
+    result_timeout = _cron_subprocess_result_timeout_seconds(job)
+    status = "error"
+    payload = ["cron run subprocess failed before producing a result", ""]
     try:
-        status, *payload = result_queue.get_nowait()
-    except queue.Empty:
-        status = "error"
-        payload = [
-            f"cron run subprocess exited with code {process.exitcode}",
-            "",
-        ]
+        try:
+            # Drain the potentially large pickled result before joining.  If the
+            # child puts >~64 KiB on a multiprocessing.Queue, joining first can
+            # deadlock while the child's feeder thread waits for the parent to
+            # read from the pipe.
+            status, *payload = result_queue.get(timeout=result_timeout)
+        except queue.Empty:
+            status = "error"
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+                payload = [
+                    f"cron run subprocess produced no result within {result_timeout:g}s and was terminated",
+                    "",
+                ]
+            else:
+                payload = [
+                    f"cron run subprocess exited with code {process.exitcode} without producing a result",
+                    "",
+                ]
+        finally:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+                if status == "ok":
+                    status = "error"
+                    payload = [
+                        "cron run subprocess did not exit after returning a result",
+                        "",
+                    ]
     finally:
         result_queue.close()
         result_queue.join_thread()
