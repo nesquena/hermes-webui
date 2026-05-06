@@ -1,0 +1,81 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pytest-timeout
+
+      - name: Run tests
+        run: pytest tests/ -v --timeout=60
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    environment: production
+
+    steps:
+      - name: Configure SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Missing VPS_HOST secret}"
+          : "${VPS_SSH_KEY:?Missing VPS_SSH_KEY secret}"
+          VPS_PORT="${VPS_PORT:-22}"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Missing VPS_HOST secret}"
+          : "${VPS_USER:?Missing VPS_USER secret}"
+          VPS_PORT="${VPS_PORT:-22}"
+          ssh -i ~/.ssh/deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" <<'REMOTE'
+            set -euo pipefail
+            cd /opt/hermes-webui
+            sudo -u hermes-admin git fetch origin
+            sudo -u hermes-admin git checkout main
+            sudo -u hermes-admin git pull --ff-only origin main
+            if [ "$(id -u)" -eq 0 ]; then
+              systemctl restart hermes-webui
+              systemctl status hermes-webui --no-pager
+            else
+              sudo systemctl restart hermes-webui
+              sudo systemctl status hermes-webui --no-pager
+            fi
+            curl -fsS http://127.0.0.1:8787/health
+          REMOTE
