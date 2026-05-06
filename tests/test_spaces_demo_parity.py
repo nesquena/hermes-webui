@@ -99,6 +99,7 @@ def test_weather_demo_smoke_records_visible_weather_observation(monkeypatch, tmp
         "blank_space": True,
         "query": "What is the weather in Prague?",
         "chat_answer_status": "recorded",
+        "answer_preview": "Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.",
         "widget_request": "show it to me in a widget",
         "widget_created": True,
         "reload_verified": True,

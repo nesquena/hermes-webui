@@ -152,7 +152,13 @@
     const answerPreview = flow.answer_preview ? String(flow.answer_preview) : '';
     const widgetRequest = flow.widget_request ? String(flow.widget_request) : '';
     const networkMode = flow.network_mode ? String(flow.network_mode) : '';
+    const chatStep = chatAnswer ? '1. Chat answer '+chatAnswer : '1. Chat answer not recorded';
+    const widgetStep = flow.widget_created ? '2. Widget created from request' : '2. Widget not created from request';
+    const reloadStep = flow.reload_verified ? '3. Persistent widget verified after reload' : '3. Persistent widget not verified after reload';
+    const checklist = '<div class="capy-spaces-card"><strong>Weather demo checklist</strong>' +
+      '<ol><li>'+escapeHtml(chatStep)+'</li><li>'+escapeHtml(widgetStep)+'</li><li>'+escapeHtml(reloadStep)+'</li></ol></div>';
     return '<div class="capy-spaces-card capy-spaces-demo-flow"><h4>Prompt → widget flow</h4>' +
+      checklist +
       '<div class="capy-spaces-muted">Blank space: '+escapeHtml(blankSpace)+' · Widget: '+escapeHtml(widgetCreated)+' · Widget after reload: '+escapeHtml(reloadVerified)+'</div>' +
       (query ? '<div class="capy-spaces-muted">Query: '+escapeHtml(query)+'</div>' : '') +
       (chatAnswer ? '<div class="capy-spaces-muted">Chat answer: '+escapeHtml(chatAnswer)+'</div>' : '') +
