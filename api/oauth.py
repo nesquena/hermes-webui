@@ -37,11 +37,9 @@ CODEX_REDIRECT_URI = f"{CODEX_ISSUER}/deviceauth/callback"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_FLOW_MAX_WAIT_SECONDS = 15 * 60
 
-_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex"}
+_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex", "anthropic", "claude", "claude-code"}
+_ANTHROPIC_PROVIDER_ALIASES = {"anthropic", "claude", "claude-code"}
 _REJECTED_ONBOARDING_OAUTH_PROVIDERS = {
-    "anthropic",
-    "claude",
-    "claude-code",
     "nous",
     "qwen-oauth",
     "gemini-cli",
@@ -52,8 +50,19 @@ _REJECTED_ONBOARDING_OAUTH_PROVIDERS = {
     "copilot-acp",
 }
 
+ANTHROPIC_CREDENTIAL_POLL_SECONDS = 5
+ANTHROPIC_FLOW_MAX_WAIT_SECONDS = 15 * 60
+ANTHROPIC_PUBLIC_LINK_ERROR = "Claude Code credential linking failed. Check server logs."
+
 _OAUTH_FLOWS: dict[str, dict[str, Any]] = {}
 _OAUTH_FLOWS_LOCK = threading.Lock()
+
+
+def _normalize_onboarding_oauth_provider(provider: str) -> str:
+    provider = str(provider or "").strip().lower()
+    if provider in _ANTHROPIC_PROVIDER_ALIASES:
+        return "anthropic"
+    return provider or "openai-codex"
 
 
 def _get_active_hermes_home() -> Path:
@@ -200,6 +209,228 @@ def _save_codex_credentials(token_data):
     return _persist_codex_credentials(_get_active_hermes_home(), token_data)
 
 
+# ── Anthropic / Claude Code credential linking ─────────────────────────────
+
+def _read_claude_code_credentials() -> dict[str, Any] | None:
+    """Read Claude Code OAuth credentials from the host without exposing them.
+
+    Delegates to the agent adapter which knows about ~/.claude/.credentials.json
+    and macOS Keychain. Returns the credential dict or None.
+    """
+    try:
+        from agent.anthropic_adapter import (
+            is_claude_code_token_valid,
+            read_claude_code_credentials,
+        )
+
+        creds = read_claude_code_credentials()
+        if creds and (
+            is_claude_code_token_valid(creds) or bool(creds.get("refreshToken"))
+        ):
+            return creds
+    except Exception as exc:
+        logger.debug("Could not read Claude Code credentials: %s", exc)
+    return None
+
+
+def _clear_anthropic_env_values(hermes_home: Path) -> None:
+    """Clear Anthropic API/setup-token env values in the active profile only."""
+    try:
+        from api.providers import _write_env_file
+
+        _write_env_file(
+            Path(hermes_home) / ".env",
+            {"ANTHROPIC_TOKEN": None, "ANTHROPIC_API_KEY": None},
+        )
+    except Exception as exc:
+        logger.warning("Failed to clear Anthropic env values: %s", exc)
+    os.environ.pop("ANTHROPIC_TOKEN", None)
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+
+
+def _link_anthropic_credentials(hermes_home: Path) -> None:
+    """Link Hermes to use Claude Code's credential store.
+
+    Clears ANTHROPIC_TOKEN and ANTHROPIC_API_KEY from the Hermes .env so
+    that resolve_anthropic_token() falls through to reading Claude Code's
+    ~/.claude/.credentials.json directly — the same thing the CLI's
+    ``use_anthropic_claude_code_credentials()`` does.
+
+    Also writes a marker entry in auth.json credential_pool so that
+    ``_provider_oauth_authenticated("anthropic", ...)`` can detect the
+    linked state without touching the actual credential files.
+    """
+    _clear_anthropic_env_values(hermes_home)
+
+    # Write a pool marker (no secrets) so onboarding status can detect linkage.
+    auth_path = Path(hermes_home) / "auth.json"
+    auth = _read_auth_json(auth_path)
+    auth.setdefault("version", 1)
+    pool = auth.setdefault("credential_pool", {})
+    if not isinstance(pool, dict):
+        pool = {}
+        auth["credential_pool"] = pool
+    entries = pool.setdefault("anthropic", [])
+    if not isinstance(entries, list):
+        entries = []
+        pool["anthropic"] = entries
+
+    now = _now_iso()
+    entry = None
+    for candidate in entries:
+        if isinstance(candidate, dict) and candidate.get("source") == "claude_code_linked":
+            entry = candidate
+            break
+    if entry is None:
+        entry = {
+            "id": "anthropic-claude-code-" + uuid.uuid4().hex[:12],
+            "label": "Claude Code (linked)",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "claude_code_linked",
+            "created_at": now,
+        }
+        entries.insert(0, entry)
+
+    entry.update({
+        "label": "Claude Code (linked)",
+        "auth_type": "oauth",
+        "priority": 0,
+        "source": "claude_code_linked",
+        "updated_at": now,
+    })
+    auth["updated_at"] = now
+    _write_auth_json(auth, auth_path)
+
+    try:
+        from api.config import invalidate_credential_pool_cache
+        invalidate_credential_pool_cache("anthropic")
+    except Exception:
+        logger.debug("Failed to invalidate anthropic credential cache", exc_info=True)
+
+
+def _anthropic_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": True,
+        "provider": "anthropic",
+        "flow_id": flow_id,
+        "status": flow.get("status", "pending"),
+        "poll_interval_seconds": flow.get("poll_interval_seconds", ANTHROPIC_CREDENTIAL_POLL_SECONDS),
+    }
+    if flow.get("status") == "pending":
+        payload["action_required"] = (
+            "Claude Code credentials were not found on this server. "
+            "Please run 'claude login' or 'claude setup-token' in a terminal "
+            "on the host, then return here — this page will detect the credentials automatically."
+        )
+    if flow.get("expires_at"):
+        payload["expires_at"] = flow["expires_at"]
+    return payload
+
+
+def _anthropic_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "ok": True,
+        "provider": "anthropic",
+        "flow_id": flow_id,
+        "status": flow.get("status", "error"),
+    }
+    if flow.get("status") == "error" and flow.get("error"):
+        payload["error"] = ANTHROPIC_PUBLIC_LINK_ERROR
+    return payload
+
+
+def _spawn_anthropic_credential_worker(flow_id: str) -> None:
+    worker = threading.Thread(
+        target=_run_anthropic_credential_worker, args=(flow_id,), daemon=True,
+    )
+    worker.start()
+
+
+def _run_anthropic_credential_worker(flow_id: str) -> None:
+    """Poll for Claude Code credential appearance until found, cancelled, or expired."""
+    while True:
+        with _OAUTH_FLOWS_LOCK:
+            flow = dict(_OAUTH_FLOWS.get(flow_id) or {})
+        if not flow:
+            return
+        if flow.get("status") != "pending":
+            return
+        if float(flow.get("expires_at") or 0) <= time.time():
+            _set_flow_status(flow_id, "expired")
+            return
+
+        time.sleep(max(1, int(flow.get("poll_interval_seconds") or ANTHROPIC_CREDENTIAL_POLL_SECONDS)))
+
+        # Re-check status under lock (cancel may have arrived during sleep)
+        with _OAUTH_FLOWS_LOCK:
+            live = _OAUTH_FLOWS.get(flow_id)
+            if not live or live.get("status") != "pending":
+                return
+
+        try:
+            creds = _read_claude_code_credentials()
+            if creds is None:
+                continue
+
+            # Re-check status under lock before linking — cancel must win
+            with _OAUTH_FLOWS_LOCK:
+                current = _OAUTH_FLOWS.get(flow_id)
+                if not current or current.get("status") != "pending":
+                    return
+
+            hermes_home = Path(flow["hermes_home"])
+            _link_anthropic_credentials(hermes_home)
+            with _OAUTH_FLOWS_LOCK:
+                current = _OAUTH_FLOWS.get(flow_id)
+                if not current or current.get("status") != "pending":
+                    cancelled = bool(current and current.get("status") == "cancelled")
+                else:
+                    current["status"] = "success"
+                    current["updated_at"] = time.time()
+                    _drop_sensitive_flow_fields(current)
+                    cancelled = False
+            if cancelled:
+                _remove_anthropic_link_marker(hermes_home)
+            return
+        except Exception as exc:
+            logger.warning("Anthropic credential polling failed: %s", exc)
+            with _OAUTH_FLOWS_LOCK:
+                current = _OAUTH_FLOWS.get(flow_id)
+                if current and current.get("status") == "pending":
+                    current["status"] = "error"
+                    current["updated_at"] = time.time()
+                    current["error"] = str(exc)
+                    _drop_sensitive_flow_fields(current)
+            return
+
+
+def _remove_anthropic_link_marker(hermes_home: Path) -> None:
+    """Remove the secret-free Claude Code linked marker after a cancelled race."""
+    auth_path = Path(hermes_home) / "auth.json"
+    auth = _read_auth_json(auth_path)
+    pool = auth.get("credential_pool")
+    if not isinstance(pool, dict):
+        return
+    entries = pool.get("anthropic")
+    if not isinstance(entries, list):
+        return
+    kept = [entry for entry in entries if not (isinstance(entry, dict) and entry.get("source") == "claude_code_linked")]
+    if len(kept) == len(entries):
+        return
+    if kept:
+        pool["anthropic"] = kept
+    else:
+        pool.pop("anthropic", None)
+    auth["updated_at"] = _now_iso()
+    _write_auth_json(auth, auth_path)
+    try:
+        from api.config import invalidate_credential_pool_cache
+        invalidate_credential_pool_cache("anthropic")
+    except Exception:
+        logger.debug("Failed to invalidate anthropic credential cache", exc_info=True)
+
+
 # ── Codex protocol ──────────────────────────────────────────────────────────
 
 def _json_request(url: str, payload: dict[str, Any], *, form: bool = False) -> dict[str, Any]:
@@ -249,7 +480,7 @@ def _exchange_codex_authorization(authorization_code: str, code_verifier: str) -
     )
 
 
-def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+def _codex_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "provider": "openai-codex",
@@ -262,7 +493,7 @@ def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+def _codex_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "ok": True,
         "provider": "openai-codex",
@@ -272,6 +503,20 @@ def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]
     if flow.get("status") == "error" and flow.get("error"):
         payload["error"] = str(flow.get("error"))[:200]
     return payload
+
+
+def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    provider = flow.get("provider", "openai-codex")
+    if provider == "anthropic":
+        return _anthropic_public_start_payload(flow_id, flow)
+    return _codex_public_start_payload(flow_id, flow)
+
+
+def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    provider = flow.get("provider", "openai-codex")
+    if provider == "anthropic":
+        return _anthropic_public_status_payload(flow_id, flow)
+    return _codex_public_status_payload(flow_id, flow)
 
 
 def _drop_sensitive_flow_fields(flow: dict[str, Any]) -> None:
@@ -363,19 +608,63 @@ def _run_codex_oauth_worker(flow_id: str) -> None:
             return
 
 
+def _start_anthropic_flow(hermes_home: Path) -> dict[str, Any]:
+    """Start or immediately complete the Anthropic credential-linking flow."""
+    creds = _read_claude_code_credentials()
+    flow_id = uuid.uuid4().hex
+
+    if creds:
+        # Credentials already exist — link and return success immediately.
+        _link_anthropic_credentials(hermes_home)
+        flow = {
+            "provider": "anthropic",
+            "status": "success",
+            "hermes_home": str(hermes_home),
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        with _OAUTH_FLOWS_LOCK:
+            _OAUTH_FLOWS[flow_id] = flow
+        return _public_start_payload(flow_id, flow)
+
+    # No credentials found — create a pending flow that polls for them.
+    expires_at = time.time() + ANTHROPIC_FLOW_MAX_WAIT_SECONDS
+    flow = {
+        "provider": "anthropic",
+        "status": "pending",
+        "expires_at": expires_at,
+        "poll_interval_seconds": ANTHROPIC_CREDENTIAL_POLL_SECONDS,
+        "hermes_home": str(hermes_home),
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with _OAUTH_FLOWS_LOCK:
+        _OAUTH_FLOWS[flow_id] = flow
+    _spawn_anthropic_credential_worker(flow_id)
+    return _public_start_payload(flow_id, flow)
+
+
 def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
     """Start the supported onboarding OAuth flow.
 
-    Currently v1 intentionally supports only OpenAI Codex. Other providers are
-    rejected instead of silently falling back to terminal-first setup.
+    Supports OpenAI Codex (device-code flow) and Anthropic/Claude Code
+    (credential-linking flow). Other providers are rejected.
     """
     _cleanup_oauth_flows()
     provider = str((body or {}).get("provider") or "").strip().lower()
     if provider not in _ALLOWED_ONBOARDING_OAUTH_PROVIDERS:
         if provider in _REJECTED_ONBOARDING_OAUTH_PROVIDERS or provider:
-            raise ValueError("Only OpenAI Codex OAuth is supported in WebUI onboarding right now")
+            raise ValueError(
+                "Only OpenAI Codex and Anthropic/Claude OAuth are supported "
+                "in WebUI onboarding right now"
+            )
         raise ValueError("provider is required")
 
+    # Normalize Claude aliases to canonical "anthropic"
+    if provider in _ANTHROPIC_PROVIDER_ALIASES:
+        return _start_anthropic_flow(_get_active_hermes_home())
+
+    # Codex flow
     hermes_home = _get_active_hermes_home()
     try:
         device = _request_codex_user_code()
@@ -428,15 +717,19 @@ def cancel_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
     fid = str((body or {}).get("flow_id") or "").strip()
     if not fid:
         raise ValueError("flow_id is required")
+    requested_provider = _normalize_onboarding_oauth_provider(str((body or {}).get("provider") or ""))
+    if requested_provider not in {"openai-codex", "anthropic"}:
+        requested_provider = "openai-codex"
     with _OAUTH_FLOWS_LOCK:
         flow = _OAUTH_FLOWS.get(fid)
         if not flow:
-            return {"ok": True, "provider": "openai-codex", "flow_id": fid, "status": "cancelled"}
+            return {"ok": True, "provider": requested_provider, "flow_id": fid, "status": "cancelled"}
         if flow.get("status") == "pending":
             flow["status"] = "cancelled"
             flow["updated_at"] = time.time()
             _drop_sensitive_flow_fields(flow)
-        return _public_status_payload(fid, dict(flow))
+        result = _public_status_payload(fid, dict(flow))
+    return result
 
 
 # Backward-compatible names from the abandoned spike. They intentionally do not
