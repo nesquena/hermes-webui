@@ -1,5 +1,19 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.10] — 2026-05-06
+
+### Fixed
+
+- **PR #1757** by @skspade — Fix gateway status card showing "not running"
+  when no platforms connected. The gateway status endpoint used
+  `bool(identity_map)` as the running signal, which reported False when
+  the gateway was alive but had zero active platform sessions. Now uses
+  `agent_health.build_agent_health_payload()` as the authoritative signal,
+  with a tri-state `alive` field (True/False/None) that distinguishes
+  running, stopped, and not-configured. Frontend gains an amber "Gateway
+  not configured" state separate from the red "not running" state. 10 new
+  regression tests.
+
 ## [v0.51.9] — 2026-05-06 — 2-PR full-sweep batch
 
 ### Fixed
