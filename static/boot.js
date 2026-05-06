@@ -410,6 +410,20 @@ $('btnNewChat').onclick=async()=>{
   if(S.session&&(S.session.message_count||0)===0){$('msg').focus();closeMobileSidebar();return;}
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
+// Mirror of btnNewChat for the dashboard chat embed: panelDashboard hosts its
+// own chat shell, so users on the default Neo dashboard never see the panelChat
+// header and previously had no way to start a fresh conversation without
+// jumping to the Chat panel first. Same idempotency guard as the original.
+const _btnDashNewChat = $('btnDashboardNewChat');
+if(_btnDashNewChat){
+  _btnDashNewChat.onclick = async () => {
+    // Compact form matches the upstream guard style at btnNewChat above; the
+    // spaced form is intentionally reserved for the ephemeral-session boot
+    // guard further down (#1182/#1187 — see test_workspace_panel_persists_on_empty_boot).
+    if(S.session&&(S.session.message_count||0)===0){$('msg').focus();return;}
+    await newSession(); await renderSessionList(); $('msg').focus();
+  };
+}
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
   const blob=new Blob([transcript()],{type:'text/markdown'});

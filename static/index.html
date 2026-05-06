@@ -287,7 +287,13 @@
               <section class="dashboard-chat-panel" id="dashboardChatPanel" aria-labelledby="dashboardChatTitle">
                 <div class="dashboard-chat-header">
                   <div class="dashboard-chat-title" id="dashboardChatTitle" data-i18n="dashboard_chat_title">Chat com Neo</div>
-                  <div class="dashboard-chat-online"><span aria-hidden="true"></span><span data-i18n="dashboard_chat_online">Online</span></div>
+                  <div class="dashboard-chat-header-actions">
+                    <button class="dashboard-chat-new-btn" id="btnDashboardNewChat" type="button" title="Nova conversa" data-i18n-title="new_conversation" aria-label="Nova conversa">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                      <span class="dashboard-chat-new-btn-label" data-i18n="new_conversation">Nova conversa</span>
+                    </button>
+                    <div class="dashboard-chat-online"><span aria-hidden="true"></span><span data-i18n="dashboard_chat_online">Online</span></div>
+                  </div>
                 </div>
                 <div class="dashboard-chat-body" id="dashboardChatMessagesSlot"></div>
                 <div class="dashboard-chat-composer" id="dashboardChatComposerSlot"></div>
