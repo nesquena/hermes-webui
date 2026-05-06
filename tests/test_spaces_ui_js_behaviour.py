@@ -307,6 +307,20 @@ global.fetch = async function(path, opts = {}) {
       { event_id: 'evt-kanban-card', event_name: 'kanban.card.move', widget_id: 'kanban-doing', status: 'queued', created_at: 1710000300, payload_summary: { action: 'move-card', card: 'token placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
+  if (path === 'api/spaces/widgets?space_id=demo-research-harness-pdf-export') {
+    return response({ widgets: [
+      { id: 'research-query', kind: 'prompt', title: 'Research query', layout: { x: 0, y: 0, w: 8, h: 4, minimized: false }, metadata: { prompt: { suggested_event: 'agent.prompt', placeholder: 'Ask Capy to research a topic', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'research-plan', kind: 'status', title: 'Research plan', layout: { x: 8, y: 0, w: 8, h: 4, minimized: false }, metadata: { research: { status: 'planned', phase: 'plan', source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
+      { id: 'research-sources', kind: 'table', title: 'Sources', layout: { x: 16, y: 0, w: 8, h: 4, minimized: false }, metadata: { research: { status: 'sources-ready', network: 'agent-mediated', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'research-notes', kind: 'markdown', title: 'Notes', layout: { x: 0, y: 4, w: 12, h: 6, minimized: false }, metadata: { research: { status: 'notes-ready', renderer: '<script>bad()</script>' } } },
+      { id: 'research-summary', kind: 'markdown', title: 'Summary report', layout: { x: 12, y: 4, w: 12, h: 6, minimized: false }, metadata: { export: { pdf: 'queued', event: 'widget.export.pdf', token: 'SECRET_VALUE_DO_NOT_LEAK' }, research: { status: 'summary-ready' } }, renderer: '<script>bad()</script>' },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-research-harness-pdf-export') {
+    return response({ events: [
+      { event_id: 'evt-research-pdf', event_name: 'widget.export.pdf', widget_id: 'research-summary', status: 'queued', created_at: 1710000400, payload_summary: { action: 'export-pdf', note: 'bearer placeholder' }, prompt_preview: 'Export research markdown without leaking SECRET values', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
   if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget') {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const widgetId = isDemoWeather ? 'weather-current' : 'weather';
@@ -822,6 +836,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runKanbanWalkthrough', {});
+  } else if (scenario === 'runResearchWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runResearchWalkthrough', {});
   } else if (scenario === 'runResearchDemoParitySmoke') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1888,6 +1906,32 @@ def test_spaces_ui_kanban_walkthrough_is_visible_and_opens_widget_manager_metada
     assert "Queued widget events" in out["rootHtml"]
     assert "kanban.card.move" in out["rootHtml"]
     assert "card: [REDACTED]" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_research_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runResearchWalkthrough")
+
+    assert "Run research walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_research_harness_pdf_export"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-research-harness-pdf-export", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-research-harness-pdf-export", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Research Harness" in out["rootHtml"]
+    assert "Action: pdf-export-requested" in out["rootHtml"]
+    assert "Rollback verified: yes" in out["rootHtml"]
+    assert "Widgets for demo-research-harness-pdf-export" in out["rootHtml"]
+    assert "research-query" in out["rootHtml"]
+    assert "research-summary" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "widget.export.pdf" in out["rootHtml"]
+    assert "note: [REDACTED]" in out["rootHtml"]
+    assert "prompt: [REDACTED]" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
