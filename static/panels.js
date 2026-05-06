@@ -5407,6 +5407,10 @@ function loadGatewayStatus(){
   if(!card) return;
   api('/api/gateway/status').then(r=>{
     if(!r) return;
+    if(!r.configured){
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>Gateway not configured</div>`;
+      return;
+    }
     if(!r.running){
       card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
       return;

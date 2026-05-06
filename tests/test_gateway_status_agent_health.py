@@ -82,34 +82,39 @@ def _call_gateway_status(monkeypatch, agent_health_alive, identity_map=None):
 # ── Acceptance criteria tests ─────────────────────────────────────────────────
 
 def test_gateway_status_running_true_when_agent_health_alive_and_no_sessions(monkeypatch):
-    """AC1: alive=true + empty identity_map → running=true, platforms=[]"""
+    """AC1: alive=true + empty identity_map → running=true, configured=true, platforms=[]"""
     result = _call_gateway_status(monkeypatch, agent_health_alive=True, identity_map={})
     assert result["running"] is True
+    assert result["configured"] is True
     assert result["platforms"] == []
 
 
 def test_gateway_status_running_false_when_agent_health_alive_false_and_no_sessions(monkeypatch):
-    """AC2: alive=false + empty identity_map → running=false, platforms=[]"""
+    """AC2: alive=false + empty identity_map → running=false, configured=true, platforms=[]"""
     result = _call_gateway_status(monkeypatch, agent_health_alive=False, identity_map={})
     assert result["running"] is False
+    assert result["configured"] is True
     assert result["platforms"] == []
 
 
 def test_gateway_status_running_false_when_agent_health_alive_none_and_no_sessions(monkeypatch):
-    """AC2 (extended): alive=None + empty identity_map → running=false, platforms=[]"""
+    """When alive=None (not configured): fall back to identity_map heuristic,
+    and set configured=false so frontend can show 'not configured' state."""
     result = _call_gateway_status(monkeypatch, agent_health_alive=None, identity_map={})
     assert result["running"] is False
+    assert result["configured"] is False
     assert result["platforms"] == []
 
 
 def test_gateway_status_running_true_and_platforms_when_agent_health_alive_and_sessions(monkeypatch):
-    """AC3: alive=true + sessions with platforms → running=true, platforms populated"""
+    """AC3: alive=true + sessions with platforms → running=true, configured=true, platforms populated"""
     identity_map = {
         "sess_a": {"raw_source": "telegram", "platform": "telegram"},
         "sess_b": {"raw_source": "discord", "platform": "discord"},
     }
     result = _call_gateway_status(monkeypatch, agent_health_alive=True, identity_map=identity_map)
     assert result["running"] is True
+    assert result["configured"] is True
     assert len(result["platforms"]) == 2
     names = {p["name"] for p in result["platforms"]}
     assert names == {"telegram", "discord"}
@@ -117,14 +122,15 @@ def test_gateway_status_running_true_and_platforms_when_agent_health_alive_and_s
 
 # ── Edge case tests ───────────────────────────────────────────────────────────
 
-def test_gateway_status_handles_agent_health_unavailable_fallback_to_sessions(monkeypatch):
-    """Edge: agent_health raises → fall back to session-only detection (current behavior)."""
+def test_gateway_status_alive_none_falls_back_to_identity_map_heuristic(monkeypatch):
+    """When alive=None (not configured) but sessions exist, running reflects identity_map.
+    configured=false tells the frontend to show 'not configured' state."""
     from api import routes
 
     monkeypatch.setattr(
         routes,
         "build_agent_health_payload",
-        lambda: (_ for _ in ()).throw(RuntimeError("gateway module busted")),
+        lambda: {"alive": None, "checked_at": "2026-05-06T12:00:00+00:00", "details": {}},
     )
     monkeypatch.setattr(
         routes,
@@ -136,8 +142,10 @@ def test_gateway_status_handles_agent_health_unavailable_fallback_to_sessions(mo
     parsed = urlparse("http://example.com/api/gateway/status")
     routes.handle_get(handler, parsed)
     result = handler.get_json()
-    # With sessions present, fallback should report running=true
+    # Fallback to identity_map: sessions exist → running=true
     assert result["running"] is True
+    # But configured=false because alive was None (no gateway metadata)
+    assert result["configured"] is False
 
 
 def test_gateway_status_handles_corrupted_sessions_json(monkeypatch):
@@ -211,13 +219,29 @@ def test_gateway_status_running_false_when_agent_health_down_even_with_sessions(
     result = handler.get_json()
     # Running should be false even though sessions exist — agent_health is authoritative
     assert result["running"] is False
+    # But configured=true because alive=False means gateway metadata exists
+    assert result["configured"] is True
     # But platforms should still be extracted from sessions
     assert len(result["platforms"]) == 1
     assert result["platforms"][0]["name"] == "telegram"
 
 
 def test_gateway_status_missing_r_field_handled_by_frontend(monkeypatch):
-    """Edge: response still has running field; frontend handles missing field via catch block.
-    This test verifies the backend always includes the 'running' field in responses."""
+    """Edge: response always has 'running' and 'configured' fields.
+    Frontend handles missing field via catch block. This test verifies the backend
+    always includes both fields in responses."""
     result = _call_gateway_status(monkeypatch, agent_health_alive=True, identity_map={})
     assert "running" in result
+    assert "configured" in result
+
+
+def test_gateway_status_last_active_empty_when_alive_and_no_sessions_path(monkeypatch):
+    """Bonus: alive=true + identity_map={} → last_active is empty string.
+    This guards the 'if running and sessions_path.exists()' guard from being
+    silently removed in a future refactor that might expose a stale timestamp."""
+    result = _call_gateway_status(monkeypatch, agent_health_alive=True, identity_map={})
+    assert result["running"] is True
+    assert result["configured"] is True
+    # In test context, sessions_path won't exist (no real filesystem),
+    # so last_active must be empty.
+    assert result["last_active"] == ""

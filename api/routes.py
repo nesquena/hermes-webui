@@ -3193,19 +3193,23 @@ def handle_get(handler, parsed) -> bool:
         # tri-state `alive` field (True/False/None).  This avoids the
         # false-negative where the gateway is running but has zero active
         # messaging sessions (empty identity_map).
-        running = False
-        try:
-            health = build_agent_health_payload()
-            running = health.get("alive") is True
-        except Exception:
-            # Fall back to identity_map heuristic when the agent_health
-            # module is not available (e.g. WebUI-only deployments).
-            import logging
-            logging.getLogger("routes").warning(
-                "agent_health.build_agent_health_payload() raised; "
-                "falling back to identity_map heuristic for gateway status"
-            )
+        #
+        # `alive` tri-state semantics:
+        #   True  → gateway process is alive
+        #   False → gateway metadata exists but process is down
+        #   None  → no gateway metadata/status available; this WebUI
+        #           setup is probably not configured with a gateway
+        health = build_agent_health_payload()
+        alive = health.get("alive")
+        if alive is True:
+            running = True
+            configured = True
+        elif alive is False:
+            running = False
+            configured = True
+        else:  # alive is None → gateway not configured / unavailable
             running = bool(identity_map)
+            configured = False
 
         platforms_set: set[str] = set()
         for meta in identity_map.values():
@@ -3233,6 +3237,7 @@ def handle_get(handler, parsed) -> bool:
                 pass
         return j(handler, {
             "running": running,
+            "configured": configured,
             "platforms": platforms,
             "last_active": last_active,
             "session_count": len(identity_map),
