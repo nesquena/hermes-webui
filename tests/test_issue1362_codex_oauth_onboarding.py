@@ -529,6 +529,9 @@ def test_frontend_has_anthropic_oauth_support():
     assert "cancelAnthropicOAuth" in js
     assert "anthropicOAuthBtn" in js
     assert "Login with Claude Code" in js
+    assert "Anthropic API key" in js
+    assert "Claude Code subscription" in js
+    assert "not the same as an Anthropic API key" in js
     assert "/api/onboarding/oauth/start" in js
     assert "/api/onboarding/oauth/poll" in js
     assert "/api/onboarding/oauth/cancel" in js

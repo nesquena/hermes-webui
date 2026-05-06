@@ -219,7 +219,7 @@ function _renderOnboardingProviderOAuthField(provider){
     <div class="onboarding-oauth-icon">🔑</div>
     <div style="flex:1">
       <strong>Use Claude Code OAuth instead</strong>
-      <p style="margin-top:6px;color:var(--muted);font-size:13px">Link this WebUI to Claude Code credentials already available on the server, or start a short polling flow while you complete <code>claude setup-token</code> on the host.</p>
+      <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code subscription credentials are not the same as an Anthropic API key.</strong> Use this path only when you want Hermes to use Claude Code credentials already available on the server, or start a short polling flow while you complete <code>claude setup-token</code> on the host.</p>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button">Login with Claude Code</button></div>
       <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
     </div>
@@ -270,7 +270,11 @@ function _renderOnboardingBody(){
     const groupedOptions=_renderProviderSelectOptions(selectedId);
     const provider=_getOnboardingSetupProvider(selectedId)||_getOnboardingSetupProviders()[0]||null;
     const showBaseUrl=provider&&provider.requires_base_url;
-    const keyHelp=provider?`${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`:'';
+    const keyHelp=provider
+      ? (provider.id==='anthropic'
+        ? 'Anthropic API key path: paste an Anthropic Console API key here. This is separate from a Claude Code subscription; use the Claude Code OAuth card if you want subscription credentials instead.'
+        : `${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`)
+      : '';
 
     // OAuth provider path: configured via CLI, no API key input needed.
     const currentIsOauth=!!(ONBOARDING.status.setup||{}).current_is_oauth;
