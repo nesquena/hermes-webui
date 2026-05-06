@@ -233,6 +233,43 @@ async function send(){
       }
     }
 
+    // Stale-session recovery: a 404 on /api/chat/start means the session id we
+    // had cached in localStorage no longer exists in SESSION_DIR (most often
+    // because the state dir was wiped or rotated by a deploy, or because the
+    // session was never persisted — see new_session() in api/models.py which
+    // only writes to disk on the first turn). Drop the orphan id, mint a fresh
+    // session and replay the user's text once. Avoids the dead-end where the
+    // chat is permanently stuck on "Erro: Session not found" until the user
+    // manually clears localStorage.
+    const sessionMissing = (e && e.status === 404) || /session not found/i.test(errMsg);
+    if(sessionMissing){
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      stopApprovalPolling();
+      stopClarifyPolling();
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      removeThinking();
+      // Pop the user message we optimistically added — newSession() will reset
+      // S.messages, but be defensive in case the new-session call throws.
+      if(S.messages.length && S.messages[S.messages.length-1]===userMsg) S.messages.pop();
+      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){}
+      try{
+        await newSession();
+        if(typeof renderSessionList==='function') renderSessionList();
+        showToast(t('chat_session_reconnected_queued')||'Sessão expirada — nova sessão criada.',2600);
+        // Restore the draft so the user only has to press Enter again. Avoids
+        // an automatic resend, which could surprise the user if the failure
+        // was caused by a momentary backend issue rather than a stale id.
+        const _msgInput = $('msg');
+        if(_msgInput && !_msgInput.value){ _msgInput.value = msgText; if(typeof autoResize==='function') autoResize(); }
+        setBusy(false); setComposerStatus('');
+        return;
+      }catch(_){
+        // Fall through to the generic error display if recovery itself fails.
+      }
+    }
+
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
     stopClarifyPolling();
@@ -1348,10 +1385,12 @@ function startApprovalPolling(sid) {
       _startApprovalFallbackPoll(sid);
     };
 
-    // If the session changes or stops being busy, close the SSE.
-    // We detect this via a periodic check (cheap — no network request).
+    // Close the SSE only when the active session changes. Approvals can arrive
+    // for an idle session (e.g. gateway tool calls from Telegram/WhatsApp), so
+    // we must not gate on S.busy — that previously hid the modal whenever the
+    // chat wasn't actively streaming.
     _approvalSSEHealthTimer = setInterval(() => {
-      if (!S.busy || !S.session || S.session.session_id !== sid) {
+      if (!S.session || S.session.session_id !== sid) {
         stopApprovalPolling(); hideApprovalCard(true);
       }
     }, 5000);
@@ -1368,7 +1407,7 @@ let _approvalSSEHealthTimer = null;
 
 function _startApprovalFallbackPoll(sid) {
   _approvalPollTimer = setInterval(async () => {
-    if (!S.busy || !S.session || S.session.session_id !== sid) {
+    if (!S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); hideApprovalCard(true); return;
     }
     try {

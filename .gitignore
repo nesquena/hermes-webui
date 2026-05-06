@@ -12,6 +12,11 @@ __pycache__/
 *.egg-info/
 *.eggs/
 dist/
+# Self-hosted vendor assets ship a ./dist subtree (katex@x.y.z/dist/...).
+# Re-include it so the WebUI can serve katex.min.css and its fonts directly,
+# avoiding the cdn.jsdelivr.net dependency on first paint.
+!static/vendor/**/dist/
+!static/vendor/**/dist/**
 build/
 .pytest_cache/
 .coverage

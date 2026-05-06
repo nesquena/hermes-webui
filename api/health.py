@@ -2,13 +2,86 @@
 
 import os
 import shutil
+import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from api.updates import WEBUI_VERSION
 
 _CPU_SAMPLE: tuple[int, int] | None = None
 _NET_SAMPLE: tuple[float, int] | None = None
+
+# ── Stream duration tracking ─────────────────────────────────────────────────
+# Records the wall-clock duration (ms) of recently-completed long-lived
+# requests so /health can expose p50/p95 without importing prometheus or
+# wiring an external collector. Bounded ring buffer per path; lock-free reads
+# would be racy, so callers grab `_STREAM_LOCK` for both record and snapshot.
+#
+# This is intentionally tiny: under sustained load the deque caps memory at
+# 256 floats per tracked path, which is enough for a 5-15 minute view of
+# typical chat traffic on the Neo VPS.
+_STREAM_LOCK = threading.Lock()
+_STREAM_SAMPLES: dict[str, deque[float]] = {}
+_STREAM_MAX_SAMPLES = 256
+_TRACKED_STREAM_PATHS = (
+    "/api/chat/stream",
+    "/api/approval/stream",
+    "/api/clarify/stream",
+    "/api/cmd/stream",
+)
+
+
+def is_tracked_stream_path(path: str) -> bool:
+    """True if `path` should be sampled for the /health latency report.
+
+    Called from server.py's per-request access logger. Kept fast — no
+    string parsing, no regex.
+    """
+    return path in _TRACKED_STREAM_PATHS
+
+
+def record_stream_duration(path: str, duration_ms: float) -> None:
+    """Append a duration sample for one of the tracked SSE endpoints.
+
+    Silently discards samples for unknown paths so callers can pass any
+    request path without checking first.
+    """
+    if path not in _TRACKED_STREAM_PATHS:
+        return
+    with _STREAM_LOCK:
+        bucket = _STREAM_SAMPLES.get(path)
+        if bucket is None:
+            bucket = deque(maxlen=_STREAM_MAX_SAMPLES)
+            _STREAM_SAMPLES[path] = bucket
+        bucket.append(float(duration_ms))
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    values = sorted(values)
+    k = max(0, min(len(values) - 1, int(round((pct / 100.0) * (len(values) - 1)))))
+    return values[k]
+
+
+def stream_latency_snapshot() -> dict[str, dict[str, float | int]]:
+    """Return a snapshot of {path: {count, p50_ms, p95_ms}} for /health.
+
+    Empty buckets are reported as `{count: 0, p50_ms: 0, p95_ms: 0}` so the
+    shape is stable for the dashboard consumer.
+    """
+    with _STREAM_LOCK:
+        snapshot = {p: list(b) for p, b in _STREAM_SAMPLES.items()}
+    out: dict[str, dict[str, float | int]] = {}
+    for path in _TRACKED_STREAM_PATHS:
+        samples = snapshot.get(path, [])
+        out[path] = {
+            "count": len(samples),
+            "p50_ms": round(_percentile(samples, 50), 1),
+            "p95_ms": round(_percentile(samples, 95), 1),
+        }
+    return out
 
 
 def _uptime_seconds() -> int:
