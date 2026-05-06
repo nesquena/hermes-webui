@@ -94,6 +94,7 @@ global.fetch = async function(path, opts = {}) {
         { demo: 'demo_kanban_board', template: 'kanban', title: 'Kanban board', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
+        { demo: 'demo_safe_admin_recovery', template: 'weather', title: 'Admin recovery', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
       ],
     });
   }
@@ -108,6 +109,7 @@ global.fetch = async function(path, opts = {}) {
     const isCamera = demo === 'demo_camera_dashboard';
     const isService = demo === 'demo_local_agent_control_dashboard';
     const isTimeTravel = demo === 'demo_time_travel_restore';
+    const isRecovery = demo === 'demo_safe_admin_recovery';
     const kanbanColumns = [
       { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', metadata: { kanban: { status: 'board-ready', column: 'Backlog', color: 'blue', cards: [{ id: 'card-plan', title: 'Plan the first task', status: 'todo' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' }, renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
       { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'amber', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
@@ -160,16 +162,21 @@ global.fetch = async function(path, opts = {}) {
         rollback_point: true,
       });
     }
+    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run'))))))));
+    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather'))))));
+    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget'))))))));
+    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke'))))))));
+    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))));
     return response({
       ok: true,
-      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isTimeTravel ? 'restored' : 'space.demo.run'))))))),
+      action: demoAction,
       demo: demo,
-      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather')))))),
+      template: demoTemplate,
       mode: 'metadata-only-smoke',
       space: {
-        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isTimeTravel ? 'demo-time-travel-restore' : 'demo-weather-widget'))))))),
-        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : 'Weather Demo Smoke'))))))),
-        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
+        space_id: demoSpaceId,
+        name: demoSpaceName,
+        widget_count: demoWidgetCount,
         revision_event_id: 'rev-demo',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
@@ -322,15 +329,17 @@ global.fetch = async function(path, opts = {}) {
       { id: 'kanban-notes', kind: 'markdown', title: 'Board notes', layout: { x: 0, y: 8, w: 24, h: 4, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Demo board state persisted as safe widget metadata.' } } },
     ] });
   }
-  if (path === 'api/spaces/widgets?space_id=lab' || path === 'api/spaces/widgets?space_id=demo-weather-widget' || path === 'api/spaces/widgets?space_id=demo-time-travel-restore') {
+  if (path === 'api/spaces/widgets?space_id=lab' || path === 'api/spaces/widgets?space_id=demo-weather-widget' || path === 'api/spaces/widgets?space_id=demo-time-travel-restore' || path === 'api/spaces/widgets?space_id=demo-safe-admin-recovery') {
     const minimized = scenario === 'restoreWidget';
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const isTimeTravelRestore = path.indexOf('demo-time-travel-restore') !== -1;
+    const isRecovery = path.indexOf('demo-safe-admin-recovery') !== -1;
     return response({ widgets: [{
-      id: (isDemoWeather || isTimeTravelRestore) ? 'weather-current' : 'weather',
+      id: (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather',
       kind: 'weather',
-      title: (isDemoWeather || isTimeTravelRestore) ? 'Weather in Prague' : '<Weather>',
+      title: (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'Weather in Prague' : '<Weather>',
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized },
+      recovery: isRecovery ? { disabled: true, disabled_reason: 'demo smoke recovery' } : undefined,
       metadata: {
         weather: {
           location: 'Prague',
@@ -435,10 +444,11 @@ global.fetch = async function(path, opts = {}) {
       { event_id: 'evt-research-pdf', event_name: 'widget.export.pdf', widget_id: 'research-summary', status: 'queued', created_at: 1710000400, payload_summary: { action: 'export-pdf', note: 'bearer placeholder' }, prompt_preview: 'Export research markdown without leaking SECRET values', renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget' || path === 'api/spaces/widget/events?space_id=demo-time-travel-restore') {
+  if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget' || path === 'api/spaces/widget/events?space_id=demo-time-travel-restore' || path === 'api/spaces/widget/events?space_id=demo-safe-admin-recovery') {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const isTimeTravelRestore = path.indexOf('demo-time-travel-restore') !== -1;
-    const widgetId = (isDemoWeather || isTimeTravelRestore) ? 'weather-current' : 'weather';
+    const isRecovery = path.indexOf('demo-safe-admin-recovery') !== -1;
+    const widgetId = (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather';
     return response({ events: [
       { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
       { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
@@ -971,6 +981,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runTimeTravelWalkthrough', {});
+  } else if (scenario === 'runAdminRecoveryWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runAdminRecoveryWalkthrough', {});
   } else if (scenario === 'runBrowserWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2178,6 +2192,29 @@ def test_spaces_ui_time_travel_walkthrough_is_visible_and_opens_widget_manager_m
     assert "Rollback point: yes" in out["rootHtml"]
     assert "Widgets for demo-time-travel-restore" in out["rootHtml"]
     assert "weather-current" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_admin_recovery_walkthrough_is_visible_and_opens_recovery_widget_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runAdminRecoveryWalkthrough")
+
+    assert "Run admin recovery walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_safe_admin_recovery"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-safe-admin-recovery", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-safe-admin-recovery", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "demo_safe_admin_recovery" in out["rootHtml"]
+    assert "Admin Recovery Smoke" in out["rootHtml"]
+    assert "Action: recovery-disabled" in out["rootHtml"]
+    assert "Widgets for demo-safe-admin-recovery" in out["rootHtml"]
+    assert "weather-current" in out["rootHtml"]
+    assert "Recovery: disabled" in out["rootHtml"]
+    assert "demo smoke recovery" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
