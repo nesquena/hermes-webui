@@ -198,7 +198,7 @@
     const notesArtifact = data && data.notes_artifact && typeof data.notes_artifact === 'object' && !Array.isArray(data.notes_artifact)
       ? data.notes_artifact
       : {};
-    const notesPreview = renderNotesSmokePreview(notesArtifact);
+    const notesPreview = renderNotesSmokePreview(notesArtifact, data && data.notes_flow);
     const kanbanBoard = data && data.kanban_board && typeof data.kanban_board === 'object' && !Array.isArray(data.kanban_board)
       ? data.kanban_board
       : {};
@@ -710,7 +710,19 @@
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
   }
 
-  function renderNotesSmokePreview(notesArtifact){
+  function renderNotesFlowChecklist(flow){
+    const safeFlow = flow && typeof flow === 'object' && !Array.isArray(flow) ? flow : {};
+    if (!Object.keys(safeFlow).length) return '';
+    const folderStep = safeFlow.folders_ready ? '1. Folder list ready' : '1. Folder list pending';
+    const editorStep = safeFlow.editor_saved ? '2. Editor draft saved' : '2. Editor draft pending';
+    const previewStep = safeFlow.markdown_preview_saved ? '3. Markdown preview saved' : '3. Markdown preview pending';
+    const attachmentsStep = safeFlow.attachments_agent_mediated ? '4. Attachments remain agent-mediated' : '4. Attachments pending';
+    return '<div class="capy-spaces-card"><strong>Notes app checklist</strong>' +
+      '<ol><li>'+escapeHtml(folderStep)+'</li><li>'+escapeHtml(editorStep)+'</li><li>'+escapeHtml(previewStep)+'</li><li>'+escapeHtml(attachmentsStep)+'</li></ol>' +
+      '<div class="capy-spaces-muted">Space Agent notes-app path remains metadata-only until richer editors and files are explicitly sandboxed.</div></div>';
+  }
+
+  function renderNotesSmokePreview(notesArtifact, flow){
     const artifact = notesArtifact && typeof notesArtifact === 'object' && !Array.isArray(notesArtifact) ? notesArtifact : {};
     const editor = artifact.editor && typeof artifact.editor === 'object' && !Array.isArray(artifact.editor) ? artifact.editor : {};
     const preview = artifact.preview && typeof artifact.preview === 'object' && !Array.isArray(artifact.preview) ? artifact.preview : {};
@@ -729,6 +741,7 @@
     if (previewBody) rows.push('<div class="capy-spaces-muted">Preview: '+escapeHtml(previewBody)+'</div>');
     if (!rows.length) return '';
     return '<div class="capy-spaces-card capy-spaces-notes-smoke"><h4>Saved notes preview</h4>' +
+      renderNotesFlowChecklist(flow) +
       '<div class="capy-spaces-muted">Visible metadata-only notes demo state. Rich editing and attachments remain agent-mediated.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
   }

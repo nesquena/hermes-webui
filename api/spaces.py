@@ -1519,7 +1519,13 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "notes_artifact": {
                 "editor": read_widget_detail(space_id, "notes-editor"),
                 "preview": read_widget_detail(space_id, "notes-preview"),
-            }
+            },
+            "notes_flow": {
+                "folders_ready": True,
+                "editor_saved": True,
+                "markdown_preview_saved": True,
+                "attachments_agent_mediated": True,
+            },
         }
     elif demo == "demo_kanban_board":
         board_columns = [

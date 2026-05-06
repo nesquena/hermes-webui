@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo smoke result now shows a visible metadata-only checklist for the Space Agent-style prompt-to-widget flow: chat answer recorded, widget created from the user's follow-up request, and persistence verified after reload. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Notes app demo smoke result now shows a visible metadata-only checklist for the Space Agent-style notes-app flow: folder list ready, editor draft saved, markdown preview saved, and attachments kept agent-mediated. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show notes demo checklist`
+  - Added RED/GREEN backend and real-`static/spaces.js` coverage proving the Notes app demo smoke carries a safe `notes_flow` summary and renders a visible `Notes app checklist` with folders/editor/markdown/attachment checkpoints while omitting hostile renderer/script/API-auth markers from DOM.
 
 - `feat(spaces): show weather demo checklist`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the weather demo smoke result renders a safe `Weather demo checklist` with chat-answer, widget-created, and reload-persistence checkpoints while preserving answer preview/weather metadata and omitting hostile renderer/script/API-auth markers from DOM.

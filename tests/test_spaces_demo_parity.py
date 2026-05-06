@@ -128,6 +128,12 @@ def test_notes_demo_smoke_saves_editable_note_preview_metadata_only(monkeypatch,
     assert result["action"] == "notes-draft-saved"
     assert result["notes_artifact"]["editor"]["metadata"]["notes"]["status"] == "draft-saved"
     assert result["notes_artifact"]["preview"]["metadata"]["notes"]["format"] == "markdown"
+    assert result["notes_flow"] == {
+        "folders_ready": True,
+        "editor_saved": True,
+        "markdown_preview_saved": True,
+        "attachments_agent_mediated": True,
+    }
     assert editor["metadata"]["notes"]["body"] == "Demo note draft saved through typed Capy Spaces metadata."
     assert preview["metadata"]["notes"]["body"] == "# Demo note This markdown preview was saved as metadata-only state."
     _assert_safe_payload(result)
