@@ -253,12 +253,13 @@ global.fetch = async function(path, opts = {}) {
       ],
     });
   }
-  if (path === 'api/spaces/widgets?space_id=lab') {
+  if (path === 'api/spaces/widgets?space_id=lab' || path === 'api/spaces/widgets?space_id=demo-weather-widget') {
     const minimized = scenario === 'restoreWidget';
+    const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     return response({ widgets: [{
-      id: 'weather',
+      id: isDemoWeather ? 'weather-current' : 'weather',
       kind: 'weather',
-      title: '<Weather>',
+      title: isDemoWeather ? 'Weather in Prague' : '<Weather>',
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized },
       metadata: {
         weather: {
@@ -280,10 +281,12 @@ global.fetch = async function(path, opts = {}) {
       renderer: '<script>bad()</script>',
     }] });
   }
-  if (path === 'api/spaces/widget/events?space_id=lab') {
+  if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget') {
+    const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
+    const widgetId = isDemoWeather ? 'weather-current' : 'weather';
     return response({ events: [
-      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: 'weather', status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
-      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: 'weather', status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
+      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'Authorization: Bearer SECRET...EAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
     ] });
   }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
@@ -1791,6 +1794,16 @@ def test_spaces_ui_weather_walkthrough_is_visible_and_runs_prompt_to_widget_flow
     assert "Weather demo checklist" in out["rootHtml"]
     assert "Current weather observation" in out["rootHtml"]
     assert "Manage weather widget" in out["rootHtml"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-weather-widget", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-weather-widget", "method": "GET", "body": ""} in out["calls"]
+    assert "Widgets for demo-weather-widget" in out["rootHtml"]
+    assert "Weather in Prague" in out["rootHtml"]
+    assert "weather-current" in out["rootHtml"]
+    assert "Agent bridge: 2 queued" in out["rootHtml"]
+    assert "Latest: widget.refresh · queued" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "note: [REDACTED]" in out["rootHtml"]
+    assert "prompt: [REDACTED]" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

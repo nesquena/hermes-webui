@@ -1059,7 +1059,23 @@
       const data = await postSpacesJson('api/spaces/demo/run', {demo: 'demo_weather_widget'});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
-      if (refreshedRoot) refreshedRoot.innerHTML = renderDemoSmokeResult(data || {}) + refreshedRoot.innerHTML;
+      if (refreshedRoot) {
+        const resultHtml = renderDemoSmokeResult(data || {});
+        const space = data && data.space && typeof data.space === 'object' ? data.space : {};
+        const demoSpaceId = space.space_id ? String(space.space_id) : '';
+        if (demoSpaceId) {
+          try {
+            const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId));
+            const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
+            refreshedRoot.dataset.editingWidgetId = '';
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+          } catch (widgetErr) {
+            refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+          }
+        } else {
+          refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+        }
+      }
       return;
     }
     if (action === 'runAllDemoSmokes') {
