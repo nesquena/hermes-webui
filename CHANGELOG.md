@@ -1,5 +1,29 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.12] — 2026-05-06 — 3-PR full-sweep batch
+
+### Fixed
+
+- **PR #1746** by @Michaelyklam — Shorten cron profile lock for manual runs (closes #1574). Manual cron runs no longer hold the parent profile/env lock for the duration of `run_job()` execution. The cron job body now runs in a subprocess pinned to the selected profile context; the parent process retains run tracking + output persistence + profile-home metadata writes but stays responsive to unrelated cron/profile UI/API calls. **Returns from v0.51.11 deferral with the queue-drain blocker fixed.** Opus advisor on the v0.51.11 stage-305 pass caught a `multiprocessing.Queue` deadlock when child output exceeds the ~64 KB pipe buffer (parent's `process.join()` blocks before the queue is drained → child's feeder thread blocks on `os.write()` waiting for the parent → infinite hang on real cron jobs). Fix: `result_queue.get(timeout=...)` is now called BEFORE `process.join()` (drain-then-join pattern), with `queue.Empty` recovery for hung/wedged children (terminate + report exitcode), and a regression test that exercises an actual fork subprocess returning a 200,000-char payload to assert the parent does not deadlock. Opus stage-306 verified the fix correct + complete; the prior `fork`→`spawn` SHOULD-FIX is filed as **follow-up issue #1754** (separate architectural change).
+- **PR #1752** by @Michaelyklam — Route custom provider models dict selections (slice of #1240 source-of-truth umbrella). `resolve_model_provider()` now matches named `custom_providers` against both the singular `model` field AND `models` dict keys. The dropdown path already collected `custom_providers[].models` dict keys for named custom provider groups; runtime routing now matches that picker behavior, so selecting one of those secondary model IDs routes to `custom:<name>` with the configured `base_url` instead of falling through to OpenRouter heuristics. Custom-providers branch runs BEFORE the slash-based OpenRouter heuristic, so `provider/model`-shaped keys in `models` are correctly captured by the custom branch first. Reconciles the still-relevant slice from the stale conflicting #1311 without trying to close #1240 wholesale.
+- **PR #1753** by @Michaelyklam — Guard session-owned runtime invariants (refs #1694). Two changes at the same boundary: (a) new `tests/test_session_runtime_ownership_invariants.py` with 5 source-level tests covering sidebar row cancellation by session-owned `active_stream_id`, live `done`/settled-session fallback NOT idling unrelated active panes, approval/clarify pollers stopped by owner session (not by currently-viewed pane), `LIVE_STREAMS`/`INFLIGHT` session-keyed; (b) `static/messages.js` change so background terminal events (`done`, `error`, `cancelled`, fallback poll, terminal heartbeat) only clear active-pane busy/composer state when `isActiveSession || !S.session || !INFLIGHT[S.session.session_id]` — own stream done OR no other inflight runtime exists. The `_isSessionCurrentPane(activeSid)` helper additionally checks `_loadingSessionId` to guard the in-flight session-switch window. Approval/clarify pollers are stopped by owner-session guard (`stopApprovalPollingForSession(activeSid)`) instead of blindly stopping the currently viewed pane's poller. This protects the core Milestone 2 streaming invariant: a long-running turn can finish/cancel/error in the background without tearing down runtime state for the session the user is currently viewing.
+
+### Tests
+
+4622 → **4632 passing** (+10 regression tests across the 3 PRs). 0 regressions. Full suite ~142s. Stably green on first try.
+
+### Pre-release verification
+
+- Stage-306: 3 PRs merged with no conflicts (disjoint files: `api/config.py`, `static/messages.js`, `api/routes.py`).
+- All JS files syntax-clean (`node -c static/messages.js`).
+- All Python files syntax-clean.
+- pytest: 4632 passed, 0 failed (single clean run).
+- `scripts/run-browser-tests.sh`: all 11 endpoints PASS on isolated port 8789 with stage-306 binary.
+- Pre-stamp re-fetch: all 3 PR heads still match local rebases — no late contributor commits.
+- Opus advisor: SHIP all 3, 5/5 verification questions clean, 0 MUST-FIX, 1 SHOULD-FIX filed as follow-up issue #1754 (`fork`→`spawn` migration, architectural follow-up to #1746). One minor observation noted: in `_run_cron_job_in_profile_subprocess`'s outer `finally`, a successful drain followed by >5s child wedge silently overwrites the valid result with an error — included as a side-observation in #1754.
+
+Closes #1574.
+
 ## [v0.51.11] — 2026-05-06 — 3-PR full-sweep batch (#1746 deferred)
 
 ### Added

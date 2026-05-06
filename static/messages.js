@@ -857,8 +857,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof _markSessionCompletedInList==='function'){
         _markSessionCompletedInList(completedSession, activeSid);
       }
-      stopApprovalPolling();
-      stopClarifyPolling();
+      stopApprovalPollingForSession(activeSid);
+      stopClarifyPollingForSession(activeSid);
       if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
       if(isActiveSession){
@@ -944,8 +944,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // TTS auto-read: speak the last assistant response if enabled (#499)
         if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
       }
-      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
-      setComposerStatus('');
+      renderSessionList();
+      if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id]){
+        _queueDrainSid=activeSid;
+        setBusy(false);
+        setStatus('');
+        setComposerStatus('');
+      }
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
     });
@@ -1026,7 +1031,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
       if(S.session&&S.session.session_id===activeSid){
@@ -1104,7 +1109,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'cancelled');
       if(S.session&&S.session.session_id===activeSid){
@@ -1143,7 +1148,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const session=data&&data.session;
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
       _closeSource();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
@@ -1152,7 +1157,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, session.message_count);
       }
-      if(S.session&&S.session.session_id===activeSid){
+      const isActiveSession=_isSessionCurrentPane(activeSid);
+      if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
@@ -1179,7 +1185,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages({preserveScroll:true});
       }
-      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');
+      renderSessionList();
+      if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id]){
+        _queueDrainSid=activeSid;
+        setBusy(false);
+        setComposerStatus('');
+      }
       return true;
     }catch(_){
       return false;
@@ -1193,7 +1204,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFinalized=true;
     if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-    delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
+    delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
     _closeSource();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
     if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
@@ -1221,8 +1232,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           delete INFLIGHT[activeSid];
           clearInflight();
           clearInflightState(activeSid);
-          stopApprovalPolling();
-          stopClarifyPolling();
+          stopApprovalPollingForSession(activeSid);
+          stopClarifyPollingForSession(activeSid);
           if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
           if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
           if(S.session&&S.session.session_id===activeSid){
@@ -1413,6 +1424,7 @@ async function respondApproval(choice) {
 
 function startApprovalPolling(sid) {
   stopApprovalPolling();
+  _approvalPollingSessionId = sid || null;
   // ── SSE (preferred): long-lived connection, server pushes instantly ──
   try {
     const es = new EventSource(new URL('api/approval/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
@@ -1455,6 +1467,7 @@ function startApprovalPolling(sid) {
 
 let _approvalEventSource = null;
 let _approvalSSEHealthTimer = null;
+let _approvalPollingSessionId = null;
 
 function _startApprovalFallbackPoll(sid) {
   _approvalPollTimer = setInterval(async () => {
@@ -1469,10 +1482,16 @@ function _startApprovalFallbackPoll(sid) {
   }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
 }
 
+function stopApprovalPollingForSession(sid) {
+  if(sid && _approvalPollingSessionId && _approvalPollingSessionId!==sid) return;
+  stopApprovalPolling();
+}
+
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
   if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
+  _approvalPollingSessionId = null;
 }
 
 // ── Clarify polling ──
@@ -1770,9 +1789,11 @@ async function respondClarify(response) {
 var _clarifyEventSource = null;
 var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
+let _clarifyPollingSessionId = null;
 
 function startClarifyPolling(sid) {
   stopClarifyPolling();
+  _clarifyPollingSessionId = sid || null;
   _clarifyMissingEndpointWarned = false;
 
   // SSE primary path: long-lived connection pushes events instantly.
@@ -1852,10 +1873,16 @@ function _startClarifyFallbackPoll(sid) {
   }, 3000);
 }
 
+function stopClarifyPollingForSession(sid) {
+  if(sid && _clarifyPollingSessionId && _clarifyPollingSessionId!==sid) return;
+  stopClarifyPolling();
+}
+
 function stopClarifyPolling() {
   if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
   if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
+  _clarifyPollingSessionId = null;
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────

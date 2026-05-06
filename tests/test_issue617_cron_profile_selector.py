@@ -184,7 +184,12 @@ def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(mon
     cron_scheduler = types.ModuleType("cron.scheduler")
     cron_scheduler.run_job = lambda job: events.append(("run", job["id"])) or (True, "output", "final", None)
 
+    def fake_subprocess_run(job, execution_profile_home):
+        events.append(("run", job["id"], str(execution_profile_home)))
+        return True, "output", "final", None
+
     monkeypatch.setattr(profiles, "cron_profile_context_for_home", Ctx)
+    monkeypatch.setattr(routes, "_run_cron_job_in_profile_subprocess", fake_subprocess_run)
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
@@ -197,9 +202,7 @@ def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(mon
     )
 
     assert events == [
-        ("enter", "/hermes/profiles/research"),
-        ("run", "job617"),
-        ("exit", "/hermes/profiles/research"),
+        ("run", "job617", "/hermes/profiles/research"),
         ("enter", "/hermes/default"),
         ("save", "job617", "output"),
         ("mark", "job617", True, None),
