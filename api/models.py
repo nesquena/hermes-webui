@@ -1136,6 +1136,138 @@ def get_cli_session_messages(sid) -> list:
     return msgs
 
 
+def hydrate_session_from_state_db(sid):
+    """Rebuild a WebUI Session from state.db when the JSON sidecar is missing.
+
+    Background: WebUI-native sessions are normally persisted as
+    ``~/.hermes/webui/sessions/<sid>.json`` by ``Session.save()``. The Hermes
+    agent runtime mirrors them into ``state.db`` for analytics and lineage.
+    If the sidecar gets deleted (state-dir migration during deploy, manual
+    cleanup, an ``OSError`` mid-write…) but the row in ``state.db`` survives,
+    the WebUI breaks in a confusing way: ``/api/session`` returns 200 because
+    its KeyError fallback reads messages directly from state.db, but
+    ``/api/chat/start`` and ``/api/session/update`` return 404 because they
+    have no fallback. Telegram/WhatsApp gateway sessions hit the same path.
+
+    This helper reconstructs a ``Session`` instance from the DB row + messages
+    table, saves a fresh sidecar so subsequent loads are pure WebUI again, and
+    populates the in-memory ``SESSIONS`` cache.
+
+    Returns the ``Session`` on success, or ``None`` if the sid is unknown to
+    state.db. Never raises — callers can treat ``None`` as "really not here".
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+
+    if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+        return None
+
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not db_path.exists():
+        return None
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, title, model, source, started_at, message_count,
+                       input_tokens, output_tokens, estimated_cost_usd
+                FROM sessions
+                WHERE id = ?
+                """,
+                (sid,),
+            )
+            srow = cur.fetchone()
+            if srow is None:
+                return None
+            cur.execute(
+                """
+                SELECT role, content, timestamp, tool_calls, tool_call_id, tool_name
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (sid,),
+            )
+            msg_rows = cur.fetchall()
+    except Exception:
+        logger.exception("hydrate_session_from_state_db: state.db read failed for %s", sid)
+        return None
+
+    # Translate state.db rows to the loose dict shape Session.messages uses
+    # everywhere else in the WebUI (the agent appends to this list directly).
+    messages = []
+    for r in msg_rows:
+        m: dict = {'role': r['role'], 'content': r['content'] or ''}
+        ts = r['timestamp']
+        if ts is not None:
+            m['timestamp'] = ts
+        if r['tool_calls']:
+            try:
+                m['tool_calls'] = json.loads(r['tool_calls'])
+            except Exception:
+                pass
+        if r['tool_call_id']:
+            m['tool_call_id'] = r['tool_call_id']
+        if r['tool_name']:
+            m['name'] = r['tool_name']
+        messages.append(m)
+
+    # Title: prefer DB title, fall back to source-tagged label so the sidebar
+    # entry is still meaningful when the row was created by the gateway.
+    src = (srow['source'] or 'session').lower()
+    title = srow['title'] or {
+        'webui': 'Untitled',
+        'cli': 'CLI Session',
+        'gateway': 'Telegram/WhatsApp',
+        'cron': 'Cron Run',
+    }.get(src, f'{src.title()} Session')
+
+    # Workspace falls back to the last-known WebUI workspace — the runtime row
+    # carries no workspace field. The user can correct it from the topbar.
+    try:
+        ws = str(get_last_workspace())
+    except Exception:
+        ws = str(DEFAULT_WORKSPACE)
+
+    s = Session(
+        session_id=srow['id'],
+        title=title,
+        workspace=ws,
+        model=srow['model'] or DEFAULT_MODEL,
+        messages=messages,
+        created_at=srow['started_at'] or time.time(),
+        input_tokens=srow['input_tokens'] or 0,
+        output_tokens=srow['output_tokens'] or 0,
+        estimated_cost=srow['estimated_cost_usd'],
+        source_tag=src if src != 'webui' else None,
+        is_cli_session=(src != 'webui'),
+    )
+    try:
+        s.save()
+    except Exception:
+        # If we can't write the sidecar (e.g. SESSION_DIR perms), still hand
+        # back the in-memory Session so the live request can proceed; the next
+        # save() (e.g. _handle_chat_start) will retry the write.
+        logger.warning("hydrate_session_from_state_db: save() failed for %s", sid, exc_info=True)
+    with LOCK:
+        SESSIONS[sid] = s
+        SESSIONS.move_to_end(sid)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)
+    return s
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session from state.db (messages + session row).
     Returns True if deleted, False if not found or error.

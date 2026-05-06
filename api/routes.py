@@ -508,6 +508,7 @@ from api.models import (
     import_cli_session,
     get_cli_sessions,
     get_cli_session_messages,
+    hydrate_session_from_state_db,
     ensure_cron_project,
     is_cron_session,
 )
@@ -1633,7 +1634,9 @@ def handle_post(handler, parsed) -> bool:
         try:
             s = get_session(body["session_id"])
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            s = hydrate_session_from_state_db(body["session_id"])
+            if s is None:
+                return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
@@ -2386,18 +2389,25 @@ def _handle_list_dir(handler, parsed):
         s = get_session(sid)
         workspace = s.workspace
     except KeyError:
-        # Fallback for CLI sessions not loaded in WebUI memory
+        # Fallback for CLI sessions not loaded in WebUI memory.
+        # First try the importable-rows projection (excludes source='webui').
+        # If that misses, hydrate from state.db so WebUI-source sessions whose
+        # sidecar was lost still resolve to a real workspace.
+        cli_meta = None
         try:
-            cli_meta = None
             for cs in get_cli_sessions():
                 if cs["session_id"] == sid:
                     cli_meta = cs
                     break
-            if not cli_meta:
-                return bad(handler, "Session not found", 404)
-            workspace = cli_meta.get("workspace", "")
         except Exception:
-            return bad(handler, "Session not found", 404)
+            cli_meta = None
+        if cli_meta:
+            workspace = cli_meta.get("workspace", "")
+        else:
+            s = hydrate_session_from_state_db(sid)
+            if s is None:
+                return bad(handler, "Session not found", 404)
+            workspace = s.workspace
     try:
         return j(
             handler,
@@ -3545,7 +3555,14 @@ def _handle_chat_start(handler, body):
     try:
         s = get_session(body["session_id"])
     except KeyError:
-        return bad(handler, "Session not found", 404)
+        # Sidecar JSON missing — try to rebuild the Session from state.db so a
+        # session that exists in the agent runtime (gateway/Telegram, or a
+        # WebUI session whose sidecar got lost in a deploy) becomes writable
+        # again on the WebUI side. If state.db doesn't know it either, the
+        # session truly does not exist.
+        s = hydrate_session_from_state_db(body["session_id"])
+        if s is None:
+            return bad(handler, "Session not found", 404)
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
