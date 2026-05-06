@@ -260,6 +260,9 @@
           <div class="dashboard-topbar-status"><span>VERSÃO:</span> <b id="dashboardSystemVersion">--</b></div>
         </div>
         <div class="main-view-actions dashboard-topbar-actions">
+          <button class="dashboard-topbar-icon dashboard-mobile-rail-btn" id="btnDashboardMobileRail" type="button" onclick="toggleDashboardMobileRail()" title="Painel lateral" data-i18n-title="dashboard_mobile_rail_open" aria-label="Painel lateral" aria-expanded="false">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+          </button>
           <button class="dashboard-terminal-btn" id="dashboardTerminalBtn" type="button" onclick="openComposerTerminal()"><span aria-hidden="true">&gt;_</span><span data-i18n="topbar_terminal_ssh">Terminal SSH</span></button>
           <button class="dashboard-topbar-icon" id="dashboardSearchBtn" type="button" onclick="handleDashboardTopbarAction('search')" title="Search" data-i18n-title="topbar_search" aria-label="Search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
           <button class="dashboard-topbar-icon" id="dashboardNotificationsBtn" type="button" onclick="handleDashboardTopbarAction('notifications')" title="Notifications" data-i18n-title="topbar_notifications" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button>
@@ -1489,6 +1492,10 @@
   </div>
 </div>
 <div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
+<!-- Dedicated overlay for the dashboard right rail (hero/KPIs/quick actions)
+     so it can slide in from the right on mobile without colliding with the
+     left sidebar overlay above. -->
+<div class="dashboard-mobile-overlay" id="dashboardMobileOverlay" onclick="toggleDashboardMobileRail(false)"></div>
 <div class="app-dialog-overlay" id="appDialogOverlay" style="display:none" aria-hidden="true">
   <div class="app-dialog" id="appDialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogDesc">
     <div class="app-dialog-header">
