@@ -112,6 +112,8 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "browser_surface",
     "network",
     "weather",
+    "market_data",
+    "watchlist",
     "chart",
     "table",
     "notes",
@@ -1604,6 +1606,49 @@ def space_demo_run(name: str) -> dict[str, Any]:
                 "column_count": len(columns),
                 "columns": columns,
             }
+        }
+    elif demo == "demo_stock_chart":
+        snapshot_rows = [
+            {"symbol": "NVDA", "last": "905.10", "change": "+1.8%", "notes": "GPU demand watch"},
+            {"symbol": "AAPL", "last": "182.40", "change": "-0.3%", "notes": "services margin watch"},
+            {"symbol": "GOOGL", "last": "171.25", "change": "+0.6%", "notes": "AI search watch"},
+        ]
+        market_snapshot = {
+            "status": "market-snapshot-ready",
+            "symbols": ["NVDA", "AAPL", "GOOGL"],
+            "network_mode": "agent-mediated",
+            "rows": snapshot_rows,
+        }
+        patch_widget(
+            space_id,
+            "stock-chart",
+            {
+                "market_data": {
+                    "status": "market-snapshot-ready",
+                    "series": market_snapshot["symbols"],
+                    "network": "agent-mediated",
+                    "rows": snapshot_rows,
+                }
+            },
+        )
+        patch_widget(
+            space_id,
+            "stock-watchlist",
+            {"watchlist": {"status": "market-snapshot-ready", "rows": snapshot_rows}},
+        )
+        queued = queue_widget_event(
+            space_id,
+            "stock-chart",
+            "stock.refresh",
+            {"demo": demo, "symbols": market_snapshot["symbols"]},
+            prompt="Refresh the stock chart snapshot through the agent-mediated market-data bridge.",
+        )
+        queued_events = list_widget_events(space_id, "stock-chart")
+        action = "stock-snapshot-recorded"
+        extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
+            "stock_snapshot": market_snapshot,
         }
     elif demo == "demo_time_travel_restore":
         before_patch = str(read_space(space_id).get("revision_event_id") or "")
@@ -3273,6 +3318,8 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "prompt",
         "status",
         "weather",
+        "market_data",
+        "watchlist",
         "chart",
         "table",
         "notes",
@@ -3285,11 +3332,13 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
     changed_fields: list[str] = []
     for key, value in (patch or {}).items():
         safe_key = str(key or "")
-        if safe_key not in allowed or not _payload_key_is_safe(safe_key):
+        if safe_key not in allowed:
+            continue
+        if safe_key != "market_data" and not _payload_key_is_safe(safe_key):
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:

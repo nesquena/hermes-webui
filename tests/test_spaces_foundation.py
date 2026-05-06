@@ -4400,6 +4400,32 @@ def test_stock_chart_template_install_route_returns_safe_metadata(monkeypatch, t
     assert "secret" not in serialized
 
 
+def test_stock_chart_demo_smoke_records_safe_market_snapshot(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_stock_chart")
+
+    assert result["action"] == "stock-snapshot-recorded"
+    assert result["queued_event_count"] == 1
+    assert result["stock_snapshot"]["status"] == "market-snapshot-ready"
+    assert result["stock_snapshot"]["symbols"] == ["NVDA", "AAPL", "GOOGL"]
+    assert result["stock_snapshot"]["network_mode"] == "agent-mediated"
+    assert result["stock_snapshot"]["rows"] == [
+        {"symbol": "NVDA", "last": "905.10", "change": "+1.8%", "notes": "GPU demand watch"},
+        {"symbol": "AAPL", "last": "182.40", "change": "-0.3%", "notes": "services margin watch"},
+        {"symbol": "GOOGL", "last": "171.25", "change": "+0.6%", "notes": "AI search watch"},
+    ]
+    chart_widget = spaces.read_widget_detail(result["space"]["space_id"], "stock-chart")
+    assert chart_widget["metadata"]["market_data"]["status"] == "market-snapshot-ready"
+    assert chart_widget["metadata"]["market_data"]["series"] == ["NVDA", "AAPL", "GOOGL"]
+    assert chart_widget["metadata"]["market_data"]["network"] == "agent-mediated"
+    serialized = json.dumps(result).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_install_big_bang_template_creates_safe_onboarding_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
