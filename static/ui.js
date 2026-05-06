@@ -1377,17 +1377,30 @@ window.addEventListener('resize',function(){
 // Uses a guard flag to avoid the race where programmatic scrolls (from
 // scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
 // the user's explicit scroll-up.  Fixes #1469 / #1360.
+// Direction-aware unpin (issue #1731): the hysteresis below is correct
+// for re-pinning (entering the near-bottom zone), but applying it to
+// unpinning stranded users who scrolled up by a small amount inside the
+// 250px zone — every upward sample still landed in the near-bottom
+// region, so the counter kept incrementing and _scrollPinned stayed
+// true. The next streaming token snapped them back. We now track
+// scrollTop direction: an explicit upward movement (scrollTop decreased
+// by more than 2px between samples) unpins immediately and resets the
+// counter, while downward / stationary movement falls through the
+// original hysteresis path so the macOS momentum re-pin protection from
+// #1360 is preserved.
 // rAF-debounced scroll listener (issue #1360): on macOS WKWebView, trackpad
 // momentum scrolling fires scroll events that interleave with the
 // _programmaticScroll setTimeout(0) guard. A mid-momentum scroll event can
 // either get swallowed (_programmaticScroll still true) or falsely report
-// nearBottom (momentum hasn't settled). rAF defers the nearBottom check to
-// the next paint frame when the browser's scroll position has settled.
-// A hysteresis counter requires two consecutive near-bottom samples before
-// re-pinning, preventing accidental re-pin during initial deceleration.
+// the user is at the bottom (momentum hasn't settled). rAF defers the
+// distance check to the next paint frame when the browser's scroll
+// position has settled. A hysteresis counter requires two consecutive
+// near-bottom samples before re-pinning, preventing accidental re-pin
+// during initial deceleration.
 let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
+let _lastScrollTop=null;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
@@ -1396,9 +1409,12 @@ let _nearBottomCount=0;
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
-      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
-      _nearBottomCount=nearBottom?_nearBottomCount+1:0;
-      _scrollPinned=_nearBottomCount>=2;
+      const top=el.scrollTop;
+      const nearBottom=el.scrollHeight-top-el.clientHeight<250;
+      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2;
+      _lastScrollTop=top;
+      if(movedUp){ _nearBottomCount=0; _scrollPinned=false; } // #1731
+      else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; } // #1360
       const btn=$('scrollToBottomBtn');
       if(btn) btn.style.display=_scrollPinned?'none':'flex';
       // Load older messages when scrolled near the top
