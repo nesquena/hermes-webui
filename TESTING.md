@@ -1835,8 +1835,8 @@ Bridged CLI sessions:
 
 ---
 
-*Last updated: v0.51.13, May 6, 2026*
-*Total automated tests collected: 4642*
+*Last updated: v0.51.14, May 6, 2026*
+*Total automated tests collected: 4662*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*

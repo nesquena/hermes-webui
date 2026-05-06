@@ -178,6 +178,17 @@ def test_sse_cancel_handler_calls_set_busy():
         next_function = src.find("\n  function ", helper_idx + 1)
         helper = src[helper_idx:next_function if next_function != -1 else helper_idx + 800]
         assert "setBusy(false)" in helper
+        # The helper MUST preserve the v0.51.12 (#1753) 3-way OR guard so
+        # idling the active pane on a background completion is gated on the
+        # permissive-fallback disjunct ("no other inflight on the active pane")
+        # in addition to "is active" / "no session". Without this, a user
+        # viewing pane A (idle) while pane B completes in the background
+        # would not get pane A's composer state cleared. Catches the exact
+        # regression v0.51.14's auto-fix repaired in PR #1761.
+        assert "!INFLIGHT[S.session.session_id]" in helper, (
+            "_setActivePaneIdleIfOwner must preserve the !INFLIGHT[...] "
+            "permissive-fallback disjunct from PR #1753 (v0.51.12)."
+        )
 
 
 # ── 7. i18n key preserved ─────────────────────────────────────────────────────

@@ -1,5 +1,30 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.14] — 2026-05-06 — 4-PR contributor batch
+
+### Fixed
+
+- **PR #1760** by @ai-ag2026 — Preserve pending user turn on stream errors. Adds reconciliation in `api/streaming.py` so the user's pending turn is appended (with timestamp + attachments) BEFORE runtime state is cleared on `apperror`-no-response and outer-Exception paths. Reload + session reconcile now see the turn instead of losing it. Includes `_materialize_pending_user_turn_before_error()` helper with dedup against eager-checkpointed messages (8-message lookback, whitespace-normalized comparison). Closes #1361.
+- **PR #1761** by @dso2ng — Scope terminal stream cleanup to owner session (refs #1694). Centralizes owner-only cleanup behind helpers (`_setActivePaneIdleIfOwner`, `_clearOwnerInflightState`, `_clearApprovalForOwner`, `_clearClarifyForOwner`) at SSE `done`/`error`/`cancel` event handlers in `static/messages.js`. Replaces inline 3-way OR guards introduced by PR #1753 (v0.51.12) with structured helper calls. The actual #1694 bug fix is in `_clearActivePaneInflightIfOwner`, which now gates `clearInflight()` on `_isActiveSession()` — previously unconditional, so a background completion would inadvertently clear the global `INFLIGHT_KEY` localStorage marker for the active pane. **Auto-fix applied**: PR's centralizing helper inadvertently dropped the `!INFLIGHT[S.session.session_id]` permissive-fallback disjunct from #1753; restored in `_setActivePaneIdleIfOwner` so the helper preserves the same 3-way OR contract Opus stage-306 verified.
+- **PR #1756** by @ng-technology-llc — Isolate profile cookie per webui instance (closes #803). Adds `WEBUI_PROFILE_COOKIE_NAME` env var so multi-instance WebUI deployments can isolate the active-profile cookie per process. Default cookie name `hermes_profile` preserved when env var not set; backwards-compatible. `get_profile_cookie_name()` resolves per-request via `os.getenv()` so deployments can change the env var without restart (existing client cookies under the old name are treated as no cookie → user re-selects profile, no data loss).
+- **PR #1757** by @skspade — Tri-state gateway status (closes earlier "gateway shows 'not running' when no platforms connected" reports). Replaces `bool(identity_map)` running signal with `agent_health.build_agent_health_payload()` as the authoritative source. Adds `alive: True/False/None` + `configured: bool` + `running: bool` fields. Frontend `static/panels.js` distinguishes three states: green "running" / amber "Gateway not configured" / red "not running". `build_agent_health_payload()` is robust to every failure (gateway import error, runtime status read exception, missing PID) — silently nulls and never raises. 247 LOC test coverage in `tests/test_gateway_status_agent_health.py`.
+
+### Tests
+
+4642 → **4662 collected** (+20 across 4 new test files plus regression coverage tightening). Includes 2 new structural-grep regression tests absorbed in-release per Opus advisor's NICE-TO-HAVE follow-ups: (1) `tests/test_sprint36.py` now asserts `_setActivePaneIdleIfOwner` body contains the `!INFLIGHT[...]` disjunct (catches the auto-fix repaired regression in #1761); (2) `tests/test_issue1361_cancel_data_loss.py` adds `test_materialize_helper_called_immediately_before_error_path_clears` to pin the helper call's call-site location in `api/streaming.py` error branches (catches future refactor that drops the call but keeps the clearing).
+
+### Pre-release verification
+
+- All 4 PRs CI-green individually (#1760, #1761) or rebased clean (#1756, #1757 — #1757 had stale base from before v0.51.10 stamps; CHANGELOG conflict auto-resolved by dropping the PR's redundant changelog entry, since we write the v0.51.14 entry at stamp time).
+- Auto-fix on #1761 verified by 9-test pass before merge (5 invariants + 4 new ownership tests).
+- `node -c` clean on both `static/messages.js` and `static/panels.js`.
+- pytest: 4649 passed, 0 failed (single clean run, ~152s).
+- `scripts/run-browser-tests.sh`: all 11 endpoints PASS on isolated port 8789.
+- Pre-stamp re-fetch: all 4 PR heads still match local rebases — no late commits.
+- Opus advisor: SHIP all 4, all 5 verification questions clean, 0 MUST-FIX, 0 SHOULD-FIX. Two NICE-TO-HAVE coverage gaps absorbed in-release as ~30 LOC of defensive structural-grep regression tests (covered above).
+
+Closes #803, #1361, #1694.
+
 ## [v0.51.13] — 2026-05-06 — single-PR composer UX
 
 ### Added
