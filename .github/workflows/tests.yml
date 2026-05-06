@@ -2,9 +2,9 @@ name: Tests
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main, develop]
   push:
-    branches: [master]
+    branches: [main, develop]
 
 jobs:
   test:
@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml>=6.0 pytest pytest-timeout
+          pip install -r requirements.txt pytest pytest-timeout
 
       - name: Run tests
         run: pytest tests/ -v --timeout=60
