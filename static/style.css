@@ -2768,6 +2768,12 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
 .dashboard-chat-panel{display:flex;flex-direction:column;min-height:0;height:100%;border:1px solid var(--border);border-radius:12px;background:var(--surface);overflow:hidden;}
 .dashboard-chat-header{height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 18px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .dashboard-chat-title{font-size:14px;font-weight:700;line-height:1.2;color:var(--text);}
+.dashboard-chat-header-actions{display:flex;align-items:center;gap:12px;}
+.dashboard-chat-new-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent);font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,transform .12s;}
+.dashboard-chat-new-btn:hover{background:color-mix(in srgb,var(--accent-bg) 60%,var(--surface));border-color:var(--accent);}
+.dashboard-chat-new-btn:active{transform:translateY(1px);}
+.dashboard-chat-new-btn svg{width:14px;height:14px;flex-shrink:0;}
+.dashboard-chat-new-btn-label{line-height:1;}
 .dashboard-chat-online{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--success);}
 .dashboard-chat-online span:first-child{width:10px;height:10px;border-radius:999px;background:var(--success);box-shadow:0 0 10px color-mix(in srgb,var(--success) 55%,transparent);}
 .dashboard-chat-body{flex:1;min-height:0;display:flex;flex-direction:column;background:color-mix(in srgb,var(--bg) 76%,var(--surface));}
@@ -2808,6 +2814,8 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
 
 @media(max-width:760px){
   .dashboard-chat-header{height:48px;padding:0 14px;}
+  .dashboard-chat-new-btn{padding:0 8px;}
+  .dashboard-chat-new-btn-label{display:none;}
   .dashboard-chat-body .messages-inner{padding:14px 14px 22px;}
   .dashboard-chat-composer .composer-wrap{padding:8px 10px;}
   .dashboard-chat-composer .composer-footer{gap:7px;padding:6px 8px 8px!important;}
