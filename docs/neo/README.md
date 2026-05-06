@@ -20,6 +20,8 @@
 | [BACKLOG.md](./BACKLOG.md) | Backlog completo organizado por **épicos** (EP-01..EP-N), com objetivo, HUs filhas, dependências e prioridade. |
 | [TASKS.md](./TASKS.md) | **Documento vivo** de execução. Sprints, HUs (User Stories), tasks técnicas, critérios de aceite, e checklist de evidências (testes + homologação + screenshots) para fechar cada HU. |
 | [UPSTREAM-SYNC.md](./UPSTREAM-SYNC.md) | Estratégia de manutenção: como manter o fork sincronizável com `nesquena/hermes-webui`, quais arquivos são "core" (evitar tocar), quais são "Neo-only" (livres), e como resolver conflitos de merge sem perder a personalização. |
+| [PRODUCAO.md](./PRODUCAO.md) | Configuração nginx (SSE sem buffering, cache de assets), procedimento de deploy/rollback na VPS `srvjosemaria`. |
+| [RUNBOOK.md](./RUNBOOK.md) | Playbook de incidentes: modal travado, chat lento, deploy quebrou, mobile legado. |
 
 ---
 
