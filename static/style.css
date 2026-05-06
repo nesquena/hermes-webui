@@ -2827,6 +2827,36 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
   .neo-personal-settings-link{justify-self:start;}
 }
 
+/* ── Pull-to-refresh indicator (mobile only) ──
+   Anchors above the message list and translates via inline transform from
+   the touch handler. Visibility is controlled by `.is-active` (touch in
+   progress, follow finger) and `.is-refreshing` (release → spinner spin
+   while refreshSession() runs). */
+.pull-refresh{
+  position:absolute;top:0;left:0;right:0;
+  display:none;
+  align-items:center;justify-content:center;gap:8px;
+  height:56px;margin-top:-56px;
+  font-size:12px;font-weight:600;color:var(--muted);
+  pointer-events:none;
+  transition:opacity .15s ease;
+  opacity:0;
+  z-index:5;
+}
+.pull-refresh.is-active{opacity:1;}
+.pull-refresh.is-refreshing{opacity:1;}
+.pull-refresh-spinner{width:18px;height:18px;flex-shrink:0;color:var(--accent);transition:transform .15s ease;}
+.pull-refresh.is-refreshing .pull-refresh-spinner{animation:pull-refresh-spin .8s linear infinite;}
+@keyframes pull-refresh-spin{to{transform:rotate(360deg);}}
+
+@media(hover:none) and (max-width:900px){
+  /* Touch-only viewports: surface the indicator. The .messages container
+     becomes position:relative so the absolutely-positioned indicator
+     anchors correctly above the first row. */
+  #messages{position:relative;}
+  .pull-refresh{display:flex;}
+}
+
 @media(max-width:760px){
   .dashboard-chat-header{height:48px;padding:0 14px;}
   .dashboard-chat-new-btn{padding:0 8px;}

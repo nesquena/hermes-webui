@@ -81,6 +81,109 @@ function _insertAfter(anchor, node) {
   anchor.parentNode.insertBefore(node, anchor.nextSibling);
 }
 
+// ── Mobile pull-to-refresh on the chat transcript ──
+// Activates only on touch viewports (the CSS media query also gates the
+// indicator to hover:none widths). When the user pulls down at scrollTop=0
+// of the #messages container, the indicator follows the finger; releasing
+// past PULL_THRESHOLD calls refreshSession(). Bypasses native browser
+// pull-to-refresh because we preventDefault on touchmove while pulling,
+// matching the behaviour the user expects from Claude / ChatGPT mobile.
+const PULL_REFRESH_THRESHOLD = 70;   // px the user must pull before we trigger
+const PULL_REFRESH_DAMPING = 0.5;    // resist past the threshold so the indicator can't run away
+const PULL_REFRESH_MAX = 130;        // visual ceiling for the indicator
+let _pullRefreshState = null;
+function _pullRefreshSetTransform(indicator, distance) {
+  if (!indicator) return;
+  const clamped = Math.max(0, Math.min(distance, PULL_REFRESH_MAX));
+  indicator.style.transform = `translate3d(0, ${clamped}px, 0)`;
+}
+function _pullRefreshReset(indicator, withDelay = true) {
+  if (!indicator) return;
+  if (withDelay) {
+    indicator.style.transition = 'transform .2s ease, opacity .2s ease';
+    setTimeout(() => {
+      indicator.style.transition = '';
+      indicator.style.transform = '';
+    }, 220);
+  } else {
+    indicator.style.transform = '';
+  }
+  indicator.classList.remove('is-active');
+  indicator.classList.remove('is-refreshing');
+  const labelEl = indicator.querySelector('.pull-refresh-label');
+  if (labelEl) labelEl.textContent = (typeof t === 'function') ? t('pull_to_refresh') : 'Pull to refresh';
+}
+function _isTouchInsideComposer(target) {
+  return !!(target && target.closest && (target.closest('.composer-wrap') || target.closest('.composer-box')));
+}
+function _initPullToRefresh() {
+  const messages = document.getElementById('messages');
+  const indicator = document.getElementById('pullRefreshIndicator');
+  if (!messages || !indicator) return;
+  // Only wire up on touch viewports — desktop mouse drag should not trigger
+  // a refresh. The hover:none media query also hides the indicator visually,
+  // so this is belt-and-braces.
+  if (!('ontouchstart' in window) && !(navigator.maxTouchPoints > 0)) return;
+
+  messages.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    if (_isTouchInsideComposer(e.target)) return;
+    if (messages.scrollTop > 0) return;
+    _pullRefreshState = {
+      startY: e.touches[0].clientY,
+      lastDelta: 0,
+      triggered: false,
+    };
+  }, { passive: true });
+
+  messages.addEventListener('touchmove', (e) => {
+    if (!_pullRefreshState) return;
+    if (messages.scrollTop > 0) {
+      // The list scrolled away from the top mid-gesture — abort the pull.
+      _pullRefreshReset(indicator, false);
+      _pullRefreshState = null;
+      return;
+    }
+    const delta = e.touches[0].clientY - _pullRefreshState.startY;
+    if (delta <= 0) return;
+    // Past threshold, dampen so the indicator stops keeping up 1:1 with the finger.
+    const visual = delta < PULL_REFRESH_THRESHOLD
+      ? delta
+      : PULL_REFRESH_THRESHOLD + (delta - PULL_REFRESH_THRESHOLD) * PULL_REFRESH_DAMPING;
+    _pullRefreshState.lastDelta = visual;
+    indicator.classList.add('is-active');
+    _pullRefreshSetTransform(indicator, visual);
+    // Block native browser pull-to-refresh while we're handling the gesture.
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  const onEnd = () => {
+    if (!_pullRefreshState) return;
+    const reached = _pullRefreshState.lastDelta >= PULL_REFRESH_THRESHOLD;
+    const state = _pullRefreshState;
+    _pullRefreshState = null;
+    if (!reached || state.triggered) {
+      _pullRefreshReset(indicator, true);
+      return;
+    }
+    state.triggered = true;
+    indicator.classList.add('is-refreshing');
+    const labelEl = indicator.querySelector('.pull-refresh-label');
+    if (labelEl) labelEl.textContent = (typeof t === 'function') ? t('refreshing') : 'Refreshing…';
+    _pullRefreshSetTransform(indicator, PULL_REFRESH_THRESHOLD);
+    Promise.resolve()
+      .then(() => (typeof refreshSession === 'function') ? refreshSession() : null)
+      .catch(() => {})
+      .finally(() => {
+        // Hold the spinner briefly so the user perceives the refresh
+        // before we slide it back up.
+        setTimeout(() => _pullRefreshReset(indicator, true), 260);
+      });
+  };
+  messages.addEventListener('touchend', onEnd, { passive: true });
+  messages.addEventListener('touchcancel', onEnd, { passive: true });
+}
+
 function toggleDashboardMobileRail(force) {
   // Slide the dashboard-right column (hero / KPIs / quick actions) in and
   // out on mobile (<=760px CSS breakpoint). On desktop the rail is always
@@ -568,3 +671,5 @@ async function loadDashboard() {
   if (_dashboardLoaded) return;
   _dashboardLoaded = true;
 }
+
+document.addEventListener('DOMContentLoaded', _initPullToRefresh);

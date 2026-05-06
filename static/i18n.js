@@ -428,6 +428,8 @@ const LOCALES = {
     // Sidebar & Tabs
     tab_chat: 'Chat',
     tab_conversations: 'Conversations',
+    pull_to_refresh: 'Pull to refresh',
+    refreshing: 'Refreshing…',
     tab_dashboard: 'Dashboard',
     tab_projects: 'Projects',
     tab_tasks: 'Tasks',
@@ -1283,6 +1285,8 @@ const LOCALES = {
     login_conn_failed: 'Не удалось подключиться',
     tab_chat: 'Чат',
     tab_conversations: 'Беседы',
+    pull_to_refresh: 'Потяните для обновления',
+    refreshing: 'Обновление…',
     tab_dashboard: 'Панель',
     tab_tasks: 'Задачи',
     tab_skills: 'Навыки',
@@ -2252,6 +2256,8 @@ const LOCALES = {
     // Sidebar & Tabs
     tab_chat: 'Chat',
     tab_conversations: 'Conversaciones',
+    pull_to_refresh: 'Desliza para actualizar',
+    refreshing: 'Actualizando…',
     tab_dashboard: 'Panel',
     tab_tasks: 'Tareas',
     tab_skills: 'Habilidades',
@@ -3211,6 +3217,8 @@ const LOCALES = {
     // Sidebar & Tabs
     tab_chat: 'Chat',
     tab_conversations: 'Konversationen',
+    pull_to_refresh: 'Zum Aktualisieren ziehen',
+    refreshing: 'Aktualisiere…',
     tab_dashboard: 'Dashboard',
     tab_tasks: 'Aufgaben',
     tab_skills: 'Skills',
@@ -3947,6 +3955,8 @@ const LOCALES = {
     // sidebar & navigation
     tab_chat: '聊天',
     tab_conversations: '对话',
+    pull_to_refresh: '下拉刷新',
+    refreshing: '刷新中…',
     tab_dashboard: '仪表板',
     tab_memory: '记忆',
     tab_skills: '技能',
@@ -4934,6 +4944,8 @@ const LOCALES = {
     project_name_prompt: '專案名稱：',
     tab_chat: '\u804a\u5929',
     tab_conversations: '\u5c0d\u8a71',
+    pull_to_refresh: '\u4e0b\u62c9\u5237\u65b0',
+    refreshing: '\u5237\u65b0\u4e2d\u2026',
     tab_dashboard: '\u5100\u8868\u677f',
     tab_memory: '\u8a18\u61b6',
     tab_skills: '\u6280\u80fd',
@@ -5802,6 +5814,8 @@ const LOCALES = {
     // Sidebar & Tabs
   tab_chat: 'Chat',
   tab_conversations: 'Conversas',
+  pull_to_refresh: 'Puxe para atualizar',
+  refreshing: 'Atualizando…',
   tab_dashboard: 'Dashboard',
   tab_projects: 'Projetos',
   tab_tasks: 'Tarefas',
@@ -6524,6 +6538,8 @@ const LOCALES = {
     // Sidebar & Tabs
     tab_chat: '채팅',
     tab_conversations: '대화',
+    pull_to_refresh: '당겨서 새로고침',
+    refreshing: '새로고침 중…',
     tab_dashboard: '대시보드',
     tab_tasks: '작업',
     tab_skills: '스킬',
