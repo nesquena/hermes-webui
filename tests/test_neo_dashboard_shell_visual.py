@@ -62,6 +62,11 @@ def test_neo_sidebar_matches_required_navigation_order_and_targets():
     )
     assert found == [
         ("dashboard", "dashboard", "tab_dashboard"),
+        # Conversas — added in Onda 9 so users can reach panelChat (the
+        # historic session list) from the dashboard rail. Without it the only
+        # way to browse old chats was through the legacy hermes nav, which
+        # the Neo fork hides.
+        ("chat", "chat", "tab_conversations"),
         ("projects", "projects", "tab_projects"),
         ("todos", "todos", "tab_tasks"),
         ("profiles", "profiles", "tab_profiles"),
