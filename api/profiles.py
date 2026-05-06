@@ -596,13 +596,18 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     # Import here to avoid circular import at module load
     from api.config import STREAMS, STREAMS_LOCK, reload_config
 
-    # Block if agent is running
-    with STREAMS_LOCK:
-        if len(STREAMS) > 0:
-            raise RuntimeError(
-                'Cannot switch profiles while an agent is running. '
-                'Cancel or wait for it to finish.'
-            )
+    # Process-wide profile switches mutate HERMES_HOME, module-level path caches,
+    # os.environ-backed .env keys, and the global config cache. Keep those blocked
+    # while any agent stream is active. Per-client WebUI switches are cookie/TLS
+    # scoped (process_wide=False) and do not mutate those globals, so users can
+    # leave a running session in one profile and start work in another (#1700).
+    if process_wide:
+        with STREAMS_LOCK:
+            if len(STREAMS) > 0:
+                raise RuntimeError(
+                    'Cannot switch profiles while an agent is running. '
+                    'Cancel or wait for it to finish.'
+                )
 
     # Resolve profile directory
     if _is_root_profile(name):

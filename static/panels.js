@@ -3766,7 +3766,9 @@ window.addEventListener('resize',()=>{
 });
 
 async function switchToProfile(name) {
-  if (S.busy) { showToast(t('profiles_busy_switch')); return; }
+  // Profile switches are per-client cookie/TLS scoped, so a running stream in
+  // the current session can safely continue while this tab moves to another
+  // profile. The in-flight session stays attached to its original profile.
 
   // ── Loading indicator ───────────────────────────────────────────────────
   // Show spinner on the profile chip immediately so the user gets visual
@@ -3781,7 +3783,11 @@ async function switchToProfile(name) {
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
   // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && S.messages && S.messages.length > 0;
+  const sessionInProgress = S.session && (
+    (S.messages && S.messages.length > 0) ||
+    S.session.active_stream_id ||
+    S.session.pending_user_message
+  );
 
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
