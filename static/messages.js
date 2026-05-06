@@ -926,6 +926,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         } else {
           S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
         }
+        if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
+          const assistantIdx=S.messages.indexOf(lastAsst);
+          if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);
+        }
         if(uploaded.length){
           const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
           if(lastUser)lastUser.attachments=uploaded;

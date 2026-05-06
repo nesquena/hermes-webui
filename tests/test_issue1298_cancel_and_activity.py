@@ -338,26 +338,32 @@ class TestIssue1298ActivityGroupExpandPersistence:
         )
 
     def test_inline_onclick_records_user_intent(self):
-        """The summary button's inline onclick must call _onLiveActivityToggle
+        """The summary button's click path must call _onLiveActivityToggle
         so user clicks update the tracker (#1298)."""
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         # The summary button is built inline inside ensureActivityGroup.
         assert "_onLiveActivityToggle" in src, (
             "_onLiveActivityToggle helper must be defined"
         )
-        # The inline onclick string must include the call so user toggles
-        # are captured into _liveActivityUserExpanded.
+        assert "function _toggleActivityGroup" in src, (
+            "Activity summary clicks should route through the shared toggle helper"
+        )
+        # The inline onclick may delegate to _toggleActivityGroup(); that helper
+        # must still call _onLiveActivityToggle(group) so user toggles are
+        # captured into _liveActivityUserExpanded.
         m = re.search(r'class="tool-call-group-summary"[^`]*`', src)
         assert m, "live activity summary button template must be present"
-        # The onclick fragment is in the same template literal that builds
-        # the button — pull a wider window
-        m2 = re.search(
-            r"group\.innerHTML=`<button[^`]*?_onLiveActivityToggle[^`]*?`",
-            src, re.DOTALL,
+        assert "onclick=\"_toggleActivityGroup(this)\"" in m.group(0), (
+            "ensureActivityGroup() summary button should use the shared toggle helper"
         )
-        assert m2, (
-            "ensureActivityGroup() inline onclick must invoke "
-            "_onLiveActivityToggle(g) so user clicks update the tracker"
+        toggle_body = re.search(
+            r"function _toggleActivityGroup\(summary\)\{(.*?)\n\}",
+            src,
+            re.DOTALL,
+        )
+        assert toggle_body and "_onLiveActivityToggle(group)" in toggle_body.group(1), (
+            "_toggleActivityGroup() must invoke _onLiveActivityToggle(group) "
+            "so user clicks update the tracker"
         )
 
     def test_clear_live_tool_cards_resets_expand_intent(self):

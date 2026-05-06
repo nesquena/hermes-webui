@@ -147,6 +147,49 @@ class TestToolCallGroupingStatic:
             "Live grouping must preserve data-live-tid so tool_start/tool_complete updates still replace the correct card."
         )
 
+    def test_activity_disclosure_state_is_session_and_turn_scoped(self):
+        helper = _function_body(UI_JS, "ensureActivityGroup")
+        toggle_fn = _function_body(UI_JS, "_toggleActivityGroup")
+        key_fn = _function_body(UI_JS, "_activityDisclosureStorageKey")
+        render_fn = _function_body(UI_JS, "renderMessages")
+        live_fn = _function_body(UI_JS, "appendLiveToolCard")
+        thinking_fn = _function_body(UI_JS, "appendThinking")
+        done_fn = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+        assert "hermes-activity-disclosure:" in UI_JS, (
+            "Activity disclosure state should use a dedicated localStorage namespace."
+        )
+        assert "S.session.session_id" in key_fn, (
+            "Activity disclosure state must be scoped to the current chat/session."
+        )
+        assert "data-activity-disclosure-key" in helper, (
+            "Each Activity group needs a stable per-turn key for persisted disclosure state."
+        )
+        assert "_readActivityDisclosureState" in helper, (
+            "ensureActivityGroup() should hydrate the saved open/closed state before using defaults."
+        )
+        assert "_writeActivityDisclosureState" in toggle_fn, (
+            "Clicking the Activity summary should persist the new open/closed state."
+        )
+        assert "assistant:" in render_fn, (
+            "Settled Activity groups should be keyed by assistant message index."
+        )
+        assert "live:" in live_fn + thinking_fn, (
+            "Live Activity groups should be keyed by active stream id."
+        )
+        assert "_copyActivityDisclosureState('live:'+streamId, 'assistant:'" in done_fn, (
+            "When a live turn settles, its saved disclosure state should transfer to the persisted assistant turn."
+        )
+
+    def test_live_tool_activity_defaults_collapsed_unless_saved_open(self):
+        live_fn = _function_body(UI_JS, "appendLiveToolCard")
+        helper = _function_body(UI_JS, "ensureActivityGroup")
+        assert "collapsed:false" not in re.sub(r"\s+", "", live_fn), (
+            "Compact live tool activity should not force-open every time a chat is revisited."
+        )
+        assert "savedState==='open'" in helper or 'savedState==="open"' in helper, (
+            "A previously-open Activity group should still restore open from persisted state."
+        )
+
     def test_tools_and_thinking_share_one_collapsed_activity_dropdown(self):
         ui_min = re.sub(r"\s+", "", UI_JS)
         assert "functionensureActivityGroup(" in ui_min, (

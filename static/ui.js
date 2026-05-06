@@ -3763,11 +3763,44 @@ function _thinkingActivityNode(text){
 // finalized into a settled assistant turn (the live attribute is removed in
 // _convertLiveActivityGroupToSettled / when liveAssistantTurn loses its id).
 let _liveActivityUserExpanded;
+const _activityDisclosureStoragePrefix='hermes-activity-disclosure:';
+function _activityDisclosureStorageKey(activityKey){
+  if(!activityKey||!S.session||!S.session.session_id) return null;
+  return _activityDisclosureStoragePrefix+S.session.session_id+':'+activityKey;
+}
+function _readActivityDisclosureState(activityKey){
+  const key=_activityDisclosureStorageKey(activityKey);
+  if(!key) return null;
+  try{
+    const saved=localStorage.getItem(key);
+    return saved==='open'||saved==='closed'?saved:null;
+  }catch(_){return null;}
+}
+function _writeActivityDisclosureState(activityKey, open){
+  const key=_activityDisclosureStorageKey(activityKey);
+  if(!key) return;
+  try{localStorage.setItem(key, open?'open':'closed');}catch(_){}
+}
+function _copyActivityDisclosureState(fromActivityKey, toActivityKey){
+  const state=_readActivityDisclosureState(fromActivityKey);
+  if(state) _writeActivityDisclosureState(toActivityKey, state==='open');
+}
+function _activityKeyForLiveTurn(){
+  return S.activeStreamId?'live:'+S.activeStreamId:null;
+}
 function _onLiveActivityToggle(group){
   if(!group) return;
   // Only track explicit user clicks on the live group, not programmatic toggles.
   if(group.getAttribute('data-live-tool-call-group')!=='1') return;
   _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
+}
+function _toggleActivityGroup(summary){
+  const group=summary&&summary.closest?summary.closest('.tool-call-group'):null;
+  if(!group) return;
+  const collapsed=group.classList.toggle('tool-call-group-collapsed');
+  summary.setAttribute('aria-expanded',String(!collapsed));
+  _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _clearLiveActivityUserIntent(){
   _liveActivityUserExpanded = undefined;
@@ -3776,23 +3809,31 @@ function ensureActivityGroup(inner, opts){
   opts=opts||{};
   if(!inner) return null;
   const live=!!opts.live;
+  const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
   const selector=live?'.tool-call-group[data-live-tool-call-group="1"]':'.tool-call-group[data-agent-activity-group="1"]';
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
+    const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
-    // activity group within the same turn (#1298).
+    // activity group within the same turn (#1298), then let persisted chat/turn
+    // state win across session switches and reloads.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
+    if(savedState==='open') collapsed=false;
+    else if(savedState==='closed') collapsed=true;
     group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
+    if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
     if(live) group.setAttribute('data-live-tool-call-group','1');
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-duration"></span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-duration"></span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
     else inner.appendChild(group);
+  }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
+    group.setAttribute('data-activity-disclosure-key',activityKey);
   }
   if(live) _setActivityElapsedStartedAt(group);
   _syncToolCallGroupSummary(group);
@@ -4647,7 +4688,7 @@ function renderMessages(options){
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode});
+        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
         const sourceMsg=S.messages[aIdx]||{};
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
@@ -4972,7 +5013,7 @@ function appendLiveToolCard(tc){
   }
   const children=Array.from(inner.children);
   const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:false,anchor});
+  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group.querySelector('.tool-call-group-body');
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
@@ -5764,7 +5805,7 @@ function appendThinking(text=''){
     el.id!=='toolRunningRow' &&
     el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
   ).pop();
-  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor});
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
