@@ -9,11 +9,14 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the demo smoke suite now surfaces a compact Weather observation / agent-bridge summary for the weather vertical, so `Run all smokes` shows visible end-to-end weather progress without exposing prompt text, generated/source fields, or credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run notes walkthrough` action that launches the metadata-only Notes app smoke, displays the saved-notes/folder/attachment checklist, and opens the safe widget manager for the resulting demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add notes walkthrough action`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run notes walkthrough`, posts exactly `{demo: "demo_notes_app"}`, then renders the Notes app smoke result plus safe widget manager/event inbox for `demo-notes-app` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): summarize weather suite observation`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now renders a compact Weather observation row (`Prague, CZ · 18 °C · partly cloudy · Agent bridge: 1 queued`) from the existing safe weather smoke result while continuing to omit raw prompt/answer text, hostile renderer/script/API-auth markers, and secret-looking values from DOM.

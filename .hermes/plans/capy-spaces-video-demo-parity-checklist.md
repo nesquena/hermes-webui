@@ -3,7 +3,7 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-05-04
+Last implementation-status update: 2026-05-06
 
 ## Current parity implementation notes
 
@@ -53,6 +53,7 @@ Recently landed:
 - Source-style current-space metadata/layout helpers now include metadata-only `space.current.saveMeta` and `space.current.saveLayout`, accepting `activeSpaceId` payloads while saving only safe Capy Space metadata/layout fields and omitting generated/credential-like fields from responses.
 - Source-style widget size utility coverage now includes metadata-only `space.spaces.sizeToToken`, mirroring Space Agent preset/object/fallback size normalization and clamping without exposing generated/source/API auth markers.
 - Source-style runtime collection property coverage now includes metadata-only `space.spaces.items`, `space.spaces.all`, `space.spaces.byId`, `space.spaces.current`, `space.spaces.currentId`, `space.current.byId`, `space.current.agentInstructions`, and `space.current.specialInstructions`, matching another Space Agent runtime namespace shape without exposing generated widget bodies or credential-like request fields.
+- The Spaces shell now exposes a direct `Run notes walkthrough` action that launches the safe Notes app smoke from the main Spaces toolbar and renders the notes checklist/folder preview/attachment preview plus the safe widget manager for the demo Space without exposing generated renderer/source/API-auth markers.
 - The demo smoke suite now surfaces a compact safe Weather observation / agent-bridge summary for the weather vertical in `Run all smokes`, making the suite output more visibly end-to-end while still omitting raw prompt/answer text and generated/source/API-auth markers.
 - The Weather demo widget manager now shows the starter prompt hint and ready-for-agent-refresh state from safe widget-list metadata before the first refresh, making the visible weather vertical clearer without exposing generated/source/API-auth markers.
 - The Weather demo smoke now records the Prague weather observation, queues one safe `widget.refresh` event for the persistent weather widget, surfaces that queued bridge count in the visible demo-smoke status, and shows an inline `Agent bridge` status in the weather widget manager without exposing prompts/generated/source/API-auth markers.

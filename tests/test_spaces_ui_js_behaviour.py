@@ -253,6 +253,14 @@ global.fetch = async function(path, opts = {}) {
       ],
     });
   }
+  if (path === 'api/spaces/widgets?space_id=demo-notes-app') {
+    return response({ widgets: [
+      { id: 'notes-folders', kind: 'folder-list', title: 'Folders', layout: { x: 0, y: 0, w: 5, h: 10, minimized: false }, metadata: { folders: [{ id: 'folder-inbox', title: 'Inbox', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'folder-demo', title: 'Demo Project' }], interaction: { rename: 'metadata-only', create_folder: 'metadata-only', active_folder_id: 'folder-demo', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', layout: { x: 5, y: 0, w: 11, h: 10, minimized: false }, metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' },
+      { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', layout: { x: 16, y: 0, w: 8, h: 10, minimized: false }, metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } },
+      { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', layout: { x: 0, y: 10, w: 8, h: 6, minimized: false }, metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+    ] });
+  }
   if (path === 'api/spaces/widgets?space_id=lab' || path === 'api/spaces/widgets?space_id=demo-weather-widget') {
     const minimized = scenario === 'restoreWidget';
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
@@ -280,6 +288,11 @@ global.fetch = async function(path, opts = {}) {
       },
       renderer: '<script>bad()</script>',
     }] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-notes-app') {
+    return response({ events: [
+      { event_id: 'evt-notes-save', event_name: 'notes.save', widget_id: 'notes-editor', status: 'queued', created_at: 1710000200, payload_summary: { action: 'save-note', note: 'Authorization: Bearer ***' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
   }
   if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget') {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
@@ -788,6 +801,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runWeatherWalkthrough', {});
+  } else if (scenario === 'runNotesWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runNotesWalkthrough', {});
   } else if (scenario === 'runResearchDemoParitySmoke') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1804,6 +1821,32 @@ def test_spaces_ui_weather_walkthrough_is_visible_and_runs_prompt_to_widget_flow
     assert "Queued widget events" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
     assert "prompt: [REDACTED]" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_notes_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runNotesWalkthrough")
+
+    assert "Run notes walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_notes_app"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-notes-app", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-notes-app", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Notes app checklist" in out["rootHtml"]
+    assert "Saved notes preview" in out["rootHtml"]
+    assert "Widgets for demo-notes-app" in out["rootHtml"]
+    assert "notes-folders" in out["rootHtml"]
+    assert "notes-editor" in out["rootHtml"]
+    assert "notes-preview" in out["rootHtml"]
+    assert "notes-attachments" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "notes.save" in out["rootHtml"]
+    assert "note: [REDACTED]" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
