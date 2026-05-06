@@ -64,31 +64,46 @@ def test_app_titlebar_for_chat_uses_tab_conversations():
     )
 
 
-def test_showing_chat_css_makes_panel_chat_a_sidecar():
-    """CSS ensures #panelChat renders as a 260px left sidecar inside #mainChat
-    when the showing-chat class is on .main."""
-    assert (
-        "body.dashboard-shell-mode main.main.showing-chat #mainChat>#panelChat"
-        in STYLE
-    ), "showing-chat sidecar rule missing"
-    # Width pinned to match the skills sidecar so visual rhythm is identical.
+def test_showing_chat_css_renders_panel_chat_full_width():
+    """Conversas panel is browse-only: #panelChat takes the full width of
+    #mainChat. Clicking a session promotes to dashboard panel via
+    switchPanel('dashboard'), where the transcript renders properly."""
     rule_idx = STYLE.find(
         "body.dashboard-shell-mode main.main.showing-chat #mainChat>#panelChat"
+    )
+    assert rule_idx != -1, "showing-chat panelChat rule missing"
+    snip = STYLE[rule_idx:rule_idx + 400]
+    assert "flex:1" in snip, "panelChat should fill #mainChat"
+    assert "width:260px" not in snip, (
+        "Sidecar layout removed — panelChat now occupies the full main area"
+    )
+
+
+def test_showing_chat_css_hides_messages_and_composer():
+    """The transcript and composer never render inside the Conversas panel
+    itself; they are only revealed in the dashboard chat embed."""
+    rule_idx = STYLE.find(
+        "body.dashboard-shell-mode main.main.showing-chat #mainChat>.messages"
+    )
+    assert rule_idx != -1, (
+        "showing-chat must hide #messages so the broken side-by-side layout "
+        "the user reported never reappears"
     )
     snip = STYLE[rule_idx:rule_idx + 400]
-    assert "width:260px" in snip
-    assert "border-right" in snip
+    assert "display:none" in snip
 
 
-def test_showing_chat_css_makes_main_chat_a_flex_row():
-    """The container must flex horizontally so the sidecar and the
-    transcript share the same row."""
-    assert (
-        "body.dashboard-shell-mode main.main.showing-chat>#mainChat"
-        in STYLE
+def test_session_click_promotes_to_dashboard():
+    """Clicking a session in the Conversas list must call
+    switchPanel('dashboard') so the transcript opens in the dashboard chat
+    embed (where the full layout renders), not in the cramped sidecar."""
+    sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text()
+    snippet_idx = sessions_js.find("await loadSession(s.session_id);")
+    assert snippet_idx != -1
+    block = sessions_js[snippet_idx:snippet_idx + 800]
+    assert "_currentPanel==='chat'" in block, (
+        "session click must check current panel before redirecting"
     )
-    rule_idx = STYLE.find(
-        "body.dashboard-shell-mode main.main.showing-chat>#mainChat"
+    assert "switchPanel('dashboard')" in block, (
+        "session click must call switchPanel('dashboard')"
     )
-    snip = STYLE[rule_idx:rule_idx + 200]
-    assert "flex-direction:row" in snip
