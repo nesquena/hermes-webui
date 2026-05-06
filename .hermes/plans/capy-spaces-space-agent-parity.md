@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run research walkthrough` action that launches the metadata-only Research Harness PDF-export smoke, displays the visible progress/rollback status, and opens the safe widget manager/event inbox for the resulting demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run browser walkthrough` action that launches the metadata-only browser co-control smoke, displays the persistent browser panel/control/notes widgets, and opens the safe widget manager/event inbox for the demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add browser walkthrough action`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run browser walkthrough`, posts exactly `{demo: "demo_browser_cocontrol_google_or_test_site"}`, then renders the browser co-control smoke result plus safe widget manager/event inbox for `demo-browser-cocontrol-google-or-test-site` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): add research walkthrough action`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run research walkthrough`, posts exactly `{demo: "demo_research_harness_pdf_export"}`, then renders the Research Harness PDF-export smoke result plus safe widget manager/event inbox for `demo-research-harness-pdf-export` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.

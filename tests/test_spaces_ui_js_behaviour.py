@@ -115,6 +115,26 @@ global.fetch = async function(path, opts = {}) {
       { id: 'dashboard-agenda', kind: 'agenda', title: 'Today agenda', metadata: { agenda: { status: 'ready', items: ['Morning brief', 'Market check'] } } },
       { id: 'dashboard-brief', kind: 'markdown', title: 'Daily brief', metadata: { notes: { status: 'ready', summary: 'Daily dashboard metadata persisted.' } } },
     ];
+    if (demo === 'demo_browser_cocontrol_google_or_test_site') {
+      return response({
+        ok: true,
+        action: 'browser-surface-seeded',
+        demo: demo,
+        template: 'browser',
+        mode: 'metadata-only-smoke',
+        space: { space_id: 'demo-browser-cocontrol-google-or-test-site', name: 'Browser Co-control Smoke', widget_count: 3, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        widgets: [
+          { id: 'browser-panel', kind: 'browser-surface', title: 'Shared browser panel', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'browser-controls', kind: 'browser-controls', title: 'Agent controls', renderer: '<script>bad()</script>' },
+          { id: 'browser-notes', kind: 'markdown', title: 'Browser notes', source: 'SECRET_SOURCE' },
+        ],
+        widget_count: 3,
+        persisted_widget_count: 3,
+        persistence_checked: true,
+        revision_event_count: 2,
+        rollback_point: true,
+      });
+    }
     return response({
       ok: true,
       action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : 'space.demo.run'))),
@@ -325,6 +345,18 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/events?space_id=demo-daily-dashboard') {
     return response({ events: [
       { event_id: 'evt-dashboard-refresh', event_name: 'dashboard.refresh', widget_id: 'dashboard-prices', status: 'queued', created_at: 1710000500, payload_summary: { action: 'refresh-dashboard', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-browser-cocontrol-google-or-test-site') {
+    return response({ widgets: [
+      { id: 'browser-panel', kind: 'browser-surface', title: 'Shared browser panel', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, metadata: { browser_surface: { url: 'about:blank', inspection: 'metadata-only', bridge: 'planned-cdp', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'browser-controls', kind: 'browser-controls', title: 'Agent controls', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false }, metadata: { actions: ['open_url', 'snapshot', 'click_ref', 'type_ref'], permissions: { browser_control: 'agent-mediated', authorization: 'bearer placeholder' } } },
+      { id: 'browser-notes', kind: 'markdown', title: 'Browser notes', layout: { x: 16, y: 5, w: 8, h: 5, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Shared browser co-control remains metadata-only.' } }, source: 'SECRET_SOURCE' },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site') {
+    return response({ events: [
+      { event_id: 'evt-browser-open', event_name: 'browser.open_url', widget_id: 'browser-panel', status: 'queued', created_at: 1710000600, payload_summary: { action: 'open-test-site', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-research-harness-pdf-export') {
@@ -860,6 +892,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDashboardWalkthrough', {});
+  } else if (scenario === 'runBrowserWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runBrowserWalkthrough', {});
   } else if (scenario === 'runResearchWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1956,6 +1992,32 @@ def test_spaces_ui_dashboard_walkthrough_is_visible_and_opens_widget_manager_met
     assert "Queued widget events" in out["rootHtml"]
     assert "dashboard.refresh" in out["rootHtml"]
     assert "action: refresh-dashboard" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_browser_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runBrowserWalkthrough")
+
+    assert "Run browser walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_browser_cocontrol_google_or_test_site"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-browser-cocontrol-google-or-test-site", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Browser Co-control Smoke" in out["rootHtml"]
+    assert "Action: browser-surface-seeded" in out["rootHtml"]
+    assert "Widgets for demo-browser-cocontrol-google-or-test-site" in out["rootHtml"]
+    assert "browser-panel" in out["rootHtml"]
+    assert "browser-controls" in out["rootHtml"]
+    assert "browser-notes" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "browser.open_url" in out["rootHtml"]
+    assert "action: open-test-site" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
