@@ -131,6 +131,30 @@ function restoreDashboardSettings() {
   if (settingsMenuAnchor) _insertAfter(settingsMenuAnchor, menu);
 }
 
+let chatListPanelAnchor = null;
+
+function mountDashboardChatList() {
+  // Mirror of mountDashboardSkills: when the user opens the Conversas tab,
+  // surface #panelChat (the historical session list) as a 260px sidecar
+  // inside #mainChat — keeping the Neo dashboard chrome (left rail menu,
+  // topbar, hero) intact instead of falling back to the legacy hermes shell.
+  const panel = document.getElementById('panelChat');
+  const mainChat = document.getElementById('mainChat');
+  if (!panel || !mainChat) return;
+  if (!chatListPanelAnchor && panel.parentNode) {
+    chatListPanelAnchor = document.createComment('chatListPanelAnchor');
+    panel.parentNode.insertBefore(chatListPanelAnchor, panel);
+  }
+  if (panel.parentNode !== mainChat) mainChat.insertBefore(panel, mainChat.firstChild);
+}
+
+function restoreDashboardChatList() {
+  const panel = document.getElementById('panelChat');
+  const mainChat = document.getElementById('mainChat');
+  if (!panel || !mainChat || panel.parentNode !== mainChat) return;
+  if (chatListPanelAnchor) _insertAfter(chatListPanelAnchor, panel);
+}
+
 let skillsPanelAnchor = null;
 
 function mountDashboardSkills() {
