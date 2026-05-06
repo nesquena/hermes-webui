@@ -2731,6 +2731,75 @@ def get_available_models() -> dict:
             if not _has_unnamed:
                 detected_providers.discard("custom")
 
+        # Resolve bare active_provider to custom:* slug when it matches a
+        # custom_providers name, and deduplicate bare vs custom:* providers.
+        # Also filter out providers that have no actual credentials (e.g.
+        # copilot-acp appearing from list_available_providers() without real
+        # access).
+        _custom_providers_cfg = cfg.get("custom_providers", [])
+        _custom_names: dict[str, str] = {}  # bare name -> custom:* slug
+        _has_named_custom = False
+        if isinstance(_custom_providers_cfg, list):
+            for _cp in _custom_providers_cfg:
+                if not isinstance(_cp, dict):
+                    continue
+                _cp_name = (_cp.get("name") or "").strip()
+                if _cp_name:
+                    _slug = "custom:" + _cp_name.lower().replace(" ", "-")
+                    _custom_names[_cp_name.lower().replace("_", "-")] = _slug
+                    _has_named_custom = True
+
+        # 1) Resolve active_provider when it matches a bare custom provider name
+        if (
+            active_provider
+            and active_provider in _custom_names
+            and active_provider not in _PROVIDER_DISPLAY
+        ):
+            active_provider = _custom_names[active_provider]
+
+        # 2) Deduplicate: remove bare slug when custom:* group exists
+        if _has_named_custom:
+            for _bare_name, _slug in _custom_names.items():
+                if _slug in detected_providers:
+                    detected_providers.discard(_bare_name)
+
+        # 3) Filter providers without credentials (e.g. copilot-acp with no key)
+        _providers_cfg = cfg.get("providers", {})
+        _has_credentials = set()
+        if isinstance(_providers_cfg, dict):
+            for _pk, _pc in _providers_cfg.items():
+                if isinstance(_pc, dict) and (_pc.get("api_key") or "").strip():
+                    _has_credentials.add(_pk.lower().replace("_", "-"))
+        # Also check credential_pool for explicit entries
+        try:
+            from hermes_cli.auth import get_auth_status as _gas
+            for _pid in list(detected_providers):
+                try:
+                    if _gas(_pid).get("logged_in", False):
+                        _has_credentials.add(_pid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Remove detected_providers that have no credentials and are not
+        # in _PROVIDER_DISPLAY (i.e. they're only visible because they
+        # appeared in list_available_providers() but have no actual access)
+        for _pid in list(detected_providers):
+            if _pid in _PROVIDER_DISPLAY:
+                continue
+            if _pid.startswith("custom:"):
+                continue
+            if _pid in _has_credentials:
+                continue
+            # Check if the provider has any API key in config at all
+            _normalized = _pid.lower().replace("_", "-")
+            if _normalized in _providers_cfg and _providers_cfg[_normalized].get("api_key", ""):
+                continue
+            # This provider has no credentials — remove it
+            detected_providers.discard(_pid)
+            logger.debug("Dropping provider %s from detected_providers (no credentials)", _pid)
+
         # Resolve bare "custom" active_provider to the actual custom provider
         # slug (e.g. "custom:llama-swap") so the frontend can match it to the
         # correct model group.  Without this, active_provider remains the
