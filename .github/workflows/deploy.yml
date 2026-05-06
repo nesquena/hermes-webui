@@ -77,5 +77,12 @@ jobs:
               sudo systemctl restart hermes-webui
               sudo systemctl status hermes-webui --no-pager
             fi
-            curl -fsS http://127.0.0.1:8787/health
+            for attempt in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8787/health; then
+                exit 0
+              fi
+              sleep 1
+            done
+            journalctl -u hermes-webui -n 120 --no-pager
+            exit 1
           REMOTE
