@@ -25,9 +25,10 @@
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
-  <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
+  <!-- xterm.js CSS (self-hosted, see static/vendor/xterm@5.3.0/) -->
+  <link rel="stylesheet" href="static/vendor/xterm@5.3.0/css/xterm.css">
+  <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift; self-hosted) -->
+  <link rel="stylesheet" href="static/vendor/katex@0.16.22/dist/katex.min.css">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
   <!-- Self-hosted from npm:streaming-markdown@0.2.15 — no CDN dependency.           -->
   <!-- sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa -->
@@ -39,16 +40,22 @@
     // sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa
     window.smd = smd;
   </script>
-  <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
-  <!-- SRI removed from prism-tomorrow.min.css — jsdelivr serves different digests across
-       edge nodes causing intermittent integrity failures that block syntax highlighting (#1100).
-       Version is pinned to @1.29.0 which is sufficient for supply-chain assurance. -->
-  <link id="prism-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js" integrity="sha384-/nfmYPUzWMS6v2atn8hbljz7NE0EI1iGx34lJaNzyVjWGDzMv+ciUZUeJpKA3Glc" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" integrity="sha384-AQLWHRKAgdTxkolJcLOELg4E9rE89CPE2xMy3tIRFn08NcGKPTsELdvKomqji+DL" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js" integrity="sha384-U4fBROT3kCM582gaYiNaOSQiJbXPzd9SfR1598Y7yeGSYVBzikXrNg0XyuU+mOnl" crossorigin="anonymous" defer></script>
+  <!-- Prism.js syntax highlighting (loaded async, non-blocking; self-hosted) -->
+  <!-- Versions pinned in path under static/vendor/prismjs@1.29.0/ -->
+  <link id="prism-theme" rel="stylesheet" href="static/vendor/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+  <script src="static/vendor/prismjs@1.29.0/components/prism-core.min.js" defer></script>
+  <script src="static/vendor/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" defer></script>
+  <script defer>
+    // Lazy-load Prism language components from the self-hosted vendor folder
+    // instead of the jsdelivr CDN. Deferred scripts run in document order, so
+    // this fires after prism-core and the autoloader have initialised.
+    if(window.Prism&&Prism.plugins&&Prism.plugins.autoloader){
+      Prism.plugins.autoloader.languages_path='static/vendor/prismjs@1.29.0/components/';
+    }
+  </script>
+  <script src="static/vendor/xterm@5.3.0/lib/xterm.js" defer></script>
+  <script src="static/vendor/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" defer></script>
+  <script src="static/vendor/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js" defer></script>
   <!-- PWA service worker registration -->
   <script>
     if ('serviceWorker' in navigator) {
@@ -1458,7 +1465,7 @@
     <div class="onboarding-shell">
       <div class="onboarding-sidebar">
         <div class="onboarding-badge" data-i18n="onboarding_badge">FIRST RUN</div>
-        <h2 id="onboardingTitle" data-i18n="onboarding_title">Welcome to Hermes Web UI</h2>
+        <h2 id="onboardingTitle" data-i18n="onboarding_title">Bem-vindo ao Neo</h2>
         <p id="onboardingLead" data-i18n="onboarding_lead">A quick guided setup will check your Hermes install, choose a workspace and model, and optionally protect the app with a password.</p>
         <div class="onboarding-steps" id="onboardingSteps"></div>
       </div>
