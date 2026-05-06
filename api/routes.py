@@ -3183,7 +3183,30 @@ def handle_get(handler, parsed) -> bool:
         import datetime
         identity_map = _load_gateway_session_identity_map()
         sessions_path = _gateway_session_metadata_path()
-        running = bool(identity_map)
+
+        # Detect whether the gateway process is alive, independent of
+        # connected messaging platforms.  An empty identity_map just
+        # means zero platforms connected, not that the gateway is down.
+        #
+        # agent_health.build_agent_health_payload() is the authoritative
+        # signal: it reads gateway.status runtime metadata and returns a
+        # tri-state `alive` field (True/False/None).  This avoids the
+        # false-negative where the gateway is running but has zero active
+        # messaging sessions (empty identity_map).
+        running = False
+        try:
+            health = build_agent_health_payload()
+            running = health.get("alive") is True
+        except Exception:
+            # Fall back to identity_map heuristic when the agent_health
+            # module is not available (e.g. WebUI-only deployments).
+            import logging
+            logging.getLogger("routes").warning(
+                "agent_health.build_agent_health_payload() raised; "
+                "falling back to identity_map heuristic for gateway status"
+            )
+            running = bool(identity_map)
+
         platforms_set: set[str] = set()
         for meta in identity_map.values():
             raw = meta.get("raw_source") or meta.get("platform") or ""
