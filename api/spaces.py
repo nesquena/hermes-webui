@@ -1495,6 +1495,7 @@ def space_demo_run(name: str) -> dict[str, Any]:
                 "blank_space": True,
                 "query": "What is the weather in Prague?",
                 "chat_answer_status": "recorded",
+                "answer_preview": "Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.",
                 "widget_request": "show it to me in a widget",
                 "widget_created": True,
                 "reload_verified": True,

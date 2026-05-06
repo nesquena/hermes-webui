@@ -149,12 +149,14 @@
     const reloadVerified = flow.reload_verified ? 'verified' : 'not verified';
     const query = flow.query ? String(flow.query) : '';
     const chatAnswer = flow.chat_answer_status ? String(flow.chat_answer_status) : '';
+    const answerPreview = flow.answer_preview ? String(flow.answer_preview) : '';
     const widgetRequest = flow.widget_request ? String(flow.widget_request) : '';
     const networkMode = flow.network_mode ? String(flow.network_mode) : '';
     return '<div class="capy-spaces-card capy-spaces-demo-flow"><h4>Prompt → widget flow</h4>' +
       '<div class="capy-spaces-muted">Blank space: '+escapeHtml(blankSpace)+' · Widget: '+escapeHtml(widgetCreated)+' · Widget after reload: '+escapeHtml(reloadVerified)+'</div>' +
       (query ? '<div class="capy-spaces-muted">Query: '+escapeHtml(query)+'</div>' : '') +
       (chatAnswer ? '<div class="capy-spaces-muted">Chat answer: '+escapeHtml(chatAnswer)+'</div>' : '') +
+      (answerPreview ? '<div class="capy-spaces-muted">Answer preview: '+escapeHtml(answerPreview)+'</div>' : '') +
       (widgetRequest ? '<div class="capy-spaces-muted">Widget request: '+escapeHtml(widgetRequest)+'</div>' : '') +
       (networkMode ? '<div class="capy-spaces-muted">Network mode: '+escapeHtml(networkMode)+'</div>' : '') +
       '</div>';

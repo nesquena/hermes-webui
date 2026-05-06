@@ -3982,7 +3982,8 @@ def test_weather_demo_widget_list_exposes_safe_observation_preview(monkeypatch, 
         },
         "summary": "Partly cloudy in Prague; refreshed through agent-mediated weather metadata.",
     }
-    serialized = json.dumps(widgets).lower()
+    assert result["prompt_flow"]["answer_preview"] == "Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata."
+    serialized = json.dumps({"widgets": widgets, "result": result}).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
     assert "<script" not in serialized
