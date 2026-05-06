@@ -80,7 +80,7 @@ class TestLoadSessionIdleOverlap:
 
         found = False
         for pos in positions:
-            block = SESSIONS_JS[pos : pos + 600]
+            block = SESSIONS_JS[pos : pos + 1200]
             has_highlight = "highlightCode()" in block
             has_loaddir = "loadDir('.')" in block
             if has_highlight and has_loaddir:

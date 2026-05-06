@@ -480,6 +480,14 @@ async function loadSession(sid){
       setComposerStatus('');
       updateQueueBadge(sid);
       syncTopbar();renderMessages();
+      // Subscribe to approval/clarify SSE even when the session is idle.
+      // Approvals can be queued by gateway tool calls (Telegram/WhatsApp) on a
+      // session the user is currently viewing without actively streaming, and
+      // the modal must surface immediately. The polling auto-closes when the
+      // session changes (see _approvalSSEHealthTimer in messages.js).
+      startApprovalPolling(sid);
+      if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
       // Kick off loadDir first (issues network requests), then highlight code.
       // The fetch is dispatched before the CPU-bound Prism pass begins.
       const _dirP=loadDir('.');

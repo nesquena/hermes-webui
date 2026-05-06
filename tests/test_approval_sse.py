@@ -190,6 +190,26 @@ class TestFrontendSSEImplementation:
         assert "_approvalSSEHealthTimer" in MESSAGES_JS, \
             "SSE health timer must be tracked and cleared in stopApprovalPolling"
 
+    def test_polling_not_gated_by_busy(self):
+        """SSE health timer and fallback poll must not depend on S.busy.
+
+        Approvals can arrive for an idle session (gateway tool calls from
+        Telegram/WhatsApp). Closing the SSE whenever S.busy is false caused
+        the modal to never appear. Regression guard for the Neo VPS fix.
+        """
+        # Locate the health-timer interval body.
+        anchor = MESSAGES_JS.find("_approvalSSEHealthTimer = setInterval")
+        assert anchor != -1, "health timer must exist"
+        body = MESSAGES_JS[anchor:anchor + 400]
+        assert "S.busy" not in body, \
+            "approval SSE health timer must not gate on S.busy"
+
+        anchor = MESSAGES_JS.find("function _startApprovalFallbackPoll")
+        assert anchor != -1, "fallback poll function must exist"
+        body = MESSAGES_JS[anchor:anchor + 600]
+        assert "S.busy" not in body, \
+            "approval fallback poll must not gate on S.busy"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. Unit tests (in-process, no HTTP server)
