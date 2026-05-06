@@ -81,6 +81,32 @@ function _insertAfter(anchor, node) {
   anchor.parentNode.insertBefore(node, anchor.nextSibling);
 }
 
+function toggleDashboardMobileRail(force) {
+  // Slide the dashboard-right column (hero / KPIs / quick actions) in and
+  // out on mobile (<=760px CSS breakpoint). On desktop the rail is always
+  // visible, so the toggle is a no-op above that width.
+  const rail = document.querySelector('main.main.showing-dashboard .dashboard-right');
+  const overlay = document.getElementById('dashboardMobileOverlay');
+  const btn = document.getElementById('btnDashboardMobileRail');
+  if (!rail) return;
+  const willOpen = (typeof force === 'boolean')
+    ? force
+    : !rail.classList.contains('mobile-open');
+  rail.classList.toggle('mobile-open', willOpen);
+  if (overlay) overlay.classList.toggle('visible', willOpen);
+  if (btn) btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  if (willOpen) {
+    // Esc closes the drawer; bind once per open cycle.
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        toggleDashboardMobileRail(false);
+        document.removeEventListener('keydown', onKey, true);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+  }
+}
+
 function mountDashboardChat() {
   const messages = document.getElementById('messages');
   const composer = document.getElementById('composerWrap');

@@ -2840,6 +2840,39 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
   .dashboard-chat-composer .composer-model-chip,
   .dashboard-chat-composer .composer-reasoning-chip,
   .dashboard-chat-composer .composer-workspace-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;}
+
+  /* ── Mobile dashboard: chat protagonist ──
+     Collapse the two-column dashboard into a single full-height column
+     hosting the chat embed. Hero / KPI / quick-actions move into a
+     slide-in drawer on the right, accessed via the new mobile rail
+     button in the topbar. Composer stays anchored at the bottom. */
+  body.dashboard-shell-mode main.main.showing-dashboard .main-view-body{padding:0;height:100%;overflow:hidden;}
+  body.dashboard-shell-mode main.main.showing-dashboard .main-view-content{padding:0;height:100%;max-width:none;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-grid{grid-template-columns:1fr;gap:0;height:100%;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-center{height:100%;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-chat-panel{height:100%;border-radius:0;border-left:0;border-right:0;border-top:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-right{
+    position:fixed;right:calc(-1 * min(360px, 92vw));top:0;bottom:0;
+    width:min(360px,92vw);height:100%;
+    background:var(--bg);border-left:1px solid var(--border);
+    z-index:300;transition:right .25s ease;
+    padding:14px 14px max(14px, env(safe-area-inset-bottom));
+    overflow-y:auto;overscroll-behavior:contain;gap:10px;
+  }
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-right.mobile-open{
+    right:0;box-shadow:-12px 0 36px rgba(0,0,0,.5);
+  }
+  /* Backdrop only renders while the rail is open. */
+  .dashboard-mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:299;-webkit-tap-highlight-color:transparent;}
+  .dashboard-mobile-overlay.visible{display:block;}
+  /* Topbar trims when the mobile rail button consumes one slot. */
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-topbar-status{display:none;}
+  body.dashboard-shell-mode main.main.showing-dashboard #dashboardTerminalBtn span:not([aria-hidden]){display:none;}
+  body.dashboard-shell-mode main.main.showing-dashboard #dashboardTerminalBtn{padding:0 10px;}
+}
+@media(min-width:761px){
+  /* Mobile rail button is desktop-noise on wide viewports. */
+  .dashboard-mobile-rail-btn{display:none!important;}
 }
 
 .hero-card{position:relative;height:clamp(300px,34vh,330px);flex:0 0 auto;border:1px solid rgba(0,229,255,.42);border-radius:8px;overflow:hidden;background:#030810;box-shadow:0 0 0 1px rgba(0,229,255,.14),0 0 36px rgba(0,229,255,.2),inset 0 0 48px rgba(0,0,0,.62);}
