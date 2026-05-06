@@ -167,7 +167,7 @@ def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
     expected_free_ids = {
         "openrouter/elephant-alpha",
         "openrouter/owl-alpha",
-        "openrouter/tencent/hy3-preview:free",
+        "tencent/hy3-preview:free",
         "nvidia/nemotron-3-super-120b-a12b:free",
         "arcee-ai/trinity-large-preview:free",
     }
