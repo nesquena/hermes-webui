@@ -261,6 +261,14 @@ global.fetch = async function(path, opts = {}) {
       { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', layout: { x: 0, y: 10, w: 8, h: 6, minimized: false }, metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
     ] });
   }
+  if (path === 'api/spaces/widgets?space_id=demo-kanban-board') {
+    return response({ widgets: [
+      { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', layout: { x: 0, y: 0, w: 8, h: 8, minimized: false }, metadata: { kanban: { status: 'board-ready', column: 'Backlog', color: 'blue', cards: [{ id: 'card-plan', title: 'Plan the first task', status: 'todo', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only', renderer: '<script>bad()</script>' } } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', layout: { x: 8, y: 0, w: 8, h: 8, minimized: false }, metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'yellow', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } }, source: 'SECRET_SOURCE' },
+      { id: 'kanban-done', kind: 'kanban-column', title: 'Done', layout: { x: 16, y: 0, w: 8, h: 8, minimized: false }, metadata: { kanban: { status: 'board-ready', column: 'Done', color: 'green', cards: [{ id: 'card-install', title: 'Install board template', status: 'done' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only', token: 'SECRET_VALUE_DO_NOT_LEAK' } } } },
+      { id: 'kanban-notes', kind: 'markdown', title: 'Board notes', layout: { x: 0, y: 8, w: 24, h: 4, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Demo board state persisted as safe widget metadata.' } } },
+    ] });
+  }
   if (path === 'api/spaces/widgets?space_id=lab' || path === 'api/spaces/widgets?space_id=demo-weather-widget') {
     const minimized = scenario === 'restoreWidget';
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
@@ -291,14 +299,19 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/widget/events?space_id=demo-notes-app') {
     return response({ events: [
-      { event_id: 'evt-notes-save', event_name: 'notes.save', widget_id: 'notes-editor', status: 'queued', created_at: 1710000200, payload_summary: { action: 'save-note', note: 'Authorization: Bearer ***' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { event_id: 'evt-notes-save', event_name: 'notes.save', widget_id: 'notes-editor', status: 'queued', created_at: 1710000200, payload_summary: { action: 'save-note', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-kanban-board') {
+    return response({ events: [
+      { event_id: 'evt-kanban-card', event_name: 'kanban.card.move', widget_id: 'kanban-doing', status: 'queued', created_at: 1710000300, payload_summary: { action: 'move-card', card: 'token placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget') {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const widgetId = isDemoWeather ? 'weather-current' : 'weather';
     return response({ events: [
-      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'Authorization: Bearer SECRET...EAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
       { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
     ] });
   }
@@ -805,6 +818,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runNotesWalkthrough', {});
+  } else if (scenario === 'runKanbanWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runKanbanWalkthrough', {});
   } else if (scenario === 'runResearchDemoParitySmoke') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1847,6 +1864,30 @@ def test_spaces_ui_notes_walkthrough_is_visible_and_opens_widget_manager_metadat
     assert "Queued widget events" in out["rootHtml"]
     assert "notes.save" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_kanban_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runKanbanWalkthrough")
+
+    assert "Run kanban walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_kanban_board"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-kanban-board", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-kanban-board", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Kanban board preview" in out["rootHtml"]
+    assert "Widgets for demo-kanban-board" in out["rootHtml"]
+    assert "kanban-backlog" in out["rootHtml"]
+    assert "kanban-doing" in out["rootHtml"]
+    assert "kanban-done" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "kanban.card.move" in out["rootHtml"]
+    assert "card: [REDACTED]" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

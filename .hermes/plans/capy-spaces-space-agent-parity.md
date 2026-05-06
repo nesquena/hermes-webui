@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run notes walkthrough` action that launches the metadata-only Notes app smoke, displays the saved-notes/folder/attachment checklist, and opens the safe widget manager for the resulting demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run kanban walkthrough` action that launches the metadata-only Kanban board smoke, displays the visible board preview, and opens the safe widget manager/event inbox for the resulting demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add kanban walkthrough action`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run kanban walkthrough`, posts exactly `{demo: "demo_kanban_board"}`, then renders the Kanban board smoke result plus safe widget manager/event inbox for `demo-kanban-board` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
+  - Tightened the demo parity test expectation for the already-expanded Notes flow metadata (`folder_count`, `active_folder`, and `attachment_count`) so the combined Spaces UI + demo parity suite reflects the current safe metadata contract.
 
 - `feat(spaces): add notes walkthrough action`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run notes walkthrough`, posts exactly `{demo: "demo_notes_app"}`, then renders the Notes app smoke result plus safe widget manager/event inbox for `demo-notes-app` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.

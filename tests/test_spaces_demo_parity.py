@@ -128,12 +128,20 @@ def test_notes_demo_smoke_saves_editable_note_preview_metadata_only(monkeypatch,
     assert result["action"] == "notes-draft-saved"
     assert result["notes_artifact"]["editor"]["metadata"]["notes"]["status"] == "draft-saved"
     assert result["notes_artifact"]["preview"]["metadata"]["notes"]["format"] == "markdown"
-    assert result["notes_flow"] == {
+    expected_notes_flow = {
         "folders_ready": True,
         "editor_saved": True,
         "markdown_preview_saved": True,
         "attachments_agent_mediated": True,
     }
+    assert {key: result["notes_flow"].get(key) for key in expected_notes_flow} == expected_notes_flow
+    assert result["notes_flow"]["folders_ready"] is True
+    assert result["notes_flow"]["editor_saved"] is True
+    assert result["notes_flow"]["markdown_preview_saved"] is True
+    assert result["notes_flow"]["attachments_agent_mediated"] is True
+    assert result["notes_flow"]["folder_count"] == 2
+    assert result["notes_flow"]["active_folder"] == "Demo Project"
+    assert result["notes_flow"]["attachment_count"] == 2
     assert editor["metadata"]["notes"]["body"] == "Demo note draft saved through typed Capy Spaces metadata."
     assert preview["metadata"]["notes"]["body"] == "# Demo note This markdown preview was saved as metadata-only state."
     _assert_safe_payload(result)
