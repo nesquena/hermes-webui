@@ -121,7 +121,7 @@
         '</div>';
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
       renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
   }
 
@@ -1209,6 +1209,29 @@
     }
     if (action === 'runDashboardWalkthrough') {
       const data = await postSpacesJson('api/spaces/demo/run', {demo: 'demo_daily_dashboard'});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) {
+        const resultHtml = renderDemoSmokeResult(data || {});
+        const space = data && data.space && typeof data.space === 'object' ? data.space : {};
+        const demoSpaceId = space.space_id ? String(space.space_id) : '';
+        if (demoSpaceId) {
+          try {
+            const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId));
+            const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
+            refreshedRoot.dataset.editingWidgetId = '';
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+          } catch (widgetErr) {
+            refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+          }
+        } else {
+          refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+        }
+      }
+      return;
+    }
+    if (action === 'runCameraWalkthrough') {
+      const data = await postSpacesJson('api/spaces/demo/run', {demo: 'demo_camera_dashboard'});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) {

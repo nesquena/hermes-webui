@@ -105,6 +105,7 @@ global.fetch = async function(path, opts = {}) {
     const isKanban = demo === 'demo_kanban_board';
     const isDashboard = demo === 'demo_daily_dashboard';
     const isStock = demo === 'demo_stock_chart';
+    const isCamera = demo === 'demo_camera_dashboard';
     const kanbanColumns = [
       { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', metadata: { kanban: { status: 'board-ready', column: 'Backlog', color: 'blue', cards: [{ id: 'card-plan', title: 'Plan the first task', status: 'todo' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' }, renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
       { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'amber', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
@@ -115,6 +116,11 @@ global.fetch = async function(path, opts = {}) {
       { id: 'dashboard-news', kind: 'news', title: 'News brief', metadata: { news: { status: 'ready', source: 'agent-mediated', token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
       { id: 'dashboard-agenda', kind: 'agenda', title: 'Today agenda', metadata: { agenda: { status: 'ready', items: ['Morning brief', 'Market check'] } } },
       { id: 'dashboard-brief', kind: 'markdown', title: 'Daily brief', metadata: { notes: { status: 'ready', summary: 'Daily dashboard metadata persisted.' } } },
+    ];
+    const cameraWidgets = [
+      { id: 'camera-grid', kind: 'camera-grid', title: 'Camera grid', metadata: { cameras: { status: 'approval-required', network: 'agent-mediated', streams: [], renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'camera-permissions', kind: 'status', title: 'Stream permissions', metadata: { permissions: { camera_urls: 'approval-required', network: 'agent-mediated', authorization: 'bearer placeholder' } } },
+      { id: 'camera-incidents', kind: 'table', title: 'Incident notes', metadata: { incidents: { status: 'empty', rows: [], source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
     ];
     const stockRows = [
       { symbol: 'NVDA', last: '905.10', change: '+1.8%', notes: 'GPU demand watch', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
@@ -148,27 +154,27 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({
       ok: true,
-      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : 'space.demo.run')))),
+      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : 'space.demo.run'))))),
       demo: demo,
-      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : 'weather')))),
+      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : 'weather'))))),
       mode: 'metadata-only-smoke',
       space: {
-        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : 'demo-weather-widget')))),
-        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : 'Weather Demo Smoke')))),
-        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : 1)))),
+        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : 'demo-weather-widget'))))),
+        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : 'Weather Demo Smoke'))))),
+        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
         revision_event_id: 'rev-demo',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
       },
-      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }])))),
+      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]))))),
       weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       prompt_flow: demo === 'demo_weather_widget' ? { blank_space: true, query: 'What is the weather in Prague?', chat_answer_status: 'recorded', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', widget_created: true, reload_verified: true, network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_flow: isNotes ? { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_artifact: isNotes ? { folders: { id: 'notes-folders', kind: 'folder-list', title: 'Folders', metadata: { folders: [{ id: 'folder-inbox', title: 'Inbox', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'folder-demo', title: 'Demo Project' }], interaction: { rename: 'metadata-only', create_folder: 'metadata-only', active_folder_id: 'folder-demo', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } }, attachments: { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } : undefined,
       kanban_board: isKanban ? { status: 'board-ready', column_count: 3, columns: kanbanColumns, renderer: '<script>bad()</script>', api_key: 'SECRET' } : undefined,
       stock_snapshot: isStock ? { status: 'market-snapshot-ready', symbols: ['NVDA', 'AAPL', 'GOOGL'], network_mode: 'agent-mediated', rows: stockRows, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : 1)))),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : 1)))),
+      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
@@ -358,6 +364,16 @@ global.fetch = async function(path, opts = {}) {
     return response({ events: [
       { event_id: 'evt-dashboard-refresh', event_name: 'dashboard.refresh', widget_id: 'dashboard-prices', status: 'queued', created_at: 1710000500, payload_summary: { action: 'refresh-dashboard', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-camera-dashboard') {
+    return response({ widgets: [
+      { id: 'camera-grid', kind: 'camera-grid', title: 'Camera grid', layout: { x: 0, y: 0, w: 16, h: 8, minimized: false }, metadata: { cameras: { status: 'approval-required', network: 'agent-mediated', streams: [], renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'camera-permissions', kind: 'status', title: 'Stream permissions', layout: { x: 16, y: 0, w: 8, h: 4, minimized: false }, metadata: { permissions: { camera_urls: 'approval-required', network: 'agent-mediated', authorization: 'bearer placeholder' } } },
+      { id: 'camera-incidents', kind: 'table', title: 'Incident notes', layout: { x: 16, y: 4, w: 8, h: 4, minimized: false }, metadata: { incidents: { status: 'empty', rows: [], source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-camera-dashboard') {
+    return response({ events: [] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-stock-chart') {
     return response({ widgets: [
@@ -916,6 +932,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDashboardWalkthrough', {});
+  } else if (scenario === 'runCameraWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runCameraWalkthrough', {});
   } else if (scenario === 'runStockWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2020,6 +2040,29 @@ def test_spaces_ui_dashboard_walkthrough_is_visible_and_opens_widget_manager_met
     assert "Queued widget events" in out["rootHtml"]
     assert "dashboard.refresh" in out["rootHtml"]
     assert "action: refresh-dashboard" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_camera_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runCameraWalkthrough")
+
+    assert "Run camera walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_camera_dashboard"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-camera-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-camera-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Camera Dashboard Smoke" in out["rootHtml"]
+    assert "Action: camera-dashboard-seeded" in out["rootHtml"]
+    assert "Widgets for demo-camera-dashboard" in out["rootHtml"]
+    assert "camera-grid" in out["rootHtml"]
+    assert "camera-permissions" in out["rootHtml"]
+    assert "camera-incidents" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run browser walkthrough` action that launches the metadata-only browser co-control smoke, displays the persistent browser panel/control/notes widgets, and opens the safe widget manager/event inbox for the demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run camera walkthrough` action that launches the metadata-only camera dashboard smoke, displays the persistent camera grid/permission/incident widgets, and opens the safe widget manager for the demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add camera walkthrough action`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run camera walkthrough`, posts exactly `{demo: "demo_camera_dashboard"}`, then renders the camera dashboard smoke result plus safe widget manager for `demo-camera-dashboard` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): add browser walkthrough action`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run browser walkthrough`, posts exactly `{demo: "demo_browser_cocontrol_google_or_test_site"}`, then renders the browser co-control smoke result plus safe widget manager/event inbox for `demo-browser-cocontrol-google-or-test-site` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
