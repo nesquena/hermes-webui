@@ -106,6 +106,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "folders",
     "attachments",
     "event_bridge",
+    "refresh",
     "permissions",
     "capabilities",
     "audio_policy",
@@ -1649,6 +1650,32 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "queued_event": queued,
             "queued_event_count": len(queued_events),
             "stock_snapshot": market_snapshot,
+        }
+    elif demo == "demo_local_agent_control_dashboard":
+        patch_widget(
+            space_id,
+            "service-health",
+            {"refresh": {"mode": "agent-mediated", "status": "health-check-queued"}},
+        )
+        queued = queue_widget_event(
+            space_id,
+            "service-health",
+            "service.status.check",
+            {"demo": demo, "checks": ["/health", "api/status"]},
+            prompt="Check approved local service health endpoints through the agent-mediated bridge.",
+        )
+        queued_events = list_widget_events(space_id, "service-health")
+        action = "local-service-dashboard-seeded"
+        extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
+            "service_flow": {
+                "api_chat": "metadata-only",
+                "browser_panel": "about:blank",
+                "health_checks": "queued",
+                "settings_review": "metadata-only",
+                "network_mode": "explicit-approval",
+            },
         }
     elif demo == "demo_time_travel_restore":
         before_patch = str(read_space(space_id).get("revision_event_id") or "")
@@ -3315,6 +3342,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "permissions",
         "recovery",
         "event_bridge",
+        "refresh",
         "prompt",
         "status",
         "weather",
@@ -3338,7 +3366,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "refresh", "prompt", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:

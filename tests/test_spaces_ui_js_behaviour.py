@@ -106,6 +106,7 @@ global.fetch = async function(path, opts = {}) {
     const isDashboard = demo === 'demo_daily_dashboard';
     const isStock = demo === 'demo_stock_chart';
     const isCamera = demo === 'demo_camera_dashboard';
+    const isService = demo === 'demo_local_agent_control_dashboard';
     const kanbanColumns = [
       { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', metadata: { kanban: { status: 'board-ready', column: 'Backlog', color: 'blue', cards: [{ id: 'card-plan', title: 'Plan the first task', status: 'todo' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' }, renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
       { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'amber', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
@@ -132,6 +133,12 @@ global.fetch = async function(path, opts = {}) {
       { id: 'stock-watchlist', kind: 'table', title: 'Watchlist', metadata: { watchlist: { status: 'market-snapshot-ready', rows: stockRows, authorization: 'bearer placeholder' } } },
       { id: 'stock-notes', kind: 'markdown', title: 'Market notes', metadata: { notes: { status: 'ready', summary: 'Demo market snapshot is agent-mediated.' } } },
     ];
+    const serviceWidgets = [
+      { id: 'service-api-chat', kind: 'api-connector', title: 'Service API chat', metadata: { connector: { target: 'local-service', mode: 'agent-mediated', auth: 'configured-outside-widget', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'service-browser-panel', kind: 'browser-surface', title: 'Service browser panel', metadata: { browser_surface: { url: 'about:blank', inspection: 'metadata-only', approval: 'required', authorization: 'bearer placeholder' } }, source: 'SECRET_SOURCE' },
+      { id: 'service-health', kind: 'status', title: 'Health checks', metadata: { checks: { status: 'pending', endpoints: ['/health', 'api/status'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'service-settings-review', kind: 'table', title: 'Settings review', metadata: { settings: { status: 'review-only', fields: ['provider', 'network', 'auth'], renderer: '<script>bad()</script>' } } },
+    ];
     if (demo === 'demo_browser_cocontrol_google_or_test_site') {
       return response({
         ok: true,
@@ -154,27 +161,27 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({
       ok: true,
-      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : 'space.demo.run'))))),
+      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : 'space.demo.run')))))),
       demo: demo,
-      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : 'weather'))))),
+      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather')))))),
       mode: 'metadata-only-smoke',
       space: {
-        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : 'demo-weather-widget'))))),
-        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : 'Weather Demo Smoke'))))),
-        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
+        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : 'demo-weather-widget')))))),
+        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : 'Weather Demo Smoke')))))),
+        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
         revision_event_id: 'rev-demo',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
       },
-      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]))))),
+      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : (isService ? serviceWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }])))))),
       weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       prompt_flow: demo === 'demo_weather_widget' ? { blank_space: true, query: 'What is the weather in Prague?', chat_answer_status: 'recorded', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', widget_created: true, reload_verified: true, network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_flow: isNotes ? { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_artifact: isNotes ? { folders: { id: 'notes-folders', kind: 'folder-list', title: 'Folders', metadata: { folders: [{ id: 'folder-inbox', title: 'Inbox', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'folder-demo', title: 'Demo Project' }], interaction: { rename: 'metadata-only', create_folder: 'metadata-only', active_folder_id: 'folder-demo', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } }, attachments: { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } : undefined,
       kanban_board: isKanban ? { status: 'board-ready', column_count: 3, columns: kanbanColumns, renderer: '<script>bad()</script>', api_key: 'SECRET' } : undefined,
       stock_snapshot: isStock ? { status: 'market-snapshot-ready', symbols: ['NVDA', 'AAPL', 'GOOGL'], network_mode: 'agent-mediated', rows: stockRows, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : 1))))),
+      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
@@ -385,6 +392,19 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/events?space_id=demo-stock-chart') {
     return response({ events: [
       { event_id: 'evt-stock-refresh', event_name: 'stock.refresh', widget_id: 'stock-chart', status: 'queued', created_at: 1710000700, payload_summary: { action: 'refresh-market-snapshot', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-local-agent-control-dashboard') {
+    return response({ widgets: [
+      { id: 'service-api-chat', kind: 'api-connector', title: 'Service API chat', layout: { x: 0, y: 0, w: 10, h: 6, minimized: false }, metadata: { connector: { target: 'local-service', mode: 'agent-mediated', auth: 'configured-outside-widget', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'service-browser-panel', kind: 'browser-surface', title: 'Service browser panel', layout: { x: 10, y: 0, w: 8, h: 6, minimized: false }, metadata: { browser_surface: { url: 'about:blank', inspection: 'metadata-only', approval: 'required', authorization: 'bearer placeholder' } }, source: 'SECRET_SOURCE' },
+      { id: 'service-health', kind: 'status', title: 'Health checks', layout: { x: 18, y: 0, w: 6, h: 3, minimized: false }, metadata: { checks: { status: 'pending', endpoints: ['/health', 'api/status'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'service-settings-review', kind: 'table', title: 'Settings review', layout: { x: 18, y: 3, w: 6, h: 3, minimized: false }, metadata: { settings: { status: 'review-only', fields: ['provider', 'network', 'auth'], renderer: '<script>bad()</script>' } } },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-local-agent-control-dashboard') {
+    return response({ events: [
+      { event_id: 'evt-service-status', event_name: 'service.status.check', widget_id: 'service-health', status: 'queued', created_at: 1710000800, payload_summary: { action: 'check-local-service', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-browser-cocontrol-google-or-test-site') {
@@ -940,6 +960,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runStockWalkthrough', {});
+  } else if (scenario === 'runLocalServiceWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runLocalServiceWalkthrough', {});
   } else if (scenario === 'runBrowserWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2095,6 +2119,35 @@ def test_spaces_ui_stock_walkthrough_is_visible_and_opens_market_snapshot_metada
     assert "Queued widget events" in out["rootHtml"]
     assert "stock.refresh" in out["rootHtml"]
     assert "action: refresh-market-snapshot" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_local_service_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runLocalServiceWalkthrough")
+
+    assert "Run local service walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_local_agent_control_dashboard"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-local-agent-control-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-local-agent-control-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Local Service Dashboard Smoke" in out["rootHtml"]
+    assert "Action: local-service-dashboard-seeded" in out["rootHtml"]
+    assert "Widgets: 4" in out["rootHtml"]
+    assert "Manage service widgets" in out["rootHtml"]
+    assert "Widgets for demo-local-agent-control-dashboard" in out["rootHtml"]
+    assert "service-api-chat" in out["rootHtml"]
+    assert "service-browser-panel" in out["rootHtml"]
+    assert "service-health" in out["rootHtml"]
+    assert "service-settings-review" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "service.status.check" in out["rootHtml"]
+    assert "action: check-local-service" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

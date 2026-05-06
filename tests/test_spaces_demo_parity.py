@@ -179,6 +179,31 @@ def test_kanban_demo_smoke_records_visible_board_metadata_only(monkeypatch, tmp_
     _assert_safe_payload({"backlog": backlog, "doing": doing, "done": done})
 
 
+def test_local_service_demo_smoke_queues_health_check_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_local_agent_control_dashboard")
+    health = spaces.read_widget_detail(result["space"]["space_id"], "service-health")
+    events = spaces.list_widget_events(result["space"]["space_id"], "service-health")
+
+    assert result["action"] == "local-service-dashboard-seeded"
+    assert result["queued_event_count"] == 1
+    assert result["service_flow"] == {
+        "api_chat": "metadata-only",
+        "browser_panel": "about:blank",
+        "health_checks": "queued",
+        "settings_review": "metadata-only",
+        "network_mode": "explicit-approval",
+    }
+    assert health["metadata"]["refresh"]["status"] == "health-check-queued"
+    assert events[0]["event_name"] == "service.status.check"
+    assert events[0]["status"] == "queued"
+    assert events[0]["widget_id"] == "service-health"
+    assert events[0]["payload_summary"] == {"demo": "demo_local_agent_control_dashboard", "checks": ["/health", "api/status"]}
+    _assert_safe_payload(result)
+    _assert_safe_payload({"health": health, "events": events})
+
+
 def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_check(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
