@@ -63,9 +63,13 @@ class TestSessionOwnedRuntimeInvariants:
             "A background session's done event must not unconditionally call setBusy(false); "
             "that can idle an unrelated active pane that is still running."
         )
-        assert "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in done.replace(" ", ""), (
-            "The done handler should only idle composer state when the completed stream "
-            "belongs to the active pane, or when no other active-pane inflight runtime exists."
+        normalized = done.replace(" ", "")
+        assert (
+            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
+            or "_setActivePaneIdleIfOwner();" in done
+        ), (
+            "The done handler should only idle composer state through an active-pane guard, "
+            "not from background completions owned by another session."
         )
 
     def test_server_session_finalize_does_not_idle_unrelated_active_pane(self):
@@ -75,7 +79,11 @@ class TestSessionOwnedRuntimeInvariants:
             "The fallback server-finalize path must not idle the active pane for a "
             "background session completion."
         )
-        assert "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in finalize.replace(" ", ""), (
+        normalized = finalize.replace(" ", "")
+        assert (
+            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
+            or "_setActivePaneIdleIfOwner();" in finalize
+        ), (
             "The fallback server-finalize path should use the same active-pane guard as the live done event."
         )
 
@@ -96,8 +104,14 @@ class TestSessionOwnedRuntimeInvariants:
         )
 
         done = _event_handler(messages, "done")
-        assert "stopApprovalPollingForSession(activeSid)" in done
-        assert "stopClarifyPollingForSession(activeSid)" in done
+        assert (
+            "stopApprovalPollingForSession(activeSid)" in done
+            or "_clearApprovalForOwner();" in done
+        )
+        assert (
+            "stopClarifyPollingForSession(activeSid)" in done
+            or "_clearClarifyForOwner('terminal');" in done
+        )
         assert "stopApprovalPolling();\n      stopClarifyPolling();" not in done, (
             "The done handler must not blindly stop whatever approval/clarify poller "
             "the active pane currently owns."

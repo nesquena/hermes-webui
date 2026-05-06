@@ -602,8 +602,10 @@ class TestClarifyCardTimerLogic:
                       src, re.DOTALL)
         assert m, 'cancel event handler not found'
         body = m.group(0)
-        assert "hideClarifyCard(true, 'cancelled')" in body, \
-            'explicit stream cancel must not use the timeout/terminal draft preservation path'
+        assert (
+            "hideClarifyCard(true, 'cancelled')" in body
+            or "_clearClarifyForOwner('cancelled')" in body
+        ), 'explicit stream cancel must not use the timeout/terminal draft preservation path'
 
     def test_clarify_urgent_countdown_has_non_color_cue(self):
         css = self._get_css().read_text()

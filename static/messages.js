@@ -357,6 +357,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _clearActivePaneInflightIfOwner(){
+    if(_isActiveSession()) clearInflight();
+  }
+  function _approvalBelongsToOwner(){
+    return _approvalSessionId===activeSid||(!_approvalSessionId&&_isActiveSession());
+  }
+  function _clarifyBelongsToOwner(){
+    return _clarifySessionId===activeSid||(!_clarifySessionId&&_isActiveSession());
+  }
+  function _clearApprovalForOwner(){
+    if(!_approvalBelongsToOwner()) return;
+    stopApprovalPolling();
+    hideApprovalCard(true);
+  }
+  function _clearClarifyForOwner(reason){
+    if(!_clarifyBelongsToOwner()) return;
+    stopClarifyPolling();
+    hideClarifyCard(true, reason||'terminal');
+  }
+  function _clearOwnerInflightState(){
+    delete INFLIGHT[activeSid];
+    clearInflightState(activeSid);
+    _clearActivePaneInflightIfOwner();
+  }
+  function _setActivePaneIdleIfOwner(){
+    if(_isActiveSession()||!S.session){
+      setBusy(false);
+      setComposerStatus('');
+      if(typeof setStatus==='function') setStatus('');
+    }
+  }
   function persistInflightState(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight||typeof saveInflightState!=='function') return;
@@ -852,15 +883,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(completedSid, completedSession.message_count);
       }
-      delete INFLIGHT[activeSid];
-      clearInflight();clearInflightState(activeSid);
+      _clearOwnerInflightState();
       if(typeof _markSessionCompletedInList==='function'){
         _markSessionCompletedInList(completedSession, activeSid);
       }
-      stopApprovalPollingForSession(activeSid);
-      stopClarifyPollingForSession(activeSid);
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      _clearApprovalForOwner();
+      _clearClarifyForOwner('terminal');
       if(isActiveSession){
         S.activeStreamId=null;
       }
@@ -944,13 +972,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // TTS auto-read: speak the last assistant response if enabled (#499)
         if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
       }
+      if(isActiveSession) _queueDrainSid=activeSid;
       renderSessionList();
-      if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id]){
-        _queueDrainSid=activeSid;
-        setBusy(false);
-        setStatus('');
-        setComposerStatus('');
-      }
+      _setActivePaneIdleIfOwner();
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
     });
@@ -1031,9 +1055,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      _clearOwnerInflightState();
+      _clearApprovalForOwner();
+      _clearClarifyForOwner('terminal');
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
@@ -1057,7 +1081,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      _setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
@@ -1109,9 +1133,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'cancelled');
+      _clearOwnerInflightState();
+      _clearApprovalForOwner();
+      _clearClarifyForOwner('cancelled');
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
@@ -1138,7 +1162,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       })();
       renderSessionList();
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      _setActivePaneIdleIfOwner();
     });
   }
 
@@ -1148,10 +1172,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const session=data&&data.session;
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
-      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
+      _clearOwnerInflightState();
       _closeSource();
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
-      if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      _clearApprovalForOwner();
+      _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       const completedSid=session.session_id||activeSid;
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
@@ -1185,12 +1209,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages({preserveScroll:true});
       }
+      if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
-      if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id]){
-        _queueDrainSid=activeSid;
-        setBusy(false);
-        setComposerStatus('');
-      }
+      _setActivePaneIdleIfOwner();
       return true;
     }catch(_){
       return false;
@@ -1204,10 +1225,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFinalized=true;
     if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-    delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPollingForSession(activeSid);stopClarifyPollingForSession(activeSid);
+    _clearOwnerInflightState();
     _closeSource();
-    if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
-    if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+    _clearApprovalForOwner();
+    _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
@@ -1219,7 +1240,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,'Connection lost');
       }
     }
-    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+    _setActivePaneIdleIfOwner();
   }
 
   (async()=>{
@@ -1229,19 +1250,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
         if(!st.active){
-          delete INFLIGHT[activeSid];
-          clearInflight();
-          clearInflightState(activeSid);
-          stopApprovalPollingForSession(activeSid);
-          stopClarifyPollingForSession(activeSid);
-          if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
-          if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+          _clearOwnerInflightState();
+          _clearApprovalForOwner();
+          _clearClarifyForOwner('terminal');
           if(S.session&&S.session.session_id===activeSid){
             S.activeStreamId=null;
             clearLiveToolCards();
             removeThinking();
-            _queueDrainSid=activeSid;setBusy(false);
-            setComposerStatus('');
+            if(_isActiveSession()) _queueDrainSid=activeSid;
+            _setActivePaneIdleIfOwner();
             renderMessages({preserveScroll:true});
             renderSessionList();
           }

@@ -166,9 +166,18 @@ def test_sse_cancel_handler_calls_set_busy():
     # Find the closing of this handler block (next top-level addEventListener)
     next_handler = src.find("source.addEventListener(", idx + 50)
     block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
-    assert "setBusy(false)" in block, (
-        "SSE cancel handler no longer calls setBusy(false)"
+    assert (
+        "setBusy(false)" in block
+        or "_setActivePaneIdleIfOwner()" in block
+    ), (
+        "SSE cancel handler no longer idles the owning active pane"
     )
+    if "_setActivePaneIdleIfOwner()" in block:
+        helper_idx = src.find("function _setActivePaneIdleIfOwner")
+        assert helper_idx != -1
+        next_function = src.find("\n  function ", helper_idx + 1)
+        helper = src[helper_idx:next_function if next_function != -1 else helper_idx + 800]
+        assert "setBusy(false)" in helper
 
 
 # ── 7. i18n key preserved ─────────────────────────────────────────────────────

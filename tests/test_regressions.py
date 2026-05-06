@@ -248,8 +248,13 @@ def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
     disable B's Send button.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # The fix wraps setBusy(false) in a guard
-    assert "INFLIGHT[S.session.session_id]" in src,         "messages.js must guard setBusy(false) with INFLIGHT check for current session"
+    # The fix wraps setBusy(false) in an active-pane ownership guard. Newer
+    # implementations may centralize the guard in a helper rather than repeat the
+    # raw INFLIGHT expression at every terminal event site.
+    assert (
+        "INFLIGHT[S.session.session_id]" in src
+        or "function _setActivePaneIdleIfOwner" in src
+    ), "messages.js must guard setBusy(false) for the current session"
 
 
 def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_test_sessions):
