@@ -103,6 +103,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "status",
     "export",
     "interaction",
+    "folders",
     "event_bridge",
     "permissions",
     "capabilities",
@@ -1512,16 +1513,31 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "format": "markdown",
             "body": "# Demo note\n\nThis markdown preview was saved as metadata-only state.",
         }
+        demo_folders = [
+            {"id": "folder-inbox", "title": "Inbox"},
+            {"id": "folder-demo", "title": "Demo Project"},
+        ]
+        folder_widget = read_widget(space_id, "notes-folders")
+        folder_widget["folders"] = demo_folders
+        folder_widget["interaction"] = {
+            "rename": "metadata-only",
+            "create_folder": "metadata-only",
+            "active_folder_id": "folder-demo",
+        }
+        upsert_widget(space_id, folder_widget)
         patch_widget(space_id, "notes-editor", {"notes": editor_notes})
         patch_widget(space_id, "notes-preview", {"notes": preview_notes})
         action = "notes-draft-saved"
         extra = {
             "notes_artifact": {
+                "folders": read_widget_detail(space_id, "notes-folders"),
                 "editor": read_widget_detail(space_id, "notes-editor"),
                 "preview": read_widget_detail(space_id, "notes-preview"),
             },
             "notes_flow": {
                 "folders_ready": True,
+                "folder_count": len(demo_folders),
+                "active_folder": "Demo Project",
                 "editor_saved": True,
                 "markdown_preview_saved": True,
                 "attachments_agent_mediated": True,

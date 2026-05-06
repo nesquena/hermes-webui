@@ -746,10 +746,14 @@
 
   function renderNotesSmokePreview(notesArtifact, flow){
     const artifact = notesArtifact && typeof notesArtifact === 'object' && !Array.isArray(notesArtifact) ? notesArtifact : {};
+    const foldersWidget = artifact.folders && typeof artifact.folders === 'object' && !Array.isArray(artifact.folders) ? artifact.folders : {};
     const editor = artifact.editor && typeof artifact.editor === 'object' && !Array.isArray(artifact.editor) ? artifact.editor : {};
     const preview = artifact.preview && typeof artifact.preview === 'object' && !Array.isArray(artifact.preview) ? artifact.preview : {};
+    const folderMeta = foldersWidget.metadata && typeof foldersWidget.metadata === 'object' && !Array.isArray(foldersWidget.metadata) ? foldersWidget.metadata : {};
     const editorMeta = editor.metadata && typeof editor.metadata === 'object' && !Array.isArray(editor.metadata) ? editor.metadata : {};
     const previewMeta = preview.metadata && typeof preview.metadata === 'object' && !Array.isArray(preview.metadata) ? preview.metadata : {};
+    const folders = Array.isArray(folderMeta.folders) ? folderMeta.folders : [];
+    const interaction = folderMeta.interaction && typeof folderMeta.interaction === 'object' && !Array.isArray(folderMeta.interaction) ? folderMeta.interaction : {};
     const editorNotes = editorMeta.notes && typeof editorMeta.notes === 'object' && !Array.isArray(editorMeta.notes) ? editorMeta.notes : {};
     const previewNotes = previewMeta.notes && typeof previewMeta.notes === 'object' && !Array.isArray(previewMeta.notes) ? previewMeta.notes : {};
     const status = safeWeatherText(editorNotes.status, 80);
@@ -757,13 +761,29 @@
     const previewBody = safeWeatherText(previewNotes.body, 360);
     const format = safeWeatherText(previewNotes.format || editorNotes.format, 40);
     const rows = [];
+    const folderRows = folders.slice(0, 8).map(function(folder){
+      const title = safeWeatherText(folder && folder.title, 120);
+      return title ? '<div class="capy-spaces-muted">• '+escapeHtml(title)+'</div>' : '';
+    }).filter(Boolean);
+    const folderCount = Number(flow && flow.folder_count) || folderRows.length;
+    const activeFolder = safeWeatherText(flow && flow.active_folder, 120);
+    const renameMode = safeWeatherText(interaction.rename, 80);
+    const createMode = safeWeatherText(interaction.create_folder, 80);
+    const folderPreview = folderRows.length ? '<div class="capy-spaces-card"><strong>Folder list preview</strong>' +
+      '<div class="capy-spaces-muted">Folders: '+escapeHtml(folderCount)+'</div>' +
+      (activeFolder ? '<div class="capy-spaces-muted">Active folder: '+escapeHtml(activeFolder)+'</div>' : '') +
+      '<div>'+folderRows.join('')+'</div>' +
+      (renameMode ? '<div class="capy-spaces-muted">Rename: '+escapeHtml(renameMode)+'</div>' : '') +
+      (createMode ? '<div class="capy-spaces-muted">Create folder: '+escapeHtml(createMode)+'</div>' : '') +
+      '</div>' : '';
     if (status) rows.push('<div class="capy-spaces-muted">Draft status: '+escapeHtml(status)+'</div>');
     if (format) rows.push('<div class="capy-spaces-muted">Format: '+escapeHtml(format)+'</div>');
     if (editorBody) rows.push('<div>'+escapeHtml(editorBody)+'</div>');
     if (previewBody) rows.push('<div class="capy-spaces-muted">Preview: '+escapeHtml(previewBody)+'</div>');
-    if (!rows.length) return '';
+    if (!rows.length && !folderPreview) return '';
     return '<div class="capy-spaces-card capy-spaces-notes-smoke"><h4>Saved notes preview</h4>' +
       renderNotesFlowChecklist(flow) +
+      folderPreview +
       '<div class="capy-spaces-muted">Visible metadata-only notes demo state. Rich editing and attachments remain agent-mediated.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
   }

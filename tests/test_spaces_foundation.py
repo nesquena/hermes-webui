@@ -4230,6 +4230,33 @@ def test_install_notes_template_creates_safe_notes_app_widgets(monkeypatch, tmp_
     assert "secret" not in serialized
 
 
+def test_notes_demo_smoke_exposes_safe_folder_preview(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_notes_app")
+    folders_widget = result["notes_artifact"]["folders"]
+    serialized = json.dumps(result).lower()
+
+    assert folders_widget["id"] == "notes-folders"
+    assert folders_widget["metadata"]["folders"] == [
+        {"id": "folder-inbox", "title": "Inbox"},
+        {"id": "folder-demo", "title": "Demo Project"},
+    ]
+    assert folders_widget["metadata"]["interaction"] == {
+        "rename": "metadata-only",
+        "create_folder": "metadata-only",
+        "active_folder_id": "folder-demo",
+    }
+    assert result["notes_flow"]["folder_count"] == 2
+    assert result["notes_flow"]["active_folder"] == "Demo Project"
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+
 def test_notes_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
 
