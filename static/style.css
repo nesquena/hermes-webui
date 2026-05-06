@@ -2655,14 +2655,21 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
 .main-view-body{flex:1;min-height:0;overflow-y:auto;padding:24px 32px;}
 .main-view-content{max-width:960px;margin:0 auto;width:100%;}
+/* dashboard-shell-mode tokens that must apply on every viewport — without
+   them the mobile drawer kept rendering the legacy hermes nav-strip and
+   sidebar resize handle on top of the Neo dashboard menu (visible on the
+   VPS post-deploy on iOS/Android <641px). Desktop-only sizing stays inside
+   the @media block below. */
+body.dashboard-shell-mode .layout{height:100vh;height:100dvh;}
+body.dashboard-shell-mode .rail,
+body.dashboard-shell-mode .sidebar-nav,
+body.dashboard-shell-mode #sidebarResize,
+body.dashboard-shell-mode .app-titlebar-spacer{display:none!important;}
+body.dashboard-shell-mode .main{background:var(--bg);}
+
 @media(min-width:641px){
   body.dashboard-shell-mode .app-titlebar{display:none;}
-  body.dashboard-shell-mode .layout{height:100vh;height:100dvh;}
-  body.dashboard-shell-mode .rail{display:none!important;}
   body.dashboard-shell-mode .sidebar{width:220px!important;min-width:220px;max-width:220px;flex:0 0 220px;overflow:hidden;}
-  body.dashboard-shell-mode .sidebar-nav,
-  body.dashboard-shell-mode #sidebarResize{display:none!important;}
-  body.dashboard-shell-mode .main{background:var(--bg);}
   body.dashboard-shell-mode main.main.showing-settings>#mainSettings{flex-direction:row;overflow:hidden;padding:0;}
   body.dashboard-shell-mode main.main.showing-settings #mainSettings>#settingsMenu{width:190px;min-width:190px;flex-shrink:0;border-right:1px solid var(--border);padding:12px 8px;overflow-y:auto;background:var(--sidebar);}
   body.dashboard-shell-mode main.main.showing-settings #mainSettings>#settingsMenu::before{content:'CONFIGURAÇÕES';display:block;font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--muted);padding:4px 10px 12px;}
