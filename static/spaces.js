@@ -233,8 +233,26 @@
       const flowSummary = demo === 'demo_weather_widget' && flow
         ? '<div class="capy-spaces-muted"><strong>Weather demo checklist</strong></div><div class="capy-spaces-muted">Weather flow: chat answer '+escapeHtml(flow.chat_answer_status ? String(flow.chat_answer_status) : 'not recorded')+' · widget '+(flow.widget_created ? 'created' : 'not created')+' · reload '+(flow.reload_verified ? 'verified' : 'not verified')+'</div>'
         : '';
+      const weatherWidget = item && item.weather_observation && item.weather_observation.widget && typeof item.weather_observation.widget === 'object' && !Array.isArray(item.weather_observation.widget)
+        ? item.weather_observation.widget
+        : null;
+      const weatherMeta = weatherWidget && weatherWidget.metadata && weatherWidget.metadata.weather && typeof weatherWidget.metadata.weather === 'object' && !Array.isArray(weatherWidget.metadata.weather)
+        ? weatherWidget.metadata.weather
+        : null;
+      const weatherCurrent = weatherMeta && weatherMeta.current && typeof weatherMeta.current === 'object' && !Array.isArray(weatherMeta.current)
+        ? weatherMeta.current
+        : {};
+      const weatherLocation = weatherMeta ? [weatherMeta.location, weatherMeta.country].filter(Boolean).map(String).join(', ') : '';
+      const weatherTemp = weatherCurrent && weatherCurrent.temperature_c !== undefined && weatherCurrent.temperature_c !== null && String(weatherCurrent.temperature_c) !== ''
+        ? String(weatherCurrent.temperature_c)+' °C'
+        : '';
+      const weatherCondition = weatherCurrent && weatherCurrent.condition ? String(weatherCurrent.condition) : '';
+      const weatherBridgeCount = Number(item && item.queued_event_count || 0);
+      const weatherObservationSummary = demo === 'demo_weather_widget' && weatherMeta
+        ? '<div class="capy-spaces-muted">Weather observation: '+[weatherLocation, weatherTemp, weatherCondition].filter(Boolean).map(escapeHtml).join(' · ')+(weatherBridgeCount ? ' · Agent bridge: '+weatherBridgeCount+' queued' : '')+'</div>'
+        : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + '</div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + '</div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +

@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the weather demo widget manager now surfaces the starter prompt hint and ready-for-agent-refresh metadata directly from the safe widget list, so the visible Weather Demo path has a clearer next action before/after smoke runs. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the demo smoke suite now surfaces a compact Weather observation / agent-bridge summary for the weather vertical, so `Run all smokes` shows visible end-to-end weather progress without exposing prompt text, generated/source fields, or credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): summarize weather suite observation`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now renders a compact Weather observation row (`Prague, CZ · 18 °C · partly cloudy · Agent bridge: 1 queued`) from the existing safe weather smoke result while continuing to omit raw prompt/answer text, hostile renderer/script/API-auth markers, and secret-looking values from DOM.
 
 - `feat(spaces): show weather prompt hint in widget list`
   - Added RED/GREEN backend coverage proving the installed Weather Demo widget list exposes safe `weather`, `event_bridge`, and `prompt` metadata even before the first observation refresh, while omitting generated/source/API-auth markers.
