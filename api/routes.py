@@ -934,6 +934,27 @@ def _resolve_compatible_session_model_state(
 
     # Skip normalization for models on custom/openrouter namespaces — these are
     # user-controlled and should never be silently replaced.
+    #
+    # OpenAI Codex is intentionally normalized to the OpenAI family above so bare
+    # GPT IDs survive provider switches. Slash-qualified OpenAI IDs are different:
+    # ``openai/gpt-...`` is the OpenRouter shape for OpenAI models, and
+    # resolve_model_provider() routes that through OpenRouter when Codex is the
+    # configured provider. Legacy sessions can carry that stale slash ID without
+    # a saved model_provider, so repair it to the active Codex default unless the
+    # session/request explicitly says it is an OpenRouter selection. (#1734)
+    if (
+        raw_active_provider == "openai-codex"
+        and model_provider == "openai"
+        and requested_provider is None
+        and default_model
+    ):
+        provider_context = (
+            raw_active_provider
+            if _should_attach_codex_provider_context(default_model, raw_active_provider, catalog)
+            else None
+        )
+        return default_model, provider_context, True
+
     # Also normalize when the model is from a known provider but the active provider
     # is an unlisted one (e.g. ollama-cloud) — active_provider is "" in that case
     # but raw_active_provider is set. If model_provider doesn't start with the raw
