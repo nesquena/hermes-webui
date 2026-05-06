@@ -1630,6 +1630,13 @@ function renderSessionListFromCache(){
         }
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        // Conversas panel is browse-only — clicking a session jumps to the
+        // dashboard chat embed where the full transcript + composer renders
+        // properly. The earlier sidecar attempt squeezed the composer to the
+        // right of #panelChat and looked broken at the live VPS resolution.
+        if(typeof _currentPanel!=='undefined' && _currentPanel==='chat' && typeof switchPanel==='function'){
+          await switchPanel('dashboard');
+        }
       }, 300);
     };
     return el;
