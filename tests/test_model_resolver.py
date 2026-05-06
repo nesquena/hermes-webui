@@ -159,6 +159,26 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
     assert base_url == 'http://lmstudio.local:1234/v1'
 
 
+def test_custom_provider_models_dict_routes_to_named_custom_provider():
+    """Models listed only under custom_providers[].models still route to that endpoint."""
+    model, provider, base_url = _resolve_with_config(
+        'sensenova-6.7-flash-lite',
+        provider='xiaomi',
+        custom_providers=[{
+            'name': 'LiteLLM Proxy',
+            'base_url': 'http://127.0.0.1:8080/v1',
+            'model': 'deepseek-v4-flash',
+            'models': {
+                'deepseek-v4-flash': {},
+                'sensenova-6.7-flash-lite': {},
+            },
+        }],
+    )
+    assert model == 'sensenova-6.7-flash-lite'
+    assert provider == 'custom:litellm-proxy'
+    assert base_url == 'http://127.0.0.1:8080/v1'
+
+
 # ── get_available_models() @provider: hint behaviour ──────────────────────
 
 
