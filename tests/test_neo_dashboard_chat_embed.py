@@ -1,5 +1,6 @@
 """Neo HU-03.5: Dashboard embeds the real chat/composer surface."""
 
+import re
 from pathlib import Path
 
 
@@ -104,6 +105,24 @@ def test_dashboard_chat_visual_shell_css_present():
         ".dashboard-chat-composer",
     ]:
         assert selector in STYLE_CSS
+
+
+def test_dashboard_chat_scroll_container_can_shrink_inside_grid():
+    """Regression guard: the embedded chat must scroll, not clip in dashboard."""
+
+    for selector in [
+        ".dashboard-shell",
+        ".dashboard-center",
+        ".dashboard-chat-panel",
+        ".dashboard-chat-body",
+        ".dashboard-chat-body .messages",
+    ]:
+        match = re.search(rf"{re.escape(selector)}\{{([^}}]+)\}}", STYLE_CSS)
+        assert match, f"{selector} CSS block missing"
+        assert "min-height:0" in match.group(1), (
+            f"{selector} must allow nested flex/grid children to shrink so "
+            "the embedded #messages element can own vertical scrolling"
+        )
 
 
 def test_dashboard_composer_has_responsive_hardening():

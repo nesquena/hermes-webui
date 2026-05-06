@@ -2677,9 +2677,9 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 }
 main.main.showing-dashboard .main-view-body{overflow:hidden;padding:16px;}
 main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
-.dashboard-shell{display:flex;flex-direction:column;gap:0;}
+.dashboard-shell{display:flex;flex-direction:column;gap:0;min-height:0;}
 .dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:24px;align-items:stretch;height:100%;min-height:0;}
-.dashboard-center{display:flex;flex-direction:column;gap:16px;}
+.dashboard-center{display:flex;flex-direction:column;gap:16px;min-height:0;}
 .dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow:hidden;}
 .dashboard-panel{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:18px;min-height:180px;}
 .dashboard-panel h2{font-size:18px;line-height:1.3;margin:0 0 8px;color:var(--text);}
