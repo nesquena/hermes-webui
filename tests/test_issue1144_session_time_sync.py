@@ -202,7 +202,15 @@ def test_relative_time_uses_server_clock():
     """_formatRelativeSessionTime uses _serverNowMs() when nowMs is not passed."""
     result = _run_time_case(
         """
-        // Simulate server 8 hours behind client (common WSL scenario)
+        // Simulate server 8 hours behind client (common WSL scenario).
+        // Pin Date.now() to a clock-stable instant well away from any UTC
+        // calendar boundary so the test does not depend on what time CI
+        // happens to run. With _serverTimeDelta = +8h, _serverNowMs() returns
+        // (Date.now() - 8h). If Date.now() were unpinned and CI ran near
+        // 08:00 UTC, the projected server time would be ~midnight and the
+        // "5 minutes ago" subtraction would silently cross into yesterday.
+        const _origNow = Date.now;
+        Date.now = () => new Date('2026-05-06T20:00:00Z').getTime();
         _serverTimeDelta = 8 * 3600 * 1000;
         // Session created 5 minutes ago in server time
         const serverNow = _serverNowMs();
@@ -211,6 +219,7 @@ def test_relative_time_uses_server_clock():
           relative: _formatRelativeSessionTime(fiveMinAgo),
           bucket: _sessionTimeBucketLabel(fiveMinAgo),
         }));
+        Date.now = _origNow;
         """
     )
     # Without compensation, client thinks this session is 8h5m ago.

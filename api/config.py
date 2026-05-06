@@ -204,8 +204,25 @@ def _fingerprint_config(data: dict) -> str:
 
 
 def _cfg_has_in_memory_overrides() -> bool:
-    """True when cfg was changed after the last successful reload_config()."""
-    return _cfg_fingerprint is not None and _fingerprint_config(_cfg_cache) != _cfg_fingerprint
+    """True when cfg was changed after the last successful reload_config().
+
+    Detects two override shapes:
+      1. ``_cfg_cache`` was mutated in place (fingerprint differs).
+      2. ``cfg`` (the module attribute) was rebound to a different dict —
+         e.g. ``monkeypatch.setattr(config, "cfg", {...})`` in tests. The
+         alias-with-the-cache pattern at module load means this is a common
+         test-isolation override, and silently reloading from disk over it
+         (the v0.51.7 path-aware reload regression) breaks any test that
+         relies on the override.
+    """
+    if _cfg_fingerprint is not None and _fingerprint_config(_cfg_cache) != _cfg_fingerprint:
+        return True
+    # Module attribute rebound away from _cfg_cache by a test or runtime caller.
+    try:
+        return cfg is not _cfg_cache
+    except NameError:
+        # cfg not yet defined (during initial reload_config() at import time).
+        return False
 
 
 def _get_config_path() -> Path:
@@ -235,6 +252,16 @@ def get_config() -> dict:
     cache_stale = current_mtime != _cfg_mtime or _cfg_path != config_path
     if not _cfg_cache or (cache_stale and not _cfg_has_in_memory_overrides()):
         reload_config()
+    # When a test (or runtime caller) has rebound ``cfg`` to a different dict
+    # via monkeypatch.setattr(config, "cfg", ...), return that override rather
+    # than the underlying _cfg_cache. Without this branch, get_config() would
+    # silently bypass the override even though _cfg_has_in_memory_overrides()
+    # correctly suppressed the reload.
+    try:
+        if cfg is not _cfg_cache:
+            return cfg
+    except NameError:
+        pass
     return _cfg_cache
 
 
