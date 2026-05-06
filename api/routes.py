@@ -347,7 +347,7 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     import multiprocessing
     import queue
 
-    ctx = multiprocessing.get_context("fork")
+    ctx = multiprocessing.get_context("spawn")
     result_queue = ctx.Queue(maxsize=1)
     process = ctx.Process(
         target=_cron_job_subprocess_main,

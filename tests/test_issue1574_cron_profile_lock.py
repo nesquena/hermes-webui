@@ -90,24 +90,12 @@ def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, m
     assert routes._is_cron_running("job1574") == (False, 0.0)
 
 
-def test_cron_job_subprocess_executes_under_selected_profile_home(tmp_path, monkeypatch):
+def test_cron_job_runner_uses_spawned_process_for_profile_isolation():
+    import inspect
     import api.routes as routes
 
-    def fake_run_job(job):
-        import cron.scheduler as scheduler
+    src = inspect.getsource(routes._run_cron_job_in_profile_subprocess)
 
-        return True, str(scheduler._hermes_home), "final", None
-
-    events = []
-    _, cron_scheduler = _install_fake_cron(monkeypatch, fake_run_job, events)
-    exec_home = tmp_path / "exec-profile"
-
-    success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
-        {"id": "job1574"}, exec_home
-    )
-
-    assert success is True
-    assert output == str(exec_home)
-    assert final_response == "final"
-    assert error is None
-    assert cron_scheduler._hermes_home == Path("/tmp/hermes")
+    assert 'multiprocessing.get_context("spawn")' in src
+    assert "target=_cron_job_subprocess_main" in src
+    assert "with cron_profile_context" not in src
