@@ -313,6 +313,71 @@ def _profile_home_for_cron_job(job: dict):
     return get_hermes_home_for_profile(raw)
 
 
+def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
+    """Run one cron job inside a child process pinned to a profile home."""
+    try:
+        def _run():
+            from cron.scheduler import run_job
+
+            return run_job(job)
+
+        if execution_profile_home is None:
+            result = _run()
+        else:
+            from api.profiles import cron_profile_context_for_home
+
+            with cron_profile_context_for_home(execution_profile_home):
+                result = _run()
+        result_queue.put(("ok", result))
+    except BaseException as exc:  # pragma: no cover - surfaced in parent
+        import traceback
+
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}", traceback.format_exc()))
+
+
+def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
+    """Execute cron.scheduler.run_job without holding the parent cron env lock.
+
+    cron.scheduler/cron.jobs still rely on process-global HERMES_HOME and module
+    constants, so running the job body in a child process gives each long cron
+    execution its own globals. The parent process only uses cron_profile_context
+    for short metadata reads/writes and remains responsive to unrelated cron UI
+    and API calls while the job runs.
+    """
+    import multiprocessing
+    import queue
+
+    ctx = multiprocessing.get_context("fork")
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(
+        target=_cron_job_subprocess_main,
+        args=(job, execution_profile_home, result_queue),
+    )
+    process.start()
+    process.join()
+
+    try:
+        status, *payload = result_queue.get_nowait()
+    except queue.Empty:
+        status = "error"
+        payload = [
+            f"cron run subprocess exited with code {process.exitcode}",
+            "",
+        ]
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    if status == "ok":
+        return payload[0]
+
+    message = payload[0]
+    traceback_text = payload[1] if len(payload) > 1 else ""
+    if traceback_text:
+        logger.error("Manual cron subprocess failed:\n%s", traceback_text)
+    raise RuntimeError(message)
+
+
 def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     """Wrapper that tracks running state around cron.scheduler.run_job.
 
@@ -321,7 +386,6 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     agent config/.env while running. When no job profile is selected, both homes
     are the same and legacy server-default behavior is preserved.
     """
-    from cron.scheduler import run_job  # import here — runs inside a worker thread
     from cron.jobs import mark_job_run, save_job_output
 
     job_id = job.get("id", "")
@@ -336,8 +400,8 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
             return fn()
 
     try:
-        success, output, final_response, error = _with_cron_home(
-            execution_profile_home, lambda: run_job(job)
+        success, output, final_response, error = _run_cron_job_in_profile_subprocess(
+            job, execution_profile_home
         )
 
         # Persist output and run metadata back to the job's owning cron store,

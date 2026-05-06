@@ -200,30 +200,24 @@ def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
 
 
 def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
-    """_run_cron_tracked must NOT silently set ctx=None when
-    cron_profile_context_for_home(...).__enter__() raises.
+    """The subprocess target must not fall back to an unpinned cron run.
 
-    A silent fallback in the worker thread would leave the job running
-    unpinned against process-global HERMES_HOME, silently corrupting
-    cross-profile state — the same class of bug as #1573. We'd rather
-    let the exception propagate and kill the worker thread than risk
-    that.
-
-    Source-level assertion to catch any future re-introduction of the
-    over-broad except clause around the context setup.
+    A silent fallback would leave the job running against process-global
+    HERMES_HOME, silently corrupting cross-profile state — the same class of bug
+    as #1573. The child process may report the exception to the parent, but it
+    must not continue into run_job outside the requested profile context.
     """
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
 
-    idx = src.find("def _run_cron_tracked(job")
-    assert idx != -1, "_run_cron_tracked not found"
+    idx = src.find("def _cron_job_subprocess_main(job")
+    assert idx != -1, "_cron_job_subprocess_main not found"
     body = src[idx : idx + 2000]
 
-    # The profile-context setup must NOT be wrapped in try/except that
-    # silently falls back to ctx=None.
-    assert "except Exception" not in body[:body.find("run_job(job)")], (
-        "_run_cron_tracked silently falls back to ctx=None when "
-        "cron_profile_context_for_home(...).__enter__() raises. That leaves "
-        "the worker thread unpinned against process-global HERMES_HOME. "
-        "Let the exception propagate rather than corrupt cross-profile state."
+    assert "with cron_profile_context_for_home(execution_profile_home):" in body
+    assert "result = _run()" in body
+    assert "ctx = None" not in body
+    assert "except Exception" not in body[:body.find("with cron_profile_context_for_home")], (
+        "cron subprocess target appears to catch profile-context setup before "
+        "entering the context; do not fall back to an unpinned run_job call."
     )
