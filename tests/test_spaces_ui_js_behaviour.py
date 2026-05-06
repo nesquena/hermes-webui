@@ -781,6 +781,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDemoSmoke', { demo: 'demo_weather_widget' });
+  } else if (scenario === 'runWeatherWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runWeatherWalkthrough', {});
   } else if (scenario === 'runResearchDemoParitySmoke') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1769,6 +1773,24 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "Widget request: show it to me in a widget" in out["rootHtml"]
     assert "Widget after reload: verified" in out["rootHtml"]
     assert "Network mode: agent-mediated" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_weather_walkthrough_is_visible_and_runs_prompt_to_widget_flow(driver_path):
+    out = _run_spaces_scenario(driver_path, "runWeatherWalkthrough")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+
+    assert "Run weather walkthrough" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"demo": "demo_weather_widget"}
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Prompt → widget flow" in out["rootHtml"]
+    assert "Weather demo checklist" in out["rootHtml"]
+    assert "Current weather observation" in out["rootHtml"]
+    assert "Manage weather widget" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
