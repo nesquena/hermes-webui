@@ -681,8 +681,8 @@
               </div>
             </div>
             <div class="settings-field">
-              <label data-i18n="settings_label_theme">Theme</label>
-              <div id="themePickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:4px">
+              <label data-i18n="settings_label_theme">Mode</label>
+              <div id="themePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
                 <button type="button" data-theme-val="light" onclick="_pickTheme('light')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:#fff;border:1px solid rgba(0,0,0,.12);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <svg width="16" height="16" fill="none" stroke="#999" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
@@ -701,6 +701,14 @@
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)">System</span>
                 </button>
+              </div>
+              <input type="hidden" id="settingsTheme" value="dark">
+            </div>
+            <div class="settings-field">
+              <label data-i18n="settings_label_skin">Themes</label>
+              <div id="skinPickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:4px">
+              </div>
+              <div id="customThemePickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px">
                 <button type="button" id="customThemeAddCard" onclick="_openCustomThemeEditor()" class="theme-pick-btn" style="border:1px dashed var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:var(--surface-subtle);transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;border:1px dashed var(--border2);margin-bottom:6px;display:flex;align-items:center;justify-content:center;color:var(--accent)">
                     <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -708,7 +716,7 @@
                   <span style="font-size:12px;font-weight:500;color:var(--text)">Add theme</span>
                 </button>
               </div>
-              <input type="hidden" id="settingsTheme" value="dark">
+              <input type="hidden" id="settingsSkin" value="default">
             </div>
             <div class="settings-field" id="customThemeEditor" hidden style="border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--surface-subtle);margin-top:10px">
               <label for="customThemeName">Custom theme</label>
@@ -726,12 +734,6 @@
                 <button type="button" onclick="_closeCustomThemeEditor()" style="padding:7px 12px;border:1px solid var(--border2);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer">Cancel</button>
                 <span id="customThemeStatus" style="font-size:11px;color:var(--muted)"></span>
               </div>
-            </div>
-            <div class="settings-field">
-              <label data-i18n="settings_label_skin">Skin</label>
-              <div id="skinPickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:4px">
-              </div>
-              <input type="hidden" id="settingsSkin" value="default">
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>

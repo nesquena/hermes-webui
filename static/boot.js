@@ -1192,7 +1192,7 @@ function _pickSkin(name){
 }
 
 function _syncThemePicker(active){
-  document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
+  document.querySelectorAll('#themePickerGrid .theme-pick-btn, #customThemePickerGrid .theme-pick-btn').forEach(btn=>{
     btn.classList.toggle('active',btn.dataset.themeVal===active);
     btn.style.borderColor='';
     btn.style.boxShadow='';

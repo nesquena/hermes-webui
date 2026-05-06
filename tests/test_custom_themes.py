@@ -155,6 +155,16 @@ def test_custom_theme_picker_is_card_based_and_editor_is_collapsed_until_add():
     assert "_closeCustomThemeEditor();" in re.search(r"function _saveCustomThemeFromUi\(\).*?\n\}", PANELS_JS, re.S).group(0)
 
 
+def test_custom_theme_controls_live_under_renamed_themes_section():
+    assert 'data-i18n="settings_label_theme">Mode</label>' in INDEX_HTML
+    assert 'data-i18n="settings_label_skin">Themes</label>' in INDEX_HTML
+    assert 'id="customThemePickerGrid"' in INDEX_HTML
+    assert INDEX_HTML.index('id="skinPickerGrid"') < INDEX_HTML.index('id="customThemePickerGrid"') < INDEX_HTML.index('id="customThemeEditor"')
+    assert INDEX_HTML.index('id="themePickerGrid"') < INDEX_HTML.index('id="skinPickerGrid"')
+    assert "const grid=$('customThemePickerGrid');" in PANELS_JS
+    assert "#customThemePickerGrid .theme-pick-btn" in BOOT_JS
+
+
 def test_custom_theme_cards_have_delete_confirmation_and_no_static_custom_pick_button():
     assert 'data-theme-val="custom"' not in INDEX_HTML
     assert 'function _confirmDeleteCustomTheme' in PANELS_JS

@@ -2892,7 +2892,7 @@ function _ensureCustomThemePickerStyles(){
 
 function _renderCustomThemeCards(){
   const add=$('customThemeAddCard');
-  const grid=$('themePickerGrid');
+  const grid=$('customThemePickerGrid');
   if(!add||!grid) return;
   grid.querySelectorAll('[data-custom-theme-card]').forEach(el=>el.remove());
   const activeId=localStorage.getItem('hermes-custom-theme-id')||'';
