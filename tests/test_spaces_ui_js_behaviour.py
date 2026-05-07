@@ -1982,8 +1982,10 @@ def test_spaces_ui_install_camera_dashboard_posts_template_and_shows_safe_open_m
     assert "3 widgets" in out["rootHtml"]
     assert "Open camera dashboard" in out["rootHtml"]
     assert "Manage camera widgets" in out["rootHtml"]
+    assert "Run camera smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="camera-dashboard"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="camera-dashboard"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_camera_dashboard"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "camera"}
     assert out["calls"][-1]["path"] == "api/spaces"

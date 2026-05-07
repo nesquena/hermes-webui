@@ -62,6 +62,7 @@
       kanban: ['demo_kanban_board', 'Run kanban smoke'],
       research: ['demo_research_harness_pdf_export', 'Run research smoke'],
       dashboard: ['demo_daily_dashboard', 'Run dashboard smoke'],
+      camera: ['demo_camera_dashboard', 'Run camera smoke'],
       browser: ['demo_browser_cocontrol_google_or_test_site', 'Run browser smoke'],
       stock: ['demo_stock_chart', 'Run stock smoke'],
       service: ['demo_local_agent_control_dashboard', 'Run local service smoke']
