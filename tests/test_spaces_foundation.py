@@ -3438,6 +3438,54 @@ def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monke
     assert "secret" not in serialized
 
 
+def test_restore_widget_revision_restores_one_widget_without_leaking_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Widget Rollback", "description": "Current space survives"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "layout": {"x": 1, "y": 2, "w": 4, "h": 3},
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes survives"})
+    spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched", "layout": {"x": 5, "y": 6, "w": 7, "h": 4}})
+
+    restored = spaces.restore_widget_revision(created["space_id"], original["revision_event_id"], "weather")
+
+    assert restored["ok"] is True
+    assert restored["restored_event_id"] == original["revision_event_id"]
+    assert restored["widget"] == {
+        "id": "weather",
+        "kind": "html",
+        "title": "Weather original",
+        "layout": {"x": 1, "y": 2, "w": 4, "h": 3, "minimized": False},
+    }
+    detail = spaces.read_space_detail(created["space_id"])
+    assert [widget["id"] for widget in detail["widgets"]] == ["weather", "notes"]
+    assert detail["widgets"][0]["title"] == "Weather original"
+    assert detail["widgets"][1]["title"] == "Notes survives"
+    stored = spaces.read_widget(created["space_id"], "weather")
+    assert stored["renderer"] == "<script>keptButNeverReturned()</script>"
+
+    revisions = spaces.list_revision_events(created["space_id"])
+    assert revisions[0]["event_type"] == "widget.restored"
+    assert revisions[0]["details"] == {"restored_event_id": original["revision_event_id"], "widget_id": "weather"}
+    serialized = json.dumps({"restored": restored, "revisions": revisions}).lower()
+    assert "keptbutneverreturned" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+
 def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Broken Widgets"})
@@ -5133,6 +5181,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/widget/events"' in routes_src
     assert '"/api/spaces/revision/restore"' in routes_src
+    assert '"/api/spaces/revision/restore-widget"' in routes_src
     assert '"/api/spaces/widget/patch"' in routes_src
     assert '"/api/spaces/system-widget/upsert"' in routes_src
     assert '"/api/spaces/create"' in routes_src
@@ -5291,20 +5340,41 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert status == 200
     assert body["space"]["name"] == "Route Space"
 
+    widget_result = _route_post(
+        "/api/spaces/widget/upsert",
+        {"space_id": space_id, "widget": {"id": "route-widget", "kind": "markdown", "title": "Route widget original"}},
+    )[2]
+    _route_post(
+        "/api/spaces/widget/patch",
+        {"space_id": space_id, "widget_id": "route-widget", "patch": {"title": "Route widget patched"}},
+    )
+
     handled, status, body = _route_get(f"/api/spaces/revisions?space_id={space_id}")
     assert handled is None
     assert status == 200
-    assert body["revisions"][0]["event_type"] == "space.created"
+    assert body["revisions"][0]["event_type"] == "widget.patched"
+    assert body["revisions"][-1]["event_type"] == "space.created"
     assert body["revisions"][0]["space_id"] == space_id
 
     handled, status, body = _route_post(
         "/api/spaces/revision/restore",
-        {"space_id": space_id, "event_id": body["revisions"][0]["event_id"]},
+        {"space_id": space_id, "event_id": body["revisions"][-1]["event_id"]},
     )
     assert handled is None
     assert status == 200
     assert body["ok"] is True
     assert body["space"]["space_id"] == space_id
+    assert body["restored_event_id"]
+
+    handled, status, body = _route_post(
+        "/api/spaces/revision/restore-widget",
+        {"space_id": space_id, "event_id": widget_result["revision_event_id"], "widget_id": "route-widget"},
+    )
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["space_id"] == space_id
+    assert body["widget"]["id"] == "route-widget"
     assert body["restored_event_id"]
 
     handled, status, body = _route_get("/api/spaces/recovery")

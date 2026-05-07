@@ -2933,6 +2933,55 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     }
 
 
+def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dict[str, Any]:
+    """Restore one widget from a stored revision snapshot, leaving other widgets intact."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    wid = validate_widget_id(widget_id)
+    safe_event_id = str(event_id or "")
+    if not _event_id_is_safe(safe_event_id):
+        raise ValueError("Invalid event_id")
+    current = read_space(sid)
+    event_path = events_dir() / f"{safe_event_id}.json"
+    if not event_path.exists():
+        raise FileNotFoundError("Revision event not found")
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    if not isinstance(event, dict) or event.get("space_id") != sid:
+        raise ValueError("Revision event does not belong to this space")
+    snapshot = event.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("Revision snapshot is unavailable")
+    target_widget: dict[str, Any] | None = None
+    for widget in snapshot.get("widgets") if isinstance(snapshot.get("widgets"), list) else []:
+        if isinstance(widget, dict) and widget.get("id") == wid:
+            target_widget = _normalize_widget(widget)
+            break
+    if target_widget is None:
+        raise FileNotFoundError("Widget not found in revision snapshot")
+
+    widgets = current.get("widgets") if isinstance(current.get("widgets"), list) else []
+    restored_widgets: list[dict[str, Any]] = []
+    replaced = False
+    for widget in widgets:
+        if isinstance(widget, dict) and widget.get("id") == wid:
+            restored_widgets.append(target_widget)
+            replaced = True
+        elif isinstance(widget, dict):
+            restored_widgets.append(_normalize_widget(widget))
+    if not replaced:
+        restored_widgets.append(target_widget)
+    current["widgets"] = restored_widgets
+    saved = _write_manifest(current, "widget.restored", {"restored_event_id": safe_event_id, "widget_id": wid})
+    return {
+        "ok": True,
+        "space_id": sid,
+        "widget": read_widget_detail(sid, wid),
+        "restored_event_id": safe_event_id,
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
 def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")

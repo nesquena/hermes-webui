@@ -528,13 +528,15 @@
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
-      const restoreButton = eventId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button></div>' : '';
+      const widgetRestoreButtons = renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff);
+      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button>' : '';
+      const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
-        '</div>'+restoreButton+'</div>';
+        '</div>'+actions+'</div>';
     }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
     return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
       '<div class="capy-spaces-muted">Newest safe metadata events. Restore rewrites the Space manifest from a stored snapshot; generated widget bodies are not displayed.</div>' +
@@ -626,6 +628,27 @@
     if (updateWidgets.length) details.push('Update widgets: '+updateWidgets.join(', '));
     if (!summary.length) return '';
     return 'Diff: restore '+summary.join(', ')+(details.length ? ' · '+details.join(' · ') : '');
+  }
+
+  function safeRestoreWidgetIds(diff){
+    if (!diff || typeof diff !== 'object' || Array.isArray(diff) || !diff.has_changes) return [];
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source)/i;
+    const ids = [];
+    [diff.widgets_to_update, diff.widgets_to_add].forEach(function(list){
+      if (!Array.isArray(list)) return;
+      list.slice(0, 10).forEach(function(item){
+        const text = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (text && !unsafeValuePattern.test(text) && ids.indexOf(text) === -1) ids.push(text);
+      });
+    });
+    return ids;
+  }
+
+  function renderRestoreWidgetButtons(spaceId, eventId, diff){
+    if (!spaceId || !eventId) return '';
+    return safeRestoreWidgetIds(diff).map(function(widgetId){
+      return '<button type="button" class="capy-spaces-btn" data-capy-action="restoreWidgetRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Restore widget</button>';
+    }).join('');
   }
 
   function formatRevisionTime(value){
@@ -1770,6 +1793,16 @@
       const ok = await showConfirmDialog({title: 'Restore Space revision?', message: 'Restore space "'+spaceId+'" to revision '+eventId.slice(0, 12)+'? The current manifest remains in revision history.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
       await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      await openSpaceDetail(spaceId);
+      return;
+    }
+    if (action === 'restoreWidgetRevision') {
+      const eventId = button.dataset.eventId || '';
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !eventId || !widgetId || typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Restore widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+'? Other widgets in this Space are left unchanged.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
       await openSpaceDetail(spaceId);
       return;
     }

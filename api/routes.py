@@ -1863,6 +1863,22 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Revision not found", 404)
 
+    if parsed.path == "/api/spaces/revision/restore-widget":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        event_id = body.get("event_id")
+        widget_id = body.get("widget_id")
+        if not space_id or not event_id or not widget_id:
+            return bad(handler, "Missing space_id, event_id, or widget_id")
+        try:
+            return j(handler, capy_spaces.restore_widget_revision(space_id, event_id, widget_id))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Revision or widget not found", 404)
+
     if parsed.path == "/api/spaces/widget/upsert":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

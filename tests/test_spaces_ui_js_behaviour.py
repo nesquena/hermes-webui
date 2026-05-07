@@ -843,6 +843,18 @@ global.fetch = async function(path, opts = {}) {
       api_key: 'SECRET',
     });
   }
+  if (path === 'api/spaces/revision/restore-widget') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      ok: true,
+      space_id: body.space_id || 'lab',
+      widget: { id: body.widget_id || 'weather', kind: 'markdown', title: 'Weather restored', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      restored_event_id: body.event_id || 'rev1',
+      revision_event_id: 'rev-widget-restore',
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET',
+    });
+  }
   if (path === 'api/spaces/update') {
     return response({ space: { space_id: 'lab', name: 'Lab Edited', description: 'Updated', widget_count: 1, revision_event_id: 'rev5' } });
   }
@@ -1162,6 +1174,16 @@ async function click(action, dataset) {
     await click('openSpace', { spaceId: 'lab' });
     beforeHtml = root.innerHTML;
     await click('restoreRevision', { spaceId: 'lab', eventId: 'rev1' });
+  } else if (scenario === 'restoreWidgetRevisionConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('restoreWidgetRevision', { spaceId: 'lab', eventId: 'rev1', widgetId: 'weather' });
+  } else if (scenario === 'restoreWidgetRevisionNoDialog') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    await click('restoreWidgetRevision', { spaceId: 'lab', eventId: 'rev1', widgetId: 'weather' });
   } else if (scenario === 'restoreRevisionNoDialog') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -2952,6 +2974,9 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "Update widgets: weather" in out["rootHtml"]
     assert "name: Lab &lt;Detail&gt;" in out["rootHtml"]
     assert 'data-capy-action="restoreRevision"' in out["rootHtml"]
+    assert 'data-capy-action="restoreWidgetRevision"' in out["rootHtml"]
+    assert 'data-widget-id="weather"' in out["rootHtml"]
+    assert "Restore widget" in out["rootHtml"]
     assert "Restore" in out["rootHtml"]
     assert 'data-capy-action="rollbackRevision"' not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
@@ -3008,6 +3033,31 @@ def test_spaces_ui_restore_revision_uses_shared_confirm_and_reload_without_widge
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_restore_widget_revision_posts_widget_only_and_refreshes_detail(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreWidgetRevisionConfirmed")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/revision/restore-widget")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Restore widget revision?"
+    assert out["dialogs"][0]["danger"] is True
+    assert out["dialogs"][0]["confirmLabel"] == "Restore widget"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "event_id": "rev1", "widget_id": "weather"}
+    assert out["calls"][-2]["path"] == "api/spaces/get?space_id=lab"
+    assert out["calls"][-1]["path"] == "api/spaces/revisions?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_restore_widget_revision_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreWidgetRevisionNoDialog")
+
+    assert not any(call["path"] == "api/spaces/revision/restore-widget" for call in out["calls"])
+
 
 
 def test_spaces_ui_restore_revision_fails_closed_without_shared_dialog(driver_path):

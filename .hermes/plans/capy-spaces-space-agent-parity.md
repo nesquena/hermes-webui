@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: revision history now includes safe restore-diff summaries for rollback points, so users can see which metadata fields/widgets would change before restoring without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: revision history now supports widget-level rollback actions from safe restore diffs, so a single widget can be restored from a revision snapshot while leaving the rest of the Space intact and without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): restore individual widgets from revisions`
+  - Added RED/GREEN backend and real-`static/spaces.js` coverage proving a single widget can be restored from a revision snapshot while other widgets remain intact.
+  - Added `/api/spaces/revision/restore-widget`, metadata-only public responses, safe revision event details, UI `Restore widget` buttons derived from safe restore diffs, and fail-closed shared-dialog handling.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed; full Spaces UI JS behavior suite and full Spaces foundation suite passed; syntax/compile/diff checks passed; browser QA confirmed widget rollback controls are visible and no hostile renderer/source/API-auth markers or secret-looking values appear in the Spaces root.
 
 - `feat(spaces): show revision restore diffs`
   - Added RED/GREEN backend and real-`static/spaces.js` coverage proving revision events include metadata-only `restore_diff` summaries and the Revision history UI renders what a restore would change (`Fields`, `Remove widgets`, `Update widgets`) without leaking hostile renderer/source/API-auth markers or secret-looking values.
