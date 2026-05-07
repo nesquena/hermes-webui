@@ -1823,6 +1823,10 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const orphans=[];
   for(const child of rawSessions||[]){
     if(!_isChildSession(child)) continue;
+    if(child._cross_surface_child_session){
+      orphans.push({...child,_orphan_child_session:true});
+      continue;
+    }
     const parentSid=child.parent_session_id;
     let parentRow=visibleBySid.get(parentSid);
     let parentSegment=null;

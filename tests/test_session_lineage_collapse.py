@@ -126,6 +126,8 @@ console.log(JSON.stringify({{sid: collapsed[0].session_id, containsRoot: _sessio
     assert '"containsRoot":true' in result
 
 
+
+
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
@@ -162,3 +164,47 @@ console.log(JSON.stringify(attached));
     assert [row["session_id"] for row in rows] == ["tip"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "child"
+
+
+def test_cross_surface_webui_child_session_remains_top_level_when_parent_is_messaging():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{session_id:'telegram_parent', title:'Telegram parent', source_label:'Telegram'}}];
+const raw = [
+  collapsed[0],
+  {{
+    session_id:'webui_tip',
+    title:'Current WebUI continuation',
+    parent_session_id:'telegram_parent',
+    relationship_type:'child_session',
+    parent_source:'telegram',
+    source_label:'Telegram',
+    session_source:'messaging',
+    raw_source:'telegram',
+    _cross_surface_child_session:true,
+  }},
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["telegram_parent", "webui_tip"]
+    assert rows[1].get("_orphan_child_session") is True
+    assert "_child_sessions" not in rows[0]

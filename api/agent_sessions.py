@@ -527,6 +527,10 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                 entry['relationship_type'] = 'child_session'
                 entry['parent_title'] = parent_row.get('title')
                 entry['parent_source'] = parent_row.get('source')
+                parent_source = str(parent_row.get('source') or '').strip().lower()
+                child_source = str(row.get('source') or '').strip().lower()
+                if parent_source and child_source and parent_source != child_source:
+                    entry['_cross_surface_child_session'] = True
                 parent_root = _continuation_root_id(rows, parent_id)
                 if parent_root:
                     entry['_parent_lineage_root_id'] = parent_root
