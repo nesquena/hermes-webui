@@ -83,9 +83,8 @@ def test_returns_none_when_hermes_has_no_shebang(monkeypatch, tmp_path):
     assert bootstrap.discover_agent_dir() is None
 
 
-def test_returns_none_when_shebang_interpreter_does_not_have_run_agent(monkeypatch, tmp_path):
-    """Shebang points at /usr/bin/python3 — no install root walks up to run_agent.py."""
-    _make_agent_install(tmp_path, with_run_agent=False)  # install exists but no run_agent.py
+def test_returns_none_when_shebang_interpreter_does_not_walk_to_run_agent(monkeypatch, tmp_path):
+    """Shebang points at a system Python — no parent of /usr/bin/python3 has run_agent.py."""
     hermes = _make_hermes_cli(tmp_path, "/usr/bin/python3")
     _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
 

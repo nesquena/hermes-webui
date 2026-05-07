@@ -102,6 +102,12 @@ def _agent_dir_from_hermes_cli() -> Path | None:
     `run_agent.py` recovers the install root regardless of where the user
     chose to clone the agent (e.g. ~/Projects/GitHub/hermes-agent), which
     the hard-coded candidate list in :func:`discover_agent_dir` cannot.
+
+    Last-resort only: this is invoked after every explicit candidate
+    (`HERMES_WEBUI_AGENT_DIR`, `$HERMES_HOME/hermes-agent`, etc.) has missed.
+    A stale clone in a known location still wins over the live `hermes` CLI
+    — that's intentional, since the candidate list is treated as
+    authoritative when present, and matches existing behavior.
     """
     hermes_path = shutil.which("hermes")
     if not hermes_path:
