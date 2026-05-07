@@ -97,3 +97,20 @@ class TestSidebarFirstTurnVisibility:
             "The index-path empty-session filter must exempt pending first-turn sessions, "
             "matching the full-scan fallback."
         )
+
+    def test_session_refresh_preserves_optimistic_first_turn_rows_when_server_lags(self):
+        src = read("static/sessions.js")
+        assert "function _mergeOptimisticFirstTurnSessions" in src, (
+            "renderSessionList() must merge locally optimistically inserted first-turn rows "
+            "back into the fetched /api/sessions result. A session switch can re-fetch before "
+            "the server has saved pending state, and replacing _allSessions would hide the "
+            "new in-flight chat until the stream finishes."
+        )
+        render_start = src.index("async function renderSessionList")
+        render_end = src.index("// ── Gateway session SSE", render_start)
+        render_body = src[render_start:render_end]
+        assign_idx = render_body.index("_allSessions =")
+        assert "_mergeOptimisticFirstTurnSessions" in render_body[:assign_idx + 160], (
+            "The fetched session list should be merged with optimistic rows at the assignment "
+            "site, before completion transitions or renderSessionListFromCache() run."
+        )
