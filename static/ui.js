@@ -6039,6 +6039,95 @@ function renderBreadcrumb(){
   }
 }
 
+function bindWorkspaceHeadingActions(){
+  const heading=$('workspacePanelHeading');
+  if(!heading||heading.dataset.bound==='1')return;
+  heading.dataset.bound='1';
+  const goRoot=()=>{
+    if(S.session&&S.session.workspace) loadDir('.');
+  };
+  heading.onclick=goRoot;
+  heading.onkeydown=(e)=>{
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      goRoot();
+    }
+  };
+  heading.oncontextmenu=(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    if(S.session&&S.session.workspace) _showWorkspaceRootContextMenu(e);
+  };
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',bindWorkspaceHeadingActions);
+else bindWorkspaceHeadingActions();
+
+function _workspaceContextMenuItem(label, onClick, opts={}){
+  const item=document.createElement('div');
+  item.textContent=label;
+  item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:'+(opts.danger?'var(--error,#e94560)':'var(--text)')+';';
+  item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+  item.onmouseleave=()=>item.style.background='';
+  item.onclick=onClick;
+  return item;
+}
+
+function _copyTextWithFallback(text, successMsg, failurePrefix){
+  const done=()=>showToast(successMsg);
+  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')));
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(done).catch(err=>{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) done(); else fail(err);
+    });
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+  document.body.appendChild(ta);
+  ta.select();
+  let copied=false;
+  try{copied=document.execCommand('copy');}catch(err){ta.remove();fail(err);return Promise.resolve();}
+  ta.remove();
+  if(copied) done(); else fail('clipboard unavailable');
+  return Promise.resolve();
+}
+
+function _showWorkspaceRootContextMenu(e){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu workspace-root-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
+  menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
+    menu.remove();
+    try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('reveal_failed')+(err.message||err));}
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
+      await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
+    }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
+  }));
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
 // Track expanded directories for tree view
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
