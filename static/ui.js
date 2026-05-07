@@ -516,13 +516,55 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
 
 // Set the model picker to the best match for modelId.
 // Returns the resolved value that was actually set, or null if nothing matched.
+function _refreshOpenModelDropdown(){
+  const dd=$('composerModelDropdown');
+  if(dd&&dd.classList&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+    renderModelDropdown();
+    if(typeof _positionModelDropdown==='function') _positionModelDropdown();
+  }
+}
 function _applyModelToDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
-    if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
     return resolved;
+  }
+  return null;
+}
+function _modelStateFromAppliedDropdown(sel, modelValue){
+  const state=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel,modelValue)
+    : {model:modelValue,model_provider:null};
+  return {model:state.model||modelValue,model_provider:state.model_provider||null};
+}
+function _persistSessionModelCorrection(model, provider){
+  if(!S.session) return;
+  fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
+  }).catch(()=>{});
+}
+function _applySessionModelFallback(sel){
+  if(!sel) return null;
+  const configuredDefault=String(window._defaultModel||'').trim();
+  if(configuredDefault){
+    const appliedDefault=_applyModelToDropdown(configuredDefault,sel,window._activeProvider||null);
+    if(appliedDefault) return _modelStateFromAppliedDropdown(sel,appliedDefault);
+  }
+  const first=sel.querySelector('optgroup > option, option');
+  if(first){
+    sel.value=first.value;
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
+    return _modelStateFromAppliedDropdown(sel,first.value);
   }
   return null;
 }
@@ -3660,35 +3702,41 @@ function syncTopbar(){
     _applyModelToDropdown(modelOverride,$('modelSelect'),providerOverride);
     currentModel=modelOverride;
   } else {
-    const applied=_applyModelToDropdown(currentModel,$('modelSelect'),S.session.model_provider||null);
-    // If the model isn't in the current provider list, silently reset to the
-    // first available model so stale values don't pollute the picker (#829).
-    if(!applied && currentModel){
-      const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-      // Also defer if a live model fetch is still in flight — the model may be
-      // in the list once the fetch completes. Persisting now would corrupt the
-      // session with the wrong model before live models arrive (#1169).
-      const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-      if(liveStillPending){
-        // Live fetch in flight — don't touch sel.value or S.session.model yet.
-        // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
-      } else {
-        // Stale session model not in the current provider catalog — reset to the
-        // first available model rather than injecting an "(unavailable)" option
-        // that visually appears under the wrong provider group (#829).
-        const modelSel=$('modelSelect');
-        const first=modelSel&&modelSel.querySelector('optgroup > option, option');
-        if(first){
-          modelSel.value=first.value;
-          if(!deferModelCorrection){
-            S.session.model=first.value;
-            S.session.model_provider=_getOptionProviderId(first)||null;
+    const modelSel=$('modelSelect');
+    const rawCurrentModel=String(currentModel||'').trim();
+    const hasSessionModel=rawCurrentModel&&rawCurrentModel.toLowerCase()!=='unknown';
+    if(!hasSessionModel){
+      // Missing/unknown session metadata must not leave the picker on the
+      // previously viewed chat's model (#1771). Apply the configured default
+      // first, then the first available option only as an HTML fallback.
+      const fallback=_applySessionModelFallback(modelSel);
+      if(fallback){
+        S.session.model=fallback.model;
+        S.session.model_provider=fallback.model_provider||null;
+        currentModel=fallback.model;
+        _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+      }
+    } else {
+      const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
+      // If the model isn't in the current provider list, reset to the configured
+      // default rather than silently retaining the previous chat's selection (#1771).
+      if(!applied){
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        // Also defer if a live model fetch is still in flight — the model may be
+        // in the list once the fetch completes. Persisting now would corrupt the
+        // session with the wrong model before live models arrive (#1169).
+        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        if(liveStillPending){
+          // Live fetch in flight — don't touch sel.value or S.session.model yet.
+          // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+        } else {
+          const fallback=_applySessionModelFallback(modelSel);
+          if(fallback&&!deferModelCorrection){
+            S.session.model=fallback.model;
+            S.session.model_provider=fallback.model_provider||null;
+            currentModel=fallback.model;
             // Persist the correction so the session doesn't re-inject on next load.
-            fetch(new URL('api/session/update',document.baseURI||location.href).href,{
-              method:'POST',credentials:'include',
-              headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value,model_provider:S.session.model_provider||null})
-            }).catch(()=>{});
+            _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
           }
         }
       }

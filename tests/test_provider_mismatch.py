@@ -1344,8 +1344,11 @@ def test_stale_ui_js_does_not_inject_unavailable_option():
         "stale models should be silently reset to the first available model (#829)"
     )
 
-    # The new silent-reset pattern must be present
-    assert "first.value" in src and "S.session.model=first.value" in src, (
-        "renderSession() must silently reset S.session.model to the first "
-        "available option when the session model is not in the dropdown (#829)"
+    # The reset path remains, but #1771 now prefers the configured default
+    # before using the first HTML option as a last-resort fallback.
+    assert "_applySessionModelFallback" in src and "configuredDefault" in src, (
+        "stale session models should be reset through the safe fallback helper"
+    )
+    assert "const first=sel.querySelector('optgroup > option, option');" in src, (
+        "the first available option should remain only as a fallback when no configured default applies"
     )
