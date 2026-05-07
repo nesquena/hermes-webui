@@ -304,6 +304,26 @@ function restoreDashboardSkills() {
   if (skillsPanelAnchor) _insertAfter(skillsPanelAnchor, panel);
 }
 
+let tasksPanelAnchor = null;
+
+function mountDashboardTasks() {
+  const panel = document.getElementById('panelTasks');
+  const mainTasks = document.getElementById('mainTasks');
+  if (!panel || !mainTasks) return;
+  if (!tasksPanelAnchor && panel.parentNode) {
+    tasksPanelAnchor = document.createComment('tasksPanelAnchor');
+    panel.parentNode.insertBefore(tasksPanelAnchor, panel);
+  }
+  if (panel.parentNode !== mainTasks) mainTasks.insertBefore(panel, mainTasks.firstChild);
+}
+
+function restoreDashboardTasks() {
+  const panel = document.getElementById('panelTasks');
+  const mainTasks = document.getElementById('mainTasks');
+  if (!panel || !mainTasks || panel.parentNode !== mainTasks) return;
+  if (tasksPanelAnchor) _insertAfter(tasksPanelAnchor, panel);
+}
+
 async function loadDashboardSummary() {
   try {
     const data = await api('/api/dashboard/summary');

@@ -2666,6 +2666,8 @@ body.dashboard-shell-mode .sidebar-nav,
 body.dashboard-shell-mode #sidebarResize,
 body.dashboard-shell-mode .app-titlebar-spacer{display:none!important;}
 body.dashboard-shell-mode .main{background:var(--bg);}
+body.dashboard-shell-mode main.main.showing-tasks #mainTasks>#panelTasks{display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
+body.dashboard-shell-mode main.main.showing-tasks #mainTasks .cron-list{flex:1;overflow-y:auto;}
 
 @media(min-width:641px){
   body.dashboard-shell-mode .app-titlebar{display:none;}
@@ -2681,6 +2683,12 @@ body.dashboard-shell-mode .main{background:var(--bg);}
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-header,
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-body,
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-empty{flex:1;min-width:0;}
+  body.dashboard-shell-mode main.main.showing-tasks>#mainTasks{flex-direction:row;overflow:hidden;padding:0;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks>#panelTasks{width:280px;min-width:280px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .cron-list{flex:1;overflow-y:auto;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-header,
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-body,
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-empty{flex:1;min-width:0;}
   /* ── Conversas (showing-chat) — full-width browse list ──
      panelChat is the only visible child of #mainChat in this mode. The
      transcript (#messages) and composer-wrap stay parked in #mainChat but
