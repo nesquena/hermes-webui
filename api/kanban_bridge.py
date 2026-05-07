@@ -745,6 +745,18 @@ def _list_boards_payload(parsed):
         current = kb.get_current_board()
     except Exception:
         current = "default"
+    visible_slugs = {(_board_meta_dict(meta).get("slug")) for meta in boards}
+    default_slug = getattr(kb, "DEFAULT_BOARD", "default")
+    if current not in visible_slugs:
+        # The on-disk active-board pointer can outlive an archived/deleted board
+        # when another CLI/WebUI process removes it. Surface a valid current
+        # board instead of letting the frontend pin every subsequent request to
+        # a ghost slug and fail with an opaque 404.
+        try:
+            kb.clear_current_board()
+        except Exception:
+            pass
+        current = default_slug
     out = []
     for raw_meta in boards:
         meta = _board_meta_dict(raw_meta)

@@ -1189,11 +1189,49 @@ function _kanbanCard(task, status){
   </article>`;
 }
 
+async function hardRefreshWebUIClient(){
+  try {
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch(_) {}
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch(_) {}
+  window.location.reload();
+}
+
+function _kanbanLooksLikeStaleClientError(err){
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return !!(err && err.status === 404 && (
+    msg === 'not found' ||
+    msg.includes('unknown kanban endpoint') ||
+    msg.includes('stale cached bundle')
+  ));
+}
+
+function _kanbanUnavailableHtml(err){
+  const raw = String((err && err.message) || err || '');
+  if (_kanbanLooksLikeStaleClientError(err)) {
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+  }
+  const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
+}
+
 async function loadKanban(animate){
   const board = $('kanbanBoard');
   const list = $('kanbanList');
   try {
     if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
+    // Resolve the active board before board-scoped requests. If another CLI or
+    // tab archived the previous board, /boards can fall back to default instead
+    // of leaving config/board pinned to a ghost slug.
+    await loadKanbanBoards();
     const config = await api('/api/kanban/config' + _kanbanBoardQuery());
     let assignees = null;
     try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
@@ -1230,9 +1268,9 @@ async function loadKanban(animate){
     _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
-    const msg = `${esc(t('kanban_unavailable'))}: ${esc(e.message || e)}`;
-    if (board) board.innerHTML = `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
-    if (list) list.innerHTML = `<div class="kanban-empty">${msg}</div>`;
+    const html = _kanbanUnavailableHtml(e);
+    if (board) board.innerHTML = html;
+    if (list) list.innerHTML = html;
   }
 }
 
@@ -1687,6 +1725,8 @@ async function loadKanbanBoards(){
   let active = serverCurrent;
   if (saved && boards.some(b => b.slug === saved)) {
     active = saved;
+  } else if (saved) {
+    _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
   // The switcher is visible whenever ≥1 non-default board exists OR the

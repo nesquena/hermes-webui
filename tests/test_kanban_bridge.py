@@ -389,6 +389,22 @@ def test_kanban_board_payload_exposes_read_only_board(monkeypatch):
     assert any(task["id"] == "t_1" and task["title"] == "Read-only board target" for task in all_tasks)
 
 
+def test_board_pointer_drift_falls_back_to_default(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+    fake_kanban.boards = {
+        "default": {"slug": "default", "name": "Default board", "archived": False},
+        "active": {"slug": "active", "name": "Active board", "archived": False},
+    }
+    fake_kanban.set_current_board("ghost")
+
+    data = bridge._list_boards_payload(_parsed(path="/api/kanban/boards"))
+
+    assert data["current"] == "default"
+    assert fake_kanban.get_current_board() == "default"
+    assert any(board["slug"] == "default" and board["is_current"] for board in data["boards"])
+
+
 def test_kanban_task_detail_payload_exposes_comments_events_links_and_runs(monkeypatch):
     bridge = _load_bridge(monkeypatch)
 
