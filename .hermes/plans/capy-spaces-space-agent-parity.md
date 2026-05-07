@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Game Sandbox install completion card links directly into the safe Snake repair smoke, making the installed game template a visible end-to-end entry point while keeping generated/source/API-auth markers and secret-looking values out of DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the demo smoke suite now renders a compact Kanban board checklist row (`columns 3 · cards 3 · drag/drop planned · card edits metadata-only`) from safe `kanban_board` metadata while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): summarize kanban flow in smoke suite`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now surfaces a compact safe Kanban board checklist row for the kanban vertical while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): link game install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Game Sandbox install status includes a `Run snake smoke` action wired to `demo_snake_iterative_repair`, while preserving `Open game sandbox` / `Manage game widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.

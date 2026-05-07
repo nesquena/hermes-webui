@@ -288,8 +288,31 @@
       const notesSummary = demo === 'demo_notes_app' && notesFlow
         ? '<div class="capy-spaces-muted"><strong>Notes app checklist</strong></div><div class="capy-spaces-muted">Notes flow: folders '+Number(notesFlow.folder_count || 0)+' · active '+escapeHtml(notesFlow.active_folder ? String(notesFlow.active_folder) : 'none')+' · editor '+(notesFlow.editor_saved ? 'saved' : 'not saved')+' · markdown '+(notesFlow.markdown_preview_saved ? 'saved' : 'not saved')+' · attachments '+(notesFlow.attachments_agent_mediated ? 'agent-mediated' : 'not ready')+'</div>'
         : '';
+      const kanbanSuiteBoard = item && item.kanban_board && typeof item.kanban_board === 'object' && !Array.isArray(item.kanban_board) ? item.kanban_board : null;
+      const kanbanSuiteColumns = kanbanSuiteBoard && Array.isArray(kanbanSuiteBoard.columns) ? kanbanSuiteBoard.columns : [];
+      const kanbanCardCount = kanbanSuiteColumns.reduce(function(count, column){
+        const meta = column && column.metadata && typeof column.metadata === 'object' && !Array.isArray(column.metadata) ? column.metadata : {};
+        const kanban = meta.kanban && typeof meta.kanban === 'object' && !Array.isArray(meta.kanban) ? meta.kanban : {};
+        const cards = Array.isArray(kanban.cards) ? kanban.cards : [];
+        return count + cards.length;
+      }, 0);
+      const kanbanDragPlanned = kanbanSuiteColumns.some(function(column){
+        const meta = column && column.metadata && typeof column.metadata === 'object' && !Array.isArray(column.metadata) ? column.metadata : {};
+        const kanban = meta.kanban && typeof meta.kanban === 'object' && !Array.isArray(meta.kanban) ? meta.kanban : {};
+        const interaction = kanban.interaction && typeof kanban.interaction === 'object' && !Array.isArray(kanban.interaction) ? kanban.interaction : {};
+        return interaction.drag_drop === 'planned';
+      });
+      const kanbanEditsMetadataOnly = kanbanSuiteColumns.some(function(column){
+        const meta = column && column.metadata && typeof column.metadata === 'object' && !Array.isArray(column.metadata) ? column.metadata : {};
+        const kanban = meta.kanban && typeof meta.kanban === 'object' && !Array.isArray(meta.kanban) ? meta.kanban : {};
+        const interaction = kanban.interaction && typeof kanban.interaction === 'object' && !Array.isArray(kanban.interaction) ? kanban.interaction : {};
+        return interaction.edit_cards === 'metadata-only';
+      });
+      const kanbanSummary = demo === 'demo_kanban_board' && kanbanSuiteBoard
+        ? '<div class="capy-spaces-muted"><strong>Kanban board checklist</strong></div><div class="capy-spaces-muted">Kanban flow: columns '+Number(kanbanSuiteBoard.column_count || kanbanSuiteColumns.length || 0)+' · cards '+kanbanCardCount+' · drag/drop '+(kanbanDragPlanned ? 'planned' : 'not ready')+' · card edits '+(kanbanEditsMetadataOnly ? 'metadata-only' : 'not ready')+'</div>'
+        : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + notesSummary + '</div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + notesSummary + kanbanSummary + '</div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
