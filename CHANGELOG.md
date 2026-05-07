@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Make the composer attach button trigger the file picker more reliably in Docker/browser shells by keeping the hidden file input programmatically clickable, and let HTML attachments/open-full links open sandboxed inline browser views instead of inert badges or forced downloads. Refs #1800.
+
 ## [v0.51.18] — 2026-05-07 — 5-PR batch (4 contributor + 1 self-built UX polish)
 
 ### Fixed

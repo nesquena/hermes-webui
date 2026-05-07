@@ -380,6 +380,10 @@ function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
   if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  if(_HTML_EXTS.test(fname)){
+    const inlineUrl=url+(String(url).includes('?')?'&':'?')+'inline=1';
+    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener">${li('file-code',12)} ${esc(fname)}</a>`;
+  }
   return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
 }
 document.addEventListener('click', e => {
@@ -5735,13 +5739,13 @@ function loadHtmlInline(){
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
         const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';

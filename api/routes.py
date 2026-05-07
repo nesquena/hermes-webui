@@ -5070,8 +5070,17 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     handler.send_header("Cache-Control", cache_control)
     handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
     if csp:
+        # Sandboxed inline HTML must remain frameable for workspace previews;
+        # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
         handler.send_header("Content-Security-Policy", csp)
-    _security_headers(handler)
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("Referrer-Policy", "same-origin")
+        handler.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+        )
+    else:
+        _security_headers(handler)
     handler.end_headers()
 
     if content_length:
@@ -5157,8 +5166,9 @@ def _handle_media(handler, parsed):
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
-    # Only serve safe media/PDF types inline when explicitly requested. Everything
-    # else remains a download. SVG is always a download (XSS risk).
+    # Only serve safe media/PDF types inline when explicitly requested. HTML is
+    # allowed inline only with a CSP sandbox so "open full page" can work without
+    # granting same-origin access to the WebUI. SVG is always a download (XSS risk).
     _INLINE_IMAGE_TYPES = {
         "image/png", "image/jpeg", "image/gif", "image/webp",
         "image/x-icon", "image/bmp",
@@ -5171,12 +5181,15 @@ def _handle_media(handler, parsed):
     }
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
     inline_preview = qs.get("inline", [""])[0] == "1"
+    html_inline_ok = inline_preview and mime == "text/html"
     disposition = "inline" if (
         mime not in _DOWNLOAD_TYPES and (
             mime in _INLINE_IMAGE_TYPES or (inline_preview and mime in _INLINE_PREVIEW_TYPES)
+            or html_inline_ok
         )
     ) else "attachment"
-    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600")
+    csp = "sandbox allow-scripts" if html_inline_ok else None
+    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
 
 
 def _handle_file_raw(handler, parsed):
