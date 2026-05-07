@@ -1,0 +1,22 @@
+{
+  "pr": 1848,
+  "issue": 1847,
+  "url": "http://127.0.0.1:18790/",
+  "synthetic_messages": [
+    {
+      "role": "user",
+      "content": "User inline LaTeX: \\(a^2 + b^2 = c^2\\) and display:\\n\\[\\int_0^1 x^2\\,dx = \\frac{1}{3}\\]"
+    },
+    {
+      "role": "assistant",
+      "content": "Assistant inline LaTeX: \\(E=mc^2\\) and display:\\n\\[\\sum_{n=1}^{3} n = 6\\]"
+    }
+  ],
+  "result": {
+    "katex_nodes": 4,
+    "raw_backslash_delimiters_visible": false
+  },
+  "screenshot": "latex-delimiters-katex-rendered.png",
+  "captured_at_unix": 1778185340,
+  "notes": "Synthetic state injected into isolated temp WebUI server; no private sessions/content used."
+}
