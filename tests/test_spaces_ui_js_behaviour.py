@@ -2021,16 +2021,26 @@ def test_spaces_ui_install_game_sandbox_posts_template_and_refreshes_without_wid
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_music_sequencer_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_music_sequencer_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installMusicSequencer")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install music sequencer" in out["rootHtml"]
+    assert "Music sequencer installed" in out["rootHtml"]
+    assert "Music Sequencer" in out["rootHtml"]
+    assert "4 widgets" in out["rootHtml"]
+    assert "Open music sequencer" in out["rootHtml"]
+    assert "Manage music widgets" in out["rootHtml"]
+    assert "Run music smoke" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="music-sequencer"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="music-sequencer"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_step_sequencer_piano_roll"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "music"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
 

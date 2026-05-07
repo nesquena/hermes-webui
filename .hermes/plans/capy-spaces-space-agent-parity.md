@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Model Provider Setup install completion card links directly into the safe provider setup smoke, making the installed model/provider template a visible end-to-end entry point while keeping generated/source/API-auth markers, token text, and secret-looking values out of DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Music Sequencer install completion card links directly into the safe step-sequencer/piano-roll smoke, making the installed music template a visible end-to-end entry point while keeping generated/source/API-auth markers and secret-looking values out of DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link music install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Music Sequencer install status includes a `Run music smoke` action wired to `demo_step_sequencer_piano_roll`, while preserving `Open music sequencer` / `Manage music widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): link model setup install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Model Provider Setup install status includes a `Run provider setup smoke` action wired to `demo_provider_setup`, while preserving `Open model setup` / `Manage provider widgets` and continuing to omit hostile renderer/script/API-auth markers, token text, and secret-looking values from DOM.
