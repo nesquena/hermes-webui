@@ -17,6 +17,56 @@ def _compressed_listener_block() -> str:
     return src[start:end]
 
 
+def _compressing_listener_block() -> str:
+    src = _read("static/messages.js")
+    start = src.find("source.addEventListener('compressing'")
+    assert start != -1, "compressing SSE listener not found"
+    end = src.find("source.addEventListener('compressed'", start)
+    assert end != -1, "compressed listener after compressing SSE listener not found"
+    return src[start:end]
+
+
+def test_auto_compression_running_sse_uses_active_session_running_card():
+    block = _compressing_listener_block()
+
+    assert "if(!S.session||S.session.session_id!==activeSid) return;" in block
+    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+    assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
+    assert "setCompressionUi" in block
+    assert "phase:'running'" in block
+    assert "automatic:true" in block
+    assert "message:d.message||'Auto-compressing context...'" in block
+
+
+def test_auto_compression_running_sse_is_emitted_from_agent_lifecycle_status():
+    src = _read("api/streaming.py")
+    start = src.find("def _agent_status_callback")
+    assert start != -1, "agent status callback bridge not found"
+    end = src.find("# Initialised here", start)
+    assert end != -1, "status callback block end marker not found"
+    block = src[start:end]
+
+    assert "put('compressing'" in block
+    assert "'session_id': session_id" in block
+    assert "'message': 'Auto-compressing context to continue...'" in block
+    assert "'preflight compression'" in block
+    assert "'compressing'" in block
+    assert "'compacting context'" in block
+    assert "'context too large'" in block
+    assert "'status_callback' in _agent_params" in src
+    assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
+    assert "agent.status_callback = _agent_kwargs.get('status_callback')" in src
+
+
+def test_auto_compression_completion_transition_is_preserved_after_running_listener():
+    src = _read("static/messages.js")
+    compressing_idx = src.find("source.addEventListener('compressing'")
+    compressed_idx = src.find("source.addEventListener('compressed'")
+    assert compressing_idx != -1 and compressed_idx != -1
+    assert compressing_idx < compressed_idx
+    assert "phase:'done'" in _compressed_listener_block()
+
+
 def test_auto_compression_sse_uses_transient_card_not_fake_message():
     """Auto compression must not inject display-only text into S.messages."""
     src = _read("static/messages.js")

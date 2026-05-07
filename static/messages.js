@@ -1011,6 +1011,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('compressing',e=>{
+      // Context auto-compression is starting. Surface the same calm running
+      // compression card as manual /compress while the summarizer LLM call runs.
+      if(!S.session||S.session.session_id!==activeSid) return;
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      if(d.session_id&&d.session_id!==activeSid) return;
+      if(typeof setCompressionUi==='function'){
+        setCompressionUi({
+          sessionId:activeSid,
+          phase:'running',
+          automatic:true,
+          message:d.message||'Auto-compressing context...',
+        });
+      }
+      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    });
+
     source.addEventListener('compressed',e=>{
       // Context was auto-compressed during this turn. Render it through the
       // same transient compression-card path as manual /compress, without
