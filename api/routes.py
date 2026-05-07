@@ -7849,6 +7849,49 @@ def _normalize_message_for_import_refresh(message: object) -> object:
     return normalized
 
 
+def _message_has_cli_tool_metadata(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+    if message.get("role") == "assistant" and message.get("tool_calls"):
+        return True
+    if message.get("role") == "tool" and (message.get("tool_call_id") or message.get("tool_name") or message.get("name")):
+        return True
+    return False
+
+
+def _strip_cli_tool_metadata_for_refresh(message: object) -> object:
+    if not isinstance(message, dict):
+        return _normalize_message_for_import_refresh(message)
+    normalized = _normalize_message_for_import_refresh(message)
+    if not isinstance(normalized, dict):
+        return normalized
+    for key in ("tool_calls", "tool_call_id", "tool_name", "name"):
+        normalized.pop(key, None)
+    return normalized
+
+
+def _is_cli_tool_metadata_enrichment(existing_messages: list, fresh_messages: list) -> bool:
+    """Return True when fresh messages only add CLI tool metadata.
+
+    Older imports from get_cli_session_messages() persisted assistant/tool rows
+    without tool_calls, tool_call_id, or tool_name. After #1772 the refreshed
+    transcript can have the same length but richer metadata, so re-imports must
+    rebuild the stored sidecar even without a new row.
+    """
+    if not isinstance(existing_messages, list) or not isinstance(fresh_messages, list):
+        return False
+    if len(existing_messages) != len(fresh_messages):
+        return False
+    if any(_message_has_cli_tool_metadata(m) for m in existing_messages):
+        return False
+    if not any(_message_has_cli_tool_metadata(m) for m in fresh_messages):
+        return False
+    for idx, existing_message in enumerate(existing_messages):
+        if _strip_cli_tool_metadata_for_refresh(existing_message) != _strip_cli_tool_metadata_for_refresh(fresh_messages[idx]):
+            return False
+    return True
+
+
 def _is_messages_refresh_prefix_match(existing_messages: list, fresh_messages: list) -> bool:
     """Return True when existing_messages is a prefix of fresh_messages by value.
 
@@ -7893,6 +7936,11 @@ def _handle_session_import_cli(handler, body):
             if _is_messages_refresh_prefix_match(existing.messages, fresh_msgs):
                 existing.messages = fresh_msgs
                 changed = True
+        elif fresh_msgs and _is_cli_tool_metadata_enrichment(existing.messages, fresh_msgs):
+            # Same row count, richer payload: rebuild sidecars imported before
+            # CLI tool metadata was preserved (#1772).
+            existing.messages = fresh_msgs
+            changed = True
         if cli_meta:
             updates = {
                 "is_cli_session": True,

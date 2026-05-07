@@ -1618,10 +1618,24 @@ def get_cli_sessions() -> list:
     return cli_sessions
 
 
+def _json_loads_if_string(value):
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return value
+
+
 def get_cli_session_messages(sid) -> list:
     """Read messages for a single CLI/external-agent session.
-    Returns a list of {role, content, timestamp} dicts.
-    Returns empty list on any error.
+
+    Preserve tool-call/result and reasoning metadata from the agent state.db so
+    CLI-origin transcripts render with the same tool cards as WebUI-native
+    sessions. Returns empty list on any error.
     """
     import os
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
@@ -1644,19 +1658,47 @@ def get_cli_session_messages(sid) -> list:
         with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("""
-                SELECT role, content, timestamp
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            required = {'role', 'content', 'timestamp'}
+            if not required.issubset(available):
+                return []
+            optional = [
+                'tool_call_id',
+                'tool_calls',
+                'tool_name',
+                'reasoning',
+                'reasoning_details',
+                'codex_reasoning_items',
+                'reasoning_content',
+                'codex_message_items',
+            ]
+            selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+            cur.execute(f"""
+                SELECT {', '.join(selected)}
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY timestamp ASC
             """, (sid,))
             msgs = []
             for row in cur.fetchall():
-                msgs.append({
+                msg = {
                     'role': row['role'],
                     'content': row['content'],
                     'timestamp': row['timestamp'],
-                })
+                }
+                for col in optional:
+                    if col not in row.keys():
+                        continue
+                    value = row[col]
+                    if value in (None, ''):
+                        continue
+                    if col in {'tool_calls', 'reasoning_details', 'codex_reasoning_items', 'codex_message_items'}:
+                        value = _json_loads_if_string(value)
+                    msg[col] = value
+                if msg.get('role') == 'tool' and msg.get('tool_name') and not msg.get('name'):
+                    msg['name'] = msg['tool_name']
+                msgs.append(msg)
     except Exception:
         return []
     return msgs
