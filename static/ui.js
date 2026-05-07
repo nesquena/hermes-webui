@@ -1472,6 +1472,25 @@ let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
+let _lastNonMessageScrollIntentMs=0;
+const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+function _recordNonMessageScrollIntent(e){
+  const el=document.getElementById('messages');
+  const target=e&&e.target;
+  if(!el||!target) return;
+  // Streaming token renders should keep pinning the chat only while the user is
+  // actually interacting with the chat pane. A wheel/touch gesture over the
+  // session sidebar (or another independent pane) must not be immediately fought
+  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
+  if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+}
+function _recentNonMessageScrollIntent(){
+  return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
+}
+if(typeof document!=='undefined'){
+  document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+}
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
@@ -1778,6 +1797,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
 function scrollIfPinned(){
   if(!_scrollPinned) return;
+  if(_recentNonMessageScrollIntent()) return;
   const el=$('messages');
   if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
 }
