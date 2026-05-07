@@ -1373,10 +1373,21 @@ def resolve_model_provider(model_id: str) -> tuple:
     # into provider="openrouter:tencent/hy3-preview", model="free").  Guard
     # against that by falling back to split(":") when the rsplit result is not
     # a recognised provider (#1744).
+    #
+    # Edge case (#1776): for custom providers with the same suffix
+    # ("@custom:my-key:some-model:free"), rsplit yields
+    # provider_hint="custom:my-key:some-model", bare_model="free", and the
+    # custom-prefix guard below skips the split-fallback. Detect the
+    # over-split structurally — custom hints carry exactly one segment after
+    # "custom:", so any provider_hint with 2+ colons that starts with
+    # "custom:" has eaten part of the model name. Peel one segment back.
     if model_id.startswith("@") and ":" in model_id:
         inner = model_id[1:]
         provider_hint, bare_model = inner.rsplit(":", 1)
-        if (provider_hint not in _PROVIDER_MODELS
+        if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+            provider_hint, extra = provider_hint.rsplit(":", 1)
+            bare_model = f"{extra}:{bare_model}"
+        elif (provider_hint not in _PROVIDER_MODELS
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)

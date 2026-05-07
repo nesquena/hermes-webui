@@ -350,5 +350,173 @@ class TestI18NTooltipSync(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Rail tooltip cascade regression (post-v0.51.17 follow-up)
+# ---------------------------------------------------------------------------
+class RailTooltipCascadeTests(unittest.TestCase):
+    """Pin the cascade fix that lets `.has-tooltip` work on `.rail .nav-tab`.
+
+    Background: the legacy `.nav-tab:hover::after { content: attr(data-label) }`
+    rule was paired with a `.rail .nav-tab:hover::after { content: none }` rule
+    that suppressed it on the desktop rail. After v0.51.17 migrated rail icons
+    to `.has-tooltip`, the suppression rule's specificity (0,3,1) outweighed
+    `.has-tooltip:hover::after` (0,2,1), and `content: none` removes the
+    pseudo-element entirely — so rail tooltips never appeared. Fix: scope the
+    legacy `data-label` tooltip to `.sidebar-nav .nav-tab` only and drop the
+    rail suppression rule.
+    """
+
+    def setUp(self):
+        self.css = _read(STYLE_CSS)
+
+    def test_rail_nav_tab_hover_after_killer_is_gone(self):
+        """The `.rail .nav-tab:hover::after { content: none }` rule MUST NOT
+        exist — it kills the `.has-tooltip` pseudo-element on rail buttons."""
+        # Strip CSS comments first so the test doesn't false-positive on the
+        # explanatory note left in place after the rule's removal.
+        css_no_comments = re.sub(r"/\*.*?\*/", "", self.css, flags=re.DOTALL)
+        pattern = re.compile(
+            r"\.rail\s+\.nav-tab:hover:{1,2}after\s*\{[^}]*content\s*:\s*none\s*[;}]",
+            re.DOTALL,
+        )
+        match = pattern.search(css_no_comments)
+        self.assertIsNone(
+            match,
+            f"Found re-added killer rule that nukes rail tooltips: {match.group(0)[:120] if match else ''}",
+        )
+
+    def test_legacy_data_label_hover_is_scoped_to_sidebar_nav(self):
+        """The legacy `data-label` hover tooltip must be scoped to
+        `.sidebar-nav .nav-tab` — otherwise it fires on rail buttons (which
+        carry no data-label) and renders an empty styled box on hover."""
+        css_no_comments = re.sub(r"/\*.*?\*/", "", self.css, flags=re.DOTALL)
+        # The unscoped bug form: `.nav-tab:hover::after { content: attr(data-label) }`
+        # at the START of a selector (i.e. after `}` or whitespace+nothing-else).
+        # Walk every rule whose selector ends with `.nav-tab:hover::after` and
+        # check the prefix that comes before `.nav-tab`. If the prefix is empty
+        # or pure whitespace, the rule is unscoped.
+        for m in re.finditer(
+            r"([^{}]*?)\.nav-tab:hover:{1,2}after\s*\{([^}]*content\s*:\s*attr\(data-label\)[^}]*)\}",
+            css_no_comments,
+            re.DOTALL,
+        ):
+            prefix = m.group(1)
+            # If the prefix (back to the previous `}` or `;`) is empty or pure
+            # whitespace, this is the unscoped bug form.
+            # Trim to the part after the last selector-list separator.
+            last_sep = max(prefix.rfind("}"), prefix.rfind("\n"), prefix.rfind(","))
+            scope_text = prefix[last_sep + 1:].strip() if last_sep >= 0 else prefix.strip()
+            self.assertTrue(
+                scope_text,
+                "Found unscoped `.nav-tab:hover::after { content: attr(data-label) }` "
+                "rule. Must be `.sidebar-nav .nav-tab:hover::after` so it does not "
+                "fire on rail buttons that carry no data-label.",
+            )
+
+        # Affirmative: the scoped form must exist.
+        good_pattern = re.compile(
+            r"\.sidebar-nav\s+\.nav-tab:hover:{1,2}after\s*\{[^}]*content\s*:\s*attr\(data-label\)",
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            good_pattern.search(css_no_comments),
+            "Expected `.sidebar-nav .nav-tab:hover::after { content: attr(data-label); ... }` "
+            "rule (mobile sidebar fallback tooltip). It went missing.",
+        )
+
+    def test_all_rail_buttons_carry_has_tooltip(self):
+        """Every `.rail-btn.nav-tab` button must carry `class="has-tooltip"` and
+        a non-empty `data-tooltip` attribute. Otherwise the rail tooltip is
+        invisible regardless of the cascade fix above."""
+        html = _read(INDEX_HTML)
+        # Find the rail block: <nav class="rail" ...> ... </nav>
+        rail_match = re.search(
+            r'<nav class="rail"[^>]*>(.*?)</nav>',
+            html,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(rail_match, "Could not locate <nav class='rail'> in index.html")
+        rail_block = rail_match.group(1)
+
+        rail_btn_count = 0
+        missing = []
+        for m in re.finditer(r'<button\b([^>]*?)>', rail_block):
+            attrs = m.group(1)
+            if 'rail-btn' not in attrs:
+                continue
+            rail_btn_count += 1
+            if 'has-tooltip' not in attrs:
+                missing.append(('class missing has-tooltip', attrs[:120]))
+                continue
+            tooltip_attr = re.search(r'data-tooltip="([^"]*)"', attrs)
+            if not tooltip_attr or not tooltip_attr.group(1).strip():
+                missing.append(('missing or empty data-tooltip', attrs[:120]))
+
+        self.assertGreaterEqual(
+            rail_btn_count, 10,
+            f"Expected ≥10 rail buttons (found {rail_btn_count}). Test selector wrong?",
+        )
+        self.assertEqual(
+            missing, [],
+            f"Rail buttons without working tooltip markup:\n  " +
+            "\n  ".join(f"{reason}: {attrs}" for reason, attrs in missing),
+        )
+
+
+# ---------------------------------------------------------------------------
+# `--bottom-right` variant: anchors tooltip's RIGHT edge to a trigger that sits
+# flush with its container's right edge, so the label extends inward instead of
+# overflowing past the panel edge. Used by `#btnNewChat`.
+# ---------------------------------------------------------------------------
+class BottomRightTooltipVariantTests(unittest.TestCase):
+    def setUp(self):
+        self.css = _read(STYLE_CSS)
+        self.html = _read(INDEX_HTML)
+
+    def test_bottom_right_variant_defined(self):
+        """`.has-tooltip--bottom-right::after` must exist and right-anchor the
+        tooltip (`right: 0` and no `transform: translateX`)."""
+        rule = re.search(
+            r"\.has-tooltip--bottom-right:{1,2}after\s*\{([^}]*)\}",
+            self.css,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(rule, "`.has-tooltip--bottom-right::after` rule missing")
+        body = rule.group(1)
+        # Must anchor right edge.
+        self.assertRegex(body, r"right\s*:\s*0",
+                         "--bottom-right variant must set right:0")
+        # Must clear the inherited `left:` so it doesn't fight with the base rule.
+        self.assertRegex(body, r"left\s*:\s*auto",
+                         "--bottom-right variant must clear left:auto")
+        # Must clear the inherited transform (otherwise translateX(-50%) shifts it).
+        self.assertRegex(body, r"transform\s*:\s*none",
+                         "--bottom-right variant must reset transform:none")
+
+    def test_btn_new_chat_uses_bottom_right_variant(self):
+        """`#btnNewChat` sits flush with the chat-panel right edge; its tooltip
+        previously overflowed (with `--bottom`, half clips past the panel).
+        Must now use `--bottom-right`, NOT `--bottom`."""
+        match = re.search(
+            r'<button[^>]*\bid="btnNewChat"[^>]*>',
+            self.html,
+        )
+        self.assertIsNotNone(match, "Could not find #btnNewChat button")
+        attrs = match.group(0)
+        self.assertIn(
+            "has-tooltip--bottom-right",
+            attrs,
+            "#btnNewChat must carry has-tooltip--bottom-right so its tooltip "
+            "doesn't overflow the chat-panel right edge.",
+        )
+        # Must NOT also carry the old --bottom (would conflict).
+        self.assertNotRegex(
+            attrs,
+            r'has-tooltip--bottom(?!-)',
+            "#btnNewChat carries both --bottom and --bottom-right; pick one. "
+            "The plain --bottom variant centers on left:50% and overflows.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -130,3 +130,30 @@ def test_eager_checkpointed_user_is_not_duplicated_after_agent_result():
         msg_text="repeat me",
     )
     assert [m["role"] for m in merged] == ["user", "assistant"]
+
+
+def test_deferred_turn_is_materialized_when_agent_returns_assistant_only_delta():
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display=[
+            {"role": "user", "content": "older prompt"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        previous_context=[
+            {"role": "user", "content": "older prompt"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        result_messages=[
+            {"role": "user", "content": "older prompt"},
+            {"role": "assistant", "content": "older answer"},
+            {"role": "assistant", "content": "current answer"},
+        ],
+        msg_text="latest prompt",
+    )
+
+    assert [m["role"] for m in merged] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [m["content"] for m in merged[-2:]] == ["latest prompt", "current answer"]

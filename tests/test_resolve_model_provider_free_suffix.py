@@ -113,3 +113,60 @@ def test_known_provider_anthropic():
     model, provider, _ = resolve_model_provider(qualified)
     assert provider == "anthropic"
     assert model == "claude-sonnet-4.6"
+
+
+# ---------------------------------------------------------------------------
+# Issue #1776 — custom provider + :free / :beta / :thinking suffix
+#
+# The PR #1762 fix for #1744 skipped the rsplit-fallback when the provider
+# hint started with "custom:", on the assumption that custom-provider model
+# IDs route directly without further heuristics. But "@custom:my-key:model:free"
+# trips the same rsplit grammar collision: rsplit yields
+#   provider="custom:my-key:model", bare="free"
+# and the custom-prefix guard skips the fallback → wrong routing.
+#
+# The fix detects the over-split structurally: custom hints carry exactly
+# one segment after "custom:" (see api/config.py:1363 where the slug is
+# constructed as "custom:" + entry_name), so any rsplit result of the form
+# "custom:<a>:<b>" with bare model "<c>" has eaten one model segment. Peel
+# it back so the model becomes "<b>:<c>".
+# ---------------------------------------------------------------------------
+
+def test_custom_provider_free_suffix_1776():
+    """@custom:my-key:some-model:free → custom:my-key + some-model:free (#1776)."""
+    qualified = "@custom:my-key:some-model:free"
+    model, provider, _ = resolve_model_provider(qualified)
+    assert provider == "custom:my-key", f"expected provider='custom:my-key', got '{provider}'"
+    assert model == "some-model:free", f"expected model='some-model:free', got '{model}'"
+
+
+def test_custom_provider_beta_suffix_1776():
+    """@custom:my-key:some-model:beta — same bug class as :free."""
+    qualified = "@custom:my-key:some-model:beta"
+    model, provider, _ = resolve_model_provider(qualified)
+    assert provider == "custom:my-key"
+    assert model == "some-model:beta"
+
+
+def test_custom_provider_thinking_suffix_1776():
+    """@custom:my-key:some-model:thinking — same bug class as :free."""
+    qualified = "@custom:my-key:some-model:thinking"
+    model, provider, _ = resolve_model_provider(qualified)
+    assert provider == "custom:my-key"
+    assert model == "some-model:thinking"
+
+
+def test_custom_provider_preview_suffix_1776():
+    """@custom:my-key:some-model:preview — same bug class, no allowlist needed."""
+    qualified = "@custom:my-key:some-model:preview"
+    model, provider, _ = resolve_model_provider(qualified)
+    assert provider == "custom:my-key"
+    assert model == "some-model:preview"
+
+
+def test_custom_provider_slashed_model_with_free_suffix_1776():
+    """@custom:my-key:org/model:free — custom hint + slashed model + suffix."""
+    qualified = "@custom:my-key:org/model:free"
+    model, provider, _ = resolve_model_provider(qualified)
+    assert provider == "custom:my-key"
+    assert model == "org/model:free"

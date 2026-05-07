@@ -1472,6 +1472,25 @@ let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
+let _lastNonMessageScrollIntentMs=0;
+const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+function _recordNonMessageScrollIntent(e){
+  const el=document.getElementById('messages');
+  const target=e&&e.target;
+  if(!el||!target) return;
+  // Streaming token renders should keep pinning the chat only while the user is
+  // actually interacting with the chat pane. A wheel/touch gesture over the
+  // session sidebar (or another independent pane) must not be immediately fought
+  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
+  if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+}
+function _recentNonMessageScrollIntent(){
+  return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
+}
+if(typeof document!=='undefined'){
+  document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+}
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
@@ -1778,6 +1797,7 @@ document.addEventListener('DOMContentLoaded',function(){
 
 function scrollIfPinned(){
   if(!_scrollPinned) return;
+  if(_recentNonMessageScrollIntent()) return;
   const el=$('messages');
   if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
 }
@@ -3025,7 +3045,11 @@ function showPromptDialog(opts={}){
   if(desc) desc.textContent=opts.message||'';
   if(input){
     input.type=opts.inputType||'text';input.style.display='';
-    input.value=opts.value||'';input.placeholder=opts.placeholder||'';
+    // Pre-fill: prefer `value`, accept `defaultValue` as alias for callers that
+    // mirror the standard HTMLInputElement.defaultValue naming. Both empty →
+    // blank field (the default rename-from-scratch flow stays unchanged).
+    const prefill=(opts.value!=null?opts.value:(opts.defaultValue!=null?opts.defaultValue:''));
+    input.value=prefill;input.placeholder=opts.placeholder||'';
     input.autocomplete='off';input.spellcheck=false;
   }
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
@@ -3034,7 +3058,27 @@ function showPromptDialog(opts={}){
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
-    setTimeout(()=>{if(input&&input.style.display!=='none')input.focus();else if(confirmBtn)confirmBtn.focus();},0);
+    setTimeout(()=>{
+      if(input&&input.style.display!=='none'){
+        input.focus();
+        // Selection behavior on focus:
+        //   selectStem:true → select everything before the LAST '.' (e.g. for
+        //     'report.txt' selects 'report' so a user can retype the basename
+        //     without losing the extension; matches macOS Finder rename UX).
+        //     Falls back to selecting the full value when there's no '.' or
+        //     the dot is at index 0 ('.gitignore' → full select).
+        //   selectAll:true → select the entire prefilled value.
+        //   default       → caret at end (current behavior).
+        const v=input.value||'';
+        if(opts.selectStem && v){
+          const dot=v.lastIndexOf('.');
+          if(dot>0) input.setSelectionRange(0,dot);
+          else input.select();
+        } else if(opts.selectAll && v){
+          input.select();
+        }
+      } else if(confirmBtn) confirmBtn.focus();
+    },0);
   });
 }
 
@@ -6205,7 +6249,7 @@ function _showFileContextMenu(e, item){
   const renameItem=document.createElement('div');
   renameItem.textContent=t('rename_title');
   renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover-bg)';
   renameItem.onmouseleave=()=>renameItem.style.background='';
   renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
   menu.appendChild(renameItem);
@@ -6214,7 +6258,7 @@ function _showFileContextMenu(e, item){
   const revealItem=document.createElement('div');
   revealItem.textContent=t('reveal_in_finder');
   revealItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover)';
+  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover-bg)';
   revealItem.onmouseleave=()=>revealItem.style.background='';
   revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+(err.message||err));}};
   menu.appendChild(revealItem);
@@ -6227,7 +6271,7 @@ function _showFileContextMenu(e, item){
   const copyPathItem=document.createElement('div');
   copyPathItem.textContent=t('copy_file_path');
   copyPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover)';
+  copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover-bg)';
   copyPathItem.onmouseleave=()=>copyPathItem.style.background='';
   copyPathItem.onclick=async()=>{
     menu.remove();
@@ -6266,7 +6310,7 @@ function _showFileContextMenu(e, item){
   const delItem=document.createElement('div');
   delItem.textContent=t('delete_title');
   delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
-  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover-bg)';
   delItem.onmouseleave=()=>delItem.style.background='';
   delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
   menu.appendChild(delItem);
@@ -6278,7 +6322,18 @@ function _showFileContextMenu(e, item){
 
 async function _inlineRenameFileItem(item){
   if(!S.session)return;
-  const newName=await showPromptDialog({message:t('rename_prompt'),defaultValue:item.name,placeholder:item.name,confirmLabel:t('rename_title')});
+  // Pre-fill the input with the current name and select just the stem
+  // (everything before the last '.') so the user can immediately retype the
+  // basename while preserving the extension — matches macOS Finder. For
+  // directories or names with no '.', the helper selects the full value.
+  // `selectStem` also handles dotfiles ('.gitignore') by full-selecting.
+  const newName=await showPromptDialog({
+    message:t('rename_prompt'),
+    value:item.name,
+    confirmLabel:t('rename_title'),
+    selectStem:item.type!=='dir',
+    selectAll:item.type==='dir'
+  });
   if(!newName||newName===item.name)return;
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});

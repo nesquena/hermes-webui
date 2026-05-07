@@ -1,5 +1,42 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.18] — 2026-05-07 — 5-PR batch (4 contributor + 1 self-built UX polish)
+
+### Fixed
+
+- **PR #1783** by @Sanjays2402 — Custom provider + `:free`/`:beta`/`:thinking` suffix mis-resolution. **Closes #1776** (the follow-up I filed during the v0.51.15 sweep against PR #1762). `api/config.py +13` extends `resolve_model_provider()`'s rsplit-fallback so `@custom:my-key:some-model:free` correctly resolves to `provider=custom:my-key, model=some-model:free` (was previously dropping the suffix). 57 LOC test coverage in `tests/test_resolve_model_provider_free_suffix.py`. Opus verified: non-custom path (`@openrouter:tencent/hy3-preview:free`) preserved unchanged; `@custom:my-key:some-model` (no suffix) backward-compatible; no recursion risk.
+
+- **PR #1791** by @Michaelyklam — Keep assistant-only stream deltas on the current turn (closes #1787). When an SSE stream produces only assistant content (no user-turn material), `api/streaming.py +27` no longer promotes it to a new turn — appends to current. Tool-call responses (`role in ('assistant','tool')`) correctly trigger user-turn materialization. Pure display-merge logic with no INFLIGHT mutation. 27 LOC test coverage. Includes screenshot of correct transcript order.
+
+- **PR #1790** by @Michaelyklam — Keep workspace open from preview breadcrumb (closes #1785). `static/boot.js +6/-1` (panel-state preservation via new `clearPreview({keepPanelOpen:true})`) + `static/workspace.js +8/-7` (breadcrumb-click handler delegates instead of duplicating mode logic). Compact-viewport routing through existing `openWorkspacePanel('browse')` path preserved. No conflict with PR #1758's composer chip lightbox (different code path). 59 LOC test coverage with 2 screenshots.
+
+- **PR #1789** by @Michaelyklam — Preserve sidebar scrolling while streaming (closes #1784). `static/style.css +2/-1` + `static/ui.js +20`. Adds `{capture:true, passive:true}` scroll listeners (non-blocking) that detect non-message scroll intent within a 350ms window using `performance.now()` (monotonic), then suppresses `scrollIfPinned()` auto-scroll-to-bottom during that window. Auto-scroll still works at-bottom + new message when no recent sidebar gesture. 47 LOC test coverage + screenshot + QA JSON.
+
+### Added (UX polish)
+
+- **PR #1794** by @nesquena-hermes — Self-built UX bundle following up on the v0.51.17 tooltip system. **APPROVED by @nesquena** at exact head SHA `f2d5e9bd`. Four fixes:
+  - **Rail tooltip cascade fix**: removed `.rail .nav-tab:hover::after { content:none }` (specificity 0,3,1) which was preventing `.has-tooltip:hover::after` from firing on rail buttons. Legacy `data-label` rule correctly scoped to `.sidebar-nav .nav-tab` so rail buttons (no `data-label`) don't get an empty styled box.
+  - **+New-conversation button clipping**: introduces new `.has-tooltip--bottom-right` variant (`left:auto; right:0; transform:none`) for the `#btnNewChat` button which sits at the right edge of the sidebar header. Tooltip flips to align with the right edge of the trigger instead of extending past the viewport.
+  - **Context-menu hover affordance**: adds visible `var(--hover-bg)` background on `.workspace-context-menu li:hover` (typo fix from `var(--hover)` which was undefined → no visual feedback).
+  - **Rename pre-fill**: rename modal now calls `setSelectionRange(0, dot)` to pre-select the basename portion of a filename (everything before the last `.`), so users can immediately type the new name without manually clearing the extension.
+  
+  `static/index.html +1` (single attribute swap on `#btnNewChat` from `has-tooltip--bottom` to `has-tooltip--bottom-right`), `static/sessions.js +4`, `static/style.css +26`, `static/ui.js +69`. 168 LOC of `tests/test_css_tooltips.py` extensions (regex-vs-source, consistent with existing pattern) + 263 LOC of new `tests/test_workspace_context_menu_and_rename.py`.
+
+### Tests
+
+4723 → **4747 collected** (+24). 4733 passed, 11 skipped (2 dev-only spawn from v0.51.15 + 9 prong-2/QA gating), 3 xpassed, 0 failed in 149s.
+
+### Pre-release verification
+
+- All 5 PRs CI-green individually
+- File overlaps: `static/style.css` and `static/ui.js` (#1789 + #1794) — different rules/functions, auto-merged cleanly
+- All JS/Python files syntax-clean
+- Browser API sanity (11/11 endpoints): all pass
+- Pre-stamp re-fetch: all 5 PR heads still match local rebases
+- Opus advisor: SHIP all 5, 0 MUST-FIX, 1 informational SHOULD-NOTE (test pattern divergence — acceptable, matches existing style)
+
+Closes #1776, #1784, #1785, #1787.
+
 ## [v0.51.17] — 2026-05-07 — 2-PR contributor batch (kanban early-out + tooltip system overhaul)
 
 ### Fixed
