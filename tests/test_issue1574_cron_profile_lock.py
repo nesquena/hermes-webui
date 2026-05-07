@@ -1,4 +1,5 @@
 import multiprocessing
+import os
 import sys
 import threading
 import types
@@ -29,9 +30,12 @@ def _install_fake_cron(monkeypatch, run_job, events):
     return cron_jobs, cron_scheduler
 
 
-def _write_fake_large_payload_cron_package(root: Path):
+
+def _write_spawn_fake_agent(root: Path, *, run_job_body: str):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run_agent.py").write_text("", encoding="utf-8")
     cron_dir = root / "cron"
-    cron_dir.mkdir(parents=True)
+    cron_dir.mkdir(parents=True, exist_ok=True)
     (cron_dir / "__init__.py").write_text("", encoding="utf-8")
     (cron_dir / "jobs.py").write_text(
         "from pathlib import Path\n"
@@ -47,22 +51,51 @@ def _write_fake_large_payload_cron_package(root: Path):
         "_LOCK_DIR = _hermes_home / 'cron'\n"
         "_LOCK_FILE = _LOCK_DIR / '.tick.lock'\n"
         "def run_job(job):\n"
-        "    payload = 'x' * 200_000\n"
-        "    return True, payload, payload, None\n",
+        f"{run_job_body}",
         encoding="utf-8",
     )
 
 
-def _large_cron_payload_runner(fake_pkg_root, profile_home, result_queue):
-    try:
-        import api.routes as routes
+def _activate_spawn_fake_agent(fake_agent_root: Path):
+    fake_path = str(fake_agent_root)
+    os.environ["HERMES_WEBUI_AGENT_DIR"] = fake_path
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [
+        p
+        for p in existing.split(os.pathsep)
+        if p and ("hermes-agent" not in p or p == fake_path)
+    ]
+    os.environ["PYTHONPATH"] = os.pathsep.join([fake_path, *[p for p in parts if p != fake_path]])
+    sys.path[:] = [
+        p
+        for p in sys.path
+        if not p or "hermes-agent" not in p or p == fake_path
+    ]
+    if fake_path not in sys.path:
+        sys.path.insert(0, fake_path)
+    for module_name in (
+        "cron.scheduler",
+        "cron.jobs",
+        "cron",
+        "api.routes",
+        "api.profiles",
+        "api.config",
+    ):
+        sys.modules.pop(module_name, None)
 
-        # api.routes/config may prepend the real hermes-agent path while importing.
-        # Re-prepend the fake cron package afterward and clear any already-loaded
-        # cron modules so the helper's child process imports the large-payload fake.
-        sys.path.insert(0, str(fake_pkg_root))
-        for module_name in ("cron.scheduler", "cron.jobs", "cron"):
-            sys.modules.pop(module_name, None)
+
+def _large_cron_payload_runner(profile_home, result_queue):
+    try:
+        fake_agent_root = Path(profile_home).parent / "fake-agent"
+        _write_spawn_fake_agent(
+            fake_agent_root,
+            run_job_body=(
+                "    payload = 'x' * 200_000\n"
+                "    return True, payload, payload, None\n"
+            ),
+        )
+        _activate_spawn_fake_agent(fake_agent_root)
+        import api.routes as routes
 
         success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
             {"id": "large-payload"}, Path(profile_home)
@@ -74,11 +107,109 @@ def _large_cron_payload_runner(fake_pkg_root, profile_home, result_queue):
         result_queue.put(("error", repr(exc), traceback.format_exc()))
 
 
+def _selected_profile_home_runner(profile_home, result_queue):
+    try:
+        fake_agent_root = Path(profile_home).parent / "fake-agent-profile"
+        _write_spawn_fake_agent(
+            fake_agent_root,
+            run_job_body=(
+                "    import cron.scheduler as scheduler\n"
+                "    return True, str(scheduler._hermes_home), 'final', None\n"
+            ),
+        )
+        _activate_spawn_fake_agent(fake_agent_root)
+        import api.routes as routes
+
+        success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
+            {"id": "job1574"}, Path(profile_home)
+        )
+        result_queue.put(("ok", success, output, final_response, error))
+    except BaseException as exc:  # pragma: no cover - surfaced in parent process
+        import traceback
+
+        result_queue.put(("error", repr(exc), traceback.format_exc()))
+
+
+def test_manual_cron_subprocess_uses_spawn_context():
+    """Manual cron subprocesses must avoid fork-from-threaded-WebUI hazards."""
+    routes_src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
+    start = routes_src.find("def _run_cron_job_in_profile_subprocess")
+    assert start != -1, "_run_cron_job_in_profile_subprocess not found"
+    body = routes_src[start : start + 1200]
+
+    assert 'multiprocessing.get_context("spawn")' in body
+    assert 'multiprocessing.get_context("fork")' not in body
+
+
+def _run_lock_probe_with_context(context_name, target, result_queue):
+    ctx = multiprocessing.get_context(context_name)
+    process = ctx.Process(target=target, args=(result_queue,))
+    process.start()
+    try:
+        acquired = result_queue.get(timeout=5)
+    finally:
+        process.join(timeout=5)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+    return process.exitcode, acquired
+
+
+def test_spawn_context_does_not_inherit_parent_thread_locks(tmp_path):
+    """Spawn starts a fresh interpreter where fork would clone a held lock."""
+    helper_dir = tmp_path / "spawn_helper"
+    helper_dir.mkdir()
+    (helper_dir / "issue1754_lock_probe.py").write_text(
+        "import threading\n"
+        "LOCK = threading.Lock()\n"
+        "def try_acquire(result_queue):\n"
+        "    acquired = LOCK.acquire(timeout=1)\n"
+        "    if acquired:\n"
+        "        LOCK.release()\n"
+        "    result_queue.put(acquired)\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(helper_dir))
+    try:
+        import issue1754_lock_probe
+
+        issue1754_lock_probe.LOCK.acquire()
+        try:
+            # The held module-level lock models import/logging locks owned by a
+            # sibling WebUI thread at the instant the manual cron worker starts.
+            # fork clones the locked primitive into the child with no owner left
+            # to release it; spawn re-imports a fresh module and can proceed.
+            fork_queue = multiprocessing.get_context("fork").Queue()
+            fork_exitcode, fork_acquired = _run_lock_probe_with_context(
+                "fork", issue1754_lock_probe.try_acquire, fork_queue
+            )
+            spawn_queue = multiprocessing.get_context("spawn").Queue()
+            spawn_exitcode, spawn_acquired = _run_lock_probe_with_context(
+                "spawn", issue1754_lock_probe.try_acquire, spawn_queue
+            )
+        finally:
+            issue1754_lock_probe.LOCK.release()
+            for q in (locals().get("fork_queue"), locals().get("spawn_queue")):
+                if q is not None:
+                    q.close()
+                    q.join_thread()
+    finally:
+        sys.modules.pop("issue1754_lock_probe", None)
+        try:
+            sys.path.remove(str(helper_dir))
+        except ValueError:
+            pass
+
+    assert fork_exitcode == 0
+    assert fork_acquired is False
+    assert spawn_exitcode == 0
+    assert spawn_acquired is True
+
+
 def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     """A >100 KB result must not deadlock the parent before it can persist output."""
-    fake_pkg_root = tmp_path / "fake-cron-pkg"
-    _write_fake_large_payload_cron_package(fake_pkg_root)
-
     # Use fork only for the outer test harness so this pytest module does not
     # need to be importable as a package. The product helper under test owns its
     # own multiprocessing context.
@@ -86,7 +217,7 @@ def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     result_queue = ctx.Queue()
     runner = ctx.Process(
         target=_large_cron_payload_runner,
-        args=(fake_pkg_root, tmp_path / "exec-profile", result_queue),
+        args=(tmp_path / "exec-profile", result_queue),
     )
     runner.start()
     runner.join(10)
@@ -105,7 +236,12 @@ def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     finally:
         result_queue.close()
         result_queue.join_thread()
-    assert result == ("ok", True, 200_000, 200_000, None)
+    tag, success, output_len, final_response_len, error = result
+    assert tag == "ok"
+    assert success is True
+    assert output_len == 200_000
+    assert final_response_len == 200_000
+    assert error is None
 
 
 def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, monkeypatch):
@@ -171,23 +307,26 @@ def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, m
 
 
 def test_cron_job_subprocess_executes_under_selected_profile_home(tmp_path, monkeypatch):
-    import api.routes as routes
-
-    def fake_run_job(job):
-        import cron.scheduler as scheduler
-
-        return True, str(scheduler._hermes_home), "final", None
-
-    events = []
-    _, cron_scheduler = _install_fake_cron(monkeypatch, fake_run_job, events)
     exec_home = tmp_path / "exec-profile"
-
-    success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
-        {"id": "job1574"}, exec_home
+    ctx = multiprocessing.get_context("fork")
+    result_queue = ctx.Queue()
+    runner = ctx.Process(
+        target=_selected_profile_home_runner,
+        args=(exec_home, result_queue),
     )
+    runner.start()
+    runner.join(10)
+    if runner.is_alive():
+        runner.terminate()
+        runner.join(5)
+        result_queue.close()
+        result_queue.join_thread()
+        raise AssertionError("manual cron subprocess did not finish selected-profile probe")
 
-    assert success is True
-    assert output == str(exec_home)
-    assert final_response == "final"
-    assert error is None
-    assert cron_scheduler._hermes_home == Path("/tmp/hermes")
+    try:
+        result = result_queue.get(timeout=2)
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    assert result == ("ok", True, str(exec_home), "final", None)
