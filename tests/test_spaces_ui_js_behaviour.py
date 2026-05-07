@@ -1936,8 +1936,10 @@ def test_spaces_ui_install_browser_surface_posts_template_and_shows_safe_open_ma
     assert "2 widgets" in out["rootHtml"]
     assert "Open browser surface" in out["rootHtml"]
     assert "Manage browser widgets" in out["rootHtml"]
+    assert "Run browser smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="browser-surface"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="browser-surface"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_browser_cocontrol_google_or_test_site"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "browser"}
     assert out["calls"][-1]["path"] == "api/spaces"

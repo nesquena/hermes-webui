@@ -56,9 +56,20 @@
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
-    const smokeAction = template === 'weather'
-      ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_weather_widget">Run weather smoke</button>'
-      : (template === 'notes' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_notes_app">Run notes smoke</button>' : (template === 'kanban' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_kanban_board">Run kanban smoke</button>' : (template === 'research' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_research_harness_pdf_export">Run research smoke</button>' : (template === 'dashboard' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_daily_dashboard">Run dashboard smoke</button>' : (template === 'stock' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_stock_chart">Run stock smoke</button>' : (template === 'service' ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="demo_local_agent_control_dashboard">Run local service smoke</button>' : ''))))));
+    const smokeDemos = {
+      weather: ['demo_weather_widget', 'Run weather smoke'],
+      notes: ['demo_notes_app', 'Run notes smoke'],
+      kanban: ['demo_kanban_board', 'Run kanban smoke'],
+      research: ['demo_research_harness_pdf_export', 'Run research smoke'],
+      dashboard: ['demo_daily_dashboard', 'Run dashboard smoke'],
+      browser: ['demo_browser_cocontrol_google_or_test_site', 'Run browser smoke'],
+      stock: ['demo_stock_chart', 'Run stock smoke'],
+      service: ['demo_local_agent_control_dashboard', 'Run local service smoke']
+    };
+    const smokeMeta = smokeDemos[template];
+    const smokeAction = smokeMeta
+      ? '<button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="'+escapeHtml(smokeMeta[0])+'">'+escapeHtml(smokeMeta[1])+'</button>'
+      : '';
     const actions = spaceId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(openLabel)+'</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">'+escapeHtml(manageLabel)+'</button>'+smokeAction+'</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+' · '+escapeHtml(widgetLabel)+' · safe metadata-only install</div>' +
