@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- **PR #1812** by @franksong2702 — OpenAI Codex Providers card live catalog (closes #1807). Settings -> Providers now asks `hermes_cli.models.provider_model_ids("openai-codex")` before rendering the Codex card model list, matching the account-specific live catalog used by `/api/models/live`. Static `_PROVIDER_MODELS["openai-codex"]` remains a fallback only when live discovery is unavailable, so stale static-only IDs such as `gpt-5.5-mini`, `gpt-5.2-codex`, and `codex-mini-latest` no longer appear as available for authenticated Codex accounts whose live catalog excludes them.
+
 - **PR #1783** by @Sanjays2402 — Custom provider + `:free`/`:beta`/`:thinking` suffix mis-resolution. **Closes #1776** (the follow-up I filed during the v0.51.15 sweep against PR #1762). `api/config.py +13` extends `resolve_model_provider()`'s rsplit-fallback so `@custom:my-key:some-model:free` correctly resolves to `provider=custom:my-key, model=some-model:free` (was previously dropping the suffix). 57 LOC test coverage in `tests/test_resolve_model_provider_free_suffix.py`. Opus verified: non-custom path (`@openrouter:tencent/hy3-preview:free`) preserved unchanged; `@custom:my-key:some-model` (no suffix) backward-compatible; no recursion risk.
 
 - **PR #1791** by @Michaelyklam — Keep assistant-only stream deltas on the current turn (closes #1787). When an SSE stream produces only assistant content (no user-turn material), `api/streaming.py +27` no longer promotes it to a new turn — appends to current. Tool-call responses (`role in ('assistant','tool')`) correctly trigger user-turn materialization. Pure display-merge logic with no INFLIGHT mutation. 27 LOC test coverage. Includes screenshot of correct transcript order.

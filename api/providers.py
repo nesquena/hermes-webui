@@ -18,6 +18,7 @@ from typing import Any
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _get_label_for_model,
     _save_yaml_config_file,
     get_config,
     invalidate_models_cache,
@@ -577,6 +578,23 @@ def get_providers() -> dict[str, Any]:
 
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
+        # Codex account catalogs are account-specific and can drift faster than
+        # WebUI's static fallback table (#1807). Prefer the live agent resolver
+        # for the providers card too so stale static-only model IDs are not
+        # presented as available when discovery succeeds.
+        if pid == "openai-codex":
+            try:
+                from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                live_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
+                if live_ids:
+                    models = [
+                        {"id": mid, "label": _get_label_for_model(mid, [])}
+                        for mid in live_ids
+                    ]
+                    models_total = len(models)
+            except Exception:
+                logger.debug("Failed to load OpenAI Codex models from hermes_cli")
         # Nous Portal: prefer the live catalog so the providers card matches
         # the dropdown picker (#1538). Same fallback shape as the static-only
         # case below — when hermes_cli is unavailable or its lookup raises,
