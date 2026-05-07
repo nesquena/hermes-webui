@@ -352,7 +352,7 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           revisions: [
             { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-            { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' }, restore_preview: { name: 'Broken safe checkpoint', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+            { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' }, restore_preview: { name: 'Broken safe checkpoint', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget', 'raw-html-widget', 'script-widget', 'api_auth_widget', 'source-widget', 'secret-widget'], widgets_to_add: ['added-widget'], widgets_to_remove: ['removed-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
           ],
           widgets: [
             { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>', queued_event_count: 1, latest_queued_event: { event_id: 'evt-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } } },
@@ -1391,6 +1391,44 @@ async function click(action, dataset) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'restoreRecoveryRevision', spaceId: 'broken', eventId: 'rev-before-break' } };
+        }
+      }
+    });
+  } else if (scenario === 'restoreRecoveryWidgetRevision') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'restoreRecoveryWidgetRevision', spaceId: 'broken', eventId: 'rev-before-break', widgetId: 'safe-widget' } };
+        }
+      }
+    });
+  } else if (scenario === 'restoreRecoveryWidgetRevisionNoDialog') {
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'restoreRecoveryWidgetRevision', spaceId: 'broken', eventId: 'rev-before-break', widgetId: 'safe-widget' } };
+        }
+      }
+    });
+  } else if (scenario === 'restoreRecoveryWidgetRevisionCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'restoreRecoveryWidgetRevision', spaceId: 'broken', eventId: 'rev-before-break', widgetId: 'safe-widget' } };
         }
       }
     });
@@ -2795,6 +2833,16 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "agent.repair · queued" in out["recoveryHtml"]
     assert "Event: evt-repair" in out["recoveryHtml"]
     assert "Restore revision" in out["recoveryHtml"]
+    assert "Restore widget" in out["recoveryHtml"]
+    assert 'data-capy-action="restoreRecoveryWidgetRevision"' in out["recoveryHtml"]
+    assert 'data-widget-id="safe-widget"' in out["recoveryHtml"]
+    assert 'data-widget-id="added-widget"' in out["recoveryHtml"]
+    assert "raw-html-widget" not in out["recoveryHtml"]
+    assert "script-widget" not in out["recoveryHtml"]
+    assert "api_auth_widget" not in out["recoveryHtml"]
+    assert "source-widget" not in out["recoveryHtml"]
+    assert "secret-widget" not in out["recoveryHtml"]
+    assert 'data-widget-id="removed-widget"' not in out["recoveryHtml"]
     assert "widget.recovery_disabled" in out["recoveryHtml"]
     assert "space.updated" in out["recoveryHtml"]
     assert "rev-before-break" in out["recoveryHtml"]
@@ -2875,6 +2923,36 @@ def test_spaces_ui_recovery_restore_revision_fails_closed_without_shared_dialog(
     out = _run_spaces_scenario(driver_path, "restoreRecoveryRevisionNoDialog")
 
     assert not any(call["path"] == "api/spaces/revision/restore" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_restore_widget_revision_uses_shared_confirm_and_refreshes(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreRecoveryWidgetRevision")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/revision/restore-widget")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert out["dialogs"][0]["confirmLabel"] == "Restore widget"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "event_id": "rev-before-break", "widget_id": "safe-widget"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "api_auth" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_restore_widget_revision_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreRecoveryWidgetRevisionNoDialog")
+
+    assert not any(call["path"] == "api/spaces/revision/restore-widget" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_restore_widget_revision_cancel_does_not_post(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreRecoveryWidgetRevisionCancelled")
+
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/revision/restore-widget" for call in out["calls"])
 
 
 def test_spaces_ui_recovery_disable_space_uses_shared_confirm_and_refreshes(driver_path):

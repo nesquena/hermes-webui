@@ -454,8 +454,8 @@
 
   function formatSharedDataSummary(details){
     if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
-    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
-    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
+    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'api_auth', 'apiauth', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
     function keyIsSafe(key){
       const lowered = String(key || '').toLowerCase();
       if (lowered === 'source_widget') return true;
@@ -545,8 +545,8 @@
 
   function formatRevisionDetails(details){
     if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
-    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
-    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
+    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'api_auth', 'apiauth', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
     function keyIsSafe(key){
       const lowered = String(key || '').toLowerCase();
       return lowered && !unsafeParts.some(part => lowered.indexOf(part) >= 0);
@@ -601,7 +601,7 @@
 
   function formatRestoreDiff(diff){
     if (!diff || typeof diff !== 'object' || Array.isArray(diff) || !diff.has_changes) return '';
-    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source)/i;
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
     function safeList(value){
       if (!Array.isArray(value)) return [];
       return value.slice(0, 10).map(function(item){
@@ -632,7 +632,7 @@
 
   function safeRestoreWidgetIds(diff){
     if (!diff || typeof diff !== 'object' || Array.isArray(diff) || !diff.has_changes) return [];
-    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source)/i;
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
     const ids = [];
     [diff.widgets_to_update, diff.widgets_to_add].forEach(function(list){
       if (!Array.isArray(list)) return;
@@ -644,10 +644,11 @@
     return ids;
   }
 
-  function renderRestoreWidgetButtons(spaceId, eventId, diff){
+  function renderRestoreWidgetButtons(spaceId, eventId, diff, actionName){
     if (!spaceId || !eventId) return '';
+    const action = actionName || 'restoreWidgetRevision';
     return safeRestoreWidgetIds(diff).map(function(widgetId){
-      return '<button type="button" class="capy-spaces-btn" data-capy-action="restoreWidgetRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Restore widget</button>';
+      return '<button type="button" class="capy-spaces-btn" data-capy-action="'+escapeHtml(action)+'" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Restore widget</button>';
     }).join('');
   }
 
@@ -1989,12 +1990,13 @@
       const previewText = formatRestorePreview(rev && rev.restore_preview);
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
+      const widgetRestoreButtons = renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
-        '</div><div class="capy-spaces-actions">'+restoreButton+'</div></div>';
+        '</div><div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div></div>';
     }).join('');
   }
 
@@ -2060,7 +2062,7 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
     if (action === 'repairRecoveryWidget') {
@@ -2091,6 +2093,16 @@
       const ok = await showConfirmDialog({title: 'Restore recovery revision?', message: 'Restore Space "'+spaceId+'" to revision '+eventId.slice(0, 12)+' from safe recovery? The current manifest remains in revision history, and generated widget bodies are not displayed here.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
       await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      await loadCapySpacesRecovery();
+      return;
+    }
+    if (action === 'restoreRecoveryWidgetRevision') {
+      const eventId = button.dataset.eventId || '';
+      const widgetId = button.dataset.widgetId || '';
+      if (!eventId || !widgetId) return;
+      const ok = await showConfirmDialog({title: 'Restore recovery widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+' in safe recovery? Other widgets are left unchanged, and generated widget bodies are not displayed here.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
       await loadCapySpacesRecovery();
       return;
     }
