@@ -586,11 +586,6 @@ def _message_text(value) -> str:
     return _strip_thinking_markup(str(value or '').strip())
 
 
-def _strip_workspace_prefix(text: str) -> str:
-    """Remove WebUI's model-facing workspace tag from display identity text."""
-    return re.sub(r'^\s*\[Workspace:[^\]]+\]\s*', '', str(text or '')).strip()
-
-
 def _first_exchange_snippets(messages):
     """Return (first_user_text, first_assistant_text) snippets for title generation.
 
@@ -1438,12 +1433,6 @@ def _message_identity(msg):
     role = str(msg.get('role') or '')
     content = msg.get('content', '')
     text = _message_text(content)
-    if role == 'user':
-        # WebUI sends the model a workspace-prefixed user_message while the
-        # visible optimistic bubble contains only the human text. Treat them as
-        # the same turn for merge/dedup purposes; otherwise compaction results
-        # render two adjacent user bubbles ("Ok" and "[Workspace...]\nOk").
-        text = _strip_workspace_prefix(text)
     if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
         return None
     return (
@@ -1482,7 +1471,7 @@ def _find_current_user_turn(messages, msg_text):
         if not isinstance(msg, dict) or msg.get('role') != 'user':
             continue
         fallback = idx
-        text = " ".join(_strip_workspace_prefix(_message_text(msg.get('content', ''))).split())
+        text = " ".join(_message_text(msg.get('content', '')).split())
         if needle and (needle in text or text in needle):
             return idx
     return fallback
@@ -1569,11 +1558,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
-        display_msg = msg
-        if key is not None and key == current_user_key and isinstance(msg, dict) and msg.get('role') == 'user':
-            display_msg = copy.deepcopy(msg)
-            display_msg['content'] = msg_text
-        merged.append(copy.deepcopy(display_msg))
+        merged.append(copy.deepcopy(msg))
         if key is not None:
             seen.add(key)
     return merged

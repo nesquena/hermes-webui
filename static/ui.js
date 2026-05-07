@@ -67,6 +67,9 @@ function _isBacktickFenceClose(line,minLen){
  * All non-fenced text stays escaped (no bold/italic/link interpretation).
  */
 
+function _stripWorkspaceDisplayPrefix(text){
+  return String(text||'').replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
   let s=String(text||'');
@@ -4573,6 +4576,7 @@ function renderMessages(options){
       }
     }
     const isUser=m.role==='user';
+    if(isUser) content=_stripWorkspaceDisplayPrefix(content);
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
