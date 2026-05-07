@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Spaces shell now exposes a direct `Run Big Bang onboarding` action that launches the safe first-run onboarding smoke from the main Spaces toolbar and opens the metadata-only widget manager for the seeded welcome/launcher/safety/next-step widgets without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather demo checklist avoids browser double-numbering in the visible prompt → widget flow by letting the ordered list provide numbering while keeping the same metadata-only weather smoke safety contract. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): avoid double-numbering weather checklist`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo prompt → widget checklist renders clean ordered-list items (`Chat answer recorded`, `Widget created from request`, `Persistent widget verified after reload`) instead of duplicating numeric prefixes such as `1. 1. ...`, while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): add Big Bang onboarding walkthrough`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run Big Bang onboarding`, posts exactly `{demo: "demo_big_bang_onboarding"}`, then renders the safe Big Bang smoke result plus metadata-only widget manager for `demo-big-bang-onboarding` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
