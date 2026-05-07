@@ -1377,7 +1377,7 @@
 .msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
 .msg-action-btn:hover{color:var(--accent-text);background:var(--accent-bg);}
 /* TTS speaker button: hidden by default, shown when TTS enabled */
-.msg-tts-btn{display:none;}
+.msg-tts-btn{display:inline-flex;}
 .msg-tts-btn[data-speaking="1"]{color:var(--accent);animation:tts-pulse 1s ease-in-out infinite;}
 @keyframes tts-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
@@ -2655,6 +2655,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
 .main-view-body{flex:1;min-height:0;overflow-y:auto;padding:24px 32px;}
 .main-view-content{max-width:960px;margin:0 auto;width:100%;}
+.task-detail-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:hidden;}
 /* dashboard-shell-mode tokens that must apply on every viewport — without
    them the mobile drawer kept rendering the legacy hermes nav-strip and
    sidebar resize handle on top of the Neo dashboard menu (visible on the
@@ -2668,6 +2669,7 @@ body.dashboard-shell-mode .app-titlebar-spacer{display:none!important;}
 body.dashboard-shell-mode .main{background:var(--bg);}
 body.dashboard-shell-mode main.main.showing-tasks #mainTasks>#panelTasks{display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
 body.dashboard-shell-mode main.main.showing-tasks #mainTasks .cron-list{flex:1;overflow-y:auto;}
+body.dashboard-shell-mode main.main.showing-tasks #mainTasks>.task-detail-pane{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;overflow:hidden;background:var(--bg);}
 
 @media(min-width:641px){
   body.dashboard-shell-mode .app-titlebar{display:none;}
@@ -2684,11 +2686,12 @@ body.dashboard-shell-mode main.main.showing-tasks #mainTasks .cron-list{flex:1;o
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-body,
   body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-empty{flex:1;min-width:0;}
   body.dashboard-shell-mode main.main.showing-tasks>#mainTasks{flex-direction:row;overflow:hidden;padding:0;}
-  body.dashboard-shell-mode main.main.showing-tasks #mainTasks>#panelTasks{width:280px;min-width:280px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks>#panelTasks{width:500px;min-width:360px;max-width:520px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
   body.dashboard-shell-mode main.main.showing-tasks #mainTasks .cron-list{flex:1;overflow-y:auto;}
-  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-header,
-  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-body,
-  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .main-view-empty{flex:1;min-width:0;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks>.task-detail-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .task-detail-pane>.main-view-header{flex:0 0 auto;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .task-detail-pane>.main-view-body{flex:1;min-width:0;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-tasks #mainTasks .task-detail-pane>.main-view-empty{flex:1;min-width:0;}
   /* ── Conversas (showing-chat) — full-width browse list ──
      panelChat is the only visible child of #mainChat in this mode. The
      transcript (#messages) and composer-wrap stay parked in #mainChat but
