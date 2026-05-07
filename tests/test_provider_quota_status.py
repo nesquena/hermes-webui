@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import api.config as config
 import api.profiles as profiles
@@ -162,6 +165,149 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     assert "follow-up" in result["message"]
 
 
+def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, tmp_path):
+    """Codex account limits must use the selected WebUI profile's HERMES_HOME."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+
+    import api.providers as providers
+    seen = {}
+    previous_home = os.environ.get("HERMES_HOME")
+
+    def fake_fetch(provider, base_url=None, api_key=None):
+        seen["provider"] = provider
+        seen["api_key"] = api_key
+        seen["hermes_home"] = os.environ.get("HERMES_HOME")
+        return SimpleNamespace(
+            provider="openai-codex",
+            source="usage_api",
+            title="Account limits",
+            plan="Pro",
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            available=True,
+            windows=(
+                SimpleNamespace(
+                    label="Session",
+                    used_percent=15.0,
+                    reset_at=datetime(2030, 3, 17, 17, 30, tzinfo=timezone.utc),
+                    detail=None,
+                ),
+                SimpleNamespace(
+                    label="Weekly",
+                    used_percent=40.0,
+                    reset_at=datetime(2030, 3, 24, 12, 30, tzinfo=timezone.utc),
+                    detail=None,
+                ),
+            ),
+            details=("Credits balance: $12.50",),
+            unavailable_reason=None,
+        )
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage", fake_fetch)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert seen == {
+        "provider": "openai-codex",
+        "api_key": None,
+        "hermes_home": str(tmp_path),
+    }
+    assert os.environ.get("HERMES_HOME") == previous_home
+    assert result["ok"] is True
+    assert result["provider"] == "openai-codex"
+    assert result["supported"] is True
+    assert result["status"] == "available"
+    assert result["quota"] is None
+    assert result["account_limits"] == {
+        "provider": "openai-codex",
+        "source": "usage_api",
+        "title": "Account limits",
+        "plan": "Pro",
+        "windows": [
+            {
+                "label": "Session",
+                "used_percent": 15.0,
+                "remaining_percent": 85.0,
+                "reset_at": "2030-03-17T17:30:00Z",
+                "detail": None,
+            },
+            {
+                "label": "Weekly",
+                "used_percent": 40.0,
+                "remaining_percent": 60.0,
+                "reset_at": "2030-03-24T12:30:00Z",
+                "detail": None,
+            },
+        ],
+        "details": ["Credits balance: $12.50"],
+        "available": True,
+        "unavailable_reason": None,
+        "fetched_at": "2030-03-17T12:30:00Z",
+    }
+
+
+def test_codex_account_usage_unavailable_is_sanitized(monkeypatch, tmp_path):
+    """Auth/network failures should not leak raw token or exception details."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+
+    import api.providers as providers
+
+    def fake_fetch(*_args, **_kwargs):
+        raise RuntimeError("secret access token should not leak")
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage", fake_fetch)
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is False
+    assert result["provider"] == "openai-codex"
+    assert result["supported"] is True
+    assert result["status"] == "unavailable"
+    assert result["account_limits"] is None
+    assert "Confirm provider authentication" in result["message"]
+    assert "secret" not in repr(result).lower()
+
+
+def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_path):
+    """Hermes Agent can report why account limits are not available."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "anthropic"})
+
+    import api.providers as providers
+
+    monkeypatch.setattr(
+        providers,
+        "_agent_fetch_account_usage",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            provider="anthropic",
+            source="oauth_usage_api",
+            title="Account limits",
+            plan=None,
+            fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+            available=False,
+            windows=(),
+            details=(),
+            unavailable_reason="Anthropic account limits are only available for OAuth-backed Claude accounts.",
+        ),
+    )
+    try:
+        result = providers.get_provider_quota()
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is False
+    assert result["provider"] == "anthropic"
+    assert result["supported"] is True
+    assert result["status"] == "unavailable"
+    assert result["account_limits"]["unavailable_reason"].startswith("Anthropic account limits")
+    assert "OAuth-backed Claude accounts" in result["message"]
+
+
 def test_provider_quota_route_is_registered():
     """The backend must expose a route for the UI to poll quota status."""
     routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
@@ -176,6 +322,10 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "function _buildProviderQuotaCard" in panels
     assert "Active provider quota" in panels
     assert "provider-quota-card" in panels
+    assert "account_limits" in panels
+    assert "remaining_percent" in panels
+    assert "provider-quota-details" in panels
+    assert "5-hour limit" in panels
 
 
 def test_provider_quota_styles_exist():
@@ -187,5 +337,7 @@ def test_provider_quota_styles_exist():
         ".provider-quota-card-available",
         ".provider-quota-card-no_key",
         ".provider-quota-card-invalid_key",
+        ".provider-quota-details",
+        ".provider-quota-window",
     ):
         assert token in css

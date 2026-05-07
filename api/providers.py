@@ -12,6 +12,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
+_ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
 
 # SECTION: Provider ↔ env var mapping
 
@@ -358,13 +360,122 @@ def _sanitize_openrouter_quota(payload: Any) -> dict[str, int | float | None]:
     }
 
 
+def _isoformat_utc(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    text = str(value).strip()
+    return text or None
+
+
+def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    windows: list[dict[str, Any]] = []
+    for window in getattr(snapshot, "windows", ()) or ():
+        label = str(getattr(window, "label", "") or "").strip()
+        if not label:
+            continue
+        used_percent = _quota_number(getattr(window, "used_percent", None))
+        remaining_percent = None
+        if used_percent is not None:
+            remaining_percent = max(0.0, min(100.0, 100.0 - float(used_percent)))
+        windows.append({
+            "label": label,
+            "used_percent": used_percent,
+            "remaining_percent": remaining_percent,
+            "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
+            "detail": str(getattr(window, "detail", "") or "").strip() or None,
+        })
+
+    details = [
+        str(detail).strip()
+        for detail in (getattr(snapshot, "details", ()) or ())
+        if str(detail).strip()
+    ]
+    plan = str(getattr(snapshot, "plan", "") or "").strip() or None
+    unavailable_reason = str(getattr(snapshot, "unavailable_reason", "") or "").strip() or None
+    return {
+        "provider": str(getattr(snapshot, "provider", "") or "").strip() or None,
+        "source": str(getattr(snapshot, "source", "") or "").strip() or None,
+        "title": str(getattr(snapshot, "title", "") or "").strip() or "Account limits",
+        "plan": plan,
+        "windows": windows,
+        "details": details,
+        "available": bool(getattr(snapshot, "available", bool(windows or details))) and not unavailable_reason,
+        "unavailable_reason": unavailable_reason,
+        "fetched_at": _isoformat_utc(getattr(snapshot, "fetched_at", None)),
+    }
+
+
+def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, api_key: str | None = None) -> Any:
+    from agent.account_usage import fetch_account_usage
+
+    return fetch_account_usage(provider, base_url=base_url, api_key=api_key)
+
+
+def _fetch_account_usage_with_profile_context(provider: str) -> Any:
+    try:
+        from api.profiles import cron_profile_context_for_home
+    except ImportError:
+        cron_profile_context_for_home = None
+
+    home = _get_hermes_home()
+    api_key = _get_provider_api_key(provider)
+    try:
+        if cron_profile_context_for_home is None:
+            return _agent_fetch_account_usage(provider, api_key=api_key)
+        with cron_profile_context_for_home(home):
+            return _agent_fetch_account_usage(provider, api_key=api_key)
+    except Exception:
+        logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
+        return None
+
+
+def _provider_account_usage_status(provider: str, display_name: str) -> dict[str, Any]:
+    snapshot = _fetch_account_usage_with_profile_context(provider)
+    account_limits = _serialize_account_usage_snapshot(snapshot)
+    if account_limits and account_limits.get("available"):
+        return {
+            "ok": True,
+            "provider": provider,
+            "display_name": display_name,
+            "supported": True,
+            "status": "available",
+            "label": account_limits.get("title") or "Account limits",
+            "quota": None,
+            "account_limits": account_limits,
+            "message": f"{display_name} account limits loaded.",
+        }
+
+    reason = ""
+    if account_limits:
+        reason = str(account_limits.get("unavailable_reason") or "").strip()
+    message = (
+        f"{display_name} account limits are unavailable. {reason}"
+        if reason
+        else f"{display_name} account limits are unavailable. Confirm provider authentication and try again."
+    )
+    return {
+        "ok": False,
+        "provider": provider,
+        "display_name": display_name,
+        "supported": True,
+        "status": "unavailable",
+        "quota": None,
+        "account_limits": account_limits,
+        "message": message,
+    }
+
+
 def get_provider_quota(provider_id: str | None = None) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
-    Issue #706 starts conservatively with OpenRouter's documented key endpoint.
-    OpenAI/Anthropic only expose per-call headers; until the WebUI captures those
-    response headers, report a clear unsupported/follow-up state rather than
-    inventing stale or guessed quota numbers.
+    OpenRouter keeps its documented key endpoint. OAuth-backed account usage
+    providers reuse Hermes Agent's /usage account-limits abstraction so WebUI
+    stays aligned with CLI/Gateway provider semantics.
     """
     provider = (provider_id or _active_provider_id() or "").strip().lower()
     if not provider:
@@ -379,6 +490,9 @@ def get_provider_quota(provider_id: str | None = None) -> dict[str, Any]:
         }
 
     display_name = _PROVIDER_DISPLAY.get(provider, provider.replace("-", " ").title())
+    if provider in _ACCOUNT_USAGE_PROVIDERS:
+        return _provider_account_usage_status(provider, display_name)
+
     if provider != "openrouter":
         detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
         return {

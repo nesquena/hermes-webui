@@ -4701,15 +4701,64 @@ function _formatProviderQuotaMoney(value){
   return '$'+n.toFixed(2);
 }
 
+function _formatProviderQuotaPercent(value){
+  if(value===null||value===undefined||value==='') return '—';
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '—';
+  return Math.max(0,Math.min(100,Math.round(n)))+'%';
+}
+
+function _formatProviderQuotaReset(value){
+  if(!value) return '';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return '';
+  try{return d.toLocaleString();}catch(e){return value;}
+}
+
+function _formatProviderQuotaWindowLabel(accountLimits,w){
+  const raw=((w&&w.label)||'Window').trim();
+  const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
+  if(provider==='openai-codex'){
+    if(raw.toLowerCase()==='session') return '5-hour limit';
+    if(raw.toLowerCase()==='weekly') return 'Weekly limit';
+  }
+  return raw||'Window';
+}
+
 function _buildProviderQuotaCard(status){
   if(!status) return null;
   const card=document.createElement('div');
   const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
   card.className='provider-quota-card provider-quota-card-'+state;
-  const provider=status.display_name||status.provider||'Active provider';
-  const quota=status.quota||{};
+  const accountLimits=status.account_limits||null;
+  const providerBase=status.display_name||status.provider||'Active provider';
+  const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
+  const quota=status.quota||null;
   let body='';
-  if(status.status==='available'&&quota){
+  if(status.status==='available'&&accountLimits){
+    const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+    const details=Array.isArray(accountLimits.details)?accountLimits.details:[];
+    const windowHtml=windows.map(w=>{
+      const used=_formatProviderQuotaPercent(w&&w.used_percent);
+      const reset=_formatProviderQuotaReset(w&&w.reset_at);
+      const meta=[];
+      if(used!=='—') meta.push(`${used} used`);
+      if(reset) meta.push(`resets ${reset}`);
+      if(w&&w.detail) meta.push(w.detail);
+      return `
+        <div class="provider-quota-metric provider-quota-window">
+          <span>${esc(_formatProviderQuotaWindowLabel(accountLimits,w))}</span>
+          <strong>${esc(_formatProviderQuotaPercent(w&&w.remaining_percent))}</strong>
+          ${meta.length?`<small>${esc(meta.join(' · '))}</small>`:''}
+        </div>
+      `;
+    }).join('');
+    const detailHtml=details.length
+      ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
+      : '';
+    body=windowHtml+detailHtml;
+    if(!body) body=`<div class="provider-quota-message">${esc(status.message||'Account limits loaded.')}</div>`;
+  }else if(status.status==='available'&&quota){
     body=`
       <div class="provider-quota-metric"><span>Remaining</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
       <div class="provider-quota-metric"><span>Used</span><strong>${esc(_formatProviderQuotaMoney(quota.usage))}</strong></div>
