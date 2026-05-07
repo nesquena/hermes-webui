@@ -90,6 +90,41 @@ def ensure_supported_platform() -> None:
         )
 
 
+def _agent_dir_from_hermes_cli() -> Path | None:
+    """Resolve the agent install root by inspecting the `hermes` CLI shebang.
+
+    The Hermes Agent installer drops a `hermes` console-script in the user's
+    PATH whose shebang points at the agent's bundled venv:
+
+        #!/path/to/hermes-agent/venv/bin/python3
+
+    Walking up the parents until we find a directory that contains
+    `run_agent.py` recovers the install root regardless of where the user
+    chose to clone the agent (e.g. ~/Projects/GitHub/hermes-agent), which
+    the hard-coded candidate list in :func:`discover_agent_dir` cannot.
+    """
+    hermes_path = shutil.which("hermes")
+    if not hermes_path:
+        return None
+    try:
+        with open(hermes_path, "r", encoding="utf-8", errors="replace") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    interp_field = first_line[2:].strip().split(None, 1)
+    if not interp_field:
+        return None
+    interp = Path(interp_field[0])
+    if not interp.is_absolute():
+        return None
+    for parent in interp.parents:
+        if (parent / "run_agent.py").exists():
+            return parent.resolve()
+    return None
+
+
 def discover_agent_dir() -> Path | None:
     home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     candidates = [
@@ -105,7 +140,7 @@ def discover_agent_dir() -> Path | None:
         candidate = Path(raw).expanduser().resolve()
         if candidate.exists() and (candidate / "run_agent.py").exists():
             return candidate
-    return None
+    return _agent_dir_from_hermes_cli()
 
 
 def discover_launcher_python(agent_dir: Path | None) -> str:
