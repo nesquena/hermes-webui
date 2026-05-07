@@ -1953,8 +1953,10 @@ def test_spaces_ui_install_stock_chart_posts_template_and_shows_safe_open_manage
     assert "3 widgets" in out["rootHtml"]
     assert "Open stock chart" in out["rootHtml"]
     assert "Manage stock widgets" in out["rootHtml"]
+    assert "Run stock smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="stock-chart"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="stock-chart"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_stock_chart"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "stock"}
     assert out["calls"][-1]["path"] == "api/spaces"

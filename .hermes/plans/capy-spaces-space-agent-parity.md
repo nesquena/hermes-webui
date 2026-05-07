@@ -9,11 +9,14 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Notes app demo checklist avoids browser double-numbering in the visible saved-notes flow by letting the ordered list provide numbering while keeping the same metadata-only notes smoke safety contract. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Stock Chart install completion card links directly into the safe stock smoke, making the installed template card a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link stock install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Stock Chart install status includes a `Run stock smoke` action wired to `demo_stock_chart`, while preserving `Open stock chart` / `Manage stock widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `fix(spaces): avoid double-numbering notes checklist`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes app checklist renders clean ordered-list items (`Folder list ready`, `Editor draft saved`, `Markdown preview saved`, `Attachments remain agent-mediated`) instead of duplicating numeric prefixes such as `1. 1. ...`, while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.

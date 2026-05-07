@@ -3,7 +3,7 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-05-06
+Last implementation-status update: 2026-05-07
 
 ## Current parity implementation notes
 
@@ -67,6 +67,7 @@ Recently landed:
 - The Spaces shell now exposes a direct `Run Big Bang onboarding` action that launches the safe first-run onboarding smoke from the main Spaces toolbar and opens the metadata-only widget manager for welcome, demo launcher, safety guardrail, and next-step widgets without exposing generated renderer/source/API-auth markers.
 - The Notes app install completion card now includes a direct `Run notes smoke` action that exercises the existing metadata-only saved-notes preview path from the installed demo card without exposing generated renderer/source/API-auth markers.
 - The Kanban board install completion card now includes a direct `Run kanban smoke` action that exercises the existing metadata-only board preview path from the installed demo card without exposing generated renderer/source/API-auth markers.
+- The Stock Chart install completion card now includes a direct `Run stock smoke` action that exercises the existing metadata-only market-data/chart preview path from the installed demo card without exposing generated renderer/source/API-auth markers.
 - The Local Service Dashboard install flow now produces a visible metadata-only completion card with direct open/manage actions for the Agent Zero/local-service dashboard demo path, without exposing generated renderer or credential-like fields.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
