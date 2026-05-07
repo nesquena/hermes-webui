@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Spaces toolbar now exposes a direct `Run camera walkthrough` action that launches the metadata-only camera dashboard smoke, displays the persistent camera grid/permission/incident widgets, and opens the safe widget manager for the demo Space without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Notes app demo smoke now queues a safe typed `notes.save` event for `notes-editor`, exposes `queued_event_count`/`queued_event` in the metadata-only smoke result, and lets the walkthrough widget manager show the agent-bridge event without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): queue notes demo save event`
+  - Added RED/GREEN backend coverage proving `demo_notes_app` records the safe folders/editor/preview/attachments state and queues one metadata-only `notes.save` event against `notes-editor`, exposing `queued_event_count`/`queued_event` for the visible smoke card and widget-manager event inbox while omitting hostile renderer/script/API-auth markers and secret-looking values from serialized responses.
 
 - `feat(spaces): add camera walkthrough action`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run camera walkthrough`, posts exactly `{demo: "demo_camera_dashboard"}`, then renders the camera dashboard smoke result plus safe widget manager for `demo-camera-dashboard` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.

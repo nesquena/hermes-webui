@@ -4260,6 +4260,18 @@ def test_notes_demo_smoke_exposes_safe_folder_and_attachment_previews(monkeypatc
     assert result["notes_flow"]["folder_count"] == 2
     assert result["notes_flow"]["active_folder"] == "Demo Project"
     assert result["notes_flow"]["attachment_count"] == 2
+    assert result["queued_event_count"] == 1
+    assert result["queued_event"]["widget_id"] == "notes-editor"
+    assert result["queued_event"]["event_name"] == "notes.save"
+    assert result["queued_event"]["payload_summary"] == {
+        "action": "save-note",
+        "demo": "demo_notes_app",
+        "target": "notes-editor",
+    }
+    events = spaces.list_widget_events(result["space"]["space_id"], "notes-editor")
+    assert len(events) == 1
+    assert events[0]["event_name"] == "notes.save"
+    assert events[0]["payload_summary"] == result["queued_event"]["payload_summary"]
     assert "renderer" not in serialized
     assert "html" not in serialized
     assert "<script" not in serialized

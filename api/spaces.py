@@ -1540,8 +1540,18 @@ def space_demo_run(name: str) -> dict[str, Any]:
         patch_widget(space_id, "notes-editor", {"notes": editor_notes})
         patch_widget(space_id, "notes-preview", {"notes": preview_notes})
         patch_widget(space_id, "notes-attachments", {"attachments": demo_attachments})
+        queued = queue_widget_event(
+            space_id,
+            "notes-editor",
+            "notes.save",
+            {"action": "save-note", "demo": demo, "target": "notes-editor"},
+            prompt="Save the demo note through the typed metadata-only notes bridge.",
+        )
+        queued_events = list_widget_events(space_id, "notes-editor")
         action = "notes-draft-saved"
         extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
             "notes_artifact": {
                 "folders": read_widget_detail(space_id, "notes-folders"),
                 "editor": read_widget_detail(space_id, "notes-editor"),
