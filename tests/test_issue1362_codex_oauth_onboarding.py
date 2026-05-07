@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -474,7 +476,6 @@ def test_anthropic_worker_reports_link_errors(monkeypatch, tmp_path):
 
 
 def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tmp_path):
-    import os
     import api.oauth as oauth
     from api.onboarding import _provider_oauth_authenticated
 
@@ -499,6 +500,55 @@ def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tm
     assert "refresh_token" not in marker
     assert _provider_oauth_authenticated("anthropic", tmp_path) is True
     assert _provider_oauth_authenticated("claude-code", tmp_path) is True
+
+
+def test_anthropic_env_clear_waits_for_chat_env_read_lock(monkeypatch, tmp_path):
+    import api.oauth as oauth
+    import api.providers as providers
+    from api.streaming import _ENV_LOCK
+
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "old-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "old-key")
+
+    def _fail_before_env_lock(_env_path, _updates):
+        raise RuntimeError("env write failed before process-env clear")
+
+    monkeypatch.setattr(providers, "_write_env_file", _fail_before_env_lock)
+
+    started = threading.Event()
+    done = threading.Event()
+    errors = []
+
+    def _onboarding_clear():
+        started.set()
+        try:
+            oauth._clear_anthropic_env_values(tmp_path)
+        except Exception as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+        finally:
+            done.set()
+
+    with _ENV_LOCK:
+        worker = threading.Thread(target=_onboarding_clear)
+        worker.start()
+        assert started.wait(timeout=1)
+        assert not done.wait(timeout=0.1)
+        assert os.environ["ANTHROPIC_TOKEN"] == "old-token"
+        assert os.environ["ANTHROPIC_API_KEY"] == "old-key"
+
+    worker.join(timeout=1)
+    assert done.is_set()
+    assert errors == []
+    assert "ANTHROPIC_TOKEN" not in os.environ
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_runtime_provider_reads_use_anthropic_env_lock():
+    streaming_src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+    routes_src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+
+    assert "resolve_runtime_provider_with_anthropic_env_lock" in streaming_src
+    assert "resolve_runtime_provider_with_anthropic_env_lock" in routes_src
 
 
 def test_anthropic_onboarding_setup_allows_linked_oauth_without_api_key(monkeypatch, tmp_path):

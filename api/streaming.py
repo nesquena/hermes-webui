@@ -1632,7 +1632,10 @@ def _attempt_credential_self_heal(
        re-invoke ``run_conversation`` with these).
     """
     try:
-        from api.oauth import read_auth_json
+        from api.oauth import (
+            read_auth_json,
+            resolve_runtime_provider_with_anthropic_env_lock,
+        )
         from api.config import (
             SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK,
             invalidate_credential_pool_cache,
@@ -1653,7 +1656,10 @@ def _attempt_credential_self_heal(
         invalidate_credential_pool_cache(provider_id)
 
         # 4. Re-resolve runtime provider with fresh credentials
-        _new_rt = resolve_runtime_provider(requested=provider_id)
+        _new_rt = resolve_runtime_provider_with_anthropic_env_lock(
+            resolve_runtime_provider,
+            requested=provider_id,
+        )
 
         logger.info(
             '[webui] self-heal: credential refresh succeeded for provider=%s session=%s',
@@ -2061,8 +2067,12 @@ def _run_agent_streaming(
             # Pass the resolved provider so non-default providers get their own credentials.
             resolved_api_key = None
             try:
+                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                 from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider(requested=resolved_provider)
+                _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                    resolve_runtime_provider,
+                    requested=resolved_provider,
+                )
                 resolved_api_key = _rt.get("api_key")
                 if not resolved_provider:
                     resolved_provider = _rt.get("provider")

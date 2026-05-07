@@ -56,6 +56,30 @@ ANTHROPIC_PUBLIC_LINK_ERROR = "Claude Code credential linking failed. Check serv
 
 _OAUTH_FLOWS: dict[str, dict[str, Any]] = {}
 _OAUTH_FLOWS_LOCK = threading.Lock()
+_ANTHROPIC_ENV_KEYS = ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")
+
+
+def _clear_process_anthropic_env_values() -> None:
+    """Clear Anthropic process env fallbacks under the streaming env lock."""
+    from api.streaming import _ENV_LOCK
+
+    with _ENV_LOCK:
+        for key in _ANTHROPIC_ENV_KEYS:
+            os.environ.pop(key, None)
+
+
+def resolve_runtime_provider_with_anthropic_env_lock(resolver, *args, **kwargs):
+    """Resolve runtime credentials under the Anthropic onboarding env lock.
+
+    Request paths must resolve Anthropic env fallbacks per outbound request,
+    not cache ANTHROPIC_TOKEN or ANTHROPIC_API_KEY across onboarding. Sharing
+    the process-env lock prevents a chat stream from observing one stale
+    Anthropic env value while onboarding has already cleared the other.
+    """
+    from api.streaming import _ENV_LOCK
+
+    with _ENV_LOCK:
+        return resolver(*args, **kwargs)
 
 
 def _normalize_onboarding_oauth_provider(provider: str) -> str:
@@ -234,18 +258,22 @@ def _read_claude_code_credentials() -> dict[str, Any] | None:
 
 
 def _clear_anthropic_env_values(hermes_home: Path) -> None:
-    """Clear Anthropic API/setup-token env values in the active profile only."""
+    """Clear Anthropic API/setup-token env values in the active profile only.
+
+    The .env write path already clears os.environ while holding the streaming
+    env lock. Keep a locked process-env clear here too so import/write failures
+    cannot leave or partially clear stale Anthropic fallbacks.
+    """
     try:
         from api.providers import _write_env_file
 
         _write_env_file(
             Path(hermes_home) / ".env",
-            {"ANTHROPIC_TOKEN": None, "ANTHROPIC_API_KEY": None},
+            {key: None for key in _ANTHROPIC_ENV_KEYS},
         )
     except Exception as exc:
         logger.warning("Failed to clear Anthropic env values: %s", exc)
-    os.environ.pop("ANTHROPIC_TOKEN", None)
-    os.environ.pop("ANTHROPIC_API_KEY", None)
+    _clear_process_anthropic_env_values()
 
 
 def _link_anthropic_credentials(hermes_home: Path) -> None:
