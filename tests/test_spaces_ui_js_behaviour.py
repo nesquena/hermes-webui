@@ -2008,16 +2008,26 @@ def test_spaces_ui_install_big_bang_onboarding_posts_template_and_refreshes_with
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_game_sandbox_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_game_sandbox_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installGameSandbox")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install game sandbox" in out["rootHtml"]
+    assert "Game sandbox installed" in out["rootHtml"]
+    assert "Game Sandbox" in out["rootHtml"]
+    assert "3 widgets" in out["rootHtml"]
+    assert "Open game sandbox" in out["rootHtml"]
+    assert "Manage game widgets" in out["rootHtml"]
+    assert "Run snake smoke" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="game-sandbox"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="game-sandbox"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_snake_iterative_repair"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "game"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
 

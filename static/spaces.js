@@ -50,9 +50,9 @@
     const spaceName = space.name || spaceId || 'Demo Space';
     const widgetCount = widgets.length || Number(space.widget_count || 0);
     const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
-    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : (template === 'kanban' ? 'Kanban board installed' : (template === 'research' ? 'Research harness installed' : (template === 'dashboard' ? 'Dashboard demo installed' : (template === 'camera' ? 'Camera dashboard installed' : (template === 'browser' ? 'Browser surface installed' : (template === 'stock' ? 'Stock chart installed' : (template === 'service' ? 'Local service dashboard installed' : (template === 'model-setup' ? 'Model setup installed' : (template === 'music' ? 'Music sequencer installed' : 'Template installed'))))))))));
-    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : (template === 'kanban' ? 'Open kanban board' : (template === 'research' ? 'Open research harness' : (template === 'dashboard' ? 'Open dashboard demo' : (template === 'camera' ? 'Open camera dashboard' : (template === 'browser' ? 'Open browser surface' : (template === 'stock' ? 'Open stock chart' : (template === 'service' ? 'Open local service dashboard' : (template === 'model-setup' ? 'Open model setup' : (template === 'music' ? 'Open music sequencer' : 'Open Space'))))))))));
-    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : (template === 'kanban' ? 'Manage kanban widgets' : (template === 'research' ? 'Manage research widgets' : (template === 'dashboard' ? 'Manage dashboard widgets' : (template === 'camera' ? 'Manage camera widgets' : (template === 'browser' ? 'Manage browser widgets' : (template === 'stock' ? 'Manage stock widgets' : (template === 'service' ? 'Manage service widgets' : (template === 'model-setup' ? 'Manage provider widgets' : (template === 'music' ? 'Manage music widgets' : 'Manage widgets'))))))))));
+    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : (template === 'kanban' ? 'Kanban board installed' : (template === 'research' ? 'Research harness installed' : (template === 'dashboard' ? 'Dashboard demo installed' : (template === 'camera' ? 'Camera dashboard installed' : (template === 'browser' ? 'Browser surface installed' : (template === 'stock' ? 'Stock chart installed' : (template === 'service' ? 'Local service dashboard installed' : (template === 'model-setup' ? 'Model setup installed' : (template === 'music' ? 'Music sequencer installed' : (template === 'game' ? 'Game sandbox installed' : 'Template installed')))))))))));
+    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : (template === 'kanban' ? 'Open kanban board' : (template === 'research' ? 'Open research harness' : (template === 'dashboard' ? 'Open dashboard demo' : (template === 'camera' ? 'Open camera dashboard' : (template === 'browser' ? 'Open browser surface' : (template === 'stock' ? 'Open stock chart' : (template === 'service' ? 'Open local service dashboard' : (template === 'model-setup' ? 'Open model setup' : (template === 'music' ? 'Open music sequencer' : (template === 'game' ? 'Open game sandbox' : 'Open Space')))))))))));
+    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : (template === 'kanban' ? 'Manage kanban widgets' : (template === 'research' ? 'Manage research widgets' : (template === 'dashboard' ? 'Manage dashboard widgets' : (template === 'camera' ? 'Manage camera widgets' : (template === 'browser' ? 'Manage browser widgets' : (template === 'stock' ? 'Manage stock widgets' : (template === 'service' ? 'Manage service widgets' : (template === 'model-setup' ? 'Manage provider widgets' : (template === 'music' ? 'Manage music widgets' : (template === 'game' ? 'Manage game widgets' : 'Manage widgets')))))))))));
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
@@ -67,7 +67,8 @@
       stock: ['demo_stock_chart', 'Run stock smoke'],
       service: ['demo_local_agent_control_dashboard', 'Run local service smoke'],
       'model-setup': ['demo_provider_setup', 'Run provider setup smoke'],
-      music: ['demo_step_sequencer_piano_roll', 'Run music smoke']
+      music: ['demo_step_sequencer_piano_roll', 'Run music smoke'],
+      game: ['demo_snake_iterative_repair', 'Run snake smoke']
     };
     const smokeMeta = smokeDemos[template];
     const smokeAction = smokeMeta
@@ -1645,8 +1646,10 @@
       return;
     }
     if (action === 'installGameTemplate') {
-      await postSpacesJson('api/spaces/templates/install', {template: 'game'});
+      const result = await postSpacesJson('api/spaces/templates/install', {template: 'game'});
       await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateInstallStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'installMusicTemplate') {
