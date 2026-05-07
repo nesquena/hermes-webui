@@ -57,5 +57,6 @@ def test_direct_frontend_event_sources_are_relative_to_current_mount():
 
 def test_static_vendor_import_is_relative_to_current_mount():
     src = read("static/index.html")
-    assert "import * as smd from 'static/vendor/smd.min.js'" in src
+    assert "import * as smd from './static/vendor/smd.min.js'" in src
     assert "import * as smd from '/static/vendor/smd.min.js'" not in src
+    assert "import * as smd from 'static/vendor/smd.min.js'" not in src

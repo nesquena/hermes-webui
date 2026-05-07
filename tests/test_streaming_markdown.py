@@ -111,6 +111,9 @@ class TestIndexHtmlSmdScript:
         assert "static/vendor/smd.min.js" in INDEX_HTML, (
             "index.html must load the vendored streaming-markdown module"
         )
+        assert "from './static/vendor/smd.min.js'" in INDEX_HTML, (
+            "streaming-markdown import must use a dot-relative path"
+        )
         assert "from '/static/vendor/smd.min.js'" not in INDEX_HTML, (
             "streaming-markdown import must not be root-absolute; root-absolute "
             "static paths break subpath deployments such as /hermes/"
@@ -118,6 +121,9 @@ class TestIndexHtmlSmdScript:
         assert 'from "/static/vendor/smd.min.js"' not in INDEX_HTML, (
             "streaming-markdown import must not be root-absolute; root-absolute "
             "static paths break subpath deployments such as /hermes/"
+        )
+        assert "from 'static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "bare module specifiers are invalid ES module specifiers"
         )
 
 
