@@ -10,13 +10,71 @@ Structural tests — no server required. Verify:
 - SAFE_TAGS updated to allow <span> (for inline math)
 - renderKatexBlocks() is wired into the requestAnimationFrame call
 """
+import json
 import pathlib
 import re
+import subprocess
+import textwrap
 
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS   = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
 INDEX   = (REPO / 'static' / 'index.html').read_text(encoding='utf-8')
 CSS     = (REPO / 'static' / 'style.css').read_text(encoding='utf-8')
+
+
+def _extract_function(src: str, name: str) -> str:
+    marker = f"function {name}("
+    start = src.index(marker)
+    brace = src.index("{", start)
+    depth = 1
+    pos = brace + 1
+    while depth and pos < len(src):
+        ch = src[pos]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        pos += 1
+    assert depth == 0, f"could not extract {name}()"
+    return src[start:pos]
+
+
+def _run_renderers(markdown: str) -> dict:
+    js = textwrap.dedent(
+        r'''
+        const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+        const _PDF_EXTS=/\.pdf$/i;
+        const _SVG_EXTS=/\.svg$/i;
+        const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
+        const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+        function t(k){ return k; }
+        function _mediaPlayerHtml(){ return ''; }
+        global.document={baseURI:'http://example.test/'};
+        '''
+    )
+    js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
+    js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
+    js += "\n" + _extract_function(UI_JS, "_renderUserFencedBlocks")
+    js += "\n" + _extract_function(UI_JS, "renderMd")
+    js += textwrap.dedent(
+        r'''
+        const input=process.argv[1];
+        console.log(JSON.stringify({
+          assistant: renderMd(input),
+          user: _renderUserFencedBlocks(input),
+        }));
+        '''
+    )
+    proc = subprocess.run(
+        ["node", "-e", js, markdown],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    return json.loads(proc.stdout)
 
 
 # ── renderMd pipeline ──────────────────────────────────────────────────────────
@@ -39,6 +97,22 @@ def test_katex_block_placeholder_emitted():
     """renderMd restore pass must emit .katex-block divs for display math."""
     assert 'katex-block' in UI_JS, \
         '.katex-block placeholder div not emitted by renderMd restore pass'
+
+
+def test_backslash_latex_delimiters_render_to_katex_placeholders():
+    """Common LLM LaTeX delimiters \\[...\\] and \\(...\\) render in assistant and user bubbles."""
+    sample = """\\[
+\\text{SoundPower}(f)=10\\log_{10}(x)
+\\]
+
+where \\(L_i(f)\\) = SPL at angle \\(i\\)."""
+    rendered = _run_renderers(sample)
+    for role in ("assistant", "user"):
+        html = rendered[role]
+        assert 'class="katex-block" data-katex="display"' in html, html
+        assert 'class="katex-inline" data-katex="inline"' in html, html
+        assert "\\[" not in html and "\\]" not in html, html
+        assert "\\(" not in html and "\\)" not in html, html
 
 
 def test_katex_inline_placeholder_emitted():
