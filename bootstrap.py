@@ -185,6 +185,9 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
         # so the venv binary aborts with SIGABRT on first import because the
         # dylib never gets copied into .venv/lib. Symlinking the interpreter
         # keeps @executable_path resolving back to the original install.
+        # CPython's venv falls back to copy mode automatically when symlink
+        # creation fails (e.g. older Windows without SeCreateSymbolicLinkPrivilege),
+        # so this is safe to set unconditionally.
         venv.EnvBuilder(with_pip=True, symlinks=True).create(venv_dir)
 
     info("Installing WebUI dependencies into local virtualenv")
