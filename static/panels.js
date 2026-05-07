@@ -4715,6 +4715,16 @@ function _formatProviderQuotaReset(value){
   try{return d.toLocaleString();}catch(e){return value;}
 }
 
+function _formatProviderQuotaWindowLabel(accountLimits,w){
+  const raw=((w&&w.label)||'Window').trim();
+  const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
+  if(provider==='openai-codex'){
+    if(raw.toLowerCase()==='session') return '5-hour limit';
+    if(raw.toLowerCase()==='weekly') return 'Weekly limit';
+  }
+  return raw||'Window';
+}
+
 function _buildProviderQuotaCard(status){
   if(!status) return null;
   const card=document.createElement('div');
@@ -4737,7 +4747,7 @@ function _buildProviderQuotaCard(status){
       if(w&&w.detail) meta.push(w.detail);
       return `
         <div class="provider-quota-metric provider-quota-window">
-          <span>${esc((w&&w.label)||'Window')}</span>
+          <span>${esc(_formatProviderQuotaWindowLabel(accountLimits,w))}</span>
           <strong>${esc(_formatProviderQuotaPercent(w&&w.remaining_percent))}</strong>
           ${meta.length?`<small>${esc(meta.join(' · '))}</small>`:''}
         </div>
