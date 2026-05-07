@@ -155,6 +155,20 @@ def test_preserved_task_list_attaches_once_per_render():
     assert "(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)" in src
 
 
+def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():
+    src = _read("static/ui.js")
+    start = src.find("function _latestTodoToolItems")
+    assert start != -1, "latest todo state helper not found"
+    end = src.find("function _isSameLocalDay", start)
+    assert end != -1, "preserved-task-list helper block end not found"
+    helpers = src[start:end]
+
+    assert "if(payload&&Array.isArray(payload.todos)) return payload.todos;" in helpers
+    assert "function _hasActiveTodoItems" in helpers
+    assert "status==='pending'||status==='in_progress'" in helpers
+    assert "if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];" in helpers
+
+
 def test_preserved_task_list_rendering_does_not_mutate_history():
     src = _read("static/ui.js")
     start = src.find("function _isPreservedCompressionTaskListMessage")

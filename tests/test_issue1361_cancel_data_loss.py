@@ -315,3 +315,95 @@ class TestCancelWithReasoningOnlyNoText:
             f"Expected no partial msg when nothing was streamed. Got partials: {partial_msgs}"
         assert len(cancel_msgs) == 1, \
             f"Expected exactly 1 cancel marker. Got: {cancel_msgs}"
+
+# ── §D: Error paths must not lose pending user turn ─────────────────────────
+
+def test_stream_error_materializes_pending_user_turn_before_clearing_runtime_state():
+    """If a stream errors before normal merge, pending_user_message must become a
+    durable user message before the error marker is saved. Otherwise reload/server
+    reconcile makes the user's just-submitted prompt disappear.
+    """
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    sid = "test_pending_error_d1"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s.pending_started_at = 1778098700.0
+    s.pending_attachments = [{"name": "screenshot.png"}]
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is True
+    assert s.messages[-1]["role"] == "user"
+    assert s.messages[-1]["content"] == "please restart the WebUI"
+    assert s.messages[-1]["timestamp"] == 1778098700
+    assert s.messages[-1]["attachments"] == [{"name": "screenshot.png"}]
+    assert s.pending_user_message == "please restart the WebUI"
+
+
+def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoint():
+    """Eager session-save mode may already have checkpointed the current user turn;
+    the error materializer must not append the same user message again.
+    """
+    from api.streaming import _materialize_pending_user_turn_before_error
+
+    sid = "test_pending_error_d2"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please restart the WebUI",
+        messages=[
+            {"role": "assistant", "content": "previous answer"},
+            {"role": "user", "content": "please restart the WebUI"},
+        ],
+    )
+
+    appended = _materialize_pending_user_turn_before_error(s)
+
+    assert appended is False
+    assert [m.get("role") for m in s.messages].count("user") == 1
+
+
+# ── Structural guard: pin call sites of the materialize helper at error branches ──
+
+def test_materialize_helper_called_immediately_before_error_path_clears():
+    """Pin call sites of _materialize_pending_user_turn_before_error.
+
+    Catches a future refactor that drops the call from the apperror-no-response
+    or outer-Exception paths in api/streaming.py while leaving the
+    `pending_user_message = None` clearing in place — which is exactly the
+    user-turn-data-loss regression #1361 was filed for.
+
+    Strategy: count how many `pending_user_message = None` clearings have the
+    helper call within the preceding 4 lines. Currently 2 (apperror at 2610,
+    outer-Exception at 3072). The success path (2716) and cancel path (3375)
+    legitimately don't need the helper. If a future refactor drops the helper
+    call from one of the error sites, this assertion fires.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent.joinpath('api', 'streaming.py').read_text(encoding='utf-8')
+    lines = src.splitlines()
+
+    helper_name = '_materialize_pending_user_turn_before_error('
+    clear_sites = [(i + 1, line) for i, line in enumerate(lines)
+                   if 'pending_user_message = None' in line]
+    assert len(clear_sites) >= 4, (
+        f"Expected ≥4 sites that clear pending_user_message; found {len(clear_sites)}. "
+        f"If api/streaming.py was refactored, re-audit this test."
+    )
+
+    sites_with_helper = []
+    for lineno, _ in clear_sites:
+        prev_block = '\n'.join(lines[max(0, lineno - 5):lineno - 1])
+        if helper_name in prev_block:
+            sites_with_helper.append(lineno)
+
+    # Concretely, PR #1760 wired up the helper at the apperror-no-response
+    # path and the outer-Exception path. Both must remain wired.
+    assert len(sites_with_helper) >= 2, (
+        f"Expected ≥2 clear sites preceded by {helper_name} within 4 lines; "
+        f"found {sites_with_helper}. PR #1760 / #1361 regression — re-wire the "
+        f"helper at the error-branch clear sites in api/streaming.py."
+    )

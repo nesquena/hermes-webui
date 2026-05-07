@@ -566,6 +566,25 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
 
 
+def _strip_surrounding_quotes(path: str) -> str:
+    """Strip a single pair of surrounding single or double quotes from a path string.
+
+    macOS Finder's "Copy as Pathname" (Cmd+Option+C) returns paths wrapped in
+    single quotes, e.g. ``'/Users/x/Documents/foo'``. Other shells and OS file
+    managers do similar things with double quotes. Users routinely paste these
+    quoted strings into the Add Space input expecting them to "just work" —
+    the only reason they didn't was a missing strip.
+
+    Only paired quotes are stripped (matching opener and closer). One-sided quotes
+    are preserved on the slim chance a path legitimately contains a literal quote
+    character.
+    """
+    s = path.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
 def validate_workspace_to_add(path: str) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
@@ -575,7 +594,12 @@ def validate_workspace_to_add(path: str) -> Path:
 
     The stricter ``resolve_trusted_workspace`` is used when *using* an existing workspace
     (file reads/writes) to prevent path traversal after the list is built.
+
+    Surrounding quotes (single or double) are stripped before validation —
+    macOS Finder's "Copy as Pathname" wraps paths in single quotes by default,
+    and users routinely paste those into the Add Space input.
     """
+    path = _strip_surrounding_quotes(path)
     candidate = Path(path).expanduser().resolve()
 
     if not candidate.exists():

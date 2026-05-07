@@ -69,6 +69,10 @@ os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
 os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
 os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
+# Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
+# ~/.hermes/config.yaml.  Override it before any product modules are imported so
+# tests that read/write config.yaml stay inside the isolated test home.
+os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
@@ -297,6 +301,7 @@ def test_server():
         "HERMES_WEBUI_DEFAULT_WORKSPACE": str(TEST_WORKSPACE),
         "HERMES_WEBUI_DEFAULT_MODEL":     "openai/gpt-5.4-mini",
         "HERMES_HOME":                    str(TEST_STATE_DIR),
+        "HERMES_CONFIG_PATH":             str(TEST_STATE_DIR / 'config.yaml'),
         # Belt-and-suspenders: HERMES_BASE_HOME hard-locks _DEFAULT_HERMES_HOME
         # in api/profiles.py to the test state dir regardless of profile switching
         # or any os.environ mutation that happens inside the server process.

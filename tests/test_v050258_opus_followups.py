@@ -6,7 +6,7 @@ initial implementation built the outer `next` parameter via:
     _next = quote(path, safe='/:@!$&\'()*+,;=')
     if query:
         _next += '?' + query
-    location = '/login?next=' + quote(_next, safe='/:@!$&\'()*+,;=?')
+    location = 'login?next=' + quote(_next, safe='/:@!$&\'()*+,;=?')
 
 Two problems with this shape:
 
@@ -45,7 +45,7 @@ def test_login_redirect_uses_path_only_safe_encoding():
     original `safe='/:@!$&\'()*+,;=?'` shape."""
     src = (REPO / "api" / "auth.py").read_text(encoding="utf-8")
 
-    redirect_idx = src.find("/login?next=")
+    redirect_idx = src.find("login?next=")
     assert redirect_idx != -1, "login redirect missing"
     block = src[max(0, redirect_idx - 1200) : redirect_idx + 600]
 
@@ -73,7 +73,7 @@ def _build_redirect_like_check_auth(path: str, query: str) -> str:
     if query:
         _path_with_query += "?" + query
     _next = _urlparse.quote(_path_with_query, safe="/")
-    return "/login?next=" + _next
+    return "login?next=" + _next
 
 
 def _browser_searchparams_get_next(location: str) -> str:

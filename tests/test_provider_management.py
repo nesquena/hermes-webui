@@ -297,6 +297,42 @@ class TestSetProviderKey:
 class TestRemoveProviderKey:
     """Unit tests for remove_provider_key() wrapper."""
 
+    def test_clean_provider_key_uses_late_bound_config_path(self, monkeypatch, tmp_path):
+        """Config cleanup must honor api.config._get_config_path monkeypatches.
+
+        PR #1597 fixed provider-key cleanup by resolving the config path through
+        the api.config module at call time. If the implementation goes back to
+        the function imported into api.providers at module load, this test cleans
+        stale_config instead of active_config.
+        """
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        stale_config = tmp_path / "stale-config.yaml"
+        active_config = tmp_path / "active-config.yaml"
+        stale_config.write_text(
+            "providers:\n  openai:\n    api_key: stale-secret\n",
+            encoding="utf-8",
+        )
+        active_config.write_text(
+            "providers:\n  openai:\n    api_key: active-secret\nmodel:\n  provider: openai\n  api_key: active-model-secret\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(providers, "_get_config_path", lambda: stale_config, raising=False)
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: active_config)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        stale = yaml.safe_load(stale_config.read_text(encoding="utf-8"))
+        active = yaml.safe_load(active_config.read_text(encoding="utf-8"))
+        assert stale["providers"]["openai"]["api_key"] == "stale-secret"
+        assert "api_key" not in active["providers"]["openai"]
+        assert active["model"] == {"provider": "openai"}
+
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
         _install_fake_hermes_cli(monkeypatch)

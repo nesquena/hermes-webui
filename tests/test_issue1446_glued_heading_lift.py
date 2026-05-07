@@ -153,20 +153,21 @@ def test_chain_of_glued_headings_all_lifted():
 
 
 def test_lift_pass_present_in_ui_js_at_correct_position():
-    """The lift regex must be present in ui.js, between rawPreStash restore and fence_stash restore.
+    """The lift regex must be present in ui.js before protected-code restores.
 
     This pins the position so a future cleanup can't accidentally move the lift
-    to a place where it would corrupt fenced code blocks (which are stashed as
-    \\x00P / \\x00F tokens at this point and don't match the lift regex).
+    to a place where it would corrupt raw <pre> HTML or fenced code blocks
+    (which are stashed as \x00R / \x00P / \x00F tokens at this point and don't
+    match the lift regex).
     """
     lift_idx = UI_JS.find(r'(/([.!?])\*\*([^*\n]{1,80})\*\*\n\n/g')
     assert lift_idx > 0, "Glued-bold-heading lift regex not found in static/ui.js"
     raw_pre_restore = UI_JS.find("rawPreStash[+i]")
     fence_restore = UI_JS.find("fence_stash[+i]")
     assert raw_pre_restore > 0 and fence_restore > 0, "stash restore landmarks missing"
-    assert raw_pre_restore < lift_idx < fence_restore, (
-        "Glued-bold lift must sit between rawPreStash restore and fence_stash restore "
-        "so fenced code is protected. Current ordering broken."
+    assert lift_idx < raw_pre_restore and lift_idx < fence_restore, (
+        "Glued-bold lift must run before rawPreStash and fence_stash restore "
+        "so raw <pre> and fenced code are protected. Current ordering broken."
     )
 
 
@@ -207,6 +208,8 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+eval(extractFunc('_matchBacktickFenceLine'));
+eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -252,6 +255,16 @@ def test_real_renderer_protects_fenced_code(driver_path):
     out = _render(driver_path, src)
     assert "<strong>inside-code</strong>" not in out, out
     assert "**inside-code**" in out, out
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_real_renderer_protects_raw_pre_html(driver_path):
+    """Raw literal <pre> content must stay byte-preserved when it contains the glued trigger."""
+    src = "<pre>Para text.**Heading**\n\nNext.</pre>\n"
+    out = _render(driver_path, src)
+    assert "<pre>Para text.**Heading**\n\nNext.</pre>" in out, out
+    assert "<pre>Para text.\n\n**Heading**\n\nNext.</pre>" not in out, out
+    assert "<strong>Heading</strong>" not in out, out
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

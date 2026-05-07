@@ -53,7 +53,26 @@ class TestWorkspacePanelCollapsePriority:
             "compresses all three children simultaneously."
         )
         assert "gap:6px" in rule
-        assert "overflow:hidden" in rule
+        # Note: `.panel-header` was changed from overflow:hidden to overflow:visible
+        # in #1775 so its tooltip pseudo-elements can escape the header bar
+        # (otherwise the workspace-panel header tooltips like "New file" get
+        # clipped). The title-text ellipsis is preserved by the inner span
+        # `.panel-header > span:first-child` which has its own
+        # overflow:hidden + text-overflow:ellipsis. So we check that EITHER
+        # the parent uses overflow:hidden (legacy) or that the inner span
+        # handles its own ellipsis (current).
+        if "overflow:hidden" not in rule:
+            inner_span_idx = STYLE_CSS.find(".panel-header > span:first-child{")
+            assert inner_span_idx != -1, (
+                ".panel-header lost overflow:hidden but no inner span "
+                "rule (.panel-header > span:first-child) handles the "
+                "title-text ellipsis as a fallback."
+            )
+            inner_rule = STYLE_CSS[inner_span_idx: STYLE_CSS.find("}", inner_span_idx) + 1]
+            assert "overflow:hidden" in inner_rule and "text-overflow:ellipsis" in inner_rule, (
+                ".panel-header > span:first-child must own the ellipsis "
+                "behaviour now that the parent is overflow:visible."
+            )
 
     def test_panel_actions_pushed_right_and_never_shrinks(self):
         """`.panel-actions` must have flex-shrink:0 and margin-left:auto so

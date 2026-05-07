@@ -248,8 +248,13 @@ def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
     disable B's Send button.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # The fix wraps setBusy(false) in a guard
-    assert "INFLIGHT[S.session.session_id]" in src,         "messages.js must guard setBusy(false) with INFLIGHT check for current session"
+    # The fix wraps setBusy(false) in an active-pane ownership guard. Newer
+    # implementations may centralize the guard in a helper rather than repeat the
+    # raw INFLIGHT expression at every terminal event site.
+    assert (
+        "INFLIGHT[S.session.session_id]" in src
+        or "function _setActivePaneIdleIfOwner" in src
+    ), "messages.js must guard setBusy(false) for the current session"
 
 
 def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_test_sessions):
@@ -415,7 +420,7 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # INFLIGHT branch must call appendLiveToolCard
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+500]
+    inflight_block = src[inflight_idx:inflight_idx+900]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -436,11 +441,12 @@ def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_session
     stream_end_idx = src.find("source.addEventListener('stream_end'", done_idx)
     assert stream_end_idx >= 0, "stream_end listener after done handler not found"
     done_block = src[done_idx:stream_end_idx]
-    # S.busy=false must appear before renderMessages() within the done handler
+    # S.busy=false must appear before the terminal render call within the done handler.
     busy_pos = done_block.find("S.busy=false;")
-    render_pos = done_block.find("renderMessages()")
+    render_pos = done_block.find("renderMessages(")
     assert busy_pos >= 0, "done handler must set S.busy=false before renderMessages()"
-    assert busy_pos < render_pos,         f"S.busy=false (pos {busy_pos}) must come before renderMessages() (pos {render_pos})"
+    assert render_pos >= 0, "done handler must call renderMessages after settling state"
+    assert busy_pos < render_pos,         f"S.busy=false (pos {busy_pos}) must come before renderMessages (pos {render_pos})"
 
 
 # ── R14: send() uses stale modelSelect.value instead of session model ────────
@@ -452,11 +458,17 @@ def test_send_uses_session_model_as_authoritative_source(cleanup_test_sessions):
     causing the wrong model to be sent.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # The model field in the chat/start payload must prefer S.session.model
-    chat_start_idx = src.find("/api/chat/start")
-    assert chat_start_idx >= 0
-    payload_block = src[chat_start_idx:chat_start_idx+300]
-    assert "S.session.model" in payload_block,         "send() must use S.session.model in the chat/start payload"
+    # The model field in the chat/start payload must prefer S.session.model.
+    # PR #1591 (May 2026) added optimistic `upsertActiveSessionForLocalTurn`
+    # comments that mention `/api/chat/start` BEFORE the actual POST call, so
+    # `src.find("/api/chat/start")` may land on a comment occurrence rather
+    # than the `api('/api/chat/start',{...})` POST. Match the call signature
+    # explicitly to land on the payload block.
+    chat_start_idx = src.find("api('/api/chat/start'")
+    assert chat_start_idx >= 0, "could not find /api/chat/start POST in messages.js"
+    payload_block = src[chat_start_idx:chat_start_idx+400]
+    assert "S.session.model" in payload_block, \
+        "send() must use S.session.model in the chat/start payload"
 
 
 # ── R15: newSession does not clear live tool cards ────────────────────────────
@@ -594,6 +606,29 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
         "loadSession must set S.busy=true before renderMessages() to avoid duplicate tool cards"
 
 
+def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_cards(cleanup_test_sessions):
+    """#1715: returning to an active chat must replay persisted tool cards.
+
+    appendLiveToolCard() intentionally no-ops unless S.activeStreamId is already
+    set for the viewed streaming session. If loadSession() restores S.toolCalls
+    and replays them before assigning S.activeStreamId, the compact Activity
+    counter drops the previously-seen tools after a focus change.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
+    inflight_block = src[inflight_idx:inflight_idx+1000]
+    active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
+    replay_pos = inflight_block.find("appendLiveToolCard(tc);")
+    attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
+    assert active_pos >= 0, "loadSession INFLIGHT branch must restore S.activeStreamId"
+    assert replay_pos >= 0, "loadSession INFLIGHT branch must replay persisted live tool cards"
+    assert active_pos < replay_pos, \
+        "S.activeStreamId must be restored before appendLiveToolCard() replays persisted tools"
+    assert attach_pos < 0 or active_pos < attach_pos, \
+        "S.activeStreamId should also be restored before SSE reattach can deliver more tool events"
+
+
 def test_streaming_bridge_accepts_current_tool_progress_callback_signature(cleanup_test_sessions):
     """R17: api/streaming.py must accept the current Hermes agent callback contract.
     The agent now calls tool_progress_callback(event_type, name, preview, args, **kwargs).
@@ -606,6 +641,38 @@ def test_streaming_bridge_accepts_current_tool_progress_callback_signature(clean
         "streaming.py must wire the agent's reasoning callback into the SSE bridge"
     assert "put('tool_complete'" in src or 'put("tool_complete"' in src, \
         "streaming.py must emit live tool completion SSE events"
+
+
+def test_streaming_reads_reasoning_effort_from_config_dict(cleanup_test_sessions):
+    """R17b: WebUI must read agent.reasoning_effort from the dict returned by get_config().
+
+    `get_config()` returns a plain dict (not a wrapper exposing `.cfg`).  The
+    pre-fix line `_cfg.cfg.get('agent', {})` raised AttributeError that the
+    surrounding try/except swallowed, so `_reasoning_config` was always None
+    regardless of what `/reasoning <level>` had been set to.  This static
+    source assertion pins the fix because the runtime symptom is silent.
+    """
+    src = (REPO_ROOT / "api/streaming.py").read_text()
+    assert "_cfg.cfg" not in src, \
+        "get_config() returns a dict; accessing _cfg.cfg drops reasoning_config to None"
+    assert "_cfg.get('agent', {})" in src or '_cfg.get("agent", {})' in src, \
+        "streaming.py must read agent.reasoning_effort via the config dict"
+
+
+def test_streaming_agent_cache_signature_includes_reasoning_config(cleanup_test_sessions):
+    """R17c: changing reasoning effort mid-session must rebuild the cached per-session agent.
+
+    Without `_reasoning_config` participating in `_sig_blob`, the cache key
+    matches the old entry and the operator's `/reasoning xhigh` change has
+    no effect on the live session.
+    """
+    src = (REPO_ROOT / "api/streaming.py").read_text()
+    start = src.find("_sig_blob = _json.dumps")
+    end = src.find("_agent_sig", start)
+    assert start >= 0 and end > start, "agent cache signature block not found"
+    sig_block = src[start:end]
+    assert "_reasoning_config" in sig_block, \
+        "agent cache signature must include reasoning_config so xhigh/medium changes take effect"
 
 
 def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_sessions):
