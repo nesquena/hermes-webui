@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Stock Chart install completion card links directly into the safe stock smoke, making the installed template card a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Daily Dashboard install completion card links directly into the safe dashboard smoke, making the installed template card a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link dashboard install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Daily Dashboard install status includes a `Run dashboard smoke` action wired to `demo_daily_dashboard`, while preserving `Open dashboard demo` / `Manage dashboard widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): link stock install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Stock Chart install status includes a `Run stock smoke` action wired to `demo_stock_chart`, while preserving `Open stock chart` / `Manage stock widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.

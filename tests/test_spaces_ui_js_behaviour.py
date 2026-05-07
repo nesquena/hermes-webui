@@ -1866,8 +1866,10 @@ def test_spaces_ui_install_dashboard_demo_posts_template_and_shows_safe_open_man
     assert "2 widgets" in out["rootHtml"]
     assert "Open dashboard demo" in out["rootHtml"]
     assert "Manage dashboard widgets" in out["rootHtml"]
+    assert "Run dashboard smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="daily-dashboard"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="daily-dashboard"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_daily_dashboard"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "dashboard"}
     assert out["calls"][-1]["path"] == "api/spaces"
