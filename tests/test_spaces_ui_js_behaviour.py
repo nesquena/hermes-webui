@@ -257,12 +257,13 @@ global.fetch = async function(path, opts = {}) {
     return response({
       ok: true,
       action: 'space.demo.run_all',
-      total: 2,
-      passed: 2,
+      total: 3,
+      passed: 3,
       failed: 0,
       mode: 'metadata-only-smoke',
       results: [
         { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true, queued_event_count: 1, weather_observation: { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } }, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } }, prompt_flow: { blank_space: true, chat_answer_status: 'recorded', widget_created: true, reload_verified: true, query: 'What is the weather in Prague?', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
+        { ok: true, demo: 'demo_notes_app', template: 'notes', mode: 'metadata-only-smoke', space: { space_id: 'demo-notes-app', name: 'Notes App Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true, queued_event_count: 1, notes_flow: { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true },
       ],
       renderer: '<script>bad()</script>',
@@ -2658,13 +2659,16 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
         for call in out["calls"]
     )
     assert "Demo parity smoke suite passed" in out["rootHtml"]
-    assert "2 / 2 metadata-only smokes passed" in out["rootHtml"]
+    assert "3 / 3 metadata-only smokes passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]
+    assert "demo_notes_app" in out["rootHtml"]
     assert "demo_time_travel_restore" in out["rootHtml"]
     assert "persistence: checked" in out["rootHtml"]
     assert "Weather demo checklist" in out["rootHtml"]
     assert "Weather flow: chat answer recorded · widget created · reload verified" in out["rootHtml"]
     assert "Weather observation: Prague, CZ · 18 °C · partly cloudy · Agent bridge: 1 queued" in out["rootHtml"]
+    assert "Notes app checklist" in out["rootHtml"]
+    assert "Notes flow: folders 2 · active Demo Project · editor saved · markdown saved · attachments agent-mediated" in out["rootHtml"]
     assert "Observation summary" not in out["rootHtml"]
     assert "What is the weather in Prague?" not in out["rootHtml"]
     assert "Prague is partly cloudy at 18 °C" not in out["rootHtml"]

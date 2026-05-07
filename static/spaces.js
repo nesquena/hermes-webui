@@ -284,8 +284,12 @@
       const weatherObservationSummary = demo === 'demo_weather_widget' && weatherMeta
         ? '<div class="capy-spaces-muted">Weather observation: '+[weatherLocation, weatherTemp, weatherCondition].filter(Boolean).map(escapeHtml).join(' · ')+(weatherBridgeCount ? ' · Agent bridge: '+weatherBridgeCount+' queued' : '')+'</div>'
         : '';
+      const notesFlow = item && item.notes_flow && typeof item.notes_flow === 'object' && !Array.isArray(item.notes_flow) ? item.notes_flow : null;
+      const notesSummary = demo === 'demo_notes_app' && notesFlow
+        ? '<div class="capy-spaces-muted"><strong>Notes app checklist</strong></div><div class="capy-spaces-muted">Notes flow: folders '+Number(notesFlow.folder_count || 0)+' · active '+escapeHtml(notesFlow.active_folder ? String(notesFlow.active_folder) : 'none')+' · editor '+(notesFlow.editor_saved ? 'saved' : 'not saved')+' · markdown '+(notesFlow.markdown_preview_saved ? 'saved' : 'not saved')+' · attachments '+(notesFlow.attachments_agent_mediated ? 'agent-mediated' : 'not ready')+'</div>'
+        : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + '</div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + notesSummary + '</div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +

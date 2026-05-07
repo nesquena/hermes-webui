@@ -42,6 +42,9 @@ Recent completed slices:
 - `feat(spaces): link stock install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Stock Chart install status includes a `Run stock smoke` action wired to `demo_stock_chart`, while preserving `Open stock chart` / `Manage stock widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
+- `feat(spaces): summarize notes flow in smoke suite`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now renders a compact Notes app checklist row (`folders 2 · active Demo Project · editor saved · markdown saved · attachments agent-mediated`) from safe `notes_flow` metadata while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
+
 - `fix(spaces): avoid double-numbering notes checklist`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes app checklist renders clean ordered-list items (`Folder list ready`, `Editor draft saved`, `Markdown preview saved`, `Attachments remain agent-mediated`) instead of duplicating numeric prefixes such as `1. 1. ...`, while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
