@@ -72,7 +72,20 @@ function _stripWorkspaceDisplayPrefix(text){
 }
 function _renderUserFencedBlocks(text){
   const stash=[];
+  const mathStash=[];
+  const stashMath=(type,src)=>{mathStash.push({type,src});return '\x00UM'+(mathStash.length-1)+'\x00';};
+  const restoreMath=html=>String(html||'').replace(/\x00UM(\d+)\x00/g,(_,i)=>{
+    const item=mathStash[+i];
+    if(!item) return '';
+    if(item.type==='display') return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
+  });
   let s=String(text||'');
+  // Stash math before escaping plain text; display delimiters must run before inline.
+  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>stashMath('inline',m));
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>stashMath('inline',m));
   // Extract fenced code blocks → stash, replace with null-token placeholder
   // CommonMark §4.5 line-anchored fence: the closing run must use at least
   // as many backticks as the opener, so inner triple-backtick fences remain content.
@@ -100,8 +113,9 @@ function _renderUserFencedBlocks(text){
   });
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
-  // Restore stashed code blocks
+  // Restore stashed code blocks, then math placeholders as KaTeX targets.
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  s=restoreMath(s);
   return s;
 }
 function _statusCardHtml(card){
@@ -2076,14 +2090,16 @@ function renderMd(raw){
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
-  // Display math: $$...$$  (must come before inline to avoid mis-parsing)
+  // Display math: $$...$$ and \[...\] (must come before inline to avoid mis-parsing)
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Match a single literal backslash before the display delimiter (the common LLM form).
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Inline math: $...$ — require non-space at boundaries to avoid false positives
   // e.g. "costs $5 and $10" should not trigger (space after opening $)
   s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Also stash \(...\) and \[...\] LaTeX delimiters
-  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Also stash \(...\) LaTeX delimiters.
+  // Match a single literal backslash before the delimiter (the common LLM form).
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray
