@@ -33,8 +33,22 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
 
     config._save_models_cache_to_disk(payload)
 
-    assert json.loads(cache_path.read_text(encoding="utf-8")) == payload
-    assert config._load_models_cache_from_disk() == payload
+    on_disk = json.loads(cache_path.read_text(encoding="utf-8"))
+    # The four response-shape fields round-trip verbatim.
+    for k, v in payload.items():
+        assert on_disk[k] == v, f"Field {k!r} did not round-trip"
+    # Plus the disk-only metadata stamps added by #1633 — present but not part
+    # of the response payload.
+    assert "_schema_version" in on_disk
+    # _webui_version may be absent in early-init paths where api.updates isn't
+    # yet imported; in normal test runs api.updates IS imported, so assert it.
+    import sys
+    if "api.updates" in sys.modules:
+        assert on_disk.get("_webui_version") == sys.modules["api.updates"].WEBUI_VERSION
+
+    # Load returns ONLY the response-shape fields (stamps stripped).
+    loaded = config._load_models_cache_from_disk()
+    assert loaded == payload
 
 
 def test_load_models_cache_from_disk_rejects_legacy_groups_only_cache(tmp_path, monkeypatch):

@@ -2,7 +2,7 @@
 
 Covers:
 - manifest.json is valid JSON with required PWA fields
-- sw.js has the `__CACHE_VERSION__` placeholder the server replaces at request time
+- sw.js has the `__WEBUI_VERSION__` placeholder the server replaces at request time
 - sw.js offline-fallback uses a resolved promise (not `caches.match() || fallback`
   which is broken — Promise objects are always truthy in `||` checks, so the
   fallback Response would never be used)
@@ -52,10 +52,29 @@ class TestManifest:
 class TestServiceWorker:
     def test_sw_has_cache_version_placeholder(self):
         src = SW.read_text(encoding="utf-8")
-        assert "__CACHE_VERSION__" in src, (
-            "sw.js must contain __CACHE_VERSION__ placeholder for the server "
+        assert "__WEBUI_VERSION__" in src, (
+            "sw.js must contain __WEBUI_VERSION__ placeholder for the server "
             "handler at /sw.js to replace with WEBUI_VERSION at request time"
         )
+
+    def test_sw_js_has_no_merge_conflict_markers(self):
+        """Regression guard for v0.50.279 stage build: a leftover git conflict
+        marker in static/sw.js made the file fail to parse as JavaScript even
+        though the substring-based source-string tests still passed (the
+        ``__WEBUI_VERSION__`` token was present, just inside the conflict block).
+
+        A broken sw.js means the install handler throws on script load → SW
+        never reaches activated state → old SW keeps controlling the page →
+        every "old SW deletes other caches" guarantee is forfeited and frontend
+        cache-bust pathways silently break. Caught by Opus advisor pre-merge,
+        ship blocked. This test would have caught it too.
+        """
+        src = SW.read_text(encoding="utf-8")
+        for marker in ("<<<<<<<", "=======\n", ">>>>>>>"):
+            assert marker not in src, (
+                f"static/sw.js contains conflict marker {marker!r}; "
+                "the merge resolution did not actually land. Reject ship."
+            )
 
     def test_sw_bypasses_api_and_stream(self):
         src = SW.read_text(encoding="utf-8")
@@ -117,8 +136,8 @@ class TestPWARoutes:
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
         block = src[idx:idx + 1000]
-        assert "__CACHE_VERSION__" in block, (
-            "sw.js route must replace __CACHE_VERSION__ with the current WEBUI_VERSION"
+        assert "__WEBUI_VERSION__" in block, (
+            "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
         )
         assert "WEBUI_VERSION" in block, (
             "sw.js route must import and use WEBUI_VERSION for cache busting"
@@ -185,7 +204,7 @@ class TestIndexHtmlIntegration:
 
     def test_sw_shell_assets_match_versioned_asset_urls(self):
         """The service worker's SHELL_ASSETS pre-cache list must use the same
-        `?v=__CACHE_VERSION__` suffix on JS+CSS that index.html sends, so that
+        `?v=__WEBUI_VERSION__` suffix on JS+CSS that index.html sends, so that
         the pre-cached entries actually serve when the page requests them.
 
         Without this, every `cache.match()` for a versioned asset URL (e.g.
@@ -208,13 +227,13 @@ class TestIndexHtmlIntegration:
             "terminal.js",
             "onboarding.js",
         ):
-            # Either inline `?v=__CACHE_VERSION__` or via the VQ constant
+            # Either inline `?v=__WEBUI_VERSION__` or via the VQ constant
             # produces a URL string the cache lookup can match.
-            has_inline = f"{asset}?v=__CACHE_VERSION__" in src
+            has_inline = f"{asset}?v=__WEBUI_VERSION__" in src
             has_concat = f"{asset}' + VQ" in src or f"{asset}\" + VQ" in src
             assert has_inline or has_concat, (
                 f"sw.js SHELL_ASSETS entry for {asset} must carry "
-                "?v=__CACHE_VERSION__ to match the URL the page requests"
+                "?v=__WEBUI_VERSION__ to match the URL the page requests"
             )
 
     def test_index_route_url_encodes_asset_version(self):

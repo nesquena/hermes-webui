@@ -42,6 +42,7 @@ docs/*
 !docs/ui-ux/**
 !docs/docker.md
 !docs/supervisor.md
+!docs/troubleshooting.md
 
 # Local-only PR review harness: rendering drivers, sample bank, fixtures.
 # Used by Claude during deep reviews; never shared in the repo.

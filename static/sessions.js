@@ -9,6 +9,7 @@ const ICONS={
   dup:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="8.5" height="8.5" rx="1.5"/><path d="M3 11.5V3h8.5"/></svg>',
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
+  edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -24,6 +25,15 @@ let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
+
+function _formatSessionModelWithGateway(s){
+  if(!s||!s.model)return'';
+  const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
+  if(typeof _formatGatewayModelLabel==='function'){
+    return _formatGatewayModelLabel(s.model,s.model,routing)||s.model;
+  }
+  return s.model;
+}
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -287,12 +297,14 @@ async function newSession(flash){
   const newModelState=(canQualify&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(modelSel,selectedDefaultModel)
     : {model:selectedDefaultModel,model_provider:null};
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({
+  const reqBody={
     model:newModelState.model,
     model_provider:newModelState.model_provider||null,
     workspace:inheritWs,
     profile:S.activeProfile||'default',
-  })});
+  };
+  if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
@@ -381,12 +393,30 @@ async function loadSession(sid){
   S.session=data.session;
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
+  // Reset scroll-direction tracker on session switch so the new chat's
+  // first scroll doesn't compare against the previous chat's scrollTop
+  // and false-trigger an unpin (#1731 follow-up — Opus stage-302 SHOULD-FIX).
+  if (typeof window !== 'undefined' && typeof window._resetScrollDirectionTracker === 'function') {
+    try { window._resetScrollDirectionTracker(); } catch (_) {}
+  }
+  // Sync workspace display immediately so the chip label reflects the new session's workspace
+  // before any async message-loading begins (mirrors how model is handled).
+  if(typeof syncTopbar==='function') syncTopbar();
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   _clearSessionCompletionUnread(S.session.session_id);
   localStorage.setItem('hermes-webui-session',S.session.session_id);
   _setActiveSessionUrl(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
+  // If the server says the session is idle, discard any browser-side inflight
+  // cache left behind by a crashed/restarted stream. Otherwise the UI can keep
+  // showing a permanent thinking/running state even though active_streams=0.
+  if(!activeStreamId&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+    S.activeStreamId=null;
+    S.busy=false;
+  }
 
   // Phase 2a: If session is streaming, restore from INFLIGHT cache before
   // loading full messages (INFLIGHT state is self-contained and sufficient).
@@ -407,6 +437,10 @@ async function loadSession(sid){
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     S.busy=true;
+    // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
+    // replaying persisted live tools so the compact Activity count survives
+    // switching away from and back to an active chat (#1715).
+    S.activeStreamId=activeStreamId;
     syncTopbar();renderMessages();appendThinking();loadDir('.');
     clearLiveToolCards();
     if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
@@ -417,7 +451,6 @@ async function loadSession(sid){
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
-    S.activeStreamId=activeStreamId;
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
@@ -528,6 +561,365 @@ async function loadSession(sid){
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
+
+  // ── Cross-channel handoff hint ──
+  // After session fully loaded, check if this is a messaging session with
+  // enough conversation rounds to warrant a handoff hint bar.
+  if (S.session && _isMessagingSession(S.session)) {
+    _checkAndShowHandoffHint(sid);
+  } else {
+    _hideHandoffHint();
+  }
+}
+
+// ── Handoff hint logic ──────────────────────────────────────────────────────
+
+const _HANDOFF_THRESHOLD = 10;  // conversation rounds
+const _HANDOFF_STORAGE_PREFIX = 'handoff:';
+const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
+const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack']);
+const _MESSAGING_SOURCE_LABELS = {
+  weixin: 'WeChat',
+  telegram: 'Telegram',
+  discord: 'Discord',
+  slack: 'Slack',
+};
+
+function _isMessagingSession(session) {
+  if (!session) return false;
+  // session_source is set by PR #1294 source normalization
+  if (session.session_source === 'messaging') return true;
+  // Fallback: check raw_source directly
+  const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
+  return _MESSAGING_RAW_SOURCES.has(raw);
+}
+
+function _isReadOnlySession(session) {
+  return !!(session && (session.read_only || session.is_read_only));
+}
+
+function _sourceKeyForSession(session) {
+  return (session && (session.raw_source || session.source_tag || session.source || '') || '').toLowerCase();
+}
+
+function _isCliSession(session) {
+  if (!session) return false;
+  // session_source is set by upstream normalization for CLI sessions as 'cli'
+  if (session.session_source === 'cli') return true;
+  // Legacy payloads often use raw/source tags to convey the source.
+  const raw = (
+    session.raw_source
+    || session.source_tag
+    || session.source
+    || session.source_label
+    || ''
+  ).toLowerCase();
+  if (raw === 'cli') return true;
+  // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
+  if (_isMessagingSession(session)) return false;
+  return session.is_cli_session === true;
+}
+
+function _normalizeMessageForCliImportComparison(message) {
+  if (!message || typeof message !== 'object') return message;
+  const clone = { ...message };
+  delete clone.timestamp;
+  delete clone._ts;
+  return clone;
+}
+
+function _isCliImportRefreshPrefixMatch(localMessages, freshMessages) {
+  if (!Array.isArray(localMessages) || !Array.isArray(freshMessages)) return false;
+  if (localMessages.length > freshMessages.length) return false;
+  for (let i = 0; i < localMessages.length; i += 1) {
+    if (JSON.stringify(_normalizeMessageForCliImportComparison(localMessages[i])) !== JSON.stringify(_normalizeMessageForCliImportComparison(freshMessages[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function _handoffStorageKey(sid) {
+  return `${_HANDOFF_STORAGE_PREFIX}${sid}:`;
+}
+
+function _getHandoffStorageValue(sid, suffix) {
+  try {
+    const raw = localStorage.getItem(_handoffStorageKey(sid) + suffix);
+    return raw ? parseFloat(raw) : null;
+  } catch { return null; }
+}
+
+function _setHandoffStorageValue(sid, suffix, ts) {
+  const key = _handoffStorageKey(sid) + suffix;
+  try {
+    if (!Number.isFinite(ts)) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, String(ts));
+  } catch {}
+}
+
+function _clearHandoffStorageForSession(sid) {
+  if (!sid) return;
+  try {
+    _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);
+    _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);
+  } catch {}
+}
+
+function _getHandoffDismissedAt(sid) {
+  return _getHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT);
+}
+
+function _setHandoffDismissedAt(sid, ts) {
+  _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, ts);
+}
+
+function _getHandoffSummaryHandledAt(sid) {
+  return _getHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT);
+}
+
+function _setHandoffSummaryHandledAt(sid, ts) {
+  _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, ts);
+}
+
+function _getHandoffSince(sid) {
+  const dismissedAt = _getHandoffDismissedAt(sid);
+  const summaryHandledAt = _getHandoffSummaryHandledAt(sid);
+  if (Number.isFinite(dismissedAt) && Number.isFinite(summaryHandledAt)) return Math.max(dismissedAt, summaryHandledAt);
+  if (Number.isFinite(dismissedAt)) return dismissedAt;
+  if (Number.isFinite(summaryHandledAt)) return summaryHandledAt;
+  return null;
+}
+
+function _handoffMessagesEl() {
+  return document.getElementById('messages');
+}
+
+function _handoffIsMessagesNearBottom(el) {
+  if (!el) return false;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+}
+
+function _syncHandoffDockSpace(open) {
+  const messages = _handoffMessagesEl();
+  if (!messages) return;
+  const wasNearBottom = _handoffIsMessagesNearBottom(messages);
+  if (!open) {
+    messages.classList.remove('handoff-dock-visible');
+    messages.style.removeProperty('--handoff-dock-height');
+    if (wasNearBottom && typeof scrollToBottom === 'function') requestAnimationFrame(scrollToBottom);
+    return;
+  }
+  messages.classList.add('handoff-dock-visible');
+  const measure = () => {
+    const container = $('handoffHintContainer');
+    const h = container && container.getBoundingClientRect().height;
+    if (h > 0) messages.style.setProperty('--handoff-dock-height', Math.ceil(h + 24) + 'px');
+    if (wasNearBottom && typeof scrollToBottom === 'function') scrollToBottom();
+  };
+  requestAnimationFrame(measure);
+  setTimeout(measure, 360);
+}
+
+function _getChannelLabel(session) {
+  if (!session) return '';
+  // Use source_label from PR #1294 if available
+  if (session.source_label) return session.source_label;
+  const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
+  return _MESSAGING_SOURCE_LABELS[raw] || raw || '';
+}
+
+async function _checkAndShowHandoffHint(sid) {
+  try {
+    const since = _getHandoffSince(sid);
+    const body = { session_id: sid };
+    if (since != null) body.since = since;
+
+    const result = await api('/api/session/conversation-rounds', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    // Stale? Session switched while we were fetching.
+    if (!S.session || S.session.session_id !== sid) return;
+
+    if (result && result.ok && result.should_show) {
+      _showHandoffHint(sid, result.rounds);
+    } else {
+      const container = $('handoffHintContainer');
+      const isSameVisibleSession = !!(
+        container &&
+        container.classList.contains('is-visible') &&
+        container.dataset.sessionId === String(sid)
+      );
+      if (!isSameVisibleSession) _hideHandoffHint();
+    }
+  } catch (e) {
+    console.warn('Handoff hint check failed:', e);
+    _hideHandoffHint();
+  }
+}
+
+function _showHandoffHint(sid, rounds) {
+  const container = $('handoffHintContainer');
+  if (!container) return;
+
+  // Clear any existing content.
+  container.innerHTML = '';
+  container.style.display = '';
+  container.classList.add('is-visible');
+  container.dataset.sessionId = String(sid);
+
+  const channel = _getChannelLabel(S.session);
+  const hintText = channel
+    ? `${channel} handoff`
+    : `Conversation handoff`;
+  const hintMeta = `${rounds} new conversation rounds`;
+
+  const bar = document.createElement('div');
+  bar.className = 'handoff-hint-bar';
+  bar.id = 'handoffHintBar';
+  bar.innerHTML = `
+    <div class="handoff-hint-text">
+      <span class="handoff-hint-dot" aria-hidden="true"></span>
+      <span class="handoff-hint-label">${esc(hintText)}</span>
+      <span class="handoff-hint-meta">${esc(hintMeta)}</span>
+    </div>
+    <div class="handoff-hint-actions">
+      <button class="handoff-hint-action" type="button">View summary</button>
+      <button class="handoff-hint-dismiss" type="button" onclick="event.stopPropagation(); _dismissHandoffHint('${esc(sid)}')" title="Dismiss">
+        Close
+      </button>
+    </div>
+  `;
+
+  // Click on the bar (not the explicit close button) triggers summary generation.
+  bar.addEventListener('click', (e) => {
+    if (e.target.closest('.handoff-hint-dismiss')) return;
+    _generateHandoffSummary(sid, rounds);
+  });
+
+  container.appendChild(bar);
+  _syncHandoffDockSpace(true);
+}
+
+function _hideHandoffHint() {
+  const container = $('handoffHintContainer');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    container.classList.remove('is-visible');
+    delete container.dataset.sessionId;
+  }
+  _syncHandoffDockSpace(false);
+}
+
+function _dismissHandoffHint(sid) {
+  _setHandoffDismissedAt(sid, Date.now() / 1000);
+  _hideHandoffHint();
+}
+
+function _buildHandoffSummaryToolMessage(summary, channel, rounds, fallback) {
+  const generatedAt = Date.now() / 1000;
+  return {
+    role: 'tool',
+    tool_call_id: '',
+    name: 'handoff_summary',
+    timestamp: generatedAt,
+    _ts: generatedAt,
+    content: JSON.stringify({
+      _handoff_summary_card: true,
+      session_id: sidValue(),
+      summary: String(summary || '').trim(),
+      channel: (typeof channel === 'string' && channel.trim()) ? channel.trim() : null,
+      rounds: Number.isFinite(rounds) ? rounds : null,
+      fallback: !!fallback,
+      generated_at: generatedAt,
+    }),
+  };
+}
+
+function sidValue() {
+  return S && S.session && S.session.session_id ? S.session.session_id : null;
+}
+
+function _extractHandoffSummaryPayload(content){
+  if(!content) return null;
+  if(typeof content!=='string') return null;
+  try {
+    const parsed=JSON.parse(content);
+    return parsed&&typeof parsed==='object'&&parsed._handoff_summary_card===true?parsed:null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function _generateHandoffSummary(sid, rounds) {
+  // Treat handoff like a slash-command result: the composer dock entry
+  // disappears and the transient summary card renders in the transcript.
+  _hideHandoffHint();
+  const channel = _getChannelLabel(S.session);
+  if (typeof setHandoffUi === 'function') {
+    setHandoffUi({
+      sessionId: sid,
+      phase: 'running',
+      channel,
+      rounds,
+    });
+  }
+
+  try {
+    const since = _getHandoffSince(sid);
+    const body = { session_id: sid };
+    if (since != null) body.since = since;
+
+    const result = await api('/api/session/handoff-summary', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const isSuccess = result && result.ok && result.summary;
+    if (isSuccess) {
+      _setHandoffSummaryHandledAt(sid, Date.now() / 1000);
+      _setHandoffDismissedAt(sid, null);
+      const marker=_buildHandoffSummaryToolMessage(result.summary, channel, result.rounds || rounds, !!result.fallback);
+      if (S.session && S.session.session_id === sid) {
+        S.messages = [...S.messages, marker];
+        if (typeof renderMessages === 'function') renderMessages();
+      }
+      if (typeof setHandoffUi === 'function') {
+        setHandoffUi(null);
+      }
+    } else if (S.session && S.session.session_id === sid && typeof setHandoffUi === 'function') {
+      // Keep transient card while the user can retry the action.
+      setHandoffUi({
+        sessionId: sid,
+        phase: 'error',
+        channel,
+        rounds,
+        errorText: 'Could not generate summary. Please try again.',
+      });
+    } else {
+      // Stale session response path: only record success baseline.
+    }
+  } catch (e) {
+    console.warn('Handoff summary failed:', e);
+    if (S.session && S.session.session_id === sid && typeof setHandoffUi === 'function') {
+      setHandoffUi({
+        sessionId: sid,
+        phase: 'error',
+        channel,
+        rounds,
+        errorText: 'Summary generation failed: ' + e.message,
+      });
+    }
+  }
+
+  // If generation succeeds, set a baseline so only new activity after that time
+  // can re-trigger handoff prompts. Failures keep the hint active so users can
+  // retry.
 }
 
 function _resolveSessionModelForDisplaySoon(sid){
@@ -681,10 +1073,17 @@ let _allProjects = [];  // cached project list
 const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 let _showAllProfiles = false;  // false = filter to active profile only
+let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 const _expandedChildSessionKeys = new Set();
+let _sessionVisibleSidebarIds = [];
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 12;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+let _sessionVirtualScrollList = null;
+let _sessionVirtualScrollRaf = 0;
 
 function _sessionIdFromLocation(){
   if(typeof window==='undefined'||!window.location) return null;
@@ -752,9 +1151,13 @@ function setSessionSelected(sid, selected){
 }
 function selectAllSessions(){
   _selectedSessions.clear();
+  const ids=Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length
+    ? _sessionVisibleSidebarIds
+    : Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
+  ids.forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
     const sid=cb.dataset.sid;
-    if(sid){_selectedSessions.add(sid);cb.checked=true;const item=cb.closest('.session-item');if(item)item.classList.add('selected');}
+    if(sid){cb.checked=_selectedSessions.has(sid);const item=cb.closest('.session-item');if(item)item.classList.toggle('selected',_selectedSessions.has(sid));}
   });
   _updateBatchActionBar();
 }
@@ -796,7 +1199,9 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const ok=await showConfirmDialog({message:t('session_batch_delete_confirm',ids.length),confirmLabel:t('delete_title'),danger:true});
     if(!ok)return;
-    try{await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
+    try{
+      await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
+      ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
         const remaining=await api('/api/sessions');
@@ -886,14 +1291,64 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
   return opt;
 }
 
+function _appendSessionDuplicateAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_duplicate'),
+    t('session_duplicate_desc'),
+    ICONS.dup,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        const res=await api('/api/session/duplicate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        if(res.session){
+          await loadSession(res.session.session_id);
+          await renderSessionList();
+          showToast(t('session_duplicated'));
+        }
+      }catch(err){showToast(t('session_duplicate_failed')+err.message);}
+    }
+  ));
+}
+
 function _openSessionActionMenu(session, anchorEl){
+  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
     closeSessionActionMenu();
     return;
   }
   closeSessionActionMenu();
+  const isMessagingSession = _isMessagingSession(session);
+  const isCliSession = _isCliSession(session);
+  const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
+  // Rename — first menu item by request (#1764). Double-click rename is
+  // timing-sensitive: the first click frequently registers as "open the
+  // chat" before the second click arrives, so users open the conversation
+  // when they meant to rename it. Putting Rename in the menu eliminates
+  // the timing entirely. Only shown for sessions that support rename
+  // (read-only imported sessions skip it; same gate as startRename's
+  // _isReadOnlySession check).
+  if(!_isReadOnlySession(session)){
+    menu.appendChild(_buildSessionAction(
+      t('session_rename'),
+      t('session_rename_desc'),
+      ICONS.edit,
+      ()=>{
+        closeSessionActionMenu();
+        // Find the row for this session and call its attached startRename.
+        // Falls back to a no-op toast if the row isn't currently rendered
+        // (e.g. archived-and-hidden) — extremely rare since the menu only
+        // opens from a visible row's three-dot button.
+        const row=document.querySelector('.session-item[data-sid="'+session.session_id+'"]');
+        if(row && typeof row._startRename === 'function'){
+          row._startRename();
+        } else if(typeof showToast==='function'){
+          showToast(t('session_rename_failed_no_row')||'Could not start rename — row not found.', 3000, 'error');
+        }
+      }
+    ));
+  }
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
     session.pinned?t('session_unpin_desc'):t('session_pin_desc'),
@@ -934,22 +1389,9 @@ function _openSessionActionMenu(session, anchorEl){
       }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
-  menu.appendChild(_buildSessionAction(
-    t('session_duplicate'),
-    t('session_duplicate_desc'),
-    ICONS.dup,
-    async()=>{
-      closeSessionActionMenu();
-      try{
-        const res=await api('/api/session/duplicate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
-        if(res.session){
-          await loadSession(res.session.session_id);
-          await renderSessionList();
-          showToast(t('session_duplicated'));
-        }
-      }catch(err){showToast(t('session_duplicate_failed')+err.message);}
-    }
-  ));
+  if(!isExternalSession){
+    _appendSessionDuplicateAction(menu, session);
+  }
   if(session.active_stream_id){
     menu.appendChild(_buildSessionAction(
       t('session_stop_response'),
@@ -962,16 +1404,18 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  menu.appendChild(_buildSessionAction(
-    t('session_delete'),
-    t('session_delete_desc'),
-    ICONS.trash,
-    async()=>{
-      closeSessionActionMenu();
-      await deleteSession(session.session_id);
-    },
-    'danger'
-  ));
+  if(!isExternalSession){
+    menu.appendChild(_buildSessionAction(
+      t('session_delete'),
+      t('session_delete_desc'),
+      ICONS.trash,
+      async()=>{
+        closeSessionActionMenu();
+        await deleteSession(session.session_id);
+      },
+      'danger'
+    ));
+  }
   document.body.appendChild(menu);
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
@@ -1000,13 +1444,27 @@ window.addEventListener('resize',()=>{
   if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
 });
 
+// Generation counter to discard stale API responses (issue #1430).
+// Multiple callers (message send, rename, session switch) fire renderSessionList()
+// concurrently. Without this guard, a slower older response can overwrite _allSessions
+// with stale data, causing sessions to vanish from the sidebar.
+let _renderSessionListGen = 0;
+
 async function renderSessionList(){
+  const _gen = ++_renderSessionListGen;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
+    const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions'),
-      api('/api/projects'),
+      api('/api/sessions' + allProfilesQS),
+      api('/api/projects' + allProfilesQS),
     ]);
+    // Discard stale response — a newer renderSessionList() call superseded us.
+    if (_gen !== _renderSessionListGen) return;
+    // Server's other_profile_count tells us how many sessions exist outside the
+    // active profile so the "Show N from other profiles" toggle can render
+    // without a second round-trip. Stashed on the module for renderSessionListFromCache.
+    _otherProfileCount = sessData.other_profile_count || 0;
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
     // Capture server clock for clock-skew compensation (issue #1144).
@@ -1079,7 +1537,7 @@ async function probeGatewaySSEStatus(){
   if(_gatewayProbeInFlight || !window._showCliSessions) return;
   _gatewayProbeInFlight = true;
   try{
-    const resp = await fetch('/api/sessions/gateway/stream?probe=1', { credentials:'same-origin' });
+    const resp = await fetch(new URL('api/sessions/gateway/stream?probe=1', document.baseURI || location.href).href, { credentials:'same-origin' });
     const data = await resp.json().catch(() => ({}));
     if(resp.ok && data.watcher_running){
       stopGatewayPollFallback();
@@ -1131,7 +1589,10 @@ function startGatewaySSE(){
                   if(!S.session || S.session.session_id !== activeSid) return;
                   if(res && res.session && Array.isArray(res.session.messages)){
                     const prev = S.messages.length;
-                    S.messages = res.session.messages.filter(m=>m&&m.role);
+                    const next = res.session.messages.filter(m => m && m.role);
+                    if (next.length < prev) return;
+                    if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
+                    S.messages = next;
                     if(S.messages.length !== prev){
                       renderMessages();
                       if(typeof highlightCode==='function') highlightCode();
@@ -1331,6 +1792,21 @@ function _sidebarLineageKeyForRow(s){
   return s._lineage_key||s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id||null;
 }
 
+function _truncatedSessionId(sid){
+  sid=String(sid||'').trim();
+  if(!sid) return '';
+  if(sid.length<=16) return sid;
+  return sid.slice(0,12)+'...';
+}
+
+function _sessionTitleForForkParent(parentSid){
+  if(!parentSid||!Array.isArray(_allSessions)) return '';
+  const parent=_allSessions.find(item=>item&&item.session_id===parentSid);
+  const title=parent&&String(parent.title||'').trim();
+  if(!title||title==='Untitled') return '';
+  return title;
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const rows=(collapsedRows||[]).filter(s=>!_isChildSession(s)).map(s=>({...s}));
   const visibleBySid=new Map();
@@ -1410,6 +1886,124 @@ function _activeSessionIdForSidebar(){
   return null;
 }
 
+function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
+  if(!S.session||!S.session.session_id) return;
+  const sid=S.session.session_id;
+  const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
+  const localCount=Array.isArray(S.messages)?S.messages.length:0;
+  const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
+  S.session.message_count=count;
+  S.session.last_message_at=nowSec;
+  S.session.updated_at=nowSec;
+  if((S.session.title==='Untitled'||!S.session.title)&&title){
+    S.session.title=title;
+  }
+  const existingIdx=_allSessions.findIndex(s=>s&&s.session_id===sid);
+  const row={
+    ...S.session,
+    session_id:sid,
+    title:S.session.title||title||'New chat',
+    message_count:count,
+    last_message_at:nowSec,
+    updated_at:nowSec,
+    profile:S.session.profile||S.activeProfile||'default',
+    is_streaming:true,
+  };
+  if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
+  else _allSessions.unshift(row);
+  renderSessionListFromCache();
+}
+
+function clearOptimisticSessionStreaming(sid){
+  sid=sid||(S.session&&S.session.session_id)||'';
+  if(!sid) return;
+  if(S.session&&S.session.session_id===sid){
+    S.session.active_stream_id=null;
+    S.activeStreamId=null;
+  }
+  if(Array.isArray(_allSessions)){
+    const idx=_allSessions.findIndex(s=>s&&s.session_id===sid);
+    if(idx>=0){
+      _allSessions[idx]={
+        ..._allSessions[idx],
+        active_stream_id:null,
+        pending_user_message:null,
+        pending_started_at:null,
+        is_streaming:false,
+      };
+    }
+  }
+  if(typeof _sessionStreamingById!=='undefined'&&_sessionStreamingById&&typeof _sessionStreamingById.set==='function'){
+    _sessionStreamingById.set(sid,false);
+  }
+  if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
+  renderSessionListFromCache();
+}
+
+
+function _sessionVirtualWindow(opts){
+  const total=Math.max(0, Number(opts&&opts.total)||0);
+  const threshold=Math.max(1, Number(opts&&opts.threshold)||SESSION_VIRTUAL_THRESHOLD_ROWS);
+  const itemHeight=Math.max(1, Number(opts&&opts.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
+  const buffer=Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
+  const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
+  const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
+  if(total<=threshold){
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
+  }
+  let start=Math.floor((Number(opts&&opts.scrollTop)||0)/itemHeight)-buffer;
+  start=Math.max(0, Math.min(start, Math.max(0,total-visibleRows)));
+  let end=Math.min(total, start+visibleRows+(buffer*2));
+  const activeIndex=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
+  if(activeIndex>=0&&activeIndex<total&&(activeIndex<start||activeIndex>=end)){
+    start=Math.max(0, Math.min(activeIndex-buffer, Math.max(0,total-visibleRows-(buffer*2))));
+    end=Math.min(total, start+visibleRows+(buffer*2));
+  }
+  return {
+    virtualized:true,
+    start,
+    end,
+    topPad:start*itemHeight,
+    bottomPad:Math.max(0,(total-end)*itemHeight),
+    itemHeight,
+    total,
+  };
+}
+
+function _sessionVirtualSpacer(height, where){
+  const spacer=document.createElement('div');
+  spacer.className='session-virtual-spacer';
+  spacer.dataset.virtualSpacer=where||'gap';
+  spacer.setAttribute('aria-hidden','true');
+  spacer.style.height=Math.max(0,Math.round(height||0))+'px';
+  spacer.style.flex='0 0 auto';
+  return spacer;
+}
+
+function _scheduleSessionVirtualizedRender(){
+  if(_renamingSid||_sessionVirtualScrollRaf) return;
+  // Skip the re-render if the list is below the virtualization threshold —
+  // there's no virtual window to recompute, and re-rendering would just
+  // rebuild the whole DOM on every scroll tick. Without this guard, the
+  // unconditional scroll listener (attached for any list) caused
+  // user-facing scroll jumps on small lists. (#1669 follow-up)
+  const list=_sessionVirtualScrollList;
+  if(list){
+    const total=Number(list.dataset.sessionVirtualTotal||0);
+    if(total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
+  }
+  _sessionVirtualScrollRaf=requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();});
+}
+
+function _ensureSessionVirtualScrollHandler(list){
+  if(!list||_sessionVirtualScrollList===list) return;
+  if(_sessionVirtualScrollList){
+    _sessionVirtualScrollList.removeEventListener('scroll', _scheduleSessionVirtualizedRender);
+  }
+  _sessionVirtualScrollList=list;
+  list.addEventListener('scroll', _scheduleSessionVirtualizedRender, {passive:true});
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -1432,10 +2026,14 @@ function renderSessionListFromCache(){
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
   );
-  // Filter by active profile (unless "All profiles" is toggled on)
-  // Server backfills profile='default' for legacy sessions, so every session has a profile.
-  // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
-  const profileFiltered=_showAllProfiles?withMessages:withMessages.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
+  // The server is authoritative for profile scoping (#1611): it filters by
+  // active profile when no query param is set, and returns the aggregate when
+  // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
+  // 'default' matching active 'kinni' when kinni.is_default) lives server-side
+  // in _profiles_match, and a strict-equality client filter would reject those
+  // rows incorrectly. So we trust the wire data and skip the redundant client
+  // filter entirely.
+  const profileFiltered=withMessages;
   // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
   // with no project_id; otherwise filter to the matching project_id, or
   // pass through when no filter is active.
@@ -1448,7 +2046,9 @@ function renderSessionListFromCache(){
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const archivedCount=projectFiltered.filter(s=>s.archived).length;
-  const list=$('sessionList');list.innerHTML='';
+  const list=$('sessionList');
+  const listScrollTopBeforeRender=list.scrollTop||0;
+  list.innerHTML='';
   // Batch select bar (when in select mode)
   if(_sessionSelectMode){
     const selectBar=document.createElement('div');selectBar.className='session-select-bar';
@@ -1522,19 +2122,23 @@ function renderSessionListFromCache(){
     bar.appendChild(addBtn);
     list.appendChild(bar);
   }
-  // Profile filter toggle (show sessions from other profiles)
-  const otherProfileCount=withMessages.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
+  // Profile filter toggle (show sessions from other profiles).
+  // Cross-profile rows live SERVER-SIDE behind ?all_profiles=1, so the toggle
+  // must trigger a refetch — there's no client-cached aggregate to slice through.
+  // The server is authoritative for the count (renamed-root cross-alias is
+  // server-side). A naive strict-equality client fallback would mis-count.
+  const otherProfileCount = _otherProfileCount;
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
-    pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionListFromCache();};
+    pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};
     list.appendChild(pfToggle);
-  } else if(_showAllProfiles&&otherProfileCount>0){
+  } else if(_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
     pfToggle.textContent='Show active profile only';
-    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionListFromCache();};
+    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};
     list.appendChild(pfToggle);
   }
   // Show/hide archived toggle if there are archived sessions
@@ -1575,7 +2179,44 @@ function renderSessionListFromCache(){
     } else { curItems.push(s); }
   }
   if(curItems.length) groups.push({label:curLabel,items:curItems});
-  // Render groups with collapsible headers
+  const flatSessionRows=[];
+  for(const g of groups){
+    if(_groupCollapsed[g.label]) continue;
+    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+  }
+  _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  _ensureSessionVirtualScrollHandler(list);
+  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
+  const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
+    list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
+    list.dataset.sessionVirtualFilter!==q
+  );
+  let virtualWindow=_sessionVirtualWindow({
+    total:flatSessionRows.length,
+    scrollTop:listScrollTopBeforeRender,
+    viewportHeight:list.clientHeight||520,
+    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+    activeIndex:shouldAnchorActive?activeIndex:-1,
+  });
+  let virtualAnchorScrollTop=null;
+  if(shouldAnchorActive&&virtualWindow.virtualized){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+    virtualAnchorScrollTop=virtualWindow.topPad;
+  }else if(activeSidForSidebar){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+  }else{
+    delete list.dataset.sessionVirtualActiveAnchor;
+  }
+  list.dataset.sessionVirtualTotal=String(flatSessionRows.length);
+  list.dataset.sessionVirtualFilter=q;
+  list.dataset.sessionVirtualStart=String(virtualWindow.start);
+  list.dataset.sessionVirtualEnd=String(virtualWindow.end);
+  // Render groups with collapsible headers. Large sidebars render only the
+  // current session-row window plus top/bottom spacers inside each group body;
+  // headers remain real DOM so pin/archive/date grouping and clicks survive.
+  let globalSessionRowIndex=0;
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
@@ -1589,18 +2230,42 @@ function renderSessionListFromCache(){
     hdr.appendChild(caret);hdr.appendChild(label);
     const body=document.createElement('div');
     body.className='session-date-body';
-    if(_groupCollapsed[g.label]){body.style.display='none';caret.classList.add('collapsed');}
+    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+    if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
     hdr.onclick=()=>{
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
+      renderSessionListFromCache();
     };
     wrapper.appendChild(hdr);
-    for(const s of g.items){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+    let groupTopPad=0;
+    let groupBottomPad=0;
+    for(const s of g.items){
+      if(isGroupCollapsed) continue;
+      const rowIndex=globalSessionRowIndex++;
+      const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
+      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
+      else { groupBottomPad+=virtualWindow.itemHeight; }
+    }
+    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
+    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
+  }
+  if(virtualAnchorScrollTop!==null){
+    list.scrollTop=virtualAnchorScrollTop;
+  }else if(listScrollTopBeforeRender>0){
+    // Always restore the user's scroll position after re-render, regardless
+    // of whether the virtualization window applies. Lists below the
+    // virtualization threshold (≤80 rows) still have their DOM rebuilt by
+    // every renderSessionListFromCache() call, and without this restore the
+    // scrollTop drops to 0 — producing a "scroll keeps jumping back" feel
+    // when the list scrolls naturally. Fixed for #1669 follow-up.
+    list.scrollTop=listScrollTopBeforeRender;
   }
   // Select mode toggle button (only when NOT in select mode)
   if(!_sessionSelectMode){
@@ -1617,7 +2282,14 @@ function renderSessionListFromCache(){
     _rememberRenderedStreamingState(s, isStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
+    if(s.is_cli_session){
+      el.classList.add('cli-session');
+      el.dataset.source=_getChannelLabel(s)||'CLI';
+      el.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
+    }
+    if(readOnly) el.classList.add('read-only-session');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -1627,7 +2299,7 @@ function renderSessionListFromCache(){
       cleanTitle='Session';
     }
     // Checkbox for batch select mode
-    if(_sessionSelectMode){
+    if(_sessionSelectMode&&!readOnly){
       const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
       const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
       cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
@@ -1654,19 +2326,15 @@ function renderSessionListFromCache(){
     if(s.parent_session_id){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
-      branchInd.textContent='\u2482'; // ⑂
-      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+s.parent_session_id;
-      branchInd.style.cursor='pointer';
-      branchInd.onclick=(e)=>{
-        e.stopPropagation();
-        if(typeof loadSession==='function') loadSession(s.parent_session_id);
-      };
+      branchInd.innerHTML=li('git-branch',12);
+      const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
+      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+parentLabel;
       titleRow.appendChild(branchInd);
     }
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
-    title.title='Double-click to rename';
+    title.title=readOnly?'Read-only imported session':'Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread;
@@ -1716,7 +2384,11 @@ function renderSessionListFromCache(){
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
-      if(s.model) metaBits.push(s.model);
+      const modelMeta=_formatSessionModelWithGateway(s);
+      if(modelMeta) metaBits.push(modelMeta);
+      const sourceLabel=_getChannelLabel(s);
+      if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
+      if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
       meta.className='session-meta';
@@ -1767,6 +2439,7 @@ function renderSessionListFromCache(){
 
     // Rename: called directly when we confirm it's a double-click
     const startRename=()=>{
+      if(_isReadOnlySession(s)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be renamed.',3000); return; }
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
 
@@ -1830,6 +2503,13 @@ function renderSessionListFromCache(){
       title.replaceWith(inp);
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
+    // Expose the rename closure on the row so the three-dot action menu
+    // (`_openSessionActionMenu`, defined elsewhere) can trigger it without
+    // needing a separate DOM hunt or a duplicate copy of all this state
+    // (oldTitle / applyTitle / finish / _renamingSid bookkeeping). The
+    // double-click path on this element still calls startRename() directly.
+    el._startRename = startRename;
+    el.dataset.sid = s.session_id;
 
     // (Project dot is appended above, between title and timestamp, so it
     // sits outside the truncating title span and stays visible.)
@@ -1839,22 +2519,25 @@ function renderSessionListFromCache(){
     state.setAttribute('aria-hidden','true');
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
-    const actions=document.createElement('div');
-    actions.className='session-actions';
-    const menuBtn=document.createElement('button');
-    menuBtn.type='button';
-    menuBtn.className='session-actions-trigger';
-    menuBtn.title='Conversation actions';
-    menuBtn.setAttribute('aria-haspopup','menu');
-    menuBtn.setAttribute('aria-label','Conversation actions');
-    menuBtn.innerHTML=ICONS.more;
-    menuBtn.onclick=(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      _openSessionActionMenu(s, menuBtn);
-    };
-    actions.appendChild(menuBtn);
-    el.appendChild(actions);
+    let actions=null;
+    if(!readOnly){
+      actions=document.createElement('div');
+      actions.className='session-actions';
+      const menuBtn=document.createElement('button');
+      menuBtn.type='button';
+      menuBtn.className='session-actions-trigger';
+      menuBtn.title='Conversation actions';
+      menuBtn.setAttribute('aria-haspopup','menu');
+      menuBtn.setAttribute('aria-label','Conversation actions');
+      menuBtn.innerHTML=ICONS.more;
+      menuBtn.onclick=(e)=>{
+        e.stopPropagation();
+        e.preventDefault();
+        _openSessionActionMenu(s, menuBtn);
+      };
+      actions.appendChild(menuBtn);
+      el.appendChild(actions);
+    }
 
     // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
     // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
@@ -1867,15 +2550,31 @@ function renderSessionListFromCache(){
     let _tapTimer=null;
     let _pointerDownX=0;
     let _pointerDownY=0;
+    let _pointerActive=false;
     let _isDragging=false;
     let _clearDragTimer=null;
+    const _clearPointerDragState=()=>{
+      _pointerActive=false;
+      if(_isDragging){
+        _isDragging=false;
+        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+        _clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);
+      }
+    };
     el.onpointerdown=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
+      _pointerActive=true;
       _pointerDownX=e.clientX;
       _pointerDownY=e.clientY;
       _isDragging=false;
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+      el.classList.remove('dragging');
     };
     el.onpointermove=(e)=>{
+      // Plain hover also dispatches pointermove. Only mark a row as dragging
+      // after an actual press starts on this row; otherwise hovered rows stay
+      // faded until the next sidebar rerender clears their DOM nodes.
+      if(!_pointerActive) return;
       if(_isDragging) return;
       const dx=Math.abs(e.clientX-_pointerDownX);
       const dy=Math.abs(e.clientY-_pointerDownY);
@@ -1886,12 +2585,15 @@ function renderSessionListFromCache(){
         if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
       }
     };
+    el.onpointercancel=_clearPointerDragState;
+    el.onpointerleave=()=>{ if(_pointerActive) _clearPointerDragState(); };
     el.onpointerup=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      _pointerActive=false;
       if(_renamingSid) return;
-      if(actions.contains(e.target)) return;
+      if(actions&&actions.contains(e.target)) return;
       if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session')) return;
-      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
+      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
       if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);return;}
       const now=Date.now();
@@ -1927,8 +2629,8 @@ function renderSessionListFromCache(){
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
       if(_renamingSid) return;
-      if(actions.contains(e.target)) return;
-      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
+      if(actions&&actions.contains(e.target)) return;
+      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // Guard: prevent renaming if session is currently being loaded
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
@@ -1970,6 +2672,7 @@ async function deleteSession(sid){
   if(!ok)return;
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+    _clearHandoffStorageForSession(sid);
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
@@ -2181,7 +2884,7 @@ function _showProjectContextMenu(e, proj, chip){
   const renameItem=document.createElement('div');
   renameItem.textContent='Rename';
   renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover-bg)';
   renameItem.onmouseleave=()=>renameItem.style.background='';
   renameItem.onclick=()=>{menu.remove();_startProjectRename(proj,chip);};
   menu.appendChild(renameItem);
@@ -2210,7 +2913,7 @@ function _showProjectContextMenu(e, proj, chip){
   const delItem=document.createElement('div');
   delItem.textContent='Delete';
   delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
-  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover-bg)';
   delItem.onmouseleave=()=>delItem.style.background='';
   delItem.onclick=()=>{menu.remove();_confirmDeleteProject(proj);};
   menu.appendChild(delItem);

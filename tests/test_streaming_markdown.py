@@ -107,6 +107,19 @@ class TestIndexHtmlSmdScript:
             "streaming-markdown must be loaded with type=\"module\" (it is an ES module)"
         )
 
+    def test_smd_vendor_import_is_mount_agnostic(self):
+        assert "static/vendor/smd.min.js" in INDEX_HTML, (
+            "index.html must load the vendored streaming-markdown module"
+        )
+        assert "from '/static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
+        )
+        assert 'from "/static/vendor/smd.min.js"' not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
+        )
+
 
 # ── 2. Closure variable declarations ─────────────────────────────────────────
 
@@ -268,6 +281,17 @@ class TestScheduleRenderSmdPath:
         fn = self.get_fn()
         assert fn and "renderMd" in fn, (
             "renderMd fallback must still exist in _scheduleRender when smd unavailable"
+        )
+
+    def test_fallback_formats_first_segment_with_render_md(self):
+        fn = self.get_fn()
+        assert fn, "_scheduleRender not found"
+        assert "const fallbackText" in fn, (
+            "_scheduleRender fallback should choose the visible segment text once"
+        )
+        assert "renderMd(fallbackText)" in fn, (
+            "When smd is unavailable, the first live segment must still be "
+            "formatted with renderMd instead of inserting raw parsed.displayText"
         )
 
     def test_smd_new_parser_called_lazily(self):

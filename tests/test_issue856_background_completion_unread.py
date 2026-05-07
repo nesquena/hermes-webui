@@ -74,17 +74,19 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 
     marker_idx = done_block.find("_markSessionCompletionUnread(completedSid")
-    delete_idx = done_block.find("delete INFLIGHT[activeSid];")
+    cleanup_idx = done_block.find("_clearOwnerInflightState();")
+    if cleanup_idx == -1:
+        cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
     cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
     refresh_idx = done_block.find("renderSessionList();", cache_idx)
     sound_idx = done_block.find("playNotificationSound();", cache_idx)
 
     assert "function _markSessionCompletedInList(" in SESSIONS_JS
     assert marker_idx != -1, "done handler must write the completion-unread marker first"
-    assert delete_idx != -1, "done handler must clear local INFLIGHT before rendering idle state"
+    assert cleanup_idx != -1, "done handler must clear local INFLIGHT before rendering idle state"
     assert cache_idx != -1, "done handler must update the sidebar cache immediately"
     assert refresh_idx != -1 and sound_idx != -1
-    assert marker_idx < delete_idx < cache_idx < refresh_idx < sound_idx, (
+    assert marker_idx < cleanup_idx < cache_idx < refresh_idx < sound_idx, (
         "the sidebar should flip from spinner to dot from the done payload before "
         "waiting for /api/sessions or playing the completion cue"
     )
@@ -302,7 +304,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
     session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
-    render_idx = done_block.find("renderMessages()", active_guard_idx)
+    render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("loadDir('.')", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
 

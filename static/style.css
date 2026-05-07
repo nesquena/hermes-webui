@@ -293,6 +293,20 @@
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
   .app-titlebar{display:flex;align-items:center;justify-content:center;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:var(--app-titlebar-safe-top);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
   .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;}
+  .system-health-panel.insights-card{display:flex;flex-direction:column;gap:12px;color:var(--muted);}
+  .system-health-panel.unavailable{display:none;}
+  .system-health-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;}
+  .system-health-sub{font-size:11px;color:var(--muted);margin-top:-4px;}
+  .system-health-dot{width:7px;height:7px;border-radius:999px;background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);opacity:.88;}
+  .system-health-panel.loading .system-health-dot{background:var(--muted);box-shadow:none;opacity:.55;}
+  .system-health-status{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--border);color:var(--muted);background:var(--surface);white-space:nowrap;}
+  .system-health-metrics{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;min-width:0;}
+  .system-health-metric{min-width:0;display:flex;flex-direction:column;gap:5px;padding:10px 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+  .system-health-label{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;line-height:1;color:var(--muted);}
+  .system-health-value{font-variant-numeric:tabular-nums;color:var(--text);font-weight:650;}
+  .system-health-bar{height:5px;overflow:hidden;border-radius:999px;background:color-mix(in srgb,var(--border) 70%,transparent);border:1px solid color-mix(in srgb,var(--border) 75%,transparent);}
+  .system-health-bar-fill{height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .25s ease;}
+  .system-health-foot{font-size:11px;color:var(--muted);line-height:1.45;opacity:.82;}
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
@@ -307,7 +321,7 @@
   .sidebar-section{padding:14px 14px 8px;}
   .new-chat-btn{width:100%;padding:9px 12px;border-radius:9px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all .15s;margin-bottom:8px;font-weight:500;}
   .new-chat-btn:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
-  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;}
+  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;}
   .sidebar-search{position:relative;padding:8px 12px;flex-shrink:0;}
   .sidebar-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px 7px 32px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s;box-sizing:border-box;}
   .sidebar-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
@@ -519,6 +533,13 @@
   .reconnect-banner.visible{display:flex;}
   .reconnect-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg-strong);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;}
   .reconnect-btn:hover{background:var(--accent-bg-strong);}
+  .agent-health-banner{position:sticky;bottom:0;z-index:4;display:none;align-items:center;justify-content:space-between;gap:12px;margin:10px auto 0;max-width:var(--msg-max);width:calc(100% - 40px);padding:12px 16px;border:1px solid color-mix(in srgb,var(--error) 55%,var(--surface));border-radius:12px;background:color-mix(in srgb,var(--error) 14%,var(--surface));color:var(--text);box-shadow:0 10px 32px rgba(0,0,0,.16);}
+  .agent-health-banner.visible{display:flex;}
+  .agent-health-copy{display:flex;flex-direction:column;gap:3px;min-width:0;font-size:13px;line-height:1.35;}
+  .agent-health-copy strong{color:var(--error);font-size:13px;}
+  .agent-health-copy span{color:var(--muted);}
+  .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
+  .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
   /* ── Update banner ── */
   .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);align-items:center;justify-content:space-between;gap:12px;}
   .update-banner.visible{display:flex;}
@@ -559,6 +580,7 @@
   /* Terminal flyout reserves transcript space so recent messages stay readable above it. */
   .messages.terminal-open{padding-bottom:var(--terminal-card-height,320px);scroll-padding-bottom:var(--terminal-card-height,320px);transition:padding-bottom .26s cubic-bezier(.2,.8,.2,1);}
   .messages.terminal-collapsed{padding-bottom:var(--terminal-dock-height,72px);scroll-padding-bottom:var(--terminal-dock-height,72px);transition:padding-bottom .22s cubic-bezier(.2,.8,.2,1);}
+  .messages.handoff-dock-visible{padding-bottom:var(--handoff-dock-height,72px);scroll-padding-bottom:var(--handoff-dock-height,72px);transition:padding-bottom .22s cubic-bezier(.2,.8,.2,1);}
   .messages.terminal-expanding-from-dock{transition:none!important;}
   .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;contain:paint;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
   .queue-card.visible .queue-card-inner{transform:translateY(0);opacity:1;}
@@ -621,17 +643,62 @@
   .rail-btn{width:36px;height:36px;border-radius:8px;border:none;background:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:color .15s,background .15s;flex-shrink:0;padding:0;}
   .rail-btn:hover{color:var(--text);background:var(--hover-bg);}
   .rail-btn.active{color:var(--accent-text);background:var(--accent-bg);}
-  .rail-btn.active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
-  .rail-spacer{flex:1;min-height:8px;}
-  .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
-  .rail .nav-tab:hover::after{content:none;}
+.rail-btn.active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
+  /* Custom tooltip — replaces native title="" for faster, more polished display.
+     Native browser tooltips have a ~1.5s hover delay that reads as "no tooltip
+     exists" (#1775). Our custom tooltip appears at ~150ms hover, dismisses
+     instantly, and renders above all sidebar/panel stacking contexts. */
+  /* Usage: add data-tooltip="Label" and class="has-tooltip". For i18n, pair
+     with data-i18n-title; static/i18n.js will sync the localized value into
+     data-tooltip and clear any stale native title attribute. */
+  /* Design choice: no arrow/caret. At 11px text size and 5px arrow size the
+     triangle reads as visual noise rather than a connector — VS Code, Slack,
+     and Linear's rail tooltips also skip the arrow. Spatial proximity (8px
+     gap) is enough to associate the tooltip with the trigger. */
+  .has-tooltip{position:relative;}
+  .has-tooltip::after{content:attr(data-tooltip);position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--text);font-size:11.5px;font-weight:600;letter-spacing:.02em;padding:5px 10px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:1500;box-shadow:0 8px 24px rgba(0,0,0,.65),0 0 0 1px rgba(0,0,0,.35),0 1px 0 rgba(255,255,255,.04) inset;opacity:0;transition:opacity .14s ease;transition-delay:0s;}
+  .has-tooltip:hover::after,.has-tooltip:focus-visible::after{opacity:1;transition-delay:.15s;}
+  /* For bottom-positioned tooltips (panel header buttons, non-rail elements) */
+  .has-tooltip--bottom::after{left:50%;top:auto;bottom:auto;transform:translateX(-50%);top:calc(100% + 8px);}
+  /* For bottom-positioned tooltips on a trigger that sits flush with its
+     container's right edge — anchors the tooltip's RIGHT edge to the trigger
+     so the label extends inward (to the left) instead of overflowing past the
+     panel edge. Used for the `+` New conversation button at the right of the
+     chat panel header. Pairs with `--bottom`; do not apply both. */
+  .has-tooltip--bottom-right::after{left:auto;right:0;top:calc(100% + 8px);bottom:auto;transform:none;}
+  /* For right-edge elements (e.g. send button) — tooltip flips to the LEFT
+     of the trigger so it doesn't extend past the viewport edge. */
+  .has-tooltip--left::after{left:auto;right:calc(100% + 8px);top:50%;transform:translateY(-50%);}
+  @media(prefers-reduced-motion:reduce){.has-tooltip::after{transition:none;transition-delay:0s;}}
+.rail-spacer{flex:1;min-height:8px;}
+.rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
+/* Note: previously this block had `.rail .nav-tab:hover::after { content: none }`
+   to suppress the legacy `.nav-tab:hover::after { content: attr(data-label) }`
+   tooltip (line ~681 below) on the desktop rail. After v0.51.17 migrated the
+   rail to the custom `.has-tooltip` system, that suppression rule survived and
+   blocked the new tooltips because `.rail .nav-tab:hover::after` (specificity
+   0,3,1) outweighs `.has-tooltip:hover::after` (0,2,1) and `content:none`
+   removes the pseudo-element entirely. Solution: scope the legacy
+   `.nav-tab:hover::after` data-label tooltip to `.sidebar-nav` (mobile) only
+   (see line ~681). The rail rule is no longer needed. */
   .rail .nav-tab.active::before{content:'';position:absolute;left:-6px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
+  .dashboard-link{position:relative;}
+  .dashboard-link-visible{display:flex!important;}
+  .dashboard-external-badge{position:absolute;right:5px;top:5px;width:9px;height:9px;border-radius:2px;border:1px solid var(--accent);background:var(--sidebar);box-shadow:0 0 0 2px var(--sidebar);opacity:.95;}
+  .dashboard-external-badge::after{content:'';position:absolute;right:-2px;top:-2px;width:5px;height:5px;border-top:1.5px solid var(--accent);border-right:1.5px solid var(--accent);}
+  .sidebar-nav .dashboard-external-badge{right:8px;top:7px;width:8px;height:8px;}
   @media(min-width:641px){.rail{display:flex;}.sidebar > .sidebar-nav{display:none;}}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;}
   .nav-tab:hover{color:var(--text);}
-  .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:700;letter-spacing:.02em;padding:6px 12px;border-radius:8px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
+  /* Legacy hover-tooltip — kept for the mobile `.sidebar-nav` only, where it
+     positions ABOVE the trigger (the bar is at the top of the sidebar so a
+     bottom-positioned tooltip would sink into the panel content). The desktop
+     `.rail` buttons opt out of this rule so the `.has-tooltip` system can run
+     unobstructed; rail buttons carry no `data-label`, so an unscoped rule
+     would render an empty styled box on hover. */
+  .sidebar-nav .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:700;letter-spacing:.02em;padding:6px 12px;border-radius:8px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
   .nav-tab.active{color:var(--accent-text);}
   .nav-tab.active::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:20px;height:2px;background:var(--accent);border-radius:2px 2px 0 0;}
   /* Panel content areas (swapped by tab) */
@@ -644,6 +711,7 @@
   .cron-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;}
   .cron-name{flex:1;font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .cron-status{font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;flex-shrink:0;}
+  .cron-profile-badge{font-size:10px;font-weight:650;padding:2px 7px;border-radius:99px;flex-shrink:0;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);color:var(--muted);background:var(--surface-subtle);}
   .cron-status.active{background:rgba(34,197,94,.15);color:var(--success);}
   .cron-status.paused{background:var(--accent-bg-strong);color:var(--accent-text);}
   .cron-status.disabled{background:rgba(255,255,255,.07);color:var(--muted);}
@@ -733,8 +801,13 @@
   .msg-body code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:10px 0;}
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:13px;line-height:1.6;}
+  .provider-error-details{margin:12px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
+  .provider-error-details>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;padding:8px 12px;}
+  .provider-error-details>pre{margin:0;border:0;border-top:1px solid var(--border);border-radius:0;max-height:220px;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
+  /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
+  .msg-body pre code.language-yaml .token{white-space:pre !important;}
   .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
@@ -864,7 +937,10 @@
   .attach-chip--audio,.attach-chip--video{max-width:260px;}
   .attach-media-icon{display:inline-flex;align-items:center;color:var(--accent-text);}
   .attach-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .attach-thumb{width:56px;height:56px;object-fit:cover;border-radius:4px;display:block;cursor:default;}
+  .attach-thumb{width:56px;height:56px;object-fit:cover;border-radius:4px;display:block;cursor:zoom-in;transition:filter .12s ease, transform .12s ease;}
+  @media (hover: hover) {
+    .attach-thumb:hover{filter:brightness(1.05);transform:scale(1.04);}
+  }
   textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
   textarea#msg::placeholder{color:var(--muted);}
   .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
@@ -1035,6 +1111,21 @@
   .composer-terminal-dock[hidden]{display:none!important;}
   .composer-terminal-dock-title{min-width:0;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;}
   .composer-terminal-dock-dot{width:7px;height:7px;border-radius:999px;background:var(--success);box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 16%,transparent);flex:0 0 auto;}
+
+  /* ── Handoff hint bar ── */
+  .handoff-hint-container{position:absolute;left:0;right:0;bottom:-2px;width:min(calc(100% - 112px),560px);margin:0 auto;box-sizing:border-box;overflow:visible;pointer-events:none;z-index:3;}
+  .handoff-hint-container.is-visible{pointer-events:auto;}
+  .handoff-hint-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:42px;border:1px solid var(--border);border-bottom:none;border-radius:13px 13px 0 0;background:color-mix(in srgb,var(--surface) 86%,transparent);box-shadow:0 8px 22px rgba(0,0,0,.16);backdrop-filter:blur(10px);padding:7px 12px 9px;cursor:pointer;transform:translateY(100%);opacity:0;transition:transform .32s cubic-bezier(.32,.72,.16,1),opacity .2s ease,background .15s ease,border-color .15s ease;}
+  .handoff-hint-container.is-visible .handoff-hint-bar{transform:translateY(0);opacity:.94;}
+  .handoff-hint-bar:hover{background:color-mix(in srgb,var(--surface) 92%,transparent);border-color:color-mix(in srgb,var(--border) 70%,var(--accent));}
+  .handoff-hint-bar[hidden]{display:none!important;}
+  .handoff-hint-text{min-width:0;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700;line-height:1.2;letter-spacing:.02em;text-transform:uppercase;}
+  .handoff-hint-dot{width:7px;height:7px;border-radius:999px;background:var(--success);box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 16%,transparent);flex:0 0 auto;}
+  .handoff-hint-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);text-transform:none;letter-spacing:0;font-weight:700;font-size:12px;}
+  .handoff-hint-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);text-transform:none;letter-spacing:0;font-weight:600;font-size:12px;}
+  .handoff-hint-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
+  .handoff-hint-action,.handoff-hint-dismiss{border:none;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:700;line-height:1.2;padding:4px 6px;border-radius:8px;cursor:pointer;transition:background .15s ease,color .15s ease;}
+  .handoff-hint-action:hover,.handoff-hint-dismiss:hover{background:color-mix(in srgb,var(--muted) 12%,transparent);color:var(--text);}
   #terminalDockWorkspaceLabel{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);text-transform:none;letter-spacing:0;font-weight:600;}
   .composer-terminal-resize-handle{height:12px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;cursor:ns-resize;touch-action:none;background:linear-gradient(to bottom,rgba(255,255,255,.04),transparent);}
   .composer-terminal-resize-handle::before{content:"";width:52px;height:4px;border-radius:999px;background:var(--border2);opacity:.72;transition:opacity .15s,background .15s;}
@@ -1063,11 +1154,13 @@
   /* Collapse priority as the panel narrows: git-badge first, then "Workspace"
      label, never the icon buttons. flex-shrink ratios give graceful ellipsis;
      @container queries below cut to display:none at hard breakpoints. */
-  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;gap:6px;overflow:hidden;}
+  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;gap:6px;overflow:visible;}
   .panel-header > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:2;}
   .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:3;overflow:hidden;min-width:0;}
+  .topbar-source-badge{display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;font-weight:700;letter-spacing:.02em;vertical-align:middle;}
   .git-badge.dirty{color:var(--accent-text);background:var(--accent-bg);}
   .panel-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
+
   /* Crisp display:none at narrow widths so the header doesn't show a sliver
      of an ellipsised label or git badge — icons survive longest. */
   @container rightpanel (max-width: 220px){
@@ -1128,6 +1221,8 @@
   .preview-md pre code{background:none;padding:0;color:var(--pre-text);font-size:11.5px;line-height:1.55;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .preview-md pre[class*="language-"],.preview-md pre code[class*="language-"]{background:var(--code-bg) !important;}
+  /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
+  .preview-md pre code.language-yaml .token{white-space:pre !important;}
   .preview-md blockquote{border-left:3px solid var(--blue);padding-left:12px;color:var(--muted);font-style:italic;margin:8px 0;}
   .preview-md blockquote p{margin:0;}
   .preview-md strong{color:var(--strong);font-weight:600;}.preview-md em{color:var(--em);}
@@ -1245,6 +1340,11 @@
     .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
     .app-titlebar-inner{flex:1 1 auto;}
+    .system-health-panel.insights-card{gap:10px;padding:12px;}
+    .system-health-head{align-items:flex-start;}
+    .system-health-metrics{grid-template-columns:1fr;gap:8px;}
+    .system-health-label{font-size:10px;gap:4px;}
+    .system-health-bar{height:4px;}
     /* Overlay backdrop */
     .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
       z-index:199;-webkit-tap-highlight-color:transparent;}
@@ -1314,6 +1414,7 @@
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}
     .composer-terminal-panel.is-collapsed{bottom:-1px;width:calc(100% - 28px);}
+    .handoff-hint-container{bottom:-2px;width:calc(100% - 28px);}
     .composer-terminal-inner{height:var(--composer-terminal-height,190px);min-height:140px;max-height:min(300px,44vh);border-radius:12px;padding-bottom:28px;}
     .composer-terminal-dock{min-height:40px;padding:6px 7px 6px 10px;border-radius:12px;gap:8px;}
     .composer-terminal-dock-title{font-size:11px;}
@@ -1384,7 +1485,7 @@
 .model-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:280px;max-width:min(420px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:320px;overflow-y:auto;}
 .model-dropdown.open{display:block;}
 .model-scope-note{position:sticky;top:0;z-index:2;padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text);font-size:11px;font-weight:650;line-height:1.4;background:color-mix(in srgb,var(--surface) 82%,var(--accent-bg));box-shadow:0 1px 0 rgba(0,0,0,.12);}
-.model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;}
+.model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}
 .model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;}
 .model-opt:hover{background:rgba(255,255,255,.07);}
 .model-opt.active{background:var(--accent-bg);}
@@ -1394,6 +1495,7 @@
 .model-opt-badge--primary{background:rgba(50,184,198,.16);border-color:rgba(50,184,198,.32);color:#8fe7ef;}
 .model-opt-badge--fallback{background:rgba(255,184,77,.14);border-color:rgba(255,184,77,.28);color:#ffd18a;}
 .model-opt-id{display:block;font-size:10px;color:var(--muted);line-height:1.3;opacity:.72;word-break:break-word;}
+.model-opt-provider{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--border2);margin-left:auto;white-space:nowrap;flex-shrink:0;}
 .model-custom-sep{padding-top:4px;border-top:1px solid var(--border);margin-top:4px;}
 .model-custom-row{display:flex;align-items:center;gap:6px;padding:6px 10px 8px;}
 .model-custom-input{flex:1;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;font-family:inherit;min-width:0;}
@@ -1413,6 +1515,13 @@
 .ws-divider{height:1px;background:var(--border);margin:4px 0;}
 .ws-manage{color:var(--muted);font-size:12px;}
 .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:8px;}
+.ws-search-row{display:flex;align-items:center;gap:6px;padding:8px 10px 10px;}
+.ws-search-input{flex:1;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:6px 8px;font-size:12px;outline:none;font-family:inherit;min-width:0;}
+.ws-search-input:focus{border-color:var(--accent);}
+.ws-search-clear{flex-shrink:0;width:22px;height:22px;border:1px solid var(--border2);border-radius:50%;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:color .12s,border-color .12s;font-size:10px;}
+.ws-search-clear:hover{color:var(--text);border-color:var(--border);}
+.ws-list-container{overflow-y:auto;max-height:260px;}
+.ws-no-results{padding:12px 14px;text-align:center;color:var(--muted);font-size:12px;}
 .ws-opt-icon{display:inline-flex;align-items:center;justify-content:center;opacity:.82;flex-shrink:0;}
 .ws-opt-meta{font-size:11px;color:var(--muted);}
 /* ── Workspace management panel ── */
@@ -1690,8 +1799,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-call-group-summary{width:100%;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);border:0;background:transparent;color:var(--muted);cursor:pointer;text-align:left;font:inherit;font-size:var(--font-size-xs);line-height:1.4;border-radius:var(--radius-card);}
 .tool-call-group-summary:hover{background:var(--surface-subtle-hover);color:var(--text);}
 .tool-call-group-label{font-weight:600;color:var(--muted);}
-.tool-call-group-list{opacity:.72;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.tool-call-group-count{margin-left:auto;opacity:.56;font-variant-numeric:tabular-nums;}
+.tool-call-group-duration{margin-left:auto;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;}
 .tool-call-group-chevron{opacity:.45;display:inline-flex;transition:transform .16s ease;}
 .tool-call-group:not(.tool-call-group-collapsed) .tool-call-group-chevron{transform:rotate(90deg);}
 .tool-call-group-body{display:block;padding-left:var(--space-3);}
@@ -1779,6 +1887,52 @@ body.resizing{user-select:none;cursor:col-resize;}
 }
 .tool-card-compress-reference .tool-card-name{
   color:var(--blue);
+}
+.tool-card-handoff-summary{
+  background:rgba(124,185,255,.04);
+  border-color:rgba(124,185,255,.18);
+}
+.tool-card-handoff-summary .tool-card-name{
+  color:var(--blue);
+}
+.tool-card-handoff-summary .tool-card-preview{
+  margin-left:10px;
+}
+.handoff-summary-fallback-note{
+  margin:10px 0 0;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.5;
+  font-style:normal;
+}
+.handoff-summary-body{
+  color:var(--text);
+  font-size:var(--font-size-sm);
+  line-height:1.65;
+}
+.handoff-summary-body p{
+  margin:0 0 8px;
+}
+.handoff-summary-body p:last-child{
+  margin-bottom:0;
+}
+.handoff-summary-body ul,
+.handoff-summary-body ol{
+  margin:4px 0 4px 20px;
+}
+.handoff-summary-body li{
+  margin:3px 0;
+}
+.handoff-summary-body strong{
+  color:var(--strong);
+}
+.handoff-summary-body code{
+  font-family:'SF Mono',ui-monospace,monospace;
+  font-size:.92em;
+  background:var(--code-inline-bg);
+  color:var(--code-text);
+  padding:1px 5px;
+  border-radius:4px;
 }
 
 .compression-row{
@@ -2070,16 +2224,20 @@ main.main > #mainSettings,
 main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
+main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
-main.main > #mainInsights{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights) > #mainChat{display:flex;}
+main.main > #mainInsights,
+main.main > #mainLogs{display:none;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
+main.main.showing-kanban > #mainKanban{display:flex;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
+main.main.showing-logs > #mainLogs{display:flex;}
 #mainSettings{overflow-y:auto;}
 
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
@@ -2196,16 +2354,28 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 #mainSettings #btnSignOut:hover{color:var(--accent-text)!important;border-color:var(--accent-bg-strong)!important;}
 
 /* MCP Server Management */
-.mcp-server-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;position:relative;font-size:12px;}
+.mcp-server-row{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;position:relative;font-size:12px;background:var(--surface);}
 .mcp-server-row:hover{background:var(--code-bg);}
+.mcp-server-row-head{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;}
 .mcp-server-name{font-weight:600;color:var(--text);}
-.mcp-server-detail{flex:1;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.mcp-transport-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:4px;flex-shrink:0;}
+.mcp-server-detail{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;}
+.mcp-server-meta{display:flex;gap:10px;color:var(--muted);font-size:11px;}
+.mcp-transport-badge,.mcp-status-badge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:2px 6px;border-radius:999px;flex-shrink:0;}
 .mcp-stdio{background:rgba(99,102,241,.12);color:#818cf8;}
 .mcp-unknown{background:rgba(161,161,170,.12);color:#a1a1aa;}
 .mcp-http{background:rgba(34,197,94,.12);color:#4ade80;}
-.mcp-delete-btn{background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:2px 4px;border-radius:4px;flex-shrink:0;}
-.mcp-delete-btn:hover{color:#ef4444;background:rgba(239,68,68,.1);}
+.mcp-status-active{background:rgba(34,197,94,.12);color:#4ade80;}
+.mcp-status-configured{background:rgba(245,158,11,.12);color:#f59e0b;}
+.mcp-status-disabled{background:rgba(161,161,170,.12);color:#a1a1aa;}
+.mcp-status-invalid_config,.mcp-status-unknown{background:rgba(239,68,68,.12);color:#f87171;}
+.mcp-tool-count{color:var(--text);}
+.mcp-readonly-note,.mcp-restart-hint{margin-top:8px;color:var(--muted);font-size:11px;line-height:1.45;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;padding:8px 10px;}
+.mcp-tool-search{width:100%;margin:0 0 8px 0;padding:8px 10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:12px;outline:none;}
+.mcp-tool-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-soft);}
+.mcp-tool-row{display:flex;flex-direction:column;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;background:var(--surface);}
+.mcp-tool-name{font-weight:600;color:var(--text);overflow-wrap:anywhere;}
+.mcp-tool-server{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:999px;padding:2px 6px;}
+.mcp-tool-schema{margin:2px 0 0 0;padding:7px 8px;white-space:pre-wrap;max-height:140px;overflow:auto;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--muted);font-size:11px;line-height:1.45;}
 
 /* Picker grids (theme / skin / font-size): make the card chrome use
    tokens so all skins flip correctly. */
@@ -2232,6 +2402,26 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
    Matches hermes-desktop LLM Providers panel. Card uses --sidebar (surface-1),
    hover rows use --surface (surface-2). Body divider uses a subtle tint. */
 #providersList{gap:12px;}
+.provider-quota-card{
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:linear-gradient(180deg,var(--surface),var(--sidebar));
+  padding:12px 16px;
+  margin-bottom:12px;
+}
+.provider-quota-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
+.provider-quota-title{font-size:13px;font-weight:650;color:var(--text);line-height:1.2;}
+.provider-quota-subtitle{font-size:11px;color:var(--muted);line-height:1.3;margin-top:2px;}
+.provider-quota-badge{font-size:10.5px;font-weight:650;text-transform:capitalize;padding:2px 8px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);white-space:nowrap;}
+.provider-quota-body{display:flex;flex-wrap:wrap;gap:8px;}
+.provider-quota-metric{flex:1;min-width:88px;border:1px solid var(--border);border-radius:8px;background:var(--sidebar);padding:8px 10px;}
+.provider-quota-metric span{display:block;font-size:10.5px;color:var(--muted);margin-bottom:2px;}
+.provider-quota-metric strong{display:block;font-size:14px;color:var(--text);font-weight:650;}
+.provider-quota-message{font-size:12px;color:var(--muted);line-height:1.45;}
+.provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.12);color:#16a34a;}
+:root.dark .provider-quota-card-available .provider-quota-badge{background:rgba(34,197,94,.16);color:#4ade80;}
+.provider-quota-card-no_key .provider-quota-badge,.provider-quota-card-unsupported .provider-quota-badge{background:rgba(234,179,8,.12);color:var(--warning);}
+.provider-quota-card-invalid_key .provider-quota-badge{background:color-mix(in srgb,var(--error) 12%,transparent);color:var(--error);}
 .provider-card{
   border:1px solid var(--border);
   border-radius:12px;
@@ -2330,6 +2520,17 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   background:color-mix(in srgb, var(--error) 10%, transparent);
 }
 
+
+/* ── Plugin visibility cards ── */
+#pluginsList{gap:12px;}
+.plugin-card .provider-card-body{display:block;}
+.plugin-card-header{cursor:default;}
+.plugin-card-header:hover{background:transparent;}
+.plugin-card-badge-disabled{background:var(--surface);color:var(--muted);}
+.plugin-hook-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
+.plugin-hook-badge{display:inline-flex;align-items:center;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:999px;padding:3px 8px;font-size:11px;font-family:var(--font-mono);}
+.plugin-hook-empty{font-size:12px;color:var(--muted);font-style:italic;}
+
 /* ── Provider model tags ── */
 .provider-card-models{
   margin-bottom:10px;
@@ -2349,6 +2550,16 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   line-height:1.5;
   user-select:all;
 }
+/* "+N more" disclosure pill — appended when a provider's catalog is trimmed
+   for UI scannability (#1567 — Nous Portal large-tier accounts ship 100s of
+   models). Visually distinct from a real model tag so users don't think it's
+   a model id; muted dashed border, italic, no user-select. */
+.provider-card-model-tag-more{
+  font-style:italic;
+  border-style:dashed;
+  user-select:none;
+  cursor:help;
+}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{
@@ -2362,6 +2573,29 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   justify-content:center;
 }
 .session-pin-indicator svg{width:10px;height:10px;}
+
+/* ── Fork lineage indicator (inline, subtle until row focus/hover) ── */
+.session-branch-indicator{
+  flex-shrink:0;
+  width:12px;
+  height:12px;
+  color:var(--muted);
+  line-height:1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  opacity:.35;
+  pointer-events:none;
+  transition:opacity .15s ease,color .15s ease;
+}
+.session-branch-indicator svg{width:12px;height:12px;}
+.session-item:hover .session-branch-indicator,
+.session-item:focus-within .session-branch-indicator,
+.session-item.menu-open .session-branch-indicator{
+  opacity:.85;
+  color:var(--text);
+}
+.session-item.active .session-branch-indicator{color:var(--accent-text);}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
@@ -2467,19 +2701,24 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   flex-shrink: 0;
   pointer-events: none; /* don't block clicks on session-actions beneath */
 }
-.session-item.cli-session:hover::after {
+.session-item.cli-session:not(.read-only-session):hover::after {
   display: none; /* hide badge on hover so the session menu trigger stays clear */
+}
+.session-item.cli-session.read-only-session:hover::after {
+  opacity: .75;
 }
 .session-item.cli-session.menu-open::after {
   display: none;
 }
 /* Source-specific colors for gateway sessions */
-.session-item.cli-session[data-source="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
-.session-item.cli-session[data-source="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
-.session-item.cli-session[data-source="discord"] { border-left-color: #5865F2; }
-.session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
-.session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
-.session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
+.session-item.cli-session[data-source-key="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
+.session-item.cli-session[data-source-key="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
+.session-item.cli-session[data-source-key="discord"] { border-left-color: #5865F2; }
+.session-item.cli-session[data-source-key="discord"]::after { color: #5865F2; }
+.session-item.cli-session[data-source-key="slack"] { border-left-color: #4A154B; }
+.session-item.cli-session[data-source-key="slack"]::after { color: #4A154B; }
+.session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
+.session-item.cli-session[data-source-key="claude_code"]::after { color: rgba(217, 119, 6, 0.85); }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.
@@ -2527,6 +2766,21 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
+.status-card{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);border:1px solid var(--border-subtle);background:var(--surface-subtle);border-radius:var(--radius-card);box-shadow:0 10px 24px rgba(0,0,0,.05);overflow:hidden;}
+.status-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border-subtle);background:linear-gradient(180deg,var(--surface-subtle-hover),var(--surface-subtle));}
+.status-card-title-wrap{min-width:0;}
+.status-card-title{font-weight:650;color:var(--text);font-size:14px;letter-spacing:.01em;}
+.status-card-subtitle{font-size:12px;color:var(--muted);margin-top:3px;}
+.status-card-session-copy{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:5px 9px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);color:var(--muted);font-size:12px;font-family:var(--font-mono);cursor:pointer;max-width:230px;}
+.status-card-session-copy span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.status-card-session-copy:hover,.status-card-session-copy.copied{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+.status-card-grid{display:grid;grid-template-columns:minmax(120px,180px) minmax(0,1fr);gap:0;border-top:0;}
+.status-card-row{display:contents;}
+.status-card-label,.status-card-value{padding:9px 16px;border-top:1px solid var(--border-subtle);font-size:13px;line-height:1.4;}
+.status-card-row:first-child .status-card-label,.status-card-row:first-child .status-card-value{border-top:0;}
+.status-card-label{color:var(--muted);font-weight:550;background:rgba(0,0,0,.015);}
+.status-card-value{color:var(--text);word-break:break-word;font-family:var(--font-mono);}
+@media (max-width:700px){.status-card{margin-left:0;}.status-card-head{flex-direction:column;}.status-card-session-copy{max-width:100%;}.status-card-grid{grid-template-columns:1fr;}.status-card-label{padding-bottom:2px;border-top:1px solid var(--border-subtle);}.status-card-value{padding-top:2px;border-top:0;}}
 .assistant-segment-anchor { display: none; }
 
 /* ── Classic conversation layout: user right, half-width; assistant left ── */
@@ -2557,6 +2811,20 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .msg-role { font-size: 11px; font-weight: 500; margin-bottom: 6px; opacity: .8; letter-spacing: 0; }
 .msg-role:hover { opacity: 1; }
 .role-icon { width: 20px; height: 20px; font-size: 9px; }
+.msg-tps-inline {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
 .msg-time { opacity: .65; font-size: 10px; }
 .msg-role:hover .msg-time { opacity: 1; }
 
@@ -2616,11 +2884,25 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   justify-content: flex-start;
   gap: 8px;
 }
-.msg-usage-inline {
+.msg-usage-inline,
+.msg-duration-inline,
+.msg-gateway-inline,
+.gateway-failover-inline,
+.msg-model-warning-inline {
   font-size: 11px;
   color: var(--muted);
   opacity: .7;
   flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.gateway-failover-inline {
+  color: var(--accent);
+  opacity: .9;
+}
+.msg-model-warning-inline {
+  color: var(--error);
+  opacity: .95;
+  font-weight: 600;
 }
 .msg-foot-with-usage .msg-time,
 .msg-foot-with-usage .msg-actions {
@@ -2748,6 +3030,8 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 /* ── Day-change separator ── */
 .load-older-indicator{cursor:pointer;color:var(--accent-text,var(--blue));font-size:13px;padding:10px 0;text-align:center;user-select:none;}
 .load-older-indicator:hover{opacity:.75;}
+.message-window-load-earlier{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);}
+.message-window-load-earlier:hover{background:var(--hover-bg);border-color:var(--accent);}
 .msg-date-sep {
   display: flex; align-items: center; gap: 10px;
   margin: 22px 0 10px; padding: 0 var(--msg-rail);
@@ -2962,12 +3246,41 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-stat-value{font-size:22px;font-weight:700;color:var(--text);}
 .insights-stat-label{font-size:11px;color:var(--muted);margin-top:4px;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
-.insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;}
+.insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
+.wiki-status-card{margin-bottom:16px;}
+.wiki-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
+.wiki-status-sub{font-size:11px;color:var(--muted);margin-top:-4px;}
+.wiki-status-badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--border);color:var(--muted);background:var(--surface);}
+.wiki-status-badge.ok{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+.wiki-status-badge.warn{color:#e8a030;background:rgba(232,160,48,.12);border-color:rgba(232,160,48,.28);}
+.wiki-status-badge.err{color:var(--error,#e05);background:color-mix(in srgb,var(--error,#e05) 10%,transparent);border-color:color-mix(in srgb,var(--error,#e05) 30%,transparent);}
+.wiki-status-note{font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:12px;}
+.wiki-status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px;}
+.wiki-status-grid div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);min-width:0;}
+.wiki-status-grid span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+.wiki-status-grid strong{font-size:13px;color:var(--text);font-weight:650;overflow-wrap:anywhere;}
+.wiki-status-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:10px;}
+.wiki-status-footer a{color:var(--accent);text-decoration:none;font-weight:600;white-space:nowrap;}
+.wiki-status-footer a:hover{text-decoration:underline;}
 .insights-card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;}
 .insights-table{width:100%;font-size:12px;}
 .insights-table-head{display:grid;grid-template-columns:1fr 80px;padding:4px 0;border-bottom:1px solid var(--border);font-weight:600;color:var(--muted);font-size:11px;}
 .insights-table-row{display:grid;grid-template-columns:1fr 80px;padding:6px 0;border-bottom:1px solid var(--border,.05);}
+.insights-model-table .insights-table-head,.insights-model-table .insights-table-row{grid-template-columns:minmax(90px,1.5fr) 64px 76px 74px 52px;gap:8px;align-items:center;}
+.insights-model-cost,.insights-model-tokens{font-variant-numeric:tabular-nums;}
 .insights-model-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.insights-empty{font-size:12px;color:var(--muted);padding:12px 0;}
+.insights-daily-token-chart{height:180px;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(10px,1fr);gap:4px;align-items:end;padding:6px 0 2px;border-bottom:1px solid var(--border);}
+.insights-daily-bar{min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;}
+.insights-daily-stack{height:150px;display:flex;flex-direction:column;justify-content:flex-end;background:var(--border,.15);border-radius:4px;overflow:hidden;}
+.insights-daily-bar-input{background:var(--accent);min-height:0;}
+.insights-daily-bar-output{background:color-mix(in srgb,var(--accent) 55%,var(--text));min-height:0;}
+.insights-daily-bar span{height:14px;font-size:9px;color:var(--muted);text-align:center;white-space:nowrap;overflow:hidden;}
+.insights-daily-legend{display:flex;gap:12px;align-items:center;margin-top:8px;font-size:11px;color:var(--muted);}
+.insights-daily-legend span{display:inline-flex;align-items:center;gap:5px;}
+.insights-daily-legend i{width:8px;height:8px;border-radius:2px;display:inline-block;}
+.insights-daily-legend-input{background:var(--accent);}
+.insights-daily-legend-output{background:color-mix(in srgb,var(--accent) 55%,var(--text));}
 .insights-bars{display:flex;flex-direction:column;gap:6px;}
 .insights-bar-row{display:grid;grid-template-columns:40px 1fr 40px;align-items:center;gap:8px;}
 .insights-bar-label{font-size:11px;color:var(--muted);text-align:right;}
@@ -2991,3 +3304,293 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .checkpoint-diff-header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);}
 .checkpoint-diff-body{padding:12px 16px;overflow-y:auto;flex:1;}
 .checkpoint-diff-body pre{font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-all;}
+
+/* ── Kanban native board (read-only MVP) ── */
+.kanban-filter-stack{display:flex;flex-direction:column;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);}
+.kanban-filter-stack select{width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;}
+.kanban-check{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;}
+.kanban-summary{padding:8px 12px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--border);}
+.kanban-list{flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:6px;}
+.kanban-list-item{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--panel);color:var(--text);text-align:left;cursor:pointer;}
+.kanban-list-item:hover{border-color:var(--accent);background:var(--hover);}
+.kanban-list-status{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);}
+.kanban-list-title{font-size:13px;font-weight:600;line-height:1.35;}
+.kanban-board-wrap{flex:1;min-height:0;overflow:auto;padding:16px;background:var(--bg);}
+.kanban-board{display:flex;gap:12px;min-height:100%;overflow-x:auto;padding-bottom:8px;}
+.kanban-column{display:flex;flex-direction:column;min-width:260px;max-width:320px;flex:1;background:var(--panel);border:1px solid var(--border);border-radius:10px;min-height:240px;}
+.kanban-column-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text);}
+.kanban-count{font-size:11px;color:var(--muted);background:var(--input-bg);border:1px solid var(--border);border-radius:999px;padding:1px 7px;}
+.kanban-column-body{display:flex;flex-direction:column;gap:8px;padding:10px;min-height:0;overflow-y:auto;}
+.kanban-card{border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:10px;cursor:pointer;box-shadow:var(--shadow-sm);}
+.kanban-card:hover,.kanban-card.selected{border-color:var(--accent);}
+.kanban-card-title{font-size:13px;font-weight:650;color:var(--text);line-height:1.35;margin-bottom:6px;}
+.kanban-card-body{font-size:12px;color:var(--muted);line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:8px;}
+.kanban-meta{font-size:11px;color:var(--muted);line-height:1.35;}
+.kanban-readonly{font-size:11px;color:var(--muted);margin-top:6px;}
+
+/* Multi-board switcher in the main panel header.
+   Renders next to the "Board" title as `Default ▾` when at least one
+   non-default board exists, opens a click-anchored menu listing all
+   boards, current first, with per-status total badges. */
+.main-view-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.kanban-board-switcher{position:relative;display:inline-block;}
+.kanban-board-switcher[hidden]{display:none;}
+.kanban-board-switcher-toggle{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;
+  border:1px solid var(--border);
+  background:var(--input-bg);
+  color:var(--text);
+  border-radius:8px;
+  font:inherit;font-size:12px;font-weight:550;
+  cursor:pointer;
+  transition:border-color .15s,color .15s,background .15s;
+}
+.kanban-board-switcher-toggle:hover{border-color:var(--accent);color:var(--accent);}
+.kanban-board-switcher-toggle[aria-expanded="true"]{border-color:var(--accent);}
+.kanban-board-switcher-icon{font-size:14px;line-height:1;display:inline-block;min-width:14px;text-align:center;}
+.kanban-board-switcher-name{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.kanban-board-switcher-menu{
+  position:absolute;top:calc(100% + 4px);left:0;
+  min-width:240px;max-width:320px;
+  background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));
+  border:1px solid var(--accent-bg-strong, var(--border));
+  border-radius:10px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);
+  padding:6px;
+  z-index:150;
+  max-height:60vh;
+  overflow-y:auto;
+}
+:root:not(.dark) .kanban-board-switcher-menu{
+  background:linear-gradient(180deg,#fff,#f5f0e8);
+  border-color:rgba(0,0,0,.18);
+}
+.kanban-board-switcher-menu[hidden]{display:none;}
+.kanban-board-switcher-item{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:8px 10px;border:0;background:transparent;color:var(--text);
+  border-radius:6px;cursor:pointer;text-align:left;font:inherit;font-size:12px;
+  transition:background .15s;
+}
+.kanban-board-switcher-item:hover,
+.kanban-board-switcher-item:focus{background:var(--accent-bg);outline:none;}
+.kanban-board-switcher-item.is-current{font-weight:650;}
+.kanban-board-switcher-item-icon{font-size:14px;line-height:1;flex-shrink:0;width:18px;text-align:center;}
+.kanban-board-switcher-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.kanban-board-switcher-item-count{
+  flex-shrink:0;font-size:10px;color:var(--muted);
+  padding:2px 6px;border-radius:8px;background:var(--input-bg);
+}
+.kanban-board-switcher-item.is-current .kanban-board-switcher-item-count{
+  background:var(--accent-bg);color:var(--accent-text);
+}
+.kanban-board-switcher-divider{height:1px;background:var(--border);margin:6px 0;}
+.kanban-board-switcher-action{
+  display:flex;align-items:center;gap:8px;width:100%;
+  padding:8px 10px;border:0;background:transparent;color:var(--muted);
+  border-radius:6px;cursor:pointer;text-align:left;font:inherit;font-size:11px;
+  transition:background .15s,color .15s;
+}
+.kanban-board-switcher-action:hover{background:var(--accent-bg);color:var(--accent-text);}
+.kanban-board-switcher-action.danger:hover{background:rgba(255,95,95,.12);color:var(--danger);}
+.kanban-board-switcher-action svg{width:14px;height:14px;flex-shrink:0;}
+
+/* Modal forms for create/rename board — use the same visual language as
+   the app-dialog overlay (linear-gradient panel, accent border) so it
+   feels native to the WebUI rather than a one-off bridge UI. */
+.kanban-modal-overlay{
+  position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);
+  display:flex;align-items:center;justify-content:center;
+  z-index:1100;padding:24px;
+}
+.kanban-modal-overlay[hidden]{display:none;}
+.kanban-modal{
+  width:min(460px,100%);
+  background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));
+  border:1px solid var(--accent-bg-strong, var(--border));
+  border-radius:18px;
+  box-shadow:0 18px 60px rgba(0,0,0,.45);
+  padding:18px 18px 16px;
+  color:var(--text);
+  box-sizing:border-box;
+}
+:root:not(.dark) .kanban-modal{
+  background:linear-gradient(180deg,#fff,#f5f0e8);
+  border-color:rgba(0,0,0,.18);
+}
+.kanban-modal h3{margin:0 0 14px;font-size:15px;font-weight:650;color:var(--text);}
+.kanban-modal-row{margin-bottom:10px;}
+.kanban-modal-row label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:500;}
+.kanban-modal-row input[type="text"],
+.kanban-modal-row input[type="color"],
+.kanban-modal-row textarea{
+  width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:8px 10px;font:inherit;font-size:13px;box-sizing:border-box;
+}
+.kanban-modal-row input:focus,
+.kanban-modal-row textarea:focus{
+  outline:none;border-color:var(--accent, #FFD700);
+}
+.kanban-modal-row textarea{min-height:60px;resize:vertical;}
+.kanban-modal-row input[type="color"]{height:36px;padding:2px;cursor:pointer;}
+.kanban-modal-row-inline{display:flex;gap:10px;}
+.kanban-modal-row-inline > *{flex:1;min-width:0;}
+.kanban-modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px;}
+.kanban-modal-error{color:var(--danger);font-size:11px;margin-top:6px;min-height:14px;}
+.kanban-empty{padding:12px;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--border);border-radius:8px;}
+
+.kanban-new-task-row{display:flex;gap:6px;align-items:center;}
+.kanban-new-task-row input{flex:1;min-width:0;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 8px;font:inherit;font-size:12px;}
+.kanban-task-preview{padding:12px 16px;border-bottom:1px solid var(--border);background:var(--panel);}
+.kanban-task-preview-header{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+.kanban-back-btn{flex-shrink:0;font-size:11px;padding:4px 8px;}
+.kanban-task-preview-title{font-size:14px;font-weight:650;color:var(--text);margin-bottom:0;}
+.kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;white-space:pre-wrap;margin-bottom:6px;}
+.kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
+.kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+/* Generic styled buttons used throughout the Kanban panel. The Kanban PR
+   stack standardised on `.btn` / `.btn.secondary` class names but never
+   shipped the matching CSS, so without these rules buttons fall back to
+   the browser's default beveled appearance which clashes with the dark
+   theme. Scoped to kanban-* parent containers so the rules cannot affect
+   any other panel that happens to use those class names later. */
+.kanban-pane .btn,
+.kanban-bulk-bar .btn,
+.kanban-new-task-row .btn,
+.kanban-task-preview .btn,
+.kanban-comment-form .btn,
+.kanban-modal .btn{
+  border:1px solid var(--border);
+  background:var(--input-bg);
+  color:var(--text);
+  border-radius:6px;
+  padding:6px 12px;
+  font:inherit;
+  font-size:12px;
+  cursor:pointer;
+  transition:border-color .15s,background .15s,color .15s;
+}
+.kanban-pane .btn:hover,
+.kanban-bulk-bar .btn:hover,
+.kanban-new-task-row .btn:hover,
+.kanban-task-preview .btn:hover,
+.kanban-comment-form .btn:hover,
+.kanban-modal .btn:hover{border-color:var(--accent);color:var(--accent);}
+.kanban-pane .btn:disabled,
+.kanban-bulk-bar .btn:disabled,
+.kanban-new-task-row .btn:disabled,
+.kanban-task-preview .btn:disabled,
+.kanban-comment-form .btn:disabled,
+.kanban-modal .btn:disabled{opacity:.5;cursor:default;}
+.kanban-pane .btn.secondary,
+.kanban-bulk-bar .btn.secondary,
+.kanban-new-task-row .btn.secondary,
+.kanban-task-preview .btn.secondary,
+.kanban-comment-form .btn.secondary,
+.kanban-modal .btn.secondary{background:transparent;}
+.kanban-pane .btn.danger,
+.kanban-task-preview .btn.danger,
+.kanban-modal .btn.danger{color:var(--danger);border-color:rgba(255,95,95,.4);}
+.kanban-pane .btn.danger:hover,
+.kanban-task-preview .btn.danger:hover,
+.kanban-modal .btn.danger:hover{background:rgba(255,95,95,.1);color:var(--danger);}
+/* Primary CTA inside the kanban modal — accent-tinted to make Save vs.
+   Cancel visually distinct (was nearly identical before). */
+.kanban-modal .btn.primary{
+  border-color:var(--accent, #FFD700);
+  background:var(--accent-bg, rgba(255,215,0,.12));
+  color:var(--accent-text, var(--accent, #FFD700));
+  font-weight:600;
+}
+.kanban-modal .btn.primary:hover{
+  background:var(--accent-bg-strong, rgba(255,215,0,.22));
+  border-color:var(--accent, #FFD700);
+  color:var(--accent-text, var(--accent, #FFD700));
+}
+.kanban-comment-form{display:flex;gap:8px;align-items:flex-end;margin-top:12px;}
+.kanban-comment-form textarea{flex:1;min-height:42px;resize:vertical;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px;font:inherit;font-size:12px;}
+
+.kanban-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px;}
+.kanban-detail-section{border:1px solid var(--border);border-radius:8px;background:var(--bg);padding:10px;min-width:0;}
+.kanban-detail-section h3{font-size:12px;font-weight:650;color:var(--text);margin:0 0 8px;}
+.kanban-detail-row{padding:8px 0;border-top:1px solid var(--border);}
+.kanban-detail-row:first-of-type{border-top:0;padding-top:0;}
+.kanban-detail-row-main{font-size:12px;color:var(--text);line-height:1.45;white-space:pre-wrap;}
+.kanban-detail-row-meta{font-size:10px;color:var(--muted);margin-top:4px;}
+.kanban-detail-pre{font-size:11px;line-height:1.4;white-space:pre-wrap;word-break:break-word;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px;margin:6px 0 0;color:var(--muted);}
+.kanban-detail-empty{font-size:12px;color:var(--muted);}
+.kanban-detail-links-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--muted);}
+.kanban-detail-links-grid code{display:inline-block;margin:4px 4px 0 0;padding:2px 5px;border-radius:5px;background:var(--input-bg);border:1px solid var(--border);color:var(--text);}
+
+.kanban-stats{font-size:12px;color:var(--muted);padding:2px 0}
+.kanban-stats-grid{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.kanban-stat-cell{display:inline-flex;gap:4px;align-items:center;border:1px solid var(--border);border-radius:999px;background:var(--input-bg);padding:2px 7px;}
+.kanban-stat-cell.total{color:var(--text);}
+.kanban-bulk-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.kanban-bulk-bar select{flex:1;min-width:96px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:12px}
+
+.kanban-profile-lanes{display:flex;flex-direction:column;gap:18px;min-width:100%}
+.kanban-profile-lane{border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02);padding:10px}
+.kanban-profile-lane-head{display:flex;justify-content:space-between;align-items:center;color:var(--text);font-size:13px;font-weight:600;margin-bottom:8px}
+.kanban-board-in-lane{min-height:0;overflow-x:auto}
+.kanban-card-topline{display:flex;gap:6px;align-items:center;margin-bottom:4px;font-size:10px;color:var(--muted)}
+.kanban-card-id{font-family:var(--mono);opacity:.8}
+.kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted)}
+.kanban-badge.priority{color:var(--accent)}
+.kanban-badge.tenant{color:var(--text)}
+.kanban-card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
+.kanban-card-assignee{color:var(--accent)}
+.kanban-card-unassigned{opacity:.75}
+.kanban-card-actions{display:flex;gap:4px;margin-top:8px;opacity:.85;flex-wrap:wrap}
+.kanban-card-action{border:1px solid var(--border);background:var(--input-bg);color:var(--text);border-radius:6px;padding:2px 6px;font-size:10px;cursor:pointer}
+.kanban-card-action.danger{color:var(--danger)}
+.kanban-card-stale-amber{border-color:rgba(245,197,66,.55)}
+.kanban-card-stale-red{border-color:rgba(255,95,95,.65)}
+.kanban-column.drop-target{outline:2px solid var(--accent);outline-offset:-2px}
+.hermes-kanban-md p{margin:0 0 4px}.hermes-kanban-md code{font-family:var(--mono);font-size:.95em}
+
+@media (max-width: 640px){
+  .kanban-board{scroll-snap-type:x mandatory;}
+  .kanban-column{min-width:82vw;scroll-snap-align:start;}
+  .kanban-task-preview-header{align-items:flex-start;flex-direction:column;}
+  .kanban-comment-form{flex-direction:column;align-items:stretch;}
+  .kanban-stats-grid{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px;}
+  /* Multi-board: keep the switcher row tight on narrow screens, and
+     widen the dropdown menu so its action labels don't truncate. */
+  .main-view-title-row{gap:6px;}
+  .kanban-board-switcher-toggle{padding:3px 8px;font-size:11px;}
+  .kanban-board-switcher-name{max-width:140px;}
+  .kanban-board-switcher-menu{
+    min-width:min(280px, calc(100vw - 24px));
+    max-width:calc(100vw - 24px);
+  }
+  /* Modal scales to viewport width on phones with reasonable padding. */
+  .kanban-modal-overlay{padding:12px;}
+  .kanban-modal{padding:16px 16px 14px;border-radius:14px;}
+  .kanban-modal-row-inline{flex-direction:column;gap:0;}
+}
+
+/* ── Logs panel (#1455) ───────────────────────────────────────────────────── */
+main.main.showing-logs > #mainLogs{display:flex;}
+.logs-control-panel{display:flex;flex-direction:column;gap:8px;padding:12px;overflow-y:auto;}
+.logs-control-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+.logs-control-panel select{width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 9px;font-size:12px;}
+.logs-check-row{display:flex;align-items:center;gap:8px;color:var(--text);font-size:12px;line-height:1.4;}
+.logs-check-row input{accent-color:var(--accent);}
+.logs-copy{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:8px;padding:7px 10px;font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s;}
+.logs-copy:hover{background:var(--hover-bg);border-color:var(--border2);}
+.logs-copy.compact{padding:6px 10px;white-space:nowrap;}
+.logs-status{font-size:12px;color:var(--muted);margin-top:3px;font-family:'SF Mono',ui-monospace,monospace;}
+.logs-main-body{padding:18px 24px;}
+.logs-content{max-width:1200px;}
+.logs-output{min-height:320px;max-height:calc(100vh - 170px);overflow:auto;background:var(--code-bg);border:1px solid var(--border);border-radius:12px;padding:12px 0;font-family:'SF Mono','Fira Code',ui-monospace,monospace;font-size:12px;line-height:1.55;color:var(--pre-text);white-space:pre;}
+.logs-output.wrap{white-space:pre-wrap;overflow-wrap:anywhere;}
+.log-line{padding:0 14px;min-height:1.55em;border-left:3px solid transparent;}
+.log-line:hover{background:rgba(255,255,255,.04);}
+.log-line-error{color:var(--error,#ef4444);border-left-color:var(--error,#ef4444);background:color-mix(in srgb,var(--error,#ef4444) 8%,transparent);}
+.log-line-warning{color:#f59e0b;border-left-color:#f59e0b;background:rgba(245,158,11,.08);}
+.log-line-info{color:var(--pre-text);}
+.log-line-debug{color:var(--muted);opacity:.75;}
+.logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
+.logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}

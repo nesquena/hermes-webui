@@ -109,6 +109,18 @@ Or keep using the shell launcher:
 ./start.sh
 ```
 
+For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecycle commands without requiring `fuser` or `pkill`:
+
+```bash
+./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
+./ctl.sh status             # PID, uptime, bound host/port, log path, /health
+./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
+./ctl.sh restart
+./ctl.sh stop
+```
+
+`ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
@@ -118,6 +130,7 @@ The bootstrap will:
 5. Drop you into a first-run onboarding wizard inside the WebUI.
 
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
+> For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 
@@ -522,6 +535,7 @@ State lives outside the repo at `~/.hermes/webui-mvp/` by default
 - `CHANGELOG.md` -- release notes per sprint
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
 - `THEMES.md` -- theme system documentation, custom theme guide
+- `docs/troubleshooting.md` -- diagnostic flows for common failures (e.g. "AIAgent not available")
 
 ## Contributors
 

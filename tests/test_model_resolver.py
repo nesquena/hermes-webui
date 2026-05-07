@@ -159,6 +159,26 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
     assert base_url == 'http://lmstudio.local:1234/v1'
 
 
+def test_custom_provider_models_dict_routes_to_named_custom_provider():
+    """Models listed only under custom_providers[].models still route to that endpoint."""
+    model, provider, base_url = _resolve_with_config(
+        'sensenova-6.7-flash-lite',
+        provider='xiaomi',
+        custom_providers=[{
+            'name': 'LiteLLM Proxy',
+            'base_url': 'http://127.0.0.1:8080/v1',
+            'model': 'deepseek-v4-flash',
+            'models': {
+                'deepseek-v4-flash': {},
+                'sensenova-6.7-flash-lite': {},
+            },
+        }],
+    )
+    assert model == 'sensenova-6.7-flash-lite'
+    assert provider == 'custom:litellm-proxy'
+    assert base_url == 'http://127.0.0.1:8080/v1'
+
+
 # ── get_available_models() @provider: hint behaviour ──────────────────────
 
 
@@ -234,18 +254,16 @@ def test_no_duplicate_when_default_model_is_prefixed():
         _cfg.cfg.update(old_cfg)
 
 
-def test_default_provider_models_not_prefixed():
+def test_default_provider_models_not_prefixed(monkeypatch):
     """The active provider's models remain bare (no @prefix added)."""
     import api.config as _cfg
-    raw_anthropic_ids = {m['id'] for m in _cfg._PROVIDER_MODELS.get('anthropic', [])}
+    monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda pid: ["claude-sonnet-5.0"] if pid == "anthropic" else [])
     result = _available_models_with_provider('anthropic')
     groups = {g['provider']: g['models'] for g in result['groups']}
     if 'Anthropic' in groups:
         returned_ids = {m['id'] for m in groups['Anthropic']}
-        for bare_id in raw_anthropic_ids:
-            assert bare_id in returned_ids, (
-                f"_PROVIDER_MODELS entry '{bare_id}' is missing from the Anthropic group"
-            )
+        assert "claude-sonnet-5.0" in returned_ids
+        assert not any(mid.startswith('@anthropic:') for mid in returned_ids), returned_ids
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────
@@ -437,8 +455,10 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
             return False
 
     def _fake_urlopen(req, timeout=10):
-        captured['auth'] = req.get_header('Authorization')
-        captured['ua'] = req.get_header('User-agent')
+        url = getattr(req, 'full_url', '')
+        if 'example.test' in url:
+            captured['auth'] = req.get_header('Authorization')
+            captured['ua'] = req.get_header('User-agent')
         return _Resp()
 
     monkeypatch.setattr('urllib.request.urlopen', _fake_urlopen)
@@ -466,11 +486,18 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
 # -- Issue #230: custom provider with slash model name -----------------------
 
 def test_custom_endpoint_slash_model_routes_to_custom_not_openrouter():
-    """Regression test for #230.
+    """Regression test for #230, updated for #1625.
 
     When provider=custom (or any non-openrouter provider) and base_url is set,
     a model name containing a slash (e.g. google/gemma-4-26b-a4b) must NOT be
     rerouted to OpenRouter -- it should stay on the configured custom endpoint.
+
+    #1625 layered an additional rule on top: a base_url pointing at a loopback
+    or private-IP host is treated as a local model server (LM Studio, Ollama,
+    llama.cpp, vLLM, TabbyAPI), which register models under their full
+    HuggingFace path. On such hosts the prefix is now PRESERVED. The original
+    #433 strip behaviour still applies on public hosts (real OpenAI-compatible
+    proxies like LiteLLM at https://litellm.example.com/v1).
     """
     # --- custom provider with slash model name should NOT go to openrouter ---
     model, provider, base_url = _resolve_with_config(
@@ -486,10 +513,22 @@ def test_custom_endpoint_slash_model_routes_to_custom_not_openrouter():
     assert base_url == 'http://127.0.0.1:1234/v1', (
         "Expected base_url 'http://127.0.0.1:1234/v1', got '{}'.".format(base_url)
     )
-    # Fix #433: provider prefix is now stripped for custom endpoints so stale
-    # prefixed model IDs from previous sessions do not break custom endpoint routing.
-    assert model == 'gemma-4-26b-a4b', (
-        "Model name prefix should be stripped for custom base_url endpoint, got '{}'.".format(model)
+    # #1625 (supersedes the v0.50 #433 strip-on-custom rule for loopback hosts):
+    # 127.0.0.1 base_url is almost certainly a local LM Studio / Ollama / etc.,
+    # which keys models on the full HuggingFace path. Preserve the prefix.
+    assert model == 'google/gemma-4-26b-a4b', (
+        "Model name prefix must be PRESERVED on loopback base_url (#1625), got '{}'.".format(model)
+    )
+
+    # --- public-host openai-compatible proxy STILL strips per #433 ----------
+    model2, provider2, base_url2 = _resolve_with_config(
+        'google/gemma-4-26b-a4b',
+        provider='openai',
+        base_url='https://litellm.example.com/v1',
+        default='google/gemma-4-26b-a4b',
+    )
+    assert model2 == 'gemma-4-26b-a4b', (
+        "Public-host OpenAI-compat proxy must still strip prefix per #433, got '{}'.".format(model2)
     )
 
     # --- openrouter with slash model name MUST still route to openrouter -----

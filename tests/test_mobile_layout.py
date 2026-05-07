@@ -1038,8 +1038,12 @@ def test_touch_device_inputs_meet_zoom_threshold():
 
 def test_profiles_sidebar_tab_present():
     """Sidebar tab strip must include Profiles."""
-    assert 'class="nav-tab" data-panel="profiles"' in HTML, \
-        "Sidebar nav must have a Profiles tab"
+    # Tolerate additional utility classes (e.g. `has-tooltip` from #1775).
+    # We just need a nav-tab classed button targeting the profiles panel.
+    import re
+    pattern = r'class="[^"]*\bnav-tab\b[^"]*"[^>]*data-panel="profiles"'
+    assert re.search(pattern, HTML), \
+        "Sidebar nav must have a nav-tab button with data-panel=\"profiles\""
 
 
 def test_mobile_bottom_nav_removed():

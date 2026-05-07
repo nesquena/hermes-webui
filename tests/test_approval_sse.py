@@ -150,9 +150,11 @@ class TestFrontendSSEImplementation:
             "startApprovalPolling must create an EventSource for SSE"
 
     def test_sse_url_matches_backend(self):
-        """Frontend SSE URL must match backend /api/approval/stream route."""
-        assert "/api/approval/stream" in MESSAGES_JS, \
-            "EventSource must connect to /api/approval/stream"
+        """Frontend SSE URL must match backend approval stream route."""
+        assert "api/approval/stream" in MESSAGES_JS, \
+            "EventSource must connect to the approval stream endpoint"
+        assert "EventSource('/api/approval/stream" not in MESSAGES_JS, \
+            "EventSource URL must stay relative for subpath mounts"
 
     def test_initial_event_listener(self):
         """Frontend must listen for 'initial' SSE events."""

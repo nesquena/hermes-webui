@@ -14,6 +14,8 @@ def test_select_model_custom_option_uses_friendly_label_helper():
     start = src.find("async function selectModelFromDropdown(value)")
     assert start != -1, "selectModelFromDropdown() not found"
     end = src.find("\nfunction toggleModelDropdown()", start)
+    if end == -1:
+        end = src.find("\nasync function toggleModelDropdown()", start)
     assert end != -1, "toggleModelDropdown() boundary not found"
     body = src[start:end]
 

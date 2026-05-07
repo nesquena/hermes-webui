@@ -14,8 +14,12 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 def _run_node(source: str) -> str:
+    # Pass source via stdin rather than `-e <source>` argv — the latter is
+    # capped at MAX_ARG_STRLEN (131072 bytes on Linux) and tests that embed
+    # the entire sessions.js file can exceed that. stdin has no such limit.
     result = subprocess.run(
-        [NODE, "-e", source],
+        [NODE],
+        input=source,
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,

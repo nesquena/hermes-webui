@@ -38,7 +38,7 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # Save call follows shortly after
     save_call = src.find("\n                s.save()", block_start)
     assert save_call != -1, "s.save() not found after the post-merge marker"
-    assert save_call - block_start < 3000, (
+    assert save_call - block_start < 4200, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

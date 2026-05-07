@@ -794,6 +794,139 @@ def test_named_custom_provider_hint_with_colon_is_preserved(monkeypatch):
     assert effective == "@custom:sub2api:gpt-5.4-mini"
 
 
+def test_issue1734_stale_openai_slash_session_model_repairs_to_codex(monkeypatch):
+    """Legacy openai/... session IDs must not route to OpenRouter when Codex is active."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "openai/gpt-5.4-mini",
+        None,
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+    assert provider == "openai-codex"
+
+
+def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
+    """/api/chat/start should save repaired Codex model state before spawning."""
+    import contextlib
+    import io
+    import json
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        session_id = "issue1734_session"
+        workspace = "/tmp/hermes-webui-test"
+        model = "openai/gpt-5.4-mini"
+        model_provider = None
+        active_stream_id = None
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        messages = [{"role": "user", "content": "old"}]
+        context_messages = []
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(
+                {
+                    "touch_updated_at": touch_updated_at,
+                    "model": self.model,
+                    "model_provider": self.model_provider,
+                    "pending_user_message": self.pending_user_message,
+                }
+            )
+
+    captured_thread = {}
+
+    class FakeThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            captured_thread.update(
+                {"target": target, "args": args, "kwargs": kwargs or {}, "daemon": daemon}
+            )
+
+        def start(self):
+            captured_thread["started"] = True
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.status = None
+            self.sent_headers = {}
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    session = DummySession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    handler = FakeHandler()
+    routes._handle_chat_start(
+        handler,
+        {"session_id": session.session_id, "message": "new turn"},
+    )
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert handler.status == 200
+    assert payload["effective_model"] == "gpt-5.5"
+    assert payload["effective_model_provider"] == "openai-codex"
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert captured_thread["args"][2] == "gpt-5.5"
+    assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
+    assert save_calls[-1]["model_provider"] == "openai-codex"
+
+
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
     """Unroutable @provider:model should not invent a bare model for another family."""
     import api.routes as routes
@@ -1211,8 +1344,11 @@ def test_stale_ui_js_does_not_inject_unavailable_option():
         "stale models should be silently reset to the first available model (#829)"
     )
 
-    # The new silent-reset pattern must be present
-    assert "first.value" in src and "S.session.model=first.value" in src, (
-        "renderSession() must silently reset S.session.model to the first "
-        "available option when the session model is not in the dropdown (#829)"
+    # The reset path remains, but #1771 now prefers the configured default
+    # before using the first HTML option as a last-resort fallback.
+    assert "_applySessionModelFallback" in src and "configuredDefault" in src, (
+        "stale session models should be reset through the safe fallback helper"
+    )
+    assert "const first=sel.querySelector('optgroup > option, option');" in src, (
+        "the first available option should remain only as a fallback when no configured default applies"
     )

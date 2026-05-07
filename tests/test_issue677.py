@@ -25,18 +25,23 @@ class TestScrollPinningFix:
         instead when S.activeStreamId is set.
         """
         # Find renderMessages function
-        rm_start = UI_JS.find("function renderMessages()")
+        rm_start = UI_JS.find("function renderMessages(")
         assert rm_start != -1, "renderMessages() not found in ui.js"
         rm_end = UI_JS.find("\nfunction ", rm_start + 1)
         rm_body = UI_JS[rm_start:rm_end]
+        helper_start = UI_JS.find("function _scrollAfterMessageRender")
+        assert helper_start != -1, "renderMessages scroll helper not found in ui.js"
+        helper_end = UI_JS.find("\nfunction ", helper_start + 1)
+        helper_body = UI_JS[helper_start:helper_end]
 
         # Must check activeStreamId before deciding which scroll fn to call
-        assert "activeStreamId" in rm_body, (
+        assert "activeStreamId" in helper_body, (
             "renderMessages() must check S.activeStreamId before scrolling — "
             "unconditional scrollToBottom() overrides user scroll position (#677)"
         )
-        # scrollIfPinned must be called inside renderMessages (stream path)
-        assert "scrollIfPinned()" in rm_body, (
+        # scrollIfPinned must be called through the renderMessages scroll policy (stream path)
+        assert "_scrollAfterMessageRender(preserveScroll);" in rm_body
+        assert "scrollIfPinned()" in helper_body, (
             "renderMessages() must call scrollIfPinned() during streaming (#677)"
         )
 
@@ -120,7 +125,9 @@ class TestScrollPinningFix:
         """Scroll listener must hide the button when user is near the bottom (#677)."""
         scroll_listener_start = UI_JS.find("el.addEventListener('scroll'")
         assert scroll_listener_start != -1, "scroll event listener not found"
-        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 300]
+        # After #1360 fix, the nearBottom + btn logic lives inside an rAF
+        # callback — extend search window to cover the full listener block.
+        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 600]
         assert "scrollToBottomBtn" in listener_block, (
             "Scroll listener must show/hide scrollToBottomBtn based on _scrollPinned (#677)"
         )

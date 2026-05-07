@@ -14,6 +14,9 @@ MESSAGING_SOURCES = {
     'weixin',
 }
 
+CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
+CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
+
 SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
@@ -71,6 +74,115 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
 
+def _safe_lower(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_source_name(value: object) -> str:
+    source = _safe_lower(value)
+    if not source:
+        return ""
+    if source.endswith(" session"):
+        source = source[:-len(" session")].strip()
+    return source
+
+
+def _looks_like_default_cli_title(row: dict) -> bool:
+    """Return True when a CLI row looks like framework-generated metadata."""
+    title = _safe_lower(row.get("title"))
+    if not title or title == "untitled":
+        return True
+    if title in {"cli", "cli session"}:
+        return True
+
+    source_candidates = {
+        _normalize_source_name(row.get("source")),
+        _normalize_source_name(row.get("session_source")),
+        _normalize_source_name(row.get("source_tag")),
+        _normalize_source_name(row.get("raw_source")),
+        _normalize_source_name(row.get("source_label")),
+    }
+    source_candidates.discard("")
+    source_candidates.add("cli")
+    return any(title == f"{candidate} session" for candidate in source_candidates)
+
+
+def _as_positive_int(value) -> int:
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _count_user_turns(row: dict) -> int:
+    user_turns = row.get("actual_user_message_count")
+    if user_turns is None:
+        user_turns = row.get("user_message_count")
+    if user_turns is None:
+        messages = row.get("messages") or []
+        if isinstance(messages, list):
+            return sum(
+                1
+                for msg in messages
+                if _safe_lower(msg.get("role") if isinstance(msg, dict) else msg) == "user"
+            )
+        return 0
+    return _as_positive_int(user_turns)
+
+
+def _has_cli_lineage(row: dict) -> bool:
+    segment_count = _as_positive_int(row.get("_compression_segment_count"))
+    return segment_count > 1 or bool(row.get("_lineage_root_id"))
+
+
+def is_cli_session_row(row: dict) -> bool:
+    """Return True for rows that should be treated as CLI-imported sessions."""
+    if not isinstance(row, dict):
+        return False
+    source = _safe_lower(row.get("session_source"))
+    if source == "messaging":
+        return False
+    if source == "cli":
+        return True
+    source_tag = _safe_lower(row.get("source_tag"))
+    raw_source = _safe_lower(row.get("raw_source"))
+    source_name = _safe_lower(row.get("source"))
+    source_label = _safe_lower(row.get("source_label"))
+    if source_tag == "cli" or raw_source == "cli" or source_name == "cli" or source_label == "cli":
+        return True
+
+    # Legacy imported CLI rows may only be marked as CLI in sidebar metadata.
+    # Keep this conservative to avoid treating messaging sessions as CLI.
+    return bool(
+        row.get("is_cli_session")
+        and source not in MESSAGING_SOURCES
+        and source_tag not in MESSAGING_SOURCES
+        and raw_source not in MESSAGING_SOURCES
+        and source_name not in MESSAGING_SOURCES
+        and _looks_like_default_cli_title(row)
+    )
+
+
+def is_cli_session_row_visible(row: dict) -> bool:
+    """Return whether a CLI-related row should remain visible in the sidebar."""
+    if not isinstance(row, dict):
+        return False
+    if not is_cli_session_row(row):
+        return True
+
+    message_count = _as_positive_int(row.get("actual_message_count") or row.get("message_count"))
+    if message_count <= 0:
+        return False
+
+    if _has_cli_lineage(row):
+        return True
+
+    if not _looks_like_default_cli_title(row):
+        return True
+
+    return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -79,8 +191,17 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     should continue the same visible conversation rather than becoming a
     separate child-session row. Plain parent/child links that started before the
     parent's ended boundary remain child sessions.
+
+    Do not collapse lineage across raw sources. A WebUI session that continues
+    from a Telegram/CLI/etc. parent must remain visible as its own surface-owned
+    conversation; otherwise the tip inherits the root's title/source metadata and
+    can disappear under messaging/sidebar policies.
     """
     if not parent or not child:
+        return False
+    parent_source = str(parent.get('source') or '').strip().lower()
+    child_source = str(child.get('source') or '').strip().lower()
+    if parent_source and child_source and parent_source != child_source:
         return False
     if parent.get('end_reason') not in {'compression', 'cli_close'}:
         return False
@@ -133,10 +254,13 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         if not parent_id:
             continue
         children_by_parent.setdefault(parent_id, []).append(row)
-        if _is_continuation_session(rows_by_id.get(parent_id), row):
+        parent = rows_by_id.get(parent_id)
+        if _is_continuation_session(parent, row):
             continuation_child_ids.add(row['id'])
         else:
             row['relationship_type'] = 'child_session'
+            row['parent_title'] = parent.get('title') if parent else None
+            row['parent_source'] = parent.get('source') if parent else None
             parent_root = _continuation_root_id(rows_by_id, parent_id)
             if parent_root:
                 row['_parent_lineage_root_id'] = parent_root
@@ -189,7 +313,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # touched standalone sessions — exactly the inverse of what a user
         # expects from "Show agent sessions" sorted by activity.
         for key in (
-            'id', 'model', 'message_count', 'actual_message_count',
+            'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
             'ended_at', 'end_reason', 'last_activity',
         ):
             if key in tip:
@@ -214,9 +338,9 @@ def read_importable_agent_session_rows(
     db_path: Path,
     limit: int = 200,
     log=None,
-    exclude_sources: tuple[str, ...] | None = ("cron",),
+    exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
 ) -> list[dict]:
-    """Return non-WebUI agent sessions projected as importable conversations.
+    """Return agent sessions projected as importable conversations.
 
     Hermes Agent can create rows in ``state.db.sessions`` before a session has
     any messages, and long conversations can be split into compression-linked
@@ -243,6 +367,8 @@ def read_importable_agent_session_rows(
         # source column we cannot safely distinguish WebUI rows from agent rows.
         cur.execute("PRAGMA table_info(sessions)")
         session_cols = {row[1] for row in cur.fetchall()}
+        cur.execute("PRAGMA table_info(messages)")
+        message_cols = {row[1] for row in cur.fetchall()}
         if 'source' not in session_cols:
             log.warning(
                 "agent session listing skipped: state.db at %s has no 'source' column "
@@ -255,8 +381,21 @@ def read_importable_agent_session_rows(
         parent_expr = _optional_col('parent_session_id', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
+        user_id_expr = _optional_col('user_id', session_cols)
+        chat_id_expr = _optional_col('chat_id', session_cols)
+        chat_type_expr = _optional_col('chat_type', session_cols)
+        thread_id_expr = _optional_col('thread_id', session_cols)
+        session_key_expr = _optional_col('session_key', session_cols)
+        origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
+        origin_user_id_expr = _optional_col('origin_user_id', session_cols)
+        platform_expr = _optional_col('platform', session_cols)
+        user_message_count_expr = (
+            "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+            if 'role' in message_cols
+            else "COUNT(m.id)"
+        )
 
-        where_clauses = ["s.source IS NOT NULL", "s.source != 'webui'"]
+        where_clauses = ["s.source IS NOT NULL"]
         params: list[str] = []
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
@@ -269,10 +408,19 @@ def read_importable_agent_session_rows(
             f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
+                   {user_id_expr},
+                   {chat_id_expr},
+                   {chat_type_expr},
+                   {thread_id_expr},
+                   {session_key_expr},
+                   {origin_chat_id_expr},
+                   {origin_user_id_expr},
+                   {platform_expr},
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
                    COUNT(m.id) AS actual_message_count,
+                   {user_message_count_expr} AS actual_user_message_count,
                    MAX(m.timestamp) AS last_activity
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
@@ -284,6 +432,7 @@ def read_importable_agent_session_rows(
         )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
         projected = [_with_normalized_source(row) for row in projected]
+        projected = [row for row in projected if is_cli_session_row_visible(row)]
         if limit is None:
             return projected
         return projected[:max(0, int(limit))]
