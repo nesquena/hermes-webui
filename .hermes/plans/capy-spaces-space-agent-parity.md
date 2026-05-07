@@ -11,12 +11,16 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the demo smoke suite now renders a compact Kanban board checklist row (`columns 3 · cards 3 · drag/drop planned · card edits metadata-only`) from safe `kanban_board` metadata while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: safe recovery now shows restore-preview summaries for rollback points, so a broken Space can be inspected and restored from metadata-only previews without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
 
+- `feat(spaces): show recovery restore previews`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the safe recovery panel renders restore-preview summaries (`Preview: ... · Widgets: ...`) for rollback points while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed; full Spaces UI JS behavior suite passed (`92 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
+
 - `feat(spaces): summarize kanban flow in smoke suite`
-  - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now surfaces a compact safe Kanban board checklist row for the kanban vertical while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Run all smokes` now renders a compact Kanban board checklist row (`columns 3 · cards 4 · drag/drop planned · card edit planned`) from safe `kanban_flow` metadata while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): link game install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Game Sandbox install status includes a `Run snake smoke` action wired to `demo_snake_iterative_repair`, while preserving `Open game sandbox` / `Manage game widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
@@ -1331,8 +1335,9 @@ The original Phase 0 + thin Phase 1 skeleton has landed enough that the next spr
 2. Expand safe recovery/admin UI so it can inspect metadata, disable/enable spaces/widgets/modules, launch a scoped repair prompt, and later roll back without rendering generated content.
 3. Add rollback/time-travel MVP: revision list, diff/preview, widget rollback, full-space rollback, and recovery-mode rollback.
 4. Drive the Research Harness vertical demo end-to-end using strict TDD.
-5. Define the sandbox/postMessage contract before adding richer generated or trusted widget rendering.
-6. Maintain screenshot/browser QA artifacts for UI-facing slices.
+5. Define the sandbox/postMessage/event contract before adding richer generated or trusted widget rendering.
+6. Add an explicit generic creator-loop track after those gates: prompt → bounded space/widget spec → sandboxed preview → visual QA → patch/repair → revisioned commit/rollback. This is the platform unlock that moves Capy Spaces beyond curated demo cards.
+7. Maintain screenshot/browser QA artifacts for UI-facing slices.
 
 This gives a safe spine that future widget/tool/browser/share work can attach to without reworking the data model or expanding trust before recovery exists.
 

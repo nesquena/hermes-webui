@@ -1920,10 +1920,12 @@
       const eventId = rev && rev.event_id ? String(rev.event_id) : '';
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'revision';
       const detailText = formatRevisionDetails(rev && rev.details);
+      const previewText = formatRestorePreview(rev && rev.restore_preview);
       const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         '</div><div class="capy-spaces-actions">'+restoreButton+'</div></div>';
     }).join('');
   }
