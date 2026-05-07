@@ -70,6 +70,7 @@ Recently landed:
 - The Stock Chart install completion card now includes a direct `Run stock smoke` action that exercises the existing metadata-only market-data/chart preview path from the installed demo card without exposing generated renderer/source/API-auth markers.
 - The Local Service Dashboard install flow now produces a visible metadata-only completion card with direct open/manage actions for the Agent Zero/local-service dashboard demo path, without exposing generated renderer or credential-like fields.
 - The Daily Dashboard install completion card now includes a direct `Run dashboard smoke` action that exercises the existing metadata-only prices/news/agenda/briefing preview path from the installed demo card without exposing generated renderer/source/API-auth markers.
+- The Local Service Dashboard install completion card now includes a direct `Run local service smoke` action that exercises the existing metadata-only Agent Zero/local-service health-review path from the installed demo card without exposing generated renderer/source/API-auth markers.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:

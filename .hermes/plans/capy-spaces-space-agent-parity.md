@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Daily Dashboard install completion card links directly into the safe dashboard smoke, making the installed template card a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Local Service Dashboard install completion card links directly into the safe local-service smoke, making the installed Agent Zero/local-service dashboard template a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link local service install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Local Service Dashboard install status includes a `Run local service smoke` action wired to `demo_local_agent_control_dashboard`, while preserving `Open local service dashboard` / `Manage service widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): link dashboard install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Daily Dashboard install status includes a `Run dashboard smoke` action wired to `demo_daily_dashboard`, while preserving `Open dashboard demo` / `Manage dashboard widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
