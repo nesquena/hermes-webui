@@ -4474,7 +4474,10 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    let bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    if(!isUser&&m.provider_details){
+      bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
+    }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';

@@ -761,6 +761,9 @@
   .msg-body code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:10px 0;}
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:13px;line-height:1.6;}
+  .provider-error-details{margin:12px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
+  .provider-error-details>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;padding:8px 12px;}
+  .provider-error-details>pre{margin:0;border:0;border-top:1px solid var(--border);border-radius:0;max-height:220px;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
   /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
