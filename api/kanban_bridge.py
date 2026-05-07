@@ -1,9 +1,14 @@
-"""Read-only Hermes Kanban bridge for the WebUI.
+"""Hermes Kanban bridge for the WebUI.
 
-This module exposes a small WebUI-native API under ``/api/kanban/*`` while
-keeping Hermes Agent's ``hermes_cli.kanban_db`` as the only source of truth.
-The first integration is deliberately read-only; write/move semantics can be
-added in later focused PRs.
+This module exposes a full CRUD API under ``/api/kanban/*`` while keeping
+Hermes Agent's ``hermes_cli.kanban_db`` as the only source of truth.
+
+Supported operations:
+- Task CRUD (create, read, patch, bulk update, archive)
+- Multi-board management (list, create, archive, switch)
+- Task dependency links (create, delete)
+- SSE live event stream for real-time updates
+- Comments and worker dispatch integration
 """
 
 from __future__ import annotations
@@ -702,10 +707,12 @@ def _board_meta_dict(meta):
 def _board_counts_for_slug(slug):
     """Per-status task counts for a board, used to populate the board
     switcher with a live "12 tasks" badge. Mirrors the agent dashboard's
-    ``_board_counts`` helper. Best-effort — empty dict if the board's
-    sqlite is missing (which can happen on a freshly-created board before
-    the first task is added)."""
+    ``_board_counts`` helper. Returns an empty dict for boards whose
+    sqlite file has not been materialized yet (freshly-created boards
+    with no tasks)."""
     kb = _kb()
+    if not kb.board_exists(slug):
+        return {}
     try:
         conn = kb.connect(board=slug)
     except Exception:

@@ -695,6 +695,69 @@ def test_list_boards_includes_default_when_only_default_exists(monkeypatch):
     assert "default" in slugs
 
 
+def test_board_counts_returns_empty_for_nonexistent_board(monkeypatch):
+    """_board_counts_for_slug returns {} early for boards whose sqlite
+    file has not been materialized yet (board_exists returns False),
+    avoiding an unnecessary connect() call on the hot board-list path."""
+    fake_kanban = FakeKanbanDB()
+    connect_calls = []
+    orig_connect = fake_kanban.connect
+    def tracking_connect(*, board=None):
+        connect_calls.append(("connect", board))
+        return orig_connect(board=board)
+    fake_kanban.connect = tracking_connect
+
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.kanban_db = fake_kanban
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
+    import api.kanban_bridge as bridge
+    bridge = importlib.reload(bridge)
+
+    counts = bridge._board_counts_for_slug("no-such-board")
+    assert counts == {}
+    # connect must NOT have been called — early-out via board_exists
+    assert connect_calls == []
+
+
+def test_board_counts_returns_real_counts_for_populated_board(monkeypatch):
+    """When a board has tasks, _board_counts_for_slug must return actual
+    per-status counts. The FakeConn needs to handle the board-counts SQL
+    pattern (which differs from the dashboard stats SQL)."""
+    fake_kanban = FakeKanbanDB()
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.kanban_db = fake_kanban
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
+    import api.kanban_bridge as bridge
+    bridge = importlib.reload(bridge)
+
+    # Patch FakeConn.execute to handle the board-counts SQL:
+    #   SELECT status, COUNT(*) AS n FROM tasks WHERE status != 'archived' GROUP BY status
+    orig_execute = FakeConn.execute
+    def patched_execute(self, sql, params=()):
+        if "SELECT status, COUNT(*) AS n FROM tasks" in sql and "GROUP BY status" in sql:
+            rows = []
+            grouped = {}
+            for task in self.tasks:
+                if task.status == "archived":
+                    continue
+                grouped[task.status] = grouped.get(task.status, 0) + 1
+            for status, n in grouped.items():
+                rows.append(FakeRow(status=status, n=n))
+            return SimpleNamespace(fetchall=lambda: rows)
+        return orig_execute(self, sql, params)
+    FakeConn.execute = patched_execute
+
+    try:
+        counts = bridge._board_counts_for_slug("default")
+        # Default fake has t_1=ready, t_2=blocked
+        assert counts.get("ready") == 1
+        assert counts.get("blocked") == 1
+    finally:
+        FakeConn.execute = orig_execute
+
+
 def test_create_board_payload_creates_and_optionally_switches(monkeypatch):
     """POST /boards must create a board and, when ``switch=true``, also set
     it as the active board so subsequent requests resolve to it."""
