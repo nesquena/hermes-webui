@@ -4576,7 +4576,7 @@ function renderMessages(options){
       }
     }
     const isUser=m.role==='user';
-    if(isUser) content=_stripWorkspaceDisplayPrefix(content);
+    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -4590,7 +4590,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
     if(!isUser&&m.provider_details){
       bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
@@ -4631,7 +4631,7 @@ function renderMessages(options){
       row.className='msg-row';
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
-      row.dataset.rawText=String(content).trim();
+      row.dataset.rawText=String(displayContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
