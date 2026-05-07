@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather demo checklist avoids browser double-numbering in the visible prompt → widget flow by letting the ordered list provide numbering while keeping the same metadata-only weather smoke safety contract. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Notes app demo checklist avoids browser double-numbering in the visible saved-notes flow by letting the ordered list provide numbering while keeping the same metadata-only notes smoke safety contract. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): avoid double-numbering notes checklist`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes app checklist renders clean ordered-list items (`Folder list ready`, `Editor draft saved`, `Markdown preview saved`, `Attachments remain agent-mediated`) instead of duplicating numeric prefixes such as `1. 1. ...`, while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `fix(spaces): avoid double-numbering weather checklist`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Weather demo prompt → widget checklist renders clean ordered-list items (`Chat answer recorded`, `Widget created from request`, `Persistent widget verified after reload`) instead of duplicating numeric prefixes such as `1. 1. ...`, while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.

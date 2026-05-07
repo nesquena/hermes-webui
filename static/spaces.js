@@ -761,10 +761,10 @@
   function renderNotesFlowChecklist(flow){
     const safeFlow = flow && typeof flow === 'object' && !Array.isArray(flow) ? flow : {};
     if (!Object.keys(safeFlow).length) return '';
-    const folderStep = safeFlow.folders_ready ? '1. Folder list ready' : '1. Folder list pending';
-    const editorStep = safeFlow.editor_saved ? '2. Editor draft saved' : '2. Editor draft pending';
-    const previewStep = safeFlow.markdown_preview_saved ? '3. Markdown preview saved' : '3. Markdown preview pending';
-    const attachmentsStep = safeFlow.attachments_agent_mediated ? '4. Attachments remain agent-mediated' : '4. Attachments pending';
+    const folderStep = safeFlow.folders_ready ? 'Folder list ready' : 'Folder list pending';
+    const editorStep = safeFlow.editor_saved ? 'Editor draft saved' : 'Editor draft pending';
+    const previewStep = safeFlow.markdown_preview_saved ? 'Markdown preview saved' : 'Markdown preview pending';
+    const attachmentsStep = safeFlow.attachments_agent_mediated ? 'Attachments remain agent-mediated' : 'Attachments pending';
     return '<div class="capy-spaces-card"><strong>Notes app checklist</strong>' +
       '<ol><li>'+escapeHtml(folderStep)+'</li><li>'+escapeHtml(editorStep)+'</li><li>'+escapeHtml(previewStep)+'</li><li>'+escapeHtml(attachmentsStep)+'</li></ol>' +
       '<div class="capy-spaces-muted">Space Agent notes-app path remains metadata-only until richer editors and files are explicitly sandboxed.</div></div>';
