@@ -10,6 +10,7 @@ paths are used as fallback when no profile module is available.
 import json
 import logging
 import os
+import stat
 import subprocess
 import concurrent.futures
 from pathlib import Path
@@ -92,7 +93,8 @@ def _profile_default_workspace() -> str:
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
-    - Remove entries whose paths no longer exist on disk.
+    - Preserve saved paths even when they are currently missing or inaccessible;
+      picker state must not be destroyed by a transient stat/permission failure.
     - Remove entries whose paths live inside another profile's directory
       (e.g. ~/.hermes/profiles/X/... should not appear on a different profile).
     - Rename any entry whose name is literally 'default' to 'Home' (avoids
@@ -104,10 +106,9 @@ def _clean_workspace_list(workspaces: list) -> list:
     for w in workspaces:
         path = w.get('path', '')
         name = w.get('name', '')
-        p = Path(path).resolve() if path else Path('/')
-        # Skip paths that no longer exist
-        if not p.is_dir():
+        if not path:
             continue
+        p = _safe_resolve(Path(path).expanduser())
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -128,6 +129,32 @@ def _clean_workspace_list(workspaces: list) -> list:
             name = 'Home'
         result.append({'path': str(p), 'name': name})
     return result
+
+
+def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
+    """Return a user-facing validation error for an unusable workspace path.
+
+    ``Path.exists()`` can collapse permission/stat failures into a generic falsey
+    result on some Python/OS combinations, which produced misleading "does not
+    exist" messages for macOS/TCC-denied directories.  Probe with ``stat()`` so
+    missing paths, non-directories, and permission-denied paths can be reported
+    separately.
+    """
+    try:
+        st = candidate.stat()
+    except FileNotFoundError:
+        return f"{missing_label}: {candidate}"
+    except PermissionError as exc:
+        return (
+            f"Cannot access path: {candidate}. The server process could not inspect "
+            f"this directory ({exc}). On macOS, grant Full Disk Access or Files and "
+            f"Folders permission to the Hermes/WebUI app or server process, then try again."
+        )
+    except OSError as exc:
+        return f"Cannot access path: {candidate}. The server process could not inspect this path ({exc})."
+    if not stat.S_ISDIR(st.st_mode):
+        return f"Path is not a directory: {candidate}"
+    return None
 
 
 def _migrate_global_workspaces() -> list:
@@ -517,10 +544,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
@@ -602,10 +628,9 @@ def validate_workspace_to_add(path: str) -> Path:
     path = _strip_surrounding_quotes(path)
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
