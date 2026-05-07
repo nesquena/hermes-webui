@@ -85,9 +85,9 @@ async function loadDir(path){
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
       }else{
-        clearPreview();
+        clearPreview({keepPanelOpen:true});
       }
     }
     // Fetch git info for workspace root (non-blocking)
@@ -337,7 +337,7 @@ function renderFileBreadcrumb(filePath) {
   const root = document.createElement('span');
   root.className = 'breadcrumb-seg breadcrumb-link';
   root.textContent = '~';
-  root.onclick = () => { clearPreview(); loadDir('.'); };
+  root.onclick = () => { loadDir('.'); };
   bar.appendChild(root);
 
   const parts = filePath.split('/');
@@ -354,7 +354,7 @@ function renderFileBreadcrumb(filePath) {
     if (i < parts.length - 1) {
       seg.className = 'breadcrumb-seg breadcrumb-link';
       const target = accumulated;
-      seg.onclick = () => { clearPreview(); loadDir(target); };
+      seg.onclick = () => { loadDir(target); };
     } else {
       seg.className = 'breadcrumb-seg breadcrumb-current';
     }
