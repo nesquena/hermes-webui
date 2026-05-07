@@ -1,5 +1,35 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
+
+### Fixed (3 PRs)
+
+- **PR #1851** by @ChaseFlorell — **P0 hotfix**: ES module import for `static/vendor/smd.min.js` used a bare specifier (`import * as smd from 'static/vendor/smd.min.js'`) which the [HTML spec](https://html.spec.whatwg.org/multipage/webappapis.html#resolve-a-module-specifier) rejects — relative ES module references must start with `/`, `./`, or `../`. Result: the entire `<script type="module">` block in `static/index.html` failed silently, `window.smd` was never set, and live token-by-token markdown streaming was broken for all users since the streaming-markdown library landed. Fix: change `'static/vendor/smd.min.js'` → `'/static/vendor/smd.min.js'`. 1-LOC change. Browser-verified post-fix: `typeof window.smd === 'object'` with all expected exports (BLOCKQUOTE, CODE_FENCE, EQUATION_BLOCK, etc.). Closes #1849.
+
+- **PR #1852** by @ChaseFlorell — CSP `connect-src 'self'` blocked DevTools-initiated fetches of source maps for the three xterm.js libraries (xterm@5.3.0, xterm-addon-fit@0.8.0, xterm-addon-web-links@0.9.0) loaded from `cdn.jsdelivr.net`. The script tags loaded fine (covered by `script-src https://cdn.jsdelivr.net`), but `.js.map` files are fetched via `connect` and got blocked, emitting CSP violation errors in the console whenever DevTools was open. Fix: add `https://cdn.jsdelivr.net` to `connect-src` in `api/helpers.py:_security_headers()`, alongside the existing `'self'`. Consistent with the existing jsDelivr allowlist on `script-src`/`style-src`/`font-src`. New regression test `test_issue1850_csp_connect_src_jsdelivr.py` pins both the new entry and that `'self'` is preserved. Closes #1850.
+
+- **PR #1848** by @Michaelyklam — Backslash LaTeX delimiters (`\[...\]` for display, `\(...\)` for inline) didn't render through the KaTeX pipeline. The renderer already supported `$$...$$` / `$...$`, but the prior regex for `\\(...\\)` / `\\[...\\]` required a *double* backslash, which is the JavaScript-source escape form, not the form LLMs actually emit in chat content. Result: multi-line display math from real assistant output appeared as raw `\[ ... \]` text with `<br>` line breaks instead of a centered KaTeX block. Fix in `static/ui.js`: math-stash regex relaxed to single backslashes, and the user-bubble path (`_renderUserFencedBlocks`) gets its own pre-escape math stash so backslash delimiters survive `esc()` instead of being HTML-escaped to `&#92;`. Test `test_backslash_latex_delimiters_render_to_katex_placeholders` runs the assistant and user pipelines via Node and asserts no raw delimiter leakage in either rendered output. Closes #1847.
+
+### Maintainer-side absorption
+
+- **`tests/test_streaming_markdown.py` + `tests/test_subpath_frontend_routes.py`** — tightened the smd-import-shape assertions to require the `./` relative form and forbid BOTH bare specifier (broken by ES spec, #1849) AND root-absolute (breaks `/hermes/` subpath mounts). The original tests only forbade root-absolute, which let the bare-specifier regression land unnoticed in the first place. PR #1851's original fix used the root-absolute form (which would have re-broken subpath deployments); the corrected `./` form satisfies both constraints. Subpath safety verified: `new URL('./static/vendor/smd.min.js', 'http://host/hermes/').href === 'http://host/hermes/static/vendor/smd.min.js'`.
+
+- **`static/ui.js` + `tests/test_issue347.py`** (commit `d703959` by @nesquena, opus-4.7-paired) — fix code-fence-vs-math stash ordering in `_renderUserFencedBlocks`. PR #1848 added a math stash to the user-bubble path so backslash LaTeX delimiters survive `esc()` and reach KaTeX, but the math stash ran BEFORE the existing code-fence stash. Result: a user-typed code block containing LaTeX-like syntax (e.g. `` ``` ``\n`\[ a + b \]`\n`` ``` ``) had its math content extracted as KaTeX and rendered as a `<div class="katex-block">` placeholder INSIDE `<pre><code>`, replacing the user's literal source with rendered math. The assistant path (`renderMd()`) had the correct ordering already; the user-bubble path inherited the mistake from the inverted stash order. Fix reorders fences-first, then math, mirroring `renderMd()`. Two regression tests added: one fails pre-fix and asserts no KaTeX wrappers inside `<pre><code>`, one is a sibling guard against an over-correction that would disable user-bubble math entirely.
+
+- **`tests/test_issue1850_csp_connect_src_jsdelivr.py`** (absorbed from PR #1852 follow-up by @ChaseFlorell) — switched to `Path(__file__).resolve().parents[1]` rooting so the test survives being run from a non-repo-root cwd. Matches the pattern in `test_issue1112_csp_google_fonts.py`.
+
+### Tests
+
+4810 → **4817 collected** (+7). Three from #1848 augmenting `test_issue347.py` (Node-driven `_run_renderers()` harness for assistant + user pipelines), two new in `test_issue1850_csp_connect_src_jsdelivr.py`, two from the d703959 user-bubble code-fence-vs-math ordering fix.
+
+### Pre-release verification
+
+- `pytest tests/` — green
+- Live browser-verified at port 8789 against stage-316:
+  - `window.smd` resolves to streaming-markdown module (PR #1851)
+  - `Content-Security-Policy: ...connect-src 'self' https://cdn.jsdelivr.net...` in served headers (PR #1852)
+  - `renderMd()` produces `<div class="katex-block">` for `\[...\]` and `<span class="katex-inline">` for `\(...\)` with no raw delimiter leakage (PR #1848)
+
 ## [v0.51.21] — 2026-05-07 — 3-PR batch (P0 hotfix + auto-compression UI + shell route HTML fallback)
 
 ### Fixed (3 PRs)

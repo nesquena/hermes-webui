@@ -33,7 +33,7 @@
   <!-- ES module imports do not support the integrity= attribute (W3C limitation);    -->
   <!-- version is pinned in the vendored file path; hash documented above for audit. -->
   <script type="module">
-    import * as smd from 'static/vendor/smd.min.js';
+    import * as smd from './static/vendor/smd.min.js';
     // SRI verification happens at the ES module level via importmap or SW; pinning version in URL.
     // sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa
     window.smd = smd;

@@ -56,6 +56,15 @@ def test_direct_frontend_event_sources_are_relative_to_current_mount():
 
 
 def test_static_vendor_import_is_relative_to_current_mount():
+    """Import must use `./static/vendor/smd.min.js` form so the URL resolves
+    relative to the document URL. Bare specifier (no leading `./` or `/`)
+    is invalid per ES module spec and breaks markdown streaming silently
+    (#1849). Root-absolute (`/static/...`) escapes subpath mounts like
+    `/hermes/`. The `./` form satisfies both constraints.
+    """
     src = read("static/index.html")
-    assert "import * as smd from 'static/vendor/smd.min.js'" in src
+    assert "import * as smd from './static/vendor/smd.min.js'" in src
+    # Bare specifier — broken per ES module spec (#1849)
+    assert "import * as smd from 'static/vendor/smd.min.js'" not in src
+    # Root-absolute — breaks /hermes/ subpath mounts
     assert "import * as smd from '/static/vendor/smd.min.js'" not in src
