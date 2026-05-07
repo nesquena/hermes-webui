@@ -325,6 +325,7 @@ def test_provider_quota_card_is_rendered_in_providers_panel():
     assert "account_limits" in panels
     assert "remaining_percent" in panels
     assert "provider-quota-details" in panels
+    assert "5-hour limit" in panels
 
 
 def test_provider_quota_styles_exist():

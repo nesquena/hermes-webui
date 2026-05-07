@@ -1,11 +1,5 @@
 # Hermes Web UI -- Changelog
 
-## [Unreleased]
-
-### Added
-
-- Extend the active provider quota endpoint/card beyond OpenRouter for account-limit providers. OpenAI Codex and Anthropic OAuth now reuse Hermes Agent's `/usage` account-limits abstraction and render plan/window/detail fields in Settings → Providers without exposing credentials. Refs #1766.
-
 ## [v0.51.18] — 2026-05-07 — 5-PR batch (4 contributor + 1 self-built UX polish)
 
 ### Fixed
