@@ -527,11 +527,13 @@
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
+      const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const restoreButton = eventId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button></div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
+        (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
         '</div>'+restoreButton+'</div>';
     }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
     return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
@@ -593,6 +595,37 @@
       }).filter(Boolean).join(' / ');
     }).filter(Boolean) : [];
     return 'Preview: '+name+' · '+countLabel+(widgets.length ? ' · Widgets: '+widgets.join(', ') : '');
+  }
+
+  function formatRestoreDiff(diff){
+    if (!diff || typeof diff !== 'object' || Array.isArray(diff) || !diff.has_changes) return '';
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|source)/i;
+    function safeList(value){
+      if (!Array.isArray(value)) return [];
+      return value.slice(0, 10).map(function(item){
+        const text = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        return text && !unsafeValuePattern.test(text) ? text : '';
+      }).filter(Boolean);
+    }
+    function plural(count, singular){
+      return count+' '+singular+(count === 1 ? '' : 's');
+    }
+    const fields = safeList(diff.space_fields_to_update);
+    const addWidgets = safeList(diff.widgets_to_add);
+    const removeWidgets = safeList(diff.widgets_to_remove);
+    const updateWidgets = safeList(diff.widgets_to_update);
+    const summary = [];
+    if (fields.length) summary.push('changes '+plural(fields.length, 'field'));
+    if (addWidgets.length) summary.push('adds '+plural(addWidgets.length, 'widget'));
+    if (removeWidgets.length) summary.push('removes '+plural(removeWidgets.length, 'widget'));
+    if (updateWidgets.length) summary.push('updates '+plural(updateWidgets.length, 'widget'));
+    const details = [];
+    if (fields.length) details.push('Fields: '+fields.join(', '));
+    if (addWidgets.length) details.push('Add widgets: '+addWidgets.join(', '));
+    if (removeWidgets.length) details.push('Remove widgets: '+removeWidgets.join(', '));
+    if (updateWidgets.length) details.push('Update widgets: '+updateWidgets.join(', '));
+    if (!summary.length) return '';
+    return 'Diff: restore '+summary.join(', ')+(details.length ? ' · '+details.join(' · ') : '');
   }
 
   function formatRevisionTime(value){
@@ -1921,11 +1954,13 @@
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'revision';
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
+      const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
+        (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
         '</div><div class="capy-spaces-actions">'+restoreButton+'</div></div>';
     }).join('');
   }

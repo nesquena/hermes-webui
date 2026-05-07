@@ -634,8 +634,8 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
-      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widget_count_delta: -1, widgets_to_add: [], widgets_to_remove: ['notes'], widgets_to_update: ['weather'], space_fields_to_update: ['description'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
     ] });
   }
   if (path === 'api/spaces/widget/upsert') {
@@ -2946,6 +2946,10 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "Widgets: weather / Weather patched / markdown" in out["rootHtml"]
     assert "Preview: Lab &lt;Detail&gt; · 1 widget" in out["rootHtml"]
     assert "Widgets: weather / &lt;Weather&gt; / markdown" in out["rootHtml"]
+    assert "Diff: restore changes 1 field, removes 1 widget, updates 1 widget" in out["rootHtml"]
+    assert "Fields: description" in out["rootHtml"]
+    assert "Remove widgets: notes" in out["rootHtml"]
+    assert "Update widgets: weather" in out["rootHtml"]
     assert "name: Lab &lt;Detail&gt;" in out["rootHtml"]
     assert 'data-capy-action="restoreRevision"' in out["rootHtml"]
     assert "Restore" in out["rootHtml"]

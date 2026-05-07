@@ -916,7 +916,7 @@ def _event_id_is_safe(event_id: Any) -> bool:
     return bool(re.fullmatch(r"[a-f0-9]{32}", str(event_id or "")))
 
 
-def _event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
+def _event_summary(event: dict[str, Any], sid: str, current_snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
         return None
@@ -934,6 +934,8 @@ def _event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
     snapshot = event.get("snapshot")
     if isinstance(snapshot, dict):
         summary["restore_preview"] = _restore_preview_summary(snapshot, sid)
+        if isinstance(current_snapshot, dict):
+            summary["restore_diff"] = _restore_diff_summary(snapshot, current_snapshot)
     return summary
 
 
@@ -953,6 +955,60 @@ def _restore_preview_summary(snapshot: dict[str, Any], sid: str) -> dict[str, An
         "description": _payload_text_summary(snapshot.get("description") or "", 240),
         "widget_count": len(widgets),
         "widgets": widget_summaries,
+    }
+
+
+def _restore_diff_summary(target_snapshot: dict[str, Any], current_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Summarize what restoring target_snapshot would change, metadata-only."""
+
+    def widget_map(space: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
+        mapped: dict[str, dict[str, Any]] = {}
+        for widget in widgets:
+            if not isinstance(widget, dict):
+                continue
+            try:
+                summary = _widget_summary(widget)
+            except ValueError:
+                continue
+            mapped[str(summary["id"])] = summary
+        return mapped
+
+    target_widgets = widget_map(target_snapshot)
+    current_widgets = widget_map(current_snapshot)
+    target_ids = set(target_widgets)
+    current_ids = set(current_widgets)
+    widgets_to_add = sorted(target_ids - current_ids)[:20]
+    widgets_to_remove = sorted(current_ids - target_ids)[:20]
+    widgets_to_update = sorted(
+        wid for wid in (target_ids & current_ids) if target_widgets.get(wid) != current_widgets.get(wid)
+    )[:20]
+
+    space_fields_to_update: list[str] = []
+    for field in ("name", "description", "agent_instructions", "template"):
+        if _payload_text_summary(target_snapshot.get(field) or "", 500) != _payload_text_summary(
+            current_snapshot.get(field) or "", 500
+        ):
+            space_fields_to_update.append(field)
+    for field in ("layout", "capabilities"):
+        if _payload_summary(target_snapshot.get(field) or {}) != _payload_summary(current_snapshot.get(field) or {}):
+            space_fields_to_update.append(field)
+
+    widget_count_delta = len(target_widgets) - len(current_widgets)
+    has_changes = bool(
+        widget_count_delta
+        or widgets_to_add
+        or widgets_to_remove
+        or widgets_to_update
+        or space_fields_to_update
+    )
+    return {
+        "has_changes": has_changes,
+        "widget_count_delta": widget_count_delta,
+        "widgets_to_add": widgets_to_add,
+        "widgets_to_remove": widgets_to_remove,
+        "widgets_to_update": widgets_to_update,
+        "space_fields_to_update": space_fields_to_update,
     }
 
 
@@ -2822,7 +2878,7 @@ def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]
             continue
         if not isinstance(event, dict):
             continue
-        summary = _event_summary(event, sid)
+        summary = _event_summary(event, sid, space)
         if summary is not None:
             summaries.append(summary)
     return summaries

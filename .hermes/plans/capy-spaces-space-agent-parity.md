@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: safe recovery now shows restore-preview summaries for rollback points, so a broken Space can be inspected and restored from metadata-only previews without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: revision history now includes safe restore-diff summaries for rollback points, so users can see which metadata fields/widgets would change before restoring without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show revision restore diffs`
+  - Added RED/GREEN backend and real-`static/spaces.js` coverage proving revision events include metadata-only `restore_diff` summaries and the Revision history UI renders what a restore would change (`Fields`, `Remove widgets`, `Update widgets`) without leaking hostile renderer/source/API-auth markers or secret-looking values.
+  - Added the accelerated conveyor workflow to this plan: serialized implementation lane with parallel acceptance/test/harness/review prep for rollback, recovery, sandbox, Research Harness, and generic creator-loop slices.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`2 passed`); focused rollback/recovery checks passed (`5 passed`), full Spaces UI JS behavior suite passed (`92 passed`), full Spaces foundation suite passed (`152 passed`), `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed. Browser QA confirmed the restore-diff row was visible and panel-scoped leak check was clean.
 
 - `feat(spaces): show recovery restore previews`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the safe recovery panel renders restore-preview summaries (`Preview: ... · Widgets: ...`) for rollback points while continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
@@ -928,6 +933,8 @@ Sequencing rule from the video review: **do not enable powerful generated/script
 
 UI-facing acceptance update: every user-visible Capy Spaces slice should include automated tests plus browser/screenshot QA when visually relevant. Reports should include the screenshot artifact, visible pass/fail state, obvious layout issues, and confirmation that no raw renderer/source/script/secret-like values are visible.
 
+Acceleration update: use a conveyor workflow to move faster without weakening gates. Keep one serialized implementation lane for shared production files such as `static/spaces.js` and `api/spaces.py`, while parallel prep/review lanes draft acceptance criteria, RED tests, `/tmp` browser harnesses, and security reviews for upcoming slices. Every behavior slice still requires RED/GREEN TDD, scoped validation, visual QA when UI-facing, and a small committed checkpoint before the next implementation lane starts.
+
 Execution update: use one vertical demo as the near-term north star. Prefer the Research Harness until it works end-to-end: widget-origin prompt, scoped Capy event, live planning/source/notes/summary widgets, markdown artifact, PDF/export patch, revision events, rollback, and screenshot QA.
 
 ### Phase 0 — Safety and foundations
@@ -1332,12 +1339,13 @@ No direct migration from Space Agent data is required initially. If later useful
 The original Phase 0 + thin Phase 1 skeleton has landed enough that the next sprint should focus on the revised gates:
 
 1. Update this plan's current-status section at the start/end of each slice.
-2. Expand safe recovery/admin UI so it can inspect metadata, disable/enable spaces/widgets/modules, launch a scoped repair prompt, and later roll back without rendering generated content.
-3. Add rollback/time-travel MVP: revision list, diff/preview, widget rollback, full-space rollback, and recovery-mode rollback.
-4. Drive the Research Harness vertical demo end-to-end using strict TDD.
-5. Define the sandbox/postMessage/event contract before adding richer generated or trusted widget rendering.
-6. Add an explicit generic creator-loop track after those gates: prompt → bounded space/widget spec → sandboxed preview → visual QA → patch/repair → revisioned commit/rollback. This is the platform unlock that moves Capy Spaces beyond curated demo cards.
-7. Maintain screenshot/browser QA artifacts for UI-facing slices.
+2. Operate the accelerated conveyor: keep production edits serialized, but prepare acceptance criteria, RED tests, browser harnesses, and review checklists for rollback, recovery, sandbox, Research Harness, and creator-loop work in parallel.
+3. Expand safe recovery/admin UI so it can inspect metadata, disable/enable spaces/widgets/modules, launch a scoped repair prompt, and later roll back without rendering generated content.
+4. Add rollback/time-travel MVP: revision list, diff/preview, widget rollback, full-space rollback, and recovery-mode rollback.
+5. Drive the Research Harness vertical demo end-to-end using strict TDD.
+6. Define the sandbox/postMessage/event contract before adding richer generated or trusted widget rendering.
+7. Add an explicit generic creator-loop track after those gates: prompt → bounded space/widget spec → sandboxed preview → visual QA → patch/repair → revisioned commit/rollback. This is the platform unlock that moves Capy Spaces beyond curated demo cards.
+8. Maintain screenshot/browser QA artifacts for UI-facing slices.
 
 This gives a safe spine that future widget/tool/browser/share work can attach to without reworking the data model or expanding trust before recovery exists.
 

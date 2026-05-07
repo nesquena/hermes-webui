@@ -3347,6 +3347,56 @@ def test_revision_events_include_safe_restore_preview_without_leaking_sources(mo
 
 
 
+def test_revision_events_include_safe_restore_diff_without_leaking_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Rollback Diff", "description": "Original description"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes",
+            "kind": "markdown",
+            "title": "Notes",
+            "renderer": "<script>removeMe()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched"})
+    spaces.update_space(created["space_id"], {"description": "Updated description"})
+
+    revisions = spaces.list_revision_events(created["space_id"])
+    original_revision = next(rev for rev in revisions if rev["event_id"] == original["revision_event_id"])
+
+    assert original_revision["restore_diff"] == {
+        "has_changes": True,
+        "widget_count_delta": -1,
+        "widgets_to_add": [],
+        "widgets_to_remove": ["notes"],
+        "widgets_to_update": ["weather"],
+        "space_fields_to_update": ["description"],
+    }
+    serialized = json.dumps(original_revision).lower()
+    assert "keptbutneverreturned" not in serialized
+    assert "removeme" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "source" not in serialized
+
+
+
 def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Rollback Lab"})
