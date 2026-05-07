@@ -99,9 +99,9 @@ def test_approval_current_id_tracked():
 
 
 def test_polling_passes_count_to_show():
-    """The poll loop must pass pending_count to showApprovalCard."""
-    assert "showApprovalCard(data.pending, data.pending_count" in MESSAGES_JS, \
-        "Poll loop must pass data.pending_count to showApprovalCard"
+    """The poll loop must pass pending_count to the owner-aware approval renderer."""
+    assert "showApprovalForSession(sid, data.pending, data.pending_count" in MESSAGES_JS, \
+        "Poll loop must pass data.pending_count through showApprovalForSession"
 
 
 # ---------------------------------------------------------------------------

@@ -482,14 +482,16 @@ class TestApprovalCardTimerLogic:
                 f'After stopApprovalPolling(), hideApprovalCard called without force=true (got: {match!r})'
 
     def test_poll_loop_still_uses_no_force(self):
-        """Poll loop hideApprovalCard() (when pending gone) keeps no-force — correct behavior."""
+        """Poll loop approval hides (when pending gone) keep no-force behavior."""
         src = self._get_js().read_text()
-        # Line 446: else { hideApprovalCard(); } — this is the poll-loop path
-        # The 30s guard should protect this call (don't force from poll ticks)
-        assert 'else { hideApprovalCard(); }' in src or \
+        # Poll/SSE empty-state hides should preserve the 30s visibility guard.
+        # Owner-scoped prompt cleanup now routes this through the helper, whose
+        # default force=false is behavior-equivalent to the old hideApprovalCard().
+        assert '_hideApprovalCardIfOwner(sid);' in src or \
+               'else { hideApprovalCard(); }' in src or \
                'else {hideApprovalCard();}' in src or \
                'else { hideApprovalCard() }' in src, \
-            'Poll loop should still call hideApprovalCard() without force=true'
+            'Poll loop should still hide approval prompts without force=true'
 
     def test_show_approval_card_signature_dedup(self):
         """showApprovalCard uses a signature to avoid resetting timer on repeat polls."""
@@ -629,7 +631,8 @@ class TestClarifyCardTimerLogic:
 
     def test_clarify_poll_loop_uses_no_force(self):
         src = self._get_js().read_text()
-        assert "else { hideClarifyCard(false, 'expired'); }" in src or \
+        assert "_hideClarifyCardIfOwner(sid, false, 'expired');" in src or \
+               "else { hideClarifyCard(false, 'expired'); }" in src or \
                "else {hideClarifyCard(false,'expired');}" in src, \
             'Clarify poll loop should hide without force=true'
 

@@ -558,6 +558,7 @@ async function loadSession(sid){
       threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
     });
   }
+  if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
