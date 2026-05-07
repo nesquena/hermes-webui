@@ -329,6 +329,39 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
+    def test_html_media_endpoint_inline_requires_csp_sandbox(self):
+        """HTML opens inline only when requested and always carries CSP sandbox."""
+        html_bytes = b"<!doctype html><title>Hermes</title><script>window.ok=1</script>"
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(html_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("attachment", headers.get("Content-Disposition", ""))
+            self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
+            self.assertFalse(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get_all("X-Frame-Options", []), [])
+            self.assertTrue(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
     def test_path_traversal_rejected(self):
         _, status, _ = self._get(
             "/api/media?path=" + urllib.request.quote("/tmp/../../etc/passwd")

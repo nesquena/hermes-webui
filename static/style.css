@@ -935,6 +935,7 @@
   .attach-chip{display:flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:8px;padding:4px 10px;font-size:11px;font-weight:500;color:var(--accent-text);}
   .attach-chip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 0 0 3px;}
   .attach-chip button:hover{color:var(--accent);}
+  .file-input-visually-hidden{position:absolute;left:-9999px;top:auto;width:1px;height:1px;opacity:0;overflow:hidden;}
   /* Image attachment chips show a thumbnail preview instead of a paperclip chip */
   .attach-chip--image{background:transparent;border-color:var(--border);padding:3px;border-radius:6px;}
   .attach-chip--audio,.attach-chip--video{max-width:260px;}

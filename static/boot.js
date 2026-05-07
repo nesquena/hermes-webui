@@ -267,7 +267,7 @@ $('btnSend').onclick=()=>{
   }
   send();
 };
-$('btnAttach').onclick=()=>$('fileInput').click();
+$('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 (function(){
