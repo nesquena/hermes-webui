@@ -1516,6 +1516,33 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
     current_user_key = _message_identity({'role': 'user', 'content': msg_text})
+    current_user_in_candidates = any(
+        _message_identity(m) == current_user_key for m in candidates
+    )
+    current_user_already_checkpointed = bool(
+        merged and _message_identity(merged[-1]) == current_user_key
+    )
+    if (
+        current_user_key is not None
+        and not current_user_in_candidates
+        and not current_user_already_checkpointed
+        and any(
+            isinstance(m, dict) and m.get('role') in ('assistant', 'tool')
+            for m in candidates
+        )
+    ):
+        # Some provider retry/fallback paths can return an assistant/tool delta
+        # without echoing the current user turn. In deferred session-save mode
+        # the prompt exists only in pending_user_message, so appending that delta
+        # directly would make the assistant bubble appear attached to the prior
+        # exchange and then clear the pending prompt. Materialize the current
+        # turn at the transcript boundary before the assistant/tool response.
+        current_user_msg = {'role': 'user', 'content': msg_text}
+        insert_at = 0
+        while insert_at < len(candidates) and _is_context_compression_marker(candidates[insert_at]):
+            insert_at += 1
+        candidates = candidates[:insert_at] + [current_user_msg] + candidates[insert_at:]
+
     for msg in candidates:
         key = _message_identity(msg)
         if (
