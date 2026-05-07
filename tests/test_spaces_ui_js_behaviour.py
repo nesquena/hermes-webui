@@ -1845,8 +1845,10 @@ def test_spaces_ui_install_research_harness_posts_template_and_shows_safe_open_m
     assert "2 widgets" in out["rootHtml"]
     assert "Open research harness" in out["rootHtml"]
     assert "Manage research widgets" in out["rootHtml"]
+    assert "Run research smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="research-harness"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="research-harness"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_research_harness_pdf_export"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "research"}
     assert out["calls"][-1]["path"] == "api/spaces"
