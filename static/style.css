@@ -1181,6 +1181,9 @@
   .close-preview{cursor:pointer;opacity:.6;}.close-preview:hover{opacity:1;}
   /* Breadcrumb navigation */
   .breadcrumb-bar{display:flex;align-items:center;gap:2px;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--border);flex-shrink:0;overflow:hidden;white-space:nowrap;}
+  .workspace-hidden-toggle{display:flex;align-items:center;gap:7px;padding:6px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11px;line-height:1.2;user-select:none;cursor:pointer;}
+  .workspace-hidden-toggle:hover{color:var(--text);background:var(--hover-bg);}
+  .workspace-hidden-toggle input{width:13px;height:13px;margin:0;accent-color:var(--accent-text);}
   .breadcrumb-seg{padding:1px 3px;border-radius:3px;}
   .breadcrumb-link{color:var(--muted);cursor:pointer;transition:color .12s;}
   .breadcrumb-link:hover{color:var(--text);background:var(--hover-bg);}

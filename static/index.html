@@ -1131,6 +1131,10 @@
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
+    <label class="workspace-hidden-toggle" title="Show hidden and system files">
+      <input type="checkbox" id="workspaceShowHiddenFiles" onchange="toggleWorkspaceHiddenFiles(this.checked)">
+      <span data-i18n="workspace_show_hidden_files">Show hidden files</span>
+    </label>
     <div class="file-tree" id="fileTree"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">

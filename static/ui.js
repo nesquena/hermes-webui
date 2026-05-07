@@ -1,4 +1,4 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 // Tracks which session's queue to drain in setBusy(false).
@@ -6039,6 +6039,38 @@ function renderBreadcrumb(){
   }
 }
 
+const WORKSPACE_HIDDEN_FILE_NAMES=new Set([
+  '.DS_Store','._.DS_Store','.AppleDouble','.Spotlight-V100','.Trashes','.fseventsd',
+  'Thumbs.db','Desktop.ini','ehthumbs.db','$RECYCLE.BIN',
+  '.directory','.git','.svn','.hg','node_modules','__pycache__',
+  '.pytest_cache','.mypy_cache','.ruff_cache','.tox','.venv','venv'
+]);
+const WORKSPACE_HIDDEN_FILE_PREFIXES=['._','.Trash-'];
+function _workspaceShouldHideEntry(item){
+  if(!item||S.showHiddenWorkspaceFiles)return false;
+  const name=String(item.name||'');
+  if(!name)return false;
+  if(WORKSPACE_HIDDEN_FILE_NAMES.has(name))return true;
+  return WORKSPACE_HIDDEN_FILE_PREFIXES.some(prefix=>name.startsWith(prefix));
+}
+function _visibleWorkspaceEntries(entries){
+  const list=Array.isArray(entries)?entries:[];
+  return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
+}
+function _syncWorkspaceHiddenToggle(){
+  const el=$('workspaceShowHiddenFiles');
+  if(el)el.checked=!!S.showHiddenWorkspaceFiles;
+}
+function toggleWorkspaceHiddenFiles(value){
+  S.showHiddenWorkspaceFiles=!!value;
+  try{localStorage.setItem('hermes-workspace-show-hidden-files',S.showHiddenWorkspaceFiles?'1':'0');}catch(_){}
+  _syncWorkspaceHiddenToggle();
+  renderFileTree();
+}
+try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_syncWorkspaceHiddenToggle);
+else _syncWorkspaceHiddenToggle();
+
 // Track expanded directories for tree view
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
@@ -6058,11 +6090,12 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  if(!S.entries||!S.entries.length){
+  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
   }
-  _renderTreeItems(box, S.entries, 0);
+  _renderTreeItems(box, visibleEntries, 0);
 }
 
 function _renderTreeItems(container, entries, depth){
@@ -6207,7 +6240,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(item.type==='dir'&&S._expandedDirs.has(item.path)){
-      const children=S._dirCache[item.path]||[];
+      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{
