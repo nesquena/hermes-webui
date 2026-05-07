@@ -92,6 +92,7 @@ global.fetch = async function(path, opts = {}) {
         { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_notes_app', template: 'notes', title: 'Notes app', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_kanban_board', template: 'kanban', title: 'Kanban board', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        { demo: 'demo_snake_iterative_repair', template: 'game', title: 'Snake repair loop', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_safe_admin_recovery', template: 'weather', title: 'Admin recovery', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
@@ -105,6 +106,7 @@ global.fetch = async function(path, opts = {}) {
     const isNotes = demo === 'demo_notes_app';
     const isKanban = demo === 'demo_kanban_board';
     const isDashboard = demo === 'demo_daily_dashboard';
+    const isSnake = demo === 'demo_snake_iterative_repair';
     const isStock = demo === 'demo_stock_chart';
     const isCamera = demo === 'demo_camera_dashboard';
     const isService = demo === 'demo_local_agent_control_dashboard';
@@ -162,11 +164,11 @@ global.fetch = async function(path, opts = {}) {
         rollback_point: true,
       });
     }
-    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run'))))))));
-    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather'))))));
-    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget'))))))));
-    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke'))))))));
-    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))));
+    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isSnake ? 'snake-repair-queued' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run')))))))));
+    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isSnake ? 'game' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather')))))));
+    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isSnake ? 'demo-snake-iterative-repair' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget')))))))));
+    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isSnake ? 'Snake Repair Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke')))))))));
+    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))));
     return response({
       ok: true,
       action: demoAction,
@@ -188,12 +190,13 @@ global.fetch = async function(path, opts = {}) {
       notes_artifact: isNotes ? { folders: { id: 'notes-folders', kind: 'folder-list', title: 'Folders', metadata: { folders: [{ id: 'folder-inbox', title: 'Inbox', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'folder-demo', title: 'Demo Project' }], interaction: { rename: 'metadata-only', create_folder: 'metadata-only', active_folder_id: 'folder-demo', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } }, attachments: { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } : undefined,
       kanban_board: isKanban ? { status: 'board-ready', column_count: 3, columns: kanbanColumns, renderer: '<script>bad()</script>', api_key: 'SECRET' } : undefined,
       stock_snapshot: isStock ? { status: 'market-snapshot-ready', symbols: ['NVDA', 'AAPL', 'GOOGL'], network_mode: 'agent-mediated', rows: stockRows, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))),
+      snake_repair_flow: isSnake ? { game: 'snake', first_attempt: 'broken-placeholder', bug_report: 'Snake canvas needs explicit keyboard focus and collision repair before rendering is enabled.', repair_event: 'agent.repair', render_status: 'generated-code-disabled', focus_policy: 'explicit-click', rollback: 'revision-history', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
+      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))))),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))))),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
-      queued_event_count: isResearch ? 1 : (isStock ? 1 : 0),
+      queued_event_count: isResearch ? 1 : (isSnake ? 1 : (isStock ? 1 : 0)),
       research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
     });
   }
@@ -368,6 +371,18 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/events?space_id=demo-kanban-board') {
     return response({ events: [
       { event_id: 'evt-kanban-card', event_name: 'kanban.card.move', widget_id: 'kanban-doing', status: 'queued', created_at: 1710000300, payload_summary: { action: 'move-card', card: 'token placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-snake-iterative-repair') {
+    return response({ widgets: [
+      { id: 'game-canvas', kind: 'canvas-game', title: 'Snake canvas', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, metadata: { game: { title: 'Snake', status: 'generated-code-disabled', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, input_policy: { keyboard_focus: 'explicit-click', global_keys: 'blocked' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'game-controls', kind: 'status', title: 'Game controls', layout: { x: 16, y: 0, w: 8, h: 4, minimized: false }, metadata: { controls: { focus: 'explicit-click', restart: 'planned', authorization: 'bearer placeholder' } } },
+      { id: 'game-repair-notes', kind: 'markdown', title: 'Repair notes', layout: { x: 16, y: 4, w: 8, h: 6, minimized: false }, metadata: { notes: { status: 'repair-queued', summary: 'Agent repair queued for keyboard focus and collision checks.', source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-snake-iterative-repair') {
+    return response({ events: [
+      { event_id: 'evt-snake-repair', event_name: 'agent.repair', widget_id: 'game-repair-notes', status: 'queued', created_at: 1710000350, payload_summary: { action: 'repair-snake', issue: 'keyboard-focus-and-collision', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-daily-dashboard') {
@@ -961,6 +976,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runKanbanWalkthrough', {});
+  } else if (scenario === 'runSnakeWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runSnakeWalkthrough', {});
   } else if (scenario === 'runDashboardWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2059,6 +2078,38 @@ def test_spaces_ui_kanban_walkthrough_is_visible_and_opens_widget_manager_metada
     assert "Queued widget events" in out["rootHtml"]
     assert "kanban.card.move" in out["rootHtml"]
     assert "card: [REDACTED]" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_snake_walkthrough_is_visible_and_opens_repair_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runSnakeWalkthrough")
+
+    assert "Run snake repair walkthrough" in out["beforeHtml"]
+    assert "Snake repair loop" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_snake_iterative_repair"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-snake-iterative-repair", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-snake-iterative-repair", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Snake Repair Smoke" in out["rootHtml"]
+    assert "Action: snake-repair-queued" in out["rootHtml"]
+    assert "Queued events: 1" in out["rootHtml"]
+    assert "Snake repair preview" in out["rootHtml"]
+    assert "Game: snake" in out["rootHtml"]
+    assert "First attempt: broken-placeholder" in out["rootHtml"]
+    assert "Renderer status: generated-code-disabled" in out["rootHtml"]
+    assert "Focus policy: explicit-click" in out["rootHtml"]
+    assert "Widgets for demo-snake-iterative-repair" in out["rootHtml"]
+    assert "game-canvas" in out["rootHtml"]
+    assert "game-controls" in out["rootHtml"]
+    assert "game-repair-notes" in out["rootHtml"]
+    assert "agent.repair" in out["rootHtml"]
+    assert "action: repair-snake" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

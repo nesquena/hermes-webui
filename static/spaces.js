@@ -121,7 +121,7 @@
         '</div>';
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runLocalServiceWalkthrough">Run local service walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runTimeTravelWalkthrough">Run time travel walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runAdminRecoveryWalkthrough">Run admin recovery walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runSnakeWalkthrough">Run snake repair walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runLocalServiceWalkthrough">Run local service walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runTimeTravelWalkthrough">Run time travel walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runAdminRecoveryWalkthrough">Run admin recovery walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
       renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
   }
 
@@ -203,6 +203,10 @@
       ? data.kanban_board
       : {};
     const kanbanPreview = renderKanbanSmokePreview(kanbanBoard);
+    const snakeRepairFlow = data && data.snake_repair_flow && typeof data.snake_repair_flow === 'object' && !Array.isArray(data.snake_repair_flow)
+      ? data.snake_repair_flow
+      : {};
+    const snakePreview = renderSnakeRepairPreview(snakeRepairFlow);
     const stockSnapshot = data && data.stock_snapshot && typeof data.stock_snapshot === 'object' && !Array.isArray(data.stock_snapshot)
       ? data.stock_snapshot
       : {};
@@ -210,9 +214,10 @@
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const hasNotesPreview = !!notesPreview;
     const hasKanbanPreview = !!kanbanPreview;
+    const hasSnakePreview = !!snakePreview;
     const hasStockPreview = !!stockPreview;
     const isServiceDemo = String(data && data.template || '').toLowerCase() === 'service' || demo === 'demo_local_agent_control_dashboard';
-    const manageLabel = weatherPreview ? 'Manage weather widget' : (hasNotesPreview ? 'Manage notes widgets' : (hasKanbanPreview ? 'Manage kanban widgets' : (hasStockPreview ? 'Manage stock widgets' : (isServiceDemo ? 'Manage service widgets' : 'Manage demo widgets'))));
+    const manageLabel = weatherPreview ? 'Manage weather widget' : (hasNotesPreview ? 'Manage notes widgets' : (hasKanbanPreview ? 'Manage kanban widgets' : (hasSnakePreview ? 'Manage game widgets' : (hasStockPreview ? 'Manage stock widgets' : (isServiceDemo ? 'Manage service widgets' : 'Manage demo widgets')))));
     const demoActions = demoSpaceId
       ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(demoSpaceId)+'">Open demo Space</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(demoSpaceId)+'">'+escapeHtml(manageLabel)+'</button></div>'
       : '';
@@ -220,7 +225,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+stockPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -846,6 +851,28 @@
       '<div class="capy-spaces-widget-list">'+columnRows+'</div></div>';
   }
 
+  function renderSnakeRepairPreview(flow){
+    const safeFlow = flow && typeof flow === 'object' && !Array.isArray(flow) ? flow : {};
+    const game = safeWeatherText(safeFlow.game, 80);
+    const firstAttempt = safeWeatherText(safeFlow.first_attempt, 120);
+    const bugReport = safeWeatherText(safeFlow.bug_report, 240);
+    const repairEvent = safeWeatherText(safeFlow.repair_event, 120);
+    const rendererStatus = safeWeatherText(safeFlow.render_status || safeFlow.renderer_status, 120);
+    const focusPolicy = safeWeatherText(safeFlow.focus_policy, 120);
+    const rollback = safeWeatherText(safeFlow.rollback, 120);
+    if (!game && !firstAttempt && !bugReport && !repairEvent && !rendererStatus && !focusPolicy && !rollback) return '';
+    return '<div class="capy-spaces-card capy-spaces-snake-smoke"><h4>Snake repair preview</h4>' +
+      '<div class="capy-spaces-muted">Visible metadata-only game repair loop. Generated canvas code remains disabled until sandbox approval.</div>' +
+      (game ? '<div class="capy-spaces-muted">Game: '+escapeHtml(game)+'</div>' : '') +
+      (firstAttempt ? '<div class="capy-spaces-muted">First attempt: '+escapeHtml(firstAttempt)+'</div>' : '') +
+      (bugReport ? '<div class="capy-spaces-muted">Bug report: '+escapeHtml(bugReport)+'</div>' : '') +
+      (repairEvent ? '<div class="capy-spaces-muted">Repair event: '+escapeHtml(repairEvent)+'</div>' : '') +
+      (rendererStatus ? '<div class="capy-spaces-muted">Renderer status: '+escapeHtml(rendererStatus)+'</div>' : '') +
+      (focusPolicy ? '<div class="capy-spaces-muted">Focus policy: '+escapeHtml(focusPolicy)+'</div>' : '') +
+      (rollback ? '<div class="capy-spaces-muted">Rollback: '+escapeHtml(rollback)+'</div>' : '') +
+      '</div>';
+  }
+
   function renderStockSmokePreview(stockSnapshot){
     const snapshot = stockSnapshot && typeof stockSnapshot === 'object' && !Array.isArray(stockSnapshot) ? stockSnapshot : {};
     const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
@@ -1195,6 +1222,29 @@
     }
     if (action === 'runKanbanWalkthrough') {
       const data = await postSpacesJson('api/spaces/demo/run', {demo: 'demo_kanban_board'});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) {
+        const resultHtml = renderDemoSmokeResult(data || {});
+        const space = data && data.space && typeof data.space === 'object' ? data.space : {};
+        const demoSpaceId = space.space_id ? String(space.space_id) : '';
+        if (demoSpaceId) {
+          try {
+            const eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(demoSpaceId));
+            const widgetsData = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(demoSpaceId));
+            refreshedRoot.dataset.editingWidgetId = '';
+            refreshedRoot.innerHTML = resultHtml + renderWidgetManager(demoSpaceId, widgetsData.widgets || [], eventsData.events || []);
+          } catch (widgetErr) {
+            refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+          }
+        } else {
+          refreshedRoot.innerHTML = resultHtml + refreshedRoot.innerHTML;
+        }
+      }
+      return;
+    }
+    if (action === 'runSnakeWalkthrough') {
+      const data = await postSpacesJson('api/spaces/demo/run', {demo: 'demo_snake_iterative_repair'});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) {

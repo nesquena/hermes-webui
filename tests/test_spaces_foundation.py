@@ -4637,6 +4637,43 @@ def test_game_template_install_route_returns_safe_metadata(monkeypatch, tmp_path
     assert "secret" not in serialized
 
 
+def test_snake_demo_run_queues_iterative_repair_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_snake_iterative_repair")
+    events = spaces.list_widget_events(result["space"]["space_id"])
+    widgets = spaces.list_widgets(result["space"]["space_id"])
+
+    assert result["action"] == "snake-repair-queued"
+    assert result["template"] == "game"
+    assert result["space"]["name"] == "Game Sandbox"
+    assert result["widget_count"] == 3
+    assert result["queued_event_count"] == 1
+    assert result["snake_repair_flow"] == {
+        "game": "snake",
+        "first_attempt": "broken-placeholder",
+        "bug_report": "Snake canvas needs explicit keyboard focus and collision repair before rendering is enabled.",
+        "repair_event": "agent.repair",
+        "render_status": "generated-code-disabled",
+        "focus_policy": "explicit-click",
+        "rollback": "revision-history",
+    }
+    assert events[0]["event_name"] == "agent.repair"
+    assert events[0]["widget_id"] == "game-repair-notes"
+    assert events[0]["payload_summary"] == {
+        "demo": "demo_snake_iterative_repair",
+        "game": "snake",
+        "issue": "keyboard-focus-and-collision",
+    }
+    assert [widget["id"] for widget in widgets] == ["game-canvas", "game-controls", "game-repair-notes"]
+    serialized = json.dumps({"result": result, "events": events, "widgets": widgets}).lower()
+    assert '"renderer"' not in serialized
+    assert '"html"' not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_install_music_sequencer_template_creates_safe_audio_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

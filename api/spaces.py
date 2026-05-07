@@ -1608,6 +1608,41 @@ def space_demo_run(name: str) -> dict[str, Any]:
                 "columns": columns,
             }
         }
+    elif demo == "demo_snake_iterative_repair":
+        bug_report = "Snake canvas needs explicit keyboard focus and collision repair before rendering is enabled."
+        patch_widget(
+            space_id,
+            "game-repair-notes",
+            {
+                "notes": {
+                    "status": "repair-queued",
+                    "summary": "Agent repair queued for keyboard focus and collision checks.",
+                },
+                "repair_loop": {"iterative_patch": "queued", "rollback": "revision-history"},
+            },
+        )
+        queued = queue_widget_event(
+            space_id,
+            "game-repair-notes",
+            "agent.repair",
+            {"demo": demo, "game": "snake", "issue": "keyboard-focus-and-collision"},
+            prompt="Repair the Snake canvas metadata plan: keep generated rendering disabled, require explicit keyboard focus, and prepare collision fixes behind rollback.",
+        )
+        queued_events = list_widget_events(space_id, "game-repair-notes")
+        action = "snake-repair-queued"
+        extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
+            "snake_repair_flow": {
+                "game": "snake",
+                "first_attempt": "broken-placeholder",
+                "bug_report": bug_report,
+                "repair_event": "agent.repair",
+                "render_status": "generated-code-disabled",
+                "focus_policy": "explicit-click",
+                "rollback": "revision-history",
+            },
+        }
     elif demo == "demo_stock_chart":
         snapshot_rows = [
             {"symbol": "NVDA", "last": "905.10", "change": "+1.8%", "notes": "GPU demand watch"},
