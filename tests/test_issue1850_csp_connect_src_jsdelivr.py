@@ -6,11 +6,13 @@ jsDelivr and are fetched via connect (not script load), so connect-src must
 include cdn.jsdelivr.net or browsers block the fetch and emit CSP violations.
 """
 import re
+from pathlib import Path
+
+_HELPERS_PY = Path(__file__).resolve().parents[1] / "api/helpers.py"
 
 
 def _helpers_src() -> str:
-    with open("api/helpers.py") as f:
-        return f.read()
+    return _HELPERS_PY.read_text()
 
 
 class TestCSPConnectSrcJsdelivr:
