@@ -26,6 +26,7 @@ from api.config import (
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
+    resolve_custom_provider_connection,
     model_with_provider_context,
 )
 from api.helpers import redact_session_data, _redact_text
@@ -2217,6 +2218,16 @@ def _run_agent_streaming(
             except Exception as _e:
                 print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
+            # Named custom providers (custom:slug) may not be resolvable by
+            # hermes_cli.runtime_provider directly. Fall back to config.yaml
+            # custom_providers[] so WebUI can pass explicit creds/base_url.
+            if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
+                _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+                if not resolved_api_key and _cp_key:
+                    resolved_api_key = _cp_key
+                if not resolved_base_url and _cp_base:
+                    resolved_base_url = _cp_base
+
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
             _cfg = _get_config()
@@ -2635,6 +2646,12 @@ def _run_agent_streaming(
                                 resolved_provider = _heal_rt.get('provider')
                             if not resolved_base_url:
                                 resolved_base_url = _heal_rt.get('base_url')
+                            if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
+                                _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+                                if not resolved_api_key and _cp_key:
+                                    resolved_api_key = _cp_key
+                                if not resolved_base_url and _cp_base:
+                                    resolved_base_url = _cp_base
                             # Rebuild agent kwargs and create a fresh agent
                             _agent_kwargs['api_key'] = resolved_api_key
                             _agent_kwargs['base_url'] = resolved_base_url
@@ -3103,6 +3120,12 @@ def _run_agent_streaming(
                         resolved_provider = _heal_rt.get('provider')
                     if not resolved_base_url:
                         resolved_base_url = _heal_rt.get('base_url')
+                    if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
+                        _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
+                        if not resolved_api_key and _cp_key:
+                            resolved_api_key = _cp_key
+                        if not resolved_base_url and _cp_base:
+                            resolved_base_url = _cp_base
                     # Build a fresh agent with the new credentials
                     _heal_kwargs = dict(_agent_kwargs) if '_agent_kwargs' in dir() else {}
                     _heal_kwargs['api_key'] = resolved_api_key

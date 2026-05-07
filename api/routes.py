@@ -6253,7 +6253,10 @@ def _handle_chat_sync(handler, body):
         from run_agent import AIAgent
 
         with CHAT_LOCK:
-            from api.config import resolve_model_provider
+            from api.config import (
+                resolve_model_provider,
+                resolve_custom_provider_connection,
+            )
 
             _model, _provider, _base_url = resolve_model_provider(
                 model_with_provider_context(s.model, getattr(s, "model_provider", None))
@@ -6279,6 +6282,12 @@ def _handle_chat_sync(handler, body):
                     f"[webui] WARNING: resolve_runtime_provider failed: {_e}",
                     flush=True,
                 )
+            if isinstance(_provider, str) and _provider.startswith("custom:"):
+                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
+                if not _api_key and _cp_key:
+                    _api_key = _cp_key
+                if not _base_url and _cp_base:
+                    _base_url = _cp_base
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -7041,6 +7050,13 @@ def _handle_session_compress(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for compression: %s", _e)
 
+        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
+            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
+            if not resolved_api_key and _cp_key:
+                resolved_api_key = _cp_key
+            if not resolved_base_url and _cp_base:
+                resolved_base_url = _cp_base
+
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
 
@@ -7654,6 +7670,13 @@ def _handle_handoff_summary(handler, body):
                 resolved_base_url = _rt.get("base_url")
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for handoff summary: %s", _e)
+
+        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
+            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
+            if not resolved_api_key and _cp_key:
+                resolved_api_key = _cp_key
+            if not resolved_base_url and _cp_base:
+                resolved_base_url = _cp_base
 
         if not resolved_api_key:
             summary_text = _fallback_handoff_summary(msgs)

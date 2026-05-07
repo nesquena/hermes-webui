@@ -1458,6 +1458,102 @@ def resolve_model_provider(model_id: str) -> tuple:
     return model_id, config_provider, config_base_url
 
 
+def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+    """Return (api_key, base_url) for a named ``custom:*`` provider.
+
+    Supports ``custom_providers[].api_key`` as either a literal key or
+    ``${ENV_VAR}``, and ``custom_providers[].key_env`` as an env-var hint.
+    Returns ``(None, None)`` when no named custom provider matches.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return None, None
+
+    def _slugify(value: str) -> str:
+        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+        while "--" in s:
+            s = s.replace("--", "-")
+        return s.strip("-")
+
+    slug = _slugify(pid.split(":", 1)[1].strip())
+    if not slug:
+        return None, None
+
+    # Read the live config snapshot to avoid stale module-level cache edge
+    # cases after profile switches or runtime config edits.
+    cfg_data = get_config()
+
+    def _resolve_key(raw_api_key, raw_key_env) -> str | None:
+        api_key = None
+        if raw_api_key is not None:
+            key_text = str(raw_api_key).strip()
+            if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
+                api_key = os.getenv(key_text[2:-1], "").strip() or None
+            elif key_text:
+                api_key = key_text
+        if not api_key:
+            key_env = str(raw_key_env or "").strip()
+            if key_env:
+                api_key = os.getenv(key_env, "").strip() or None
+        return api_key
+
+    custom_providers = cfg_data.get("custom_providers", [])
+    if not isinstance(custom_providers, list):
+        custom_providers = []
+
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        entry_slug = _slugify(name)
+        if entry_slug != slug:
+            continue
+
+        base_url = str(entry.get("base_url") or "").strip() or None
+        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"))
+        return api_key, base_url
+
+    # If exactly one custom provider is configured, use it as a pragmatic
+    # fallback for mismatched slugs (e.g. punctuation differences).
+    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
+        entry = custom_providers[0]
+        return (
+            _resolve_key(entry.get("api_key"), entry.get("key_env")),
+            str(entry.get("base_url") or "").strip() or None,
+        )
+
+    # Fallbacks for setups that don't use custom_providers names directly.
+    providers_cfg = cfg_data.get("providers", {})
+    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
+    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+
+    model_cfg = cfg_data.get("model", {})
+    model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+
+    fallback_base = None
+    for candidate in (provider_specific, provider_custom, model_cfg):
+        if isinstance(candidate, dict):
+            _base = str(candidate.get("base_url") or "").strip()
+            if _base:
+                fallback_base = _base
+                break
+
+    fallback_key = None
+    if isinstance(provider_specific, dict):
+        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"))
+    if not fallback_key and isinstance(provider_custom, dict):
+        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"))
+    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
+        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
+
+    if fallback_key or fallback_base:
+        return fallback_key, fallback_base or None
+
+    return None, None
+
+
 def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
     """Return the model string to pass to ``resolve_model_provider()``.
 
