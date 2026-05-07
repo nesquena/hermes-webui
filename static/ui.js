@@ -2917,7 +2917,31 @@ function updateQueueBadge(sessionId){
     }
   }
 }
-function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
+const TOAST_DEFAULT_MS=2800;
+const TOAST_ERROR_DEFAULT_MS=20000;
+function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
+function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function copyToastText(btn){
+  const el=btn&&btn.closest?btn.closest('#toast'):null;
+  const text=el?(el.dataset.toastMessage||el.textContent||''):'';
+  const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
+  _copyText(text).then(done).catch(()=>{});
+}
+function showToast(msg,ms,type){
+  const el=$('toast');if(!el)return;
+  const s=String(msg==null?'':msg);let t=type;
+  if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
+  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  el.className='toast show '+t;
+  el.dataset.toastMessage=s;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  else el.textContent=s;
+  el.onmouseenter=()=>clearToastDismissTimer(el);
+  el.onmouseleave=()=>setToastDismissTimer(el,duration);
+  el.onfocusin=()=>clearToastDismissTimer(el);
+  el.onfocusout=()=>setToastDismissTimer(el,duration);
+  setToastDismissTimer(el,duration);
+}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
