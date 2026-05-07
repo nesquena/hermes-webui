@@ -1192,10 +1192,18 @@
      to sit below the breadcrumb. The toggle now lives behind the kebab
      button in the panel-actions row; the small indicator next to the
      panel heading flags the non-default "hidden files visible" state. */
-  .workspace-hidden-indicator{display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:1px 7px 1px 6px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;line-height:1.4;border-radius:9px;cursor:pointer;user-select:none;font-weight:600;letter-spacing:.02em;text-transform:none;flex-shrink:0;transition:background .12s,color .12s,opacity .12s;}
-  .workspace-hidden-indicator:hover{filter:brightness(1.06);}
+  .workspace-hidden-indicator{display:inline-flex;align-items:center;gap:4px;margin-left:6px;padding:2px 7px 2px 6px;background:var(--hover-bg);color:var(--muted);font-size:10px;line-height:1.3;border-radius:8px;cursor:pointer;user-select:none;font-weight:600;letter-spacing:.02em;text-transform:none;flex-shrink:0;transition:background .12s,color .12s;border:1px solid var(--border);}
+  .workspace-hidden-indicator:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg-strong,var(--border2));}
   .workspace-hidden-indicator[hidden]{display:none;}
-  .workspace-hidden-indicator svg{flex-shrink:0;opacity:.9;}
+  .workspace-hidden-indicator svg{flex-shrink:0;opacity:.85;}
+  /* When the workspace panel is too narrow to fit heading + chip text
+     comfortably, drop the chip's text and leave just the eye icon. The
+     tooltip still says "Hidden files are visible — click for options".
+     Uses the existing `rightpanel` container declared on .rightpanel. */
+  @container rightpanel (max-width: 360px){
+    .workspace-hidden-indicator span{display:none;}
+    .workspace-hidden-indicator{padding:2px 5px;}
+  }
   /* Small accent dot on the kebab button when a non-default pref is on */
   #btnWorkspacePrefs{position:relative;}
   #btnWorkspacePrefs .workspace-prefs-dot{position:absolute;top:3px;right:3px;width:6px;height:6px;border-radius:50%;background:var(--accent-text);box-shadow:0 0 0 1.5px var(--surface);pointer-events:none;}
