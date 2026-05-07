@@ -323,6 +323,9 @@ Recent completed slices:
 - `feat(spaces): include provider setup in demo smokes`
   - Added the model/provider setup template to the metadata-only Space Agent demo smoke catalog as `demo_provider_setup`.
   - Validation at completion: focused demo-smoke route test passed, full Spaces foundation suite passed (`95 passed`), `py_compile` and `git diff --check` passed.
+- `feat(spaces): expose provider setup walkthrough`
+  - Added a direct Spaces toolbar action for `demo_provider_setup`, with safe provider-widget management and event-inbox rendering from the existing metadata-only demo route.
+  - Added real-`static/spaces.js` regression coverage proving the action posts exactly `{demo: "demo_provider_setup"}`, fetches the safe widget/event summaries, and omits generated renderer/source/API-auth markers.
 - `feat(spaces): use active space for revision tool aliases`
   - Added `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` aliases so Hermes-style tool calls can list and restore revision snapshots from the active Space without raw generated bodies.
   - Validation at completion: focused active-space rollback adapter test passed, full Spaces foundation suite passed (`96 passed`), `py_compile` and `git diff --check` passed.

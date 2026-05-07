@@ -111,6 +111,7 @@ global.fetch = async function(path, opts = {}) {
     const isCamera = demo === 'demo_camera_dashboard';
     const isService = demo === 'demo_local_agent_control_dashboard';
     const isMusic = demo === 'demo_step_sequencer_piano_roll';
+    const isProviderSetup = demo === 'demo_provider_setup';
     const isTimeTravel = demo === 'demo_time_travel_restore';
     const isRecovery = demo === 'demo_safe_admin_recovery';
     const kanbanColumns = [
@@ -151,6 +152,12 @@ global.fetch = async function(path, opts = {}) {
       { id: 'music-piano-roll', kind: 'piano-roll', title: 'Piano roll', metadata: { interaction: { keyboard: 'explicit-focus', editing: 'metadata-only', renderer: '<script>bad()</script>' } } },
       { id: 'music-notes', kind: 'markdown', title: 'Music notes', metadata: { notes: { status: 'safe-metadata', summary: 'Piano-roll resize cleanup remains planned.' } } },
     ];
+    const modelSetupWidgets = [
+      { id: 'model-provider-status', kind: 'status', title: 'Provider status', metadata: { provider: { status: 'review-required', setup: 'external-cli-or-settings', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'model-local-runtime', kind: 'local-runtime', title: 'Local runtime', metadata: { runtime: { status: 'agent-mediated', lmstudio: 'optional', authorization: 'bearer placeholder' } }, source: 'SECRET_SOURCE' },
+      { id: 'model-settings-review', kind: 'table', title: 'Settings review', metadata: { settings: { status: 'review-only', fields: ['provider', 'model', 'runtime'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'model-next-steps', kind: 'checklist', title: 'Next steps', metadata: { checklist: { items: ['Choose provider', 'Validate model', 'Start first Space'], renderer: '<script>bad()</script>' } } },
+    ];
     if (demo === 'demo_browser_cocontrol_google_or_test_site') {
       return response({
         ok: true,
@@ -171,11 +178,39 @@ global.fetch = async function(path, opts = {}) {
         rollback_point: true,
       });
     }
-    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isSnake ? 'snake-repair-queued' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isMusic ? 'music-pattern-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run'))))))))));
-    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isSnake ? 'game' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : (isMusic ? 'music' : 'weather'))))))));
-    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isSnake ? 'demo-snake-iterative-repair' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isMusic ? 'demo-step-sequencer-piano-roll' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget'))))))))));
-    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isSnake ? 'Snake Repair Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isMusic ? 'Music Sequencer Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke'))))))))));
-    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1))))))));
+    let demoAction = 'space.demo.run';
+    let demoTemplate = 'weather';
+    let demoSpaceId = 'demo-weather-widget';
+    let demoSpaceName = 'Weather Demo Smoke';
+    let demoWidgetCount = 1;
+    let demoWidgets = [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }];
+    if (isResearch) {
+      demoAction = 'pdf-export-requested'; demoTemplate = 'research'; demoSpaceId = 'demo-research-harness-pdf-export'; demoSpaceName = 'Research Harness'; demoWidgetCount = 5;
+      demoWidgets = [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }];
+    } else if (isNotes) {
+      demoAction = 'notes-draft-saved'; demoTemplate = 'notes'; demoSpaceId = 'demo-notes-app'; demoSpaceName = 'Notes App Smoke'; demoWidgetCount = 4;
+      demoWidgets = [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }];
+    } else if (isKanban) {
+      demoAction = 'kanban-board-seeded'; demoTemplate = 'kanban'; demoSpaceId = 'demo-kanban-board'; demoSpaceName = 'Kanban Board Smoke'; demoWidgetCount = 4; demoWidgets = kanbanColumns;
+    } else if (isDashboard) {
+      demoAction = 'daily-dashboard-seeded'; demoTemplate = 'dashboard'; demoSpaceId = 'demo-daily-dashboard'; demoSpaceName = 'Daily Dashboard Smoke'; demoWidgetCount = 4; demoWidgets = dashboardWidgets;
+    } else if (isSnake) {
+      demoAction = 'snake-repair-queued'; demoTemplate = 'game'; demoSpaceId = 'demo-snake-iterative-repair'; demoSpaceName = 'Snake Repair Smoke'; demoWidgetCount = 3;
+    } else if (isStock) {
+      demoAction = 'stock-snapshot-recorded'; demoTemplate = 'stock'; demoSpaceId = 'demo-stock-chart'; demoSpaceName = 'Stock Chart Smoke'; demoWidgetCount = 3; demoWidgets = stockWidgets;
+    } else if (isCamera) {
+      demoAction = 'camera-dashboard-seeded'; demoTemplate = 'camera'; demoSpaceId = 'demo-camera-dashboard'; demoSpaceName = 'Camera Dashboard Smoke'; demoWidgetCount = 3; demoWidgets = cameraWidgets;
+    } else if (isService) {
+      demoAction = 'local-service-dashboard-seeded'; demoTemplate = 'service'; demoSpaceId = 'demo-local-agent-control-dashboard'; demoSpaceName = 'Local Service Dashboard Smoke'; demoWidgetCount = 4; demoWidgets = serviceWidgets;
+    } else if (isMusic) {
+      demoAction = 'music-pattern-seeded'; demoTemplate = 'music'; demoSpaceId = 'demo-step-sequencer-piano-roll'; demoSpaceName = 'Music Sequencer Smoke'; demoWidgetCount = 4; demoWidgets = musicWidgets;
+    } else if (isProviderSetup) {
+      demoAction = 'provider-setup-seeded'; demoTemplate = 'model-setup'; demoSpaceId = 'demo-provider-setup'; demoSpaceName = 'Provider Setup Smoke'; demoWidgetCount = 4; demoWidgets = modelSetupWidgets;
+    } else if (isTimeTravel) {
+      demoAction = 'restored'; demoTemplate = 'weather'; demoSpaceId = 'demo-time-travel-restore'; demoSpaceName = 'Time Travel Restore Smoke';
+    } else if (isRecovery) {
+      demoAction = 'recovery-disabled'; demoTemplate = 'weather'; demoSpaceId = 'demo-safe-admin-recovery'; demoSpaceName = 'Admin Recovery Smoke';
+    }
     return response({
       ok: true,
       action: demoAction,
@@ -190,7 +225,7 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
       },
-      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : (isService ? serviceWidgets : (isMusic ? musicWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]))))))),
+      widgets: demoWidgets,
       weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       prompt_flow: demo === 'demo_weather_widget' ? { blank_space: true, query: 'What is the weather in Prague?', chat_answer_status: 'recorded', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', widget_created: true, reload_verified: true, network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_flow: isNotes ? { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
@@ -199,8 +234,8 @@ global.fetch = async function(path, opts = {}) {
       stock_snapshot: isStock ? { status: 'market-snapshot-ready', symbols: ['NVDA', 'AAPL', 'GOOGL'], network_mode: 'agent-mediated', rows: stockRows, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       music_flow: isMusic ? { sequencer_ready: true, pattern_steps: 16, piano_roll_ready: true, webaudio_permission: 'explicit-user-gesture', cleanup: 'planned-on-rerender', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       snake_repair_flow: isSnake ? { game: 'snake', first_attempt: 'broken-placeholder', bug_report: 'Snake canvas needs explicit keyboard focus and collision repair before rendering is enabled.', repair_event: 'agent.repair', render_status: 'generated-code-disabled', focus_policy: 'explicit-click', rollback: 'revision-history', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1)))))))),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1)))))))),
+      widget_count: demoWidgetCount,
+      persisted_widget_count: demoWidgetCount,
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
@@ -439,6 +474,19 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll') {
     return response({ events: [
       { event_id: 'evt-music-pattern', event_name: 'audio.pattern.save', widget_id: 'music-sequencer-grid', status: 'queued', created_at: 1710000750, payload_summary: { demo: 'demo_step_sequencer_piano_roll', pattern_steps: 16, target: 'sequencer-and-piano-roll', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-provider-setup') {
+    return response({ widgets: [
+      { id: 'model-provider-status', kind: 'status', title: 'Provider status', metadata: { provider: { status: 'review-required', setup: 'external-cli-or-settings', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'model-local-runtime', kind: 'local-runtime', title: 'Local runtime', metadata: { runtime: { status: 'agent-mediated', lmstudio: 'optional', authorization: 'bearer placeholder' } }, source: 'SECRET_SOURCE' },
+      { id: 'model-settings-review', kind: 'table', title: 'Settings review', metadata: { settings: { status: 'review-only', fields: ['provider', 'model', 'runtime'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'model-next-steps', kind: 'checklist', title: 'Next steps', metadata: { checklist: { items: ['Choose provider', 'Validate model', 'Start first Space'], renderer: '<script>bad()</script>' } } },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-provider-setup') {
+    return response({ events: [
+      { event_id: 'evt-provider-review', event_name: 'provider.setup.review', widget_id: 'model-provider-status', status: 'queued', created_at: 1710000850, payload_summary: { action: 'review-provider-setup', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-local-agent-control-dashboard') {
@@ -1021,6 +1069,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runMusicWalkthrough', {});
+  } else if (scenario === 'runProviderSetupWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runProviderSetupWalkthrough', {});
   } else if (scenario === 'runTimeTravelWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2277,6 +2329,34 @@ def test_spaces_ui_music_walkthrough_is_visible_and_opens_sequencer_metadata_onl
     assert "music-notes" in out["rootHtml"]
     assert "Queued widget events" in out["rootHtml"]
     assert "audio.pattern.save" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_provider_setup_walkthrough_is_visible_and_opens_model_setup_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runProviderSetupWalkthrough")
+
+    assert "Run provider setup walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_provider_setup"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-provider-setup", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-provider-setup", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Provider Setup Smoke" in out["rootHtml"]
+    assert "Action: provider-setup-seeded" in out["rootHtml"]
+    assert "Manage provider widgets" in out["rootHtml"]
+    assert "Widgets for demo-provider-setup" in out["rootHtml"]
+    assert "model-provider-status" in out["rootHtml"]
+    assert "model-local-runtime" in out["rootHtml"]
+    assert "model-settings-review" in out["rootHtml"]
+    assert "model-next-steps" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "provider.setup.review" in out["rootHtml"]
+    assert "action: review-provider-setup" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
