@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-06 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Notes app demo smoke now queues a safe typed `notes.save` event for `notes-editor`, exposes `queued_event_count`/`queued_event` in the metadata-only smoke result, and lets the walkthrough widget manager show the agent-bridge event without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Spaces shell now exposes a direct `Run Big Bang onboarding` action that launches the safe first-run onboarding smoke from the main Spaces toolbar and opens the metadata-only widget manager for the seeded welcome/launcher/safety/next-step widgets without exposing generated/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add Big Bang onboarding walkthrough`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the main Spaces toolbar displays `Run Big Bang onboarding`, posts exactly `{demo: "demo_big_bang_onboarding"}`, then renders the safe Big Bang smoke result plus metadata-only widget manager for `demo-big-bang-onboarding` while omitting hostile renderer/script/API-auth markers and secret-looking values from DOM.
 
 - `feat(spaces): queue notes demo save event`
   - Added RED/GREEN backend coverage proving `demo_notes_app` records the safe folders/editor/preview/attachments state and queues one metadata-only `notes.save` event against `notes-editor`, exposing `queued_event_count`/`queued_event` for the visible smoke card and widget-manager event inbox while omitting hostile renderer/script/API-auth markers and secret-looking values from serialized responses.

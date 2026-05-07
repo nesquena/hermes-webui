@@ -95,6 +95,7 @@ global.fetch = async function(path, opts = {}) {
         { demo: 'demo_snake_iterative_repair', template: 'game', title: 'Snake repair loop', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
+        { demo: 'demo_big_bang_onboarding', template: 'big-bang', title: 'Big Bang onboarding', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_safe_admin_recovery', template: 'weather', title: 'Admin recovery', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
       ],
     });
@@ -112,6 +113,7 @@ global.fetch = async function(path, opts = {}) {
     const isService = demo === 'demo_local_agent_control_dashboard';
     const isMusic = demo === 'demo_step_sequencer_piano_roll';
     const isProviderSetup = demo === 'demo_provider_setup';
+    const isBigBang = demo === 'demo_big_bang_onboarding';
     const isTimeTravel = demo === 'demo_time_travel_restore';
     const isRecovery = demo === 'demo_safe_admin_recovery';
     const kanbanColumns = [
@@ -157,6 +159,12 @@ global.fetch = async function(path, opts = {}) {
       { id: 'model-local-runtime', kind: 'local-runtime', title: 'Local runtime', metadata: { runtime: { status: 'agent-mediated', lmstudio: 'optional', authorization: 'bearer placeholder' } }, source: 'SECRET_SOURCE' },
       { id: 'model-settings-review', kind: 'table', title: 'Settings review', metadata: { settings: { status: 'review-only', fields: ['provider', 'model', 'runtime'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
       { id: 'model-next-steps', kind: 'checklist', title: 'Next steps', metadata: { checklist: { items: ['Choose provider', 'Validate model', 'Start first Space'], renderer: '<script>bad()</script>' } } },
+    ];
+    const bigBangWidgets = [
+      { id: 'bigbang-welcome', kind: 'markdown', title: 'Welcome to Capy Spaces', metadata: { notes: { status: 'curated-metadata', summary: 'First-run tour for safe Spaces.', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'bigbang-demo-launcher', kind: 'checklist', title: 'Demo launchers', metadata: { checklist: { items: ['weather', 'research', 'kanban', 'notes'], api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'bigbang-safety', kind: 'status', title: 'Safety guardrails', metadata: { safety: { generated_code: 'disabled-by-default', recovery: 'available', authorization: 'bearer placeholder' } } },
+      { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps', metadata: { checklist: { items: ['Use this space in chat', 'Ask Capy to customize widgets'], renderer: '<script>bad()</script>' } } },
     ];
     if (demo === 'demo_browser_cocontrol_google_or_test_site') {
       return response({
@@ -206,6 +214,8 @@ global.fetch = async function(path, opts = {}) {
       demoAction = 'music-pattern-seeded'; demoTemplate = 'music'; demoSpaceId = 'demo-step-sequencer-piano-roll'; demoSpaceName = 'Music Sequencer Smoke'; demoWidgetCount = 4; demoWidgets = musicWidgets;
     } else if (isProviderSetup) {
       demoAction = 'provider-setup-seeded'; demoTemplate = 'model-setup'; demoSpaceId = 'demo-provider-setup'; demoSpaceName = 'Provider Setup Smoke'; demoWidgetCount = 4; demoWidgets = modelSetupWidgets;
+    } else if (isBigBang) {
+      demoAction = 'big-bang-onboarding-seeded'; demoTemplate = 'big-bang'; demoSpaceId = 'demo-big-bang-onboarding'; demoSpaceName = 'Big Bang Onboarding Smoke'; demoWidgetCount = 4; demoWidgets = bigBangWidgets;
     } else if (isTimeTravel) {
       demoAction = 'restored'; demoTemplate = 'weather'; demoSpaceId = 'demo-time-travel-restore'; demoSpaceName = 'Time Travel Restore Smoke';
     } else if (isRecovery) {
@@ -488,6 +498,17 @@ global.fetch = async function(path, opts = {}) {
     return response({ events: [
       { event_id: 'evt-provider-review', event_name: 'provider.setup.review', widget_id: 'model-provider-status', status: 'queued', created_at: 1710000850, payload_summary: { action: 'review-provider-setup', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-big-bang-onboarding') {
+    return response({ widgets: [
+      { id: 'bigbang-welcome', kind: 'markdown', title: 'Welcome to Capy Spaces', layout: { x: 0, y: 0, w: 12, h: 5, minimized: false }, metadata: { notes: { status: 'curated-metadata', summary: 'First-run tour for safe Spaces.', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'bigbang-demo-launcher', kind: 'checklist', title: 'Demo launchers', layout: { x: 12, y: 0, w: 12, h: 5, minimized: false }, metadata: { checklist: { items: ['weather', 'research', 'kanban', 'notes'], api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } },
+      { id: 'bigbang-safety', kind: 'status', title: 'Safety guardrails', layout: { x: 0, y: 5, w: 12, h: 4, minimized: false }, metadata: { safety: { generated_code: 'disabled-by-default', recovery: 'available', authorization: 'bearer placeholder' } } },
+      { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps', layout: { x: 12, y: 5, w: 12, h: 4, minimized: false }, metadata: { checklist: { items: ['Use this space in chat', 'Ask Capy to customize widgets'], renderer: '<script>bad()</script>' } } },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-big-bang-onboarding') {
+    return response({ events: [] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-local-agent-control-dashboard') {
     return response({ widgets: [
@@ -1073,6 +1094,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runProviderSetupWalkthrough', {});
+  } else if (scenario === 'runBigBangWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runBigBangWalkthrough', {});
   } else if (scenario === 'runTimeTravelWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2357,6 +2382,30 @@ def test_spaces_ui_provider_setup_walkthrough_is_visible_and_opens_model_setup_m
     assert "Queued widget events" in out["rootHtml"]
     assert "provider.setup.review" in out["rootHtml"]
     assert "action: review-provider-setup" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_big_bang_walkthrough_is_visible_and_opens_widget_manager_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runBigBangWalkthrough")
+
+    assert "Run Big Bang onboarding" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_big_bang_onboarding"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-big-bang-onboarding", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-big-bang-onboarding", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Big Bang Onboarding Smoke" in out["rootHtml"]
+    assert "Action: big-bang-onboarding-seeded" in out["rootHtml"]
+    assert "Widgets for demo-big-bang-onboarding" in out["rootHtml"]
+    assert "bigbang-welcome" in out["rootHtml"]
+    assert "bigbang-demo-launcher" in out["rootHtml"]
+    assert "bigbang-safety" in out["rootHtml"]
+    assert "bigbang-next-steps" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
