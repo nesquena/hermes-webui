@@ -110,6 +110,7 @@ global.fetch = async function(path, opts = {}) {
     const isStock = demo === 'demo_stock_chart';
     const isCamera = demo === 'demo_camera_dashboard';
     const isService = demo === 'demo_local_agent_control_dashboard';
+    const isMusic = demo === 'demo_step_sequencer_piano_roll';
     const isTimeTravel = demo === 'demo_time_travel_restore';
     const isRecovery = demo === 'demo_safe_admin_recovery';
     const kanbanColumns = [
@@ -144,6 +145,12 @@ global.fetch = async function(path, opts = {}) {
       { id: 'service-health', kind: 'status', title: 'Health checks', metadata: { checks: { status: 'pending', endpoints: ['/health', 'api/status'], token: 'SECRET_VALUE_DO_NOT_LEAK' } } },
       { id: 'service-settings-review', kind: 'table', title: 'Settings review', metadata: { settings: { status: 'review-only', fields: ['provider', 'network', 'auth'], renderer: '<script>bad()</script>' } } },
     ];
+    const musicWidgets = [
+      { id: 'music-sequencer-grid', kind: 'step-sequencer', title: 'Step sequencer', metadata: { status: { pattern: 'demo-pattern-saved', steps: 16 }, audio_policy: { permission: 'explicit-user-gesture', webaudio: 'disabled-until-approved', cleanup: 'planned-on-rerender', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'music-synth-controls', kind: 'audio-controls', title: 'Synth controls', metadata: { audio_policy: { permission: 'explicit-user-gesture', webaudio: 'disabled-until-approved', token: 'SECRET_VALUE_DO_NOT_LEAK' } }, source: 'SECRET_SOURCE' },
+      { id: 'music-piano-roll', kind: 'piano-roll', title: 'Piano roll', metadata: { interaction: { keyboard: 'explicit-focus', editing: 'metadata-only', renderer: '<script>bad()</script>' } } },
+      { id: 'music-notes', kind: 'markdown', title: 'Music notes', metadata: { notes: { status: 'safe-metadata', summary: 'Piano-roll resize cleanup remains planned.' } } },
+    ];
     if (demo === 'demo_browser_cocontrol_google_or_test_site') {
       return response({
         ok: true,
@@ -164,11 +171,11 @@ global.fetch = async function(path, opts = {}) {
         rollback_point: true,
       });
     }
-    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isSnake ? 'snake-repair-queued' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run')))))))));
-    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isSnake ? 'game' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : 'weather')))))));
-    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isSnake ? 'demo-snake-iterative-repair' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget')))))))));
-    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isSnake ? 'Snake Repair Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke')))))))));
-    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1)))))));
+    const demoAction = isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : (isDashboard ? 'daily-dashboard-seeded' : (isSnake ? 'snake-repair-queued' : (isStock ? 'stock-snapshot-recorded' : (isCamera ? 'camera-dashboard-seeded' : (isService ? 'local-service-dashboard-seeded' : (isMusic ? 'music-pattern-seeded' : (isTimeTravel ? 'restored' : (isRecovery ? 'recovery-disabled' : 'space.demo.run'))))))))));
+    const demoTemplate = isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : (isDashboard ? 'dashboard' : (isSnake ? 'game' : (isStock ? 'stock' : (isCamera ? 'camera' : (isService ? 'service' : (isMusic ? 'music' : 'weather'))))))));
+    const demoSpaceId = isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : (isDashboard ? 'demo-daily-dashboard' : (isSnake ? 'demo-snake-iterative-repair' : (isStock ? 'demo-stock-chart' : (isCamera ? 'demo-camera-dashboard' : (isService ? 'demo-local-agent-control-dashboard' : (isMusic ? 'demo-step-sequencer-piano-roll' : (isTimeTravel ? 'demo-time-travel-restore' : (isRecovery ? 'demo-safe-admin-recovery' : 'demo-weather-widget'))))))))));
+    const demoSpaceName = isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : (isDashboard ? 'Daily Dashboard Smoke' : (isSnake ? 'Snake Repair Smoke' : (isStock ? 'Stock Chart Smoke' : (isCamera ? 'Camera Dashboard Smoke' : (isService ? 'Local Service Dashboard Smoke' : (isMusic ? 'Music Sequencer Smoke' : (isTimeTravel ? 'Time Travel Restore Smoke' : (isRecovery ? 'Admin Recovery Smoke' : 'Weather Demo Smoke'))))))))));
+    const demoWidgetCount = isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1))))))));
     return response({
       ok: true,
       action: demoAction,
@@ -183,20 +190,21 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
       },
-      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : (isService ? serviceWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }])))))),
+      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : (isDashboard ? dashboardWidgets : (isStock ? stockWidgets : (isCamera ? cameraWidgets : (isService ? serviceWidgets : (isMusic ? musicWidgets : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]))))))),
       weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       prompt_flow: demo === 'demo_weather_widget' ? { blank_space: true, query: 'What is the weather in Prague?', chat_answer_status: 'recorded', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', widget_created: true, reload_verified: true, network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_flow: isNotes ? { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       notes_artifact: isNotes ? { folders: { id: 'notes-folders', kind: 'folder-list', title: 'Folders', metadata: { folders: [{ id: 'folder-inbox', title: 'Inbox', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'folder-demo', title: 'Demo Project' }], interaction: { rename: 'metadata-only', create_folder: 'metadata-only', active_folder_id: 'folder-demo', renderer: '<script>bad()</script>' } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } }, attachments: { id: 'notes-attachments', kind: 'attachment-list', title: 'Attachments', metadata: { attachments: { status: 'agent-mediated', storage: 'agent-mediated', items: [{ id: 'attachment-demo-markdown', name: 'demo-note.md', kind: 'markdown', status: 'ready', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, { id: 'attachment-whiteboard', name: 'whiteboard.png', kind: 'image', status: 'planned', renderer: '<script>bad()</script>' }] } }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } } : undefined,
       kanban_board: isKanban ? { status: 'board-ready', column_count: 3, columns: kanbanColumns, renderer: '<script>bad()</script>', api_key: 'SECRET' } : undefined,
       stock_snapshot: isStock ? { status: 'market-snapshot-ready', symbols: ['NVDA', 'AAPL', 'GOOGL'], network_mode: 'agent-mediated', rows: stockRows, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
+      music_flow: isMusic ? { sequencer_ready: true, pattern_steps: 16, piano_roll_ready: true, webaudio_permission: 'explicit-user-gesture', cleanup: 'planned-on-rerender', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
       snake_repair_flow: isSnake ? { game: 'snake', first_attempt: 'broken-placeholder', bug_report: 'Snake canvas needs explicit keyboard focus and collision repair before rendering is enabled.', repair_event: 'agent.repair', render_status: 'generated-code-disabled', focus_policy: 'explicit-click', rollback: 'revision-history', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))))),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : 1))))))),
+      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1)))))))),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : (isDashboard ? 4 : (isSnake ? 3 : (isStock ? 3 : (isCamera ? 3 : (isService ? 4 : (isMusic ? 4 : 1)))))))),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
-      queued_event_count: isResearch ? 1 : (isSnake ? 1 : (isStock ? 1 : 0)),
+      queued_event_count: isResearch ? 1 : (isSnake ? 1 : (isStock ? 1 : (isMusic ? 1 : 0))),
       research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
     });
   }
@@ -418,6 +426,19 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/events?space_id=demo-stock-chart') {
     return response({ events: [
       { event_id: 'evt-stock-refresh', event_name: 'stock.refresh', widget_id: 'stock-chart', status: 'queued', created_at: 1710000700, payload_summary: { action: 'refresh-market-snapshot', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+    ] });
+  }
+  if (path === 'api/spaces/widgets?space_id=demo-step-sequencer-piano-roll') {
+    return response({ widgets: [
+      { id: 'music-sequencer-grid', kind: 'step-sequencer', title: 'Step sequencer', metadata: { status: { pattern: 'demo-pattern-saved', steps: 16 }, audio_policy: { permission: 'explicit-user-gesture', webaudio: 'disabled-until-approved', cleanup: 'planned-on-rerender', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'music-synth-controls', kind: 'audio-controls', title: 'Synth controls', metadata: { audio_policy: { permission: 'explicit-user-gesture', webaudio: 'disabled-until-approved', token: 'SECRET_VALUE_DO_NOT_LEAK' } }, source: 'SECRET_SOURCE' },
+      { id: 'music-piano-roll', kind: 'piano-roll', title: 'Piano roll', metadata: { interaction: { keyboard: 'explicit-focus', editing: 'metadata-only', renderer: '<script>bad()</script>' } } },
+      { id: 'music-notes', kind: 'markdown', title: 'Music notes', metadata: { notes: { status: 'safe-metadata', summary: 'Piano-roll resize cleanup remains planned.' } } },
+    ] });
+  }
+  if (path === 'api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll') {
+    return response({ events: [
+      { event_id: 'evt-music-pattern', event_name: 'audio.pattern.save', widget_id: 'music-sequencer-grid', status: 'queued', created_at: 1710000750, payload_summary: { demo: 'demo_step_sequencer_piano_roll', pattern_steps: 16, target: 'sequencer-and-piano-roll', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-local-agent-control-dashboard') {
@@ -996,6 +1017,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runLocalServiceWalkthrough', {});
+  } else if (scenario === 'runMusicWalkthrough') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runMusicWalkthrough', {});
   } else if (scenario === 'runTimeTravelWalkthrough') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -2220,6 +2245,38 @@ def test_spaces_ui_local_service_walkthrough_is_visible_and_opens_widget_manager
     assert "Queued widget events" in out["rootHtml"]
     assert "service.status.check" in out["rootHtml"]
     assert "action: check-local-service" in out["rootHtml"]
+    assert "authorization" not in out["rootHtml"].lower()
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_music_walkthrough_is_visible_and_opens_sequencer_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runMusicWalkthrough")
+
+    assert "Run music walkthrough" in out["beforeHtml"]
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+    assert run_post["method"] == "POST"
+    assert json.loads(run_post["body"]) == {"demo": "demo_step_sequencer_piano_roll"}
+    assert {"path": "api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widgets?space_id=demo-step-sequencer-piano-roll", "method": "GET", "body": ""} in out["calls"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "Music Sequencer Smoke" in out["rootHtml"]
+    assert "Action: music-pattern-seeded" in out["rootHtml"]
+    assert "Music sequencer preview" in out["rootHtml"]
+    assert "Pattern: 16 steps saved" in out["rootHtml"]
+    assert "WebAudio: disabled until approved" in out["rootHtml"]
+    assert "Piano roll: metadata-only" in out["rootHtml"]
+    assert "Cleanup: planned-on-rerender" in out["rootHtml"]
+    assert "Manage music widgets" in out["rootHtml"]
+    assert "Widgets for demo-step-sequencer-piano-roll" in out["rootHtml"]
+    assert "music-sequencer-grid" in out["rootHtml"]
+    assert "music-synth-controls" in out["rootHtml"]
+    assert "music-piano-roll" in out["rootHtml"]
+    assert "music-notes" in out["rootHtml"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "audio.pattern.save" in out["rootHtml"]
     assert "authorization" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

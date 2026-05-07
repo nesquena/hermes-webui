@@ -1686,6 +1686,47 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "queued_event_count": len(queued_events),
             "stock_snapshot": market_snapshot,
         }
+    elif demo == "demo_step_sequencer_piano_roll":
+        patch_widget(
+            space_id,
+            "music-sequencer-grid",
+            {
+                "status": {"pattern": "demo-pattern-saved", "steps": 16},
+                "audio_policy": {
+                    "permission": "explicit-user-gesture",
+                    "webaudio": "disabled-until-approved",
+                    "cleanup": "planned-on-rerender",
+                },
+            },
+        )
+        patch_widget(
+            space_id,
+            "music-piano-roll",
+            {
+                "interaction": {"keyboard": "explicit-focus", "editing": "metadata-only"},
+                "audio_policy": {"permission": "explicit-user-gesture", "cleanup": "planned-on-rerender"},
+            },
+        )
+        queued = queue_widget_event(
+            space_id,
+            "music-sequencer-grid",
+            "audio.pattern.save",
+            {"demo": demo, "pattern_steps": 16, "target": "sequencer-and-piano-roll"},
+            prompt="Save the demo step sequencer pattern as safe metadata; keep WebAudio disabled until explicit user approval.",
+        )
+        queued_events = list_widget_events(space_id, "music-sequencer-grid")
+        action = "music-pattern-seeded"
+        extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
+            "music_flow": {
+                "sequencer_ready": True,
+                "pattern_steps": 16,
+                "piano_roll_ready": True,
+                "webaudio_permission": "explicit-user-gesture",
+                "cleanup": "planned-on-rerender",
+            },
+        }
     elif demo == "demo_local_agent_control_dashboard":
         patch_widget(
             space_id,
@@ -3379,6 +3420,8 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "event_bridge",
         "refresh",
         "prompt",
+        "interaction",
+        "audio_policy",
         "status",
         "weather",
         "market_data",
@@ -3401,7 +3444,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "refresh", "prompt", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "refresh", "prompt", "interaction", "audio_policy", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:

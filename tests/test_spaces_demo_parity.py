@@ -179,6 +179,38 @@ def test_kanban_demo_smoke_records_visible_board_metadata_only(monkeypatch, tmp_
     _assert_safe_payload({"backlog": backlog, "doing": doing, "done": done})
 
 
+def test_music_demo_smoke_records_safe_sequencer_and_piano_roll_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_step_sequencer_piano_roll")
+    sequencer = spaces.read_widget_detail(result["space"]["space_id"], "music-sequencer-grid")
+    piano = spaces.read_widget_detail(result["space"]["space_id"], "music-piano-roll")
+    events = spaces.list_widget_events(result["space"]["space_id"], "music-sequencer-grid")
+
+    assert result["action"] == "music-pattern-seeded"
+    assert result["queued_event_count"] == 1
+    assert result["music_flow"] == {
+        "sequencer_ready": True,
+        "pattern_steps": 16,
+        "piano_roll_ready": True,
+        "webaudio_permission": "explicit-user-gesture",
+        "cleanup": "planned-on-rerender",
+    }
+    assert sequencer["metadata"]["status"] == {"pattern": "demo-pattern-saved", "steps": "16"}
+    assert sequencer["metadata"]["audio_policy"]["webaudio"] == "disabled-until-approved"
+    assert piano["metadata"]["interaction"] == {"keyboard": "explicit-focus", "editing": "metadata-only"}
+    assert events[0]["event_name"] == "audio.pattern.save"
+    assert events[0]["status"] == "queued"
+    assert events[0]["widget_id"] == "music-sequencer-grid"
+    assert events[0]["payload_summary"] == {
+        "demo": "demo_step_sequencer_piano_roll",
+        "pattern_steps": "16",
+        "target": "sequencer-and-piano-roll",
+    }
+    _assert_safe_payload(result)
+    _assert_safe_payload({"sequencer": sequencer, "piano": piano, "events": events})
+
+
 def test_local_service_demo_smoke_queues_health_check_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
