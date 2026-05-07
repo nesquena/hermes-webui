@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Camera Dashboard install completion card links directly into the safe camera dashboard smoke, making the installed camera template a visible end-to-end entry point while keeping generated/source/API-auth markers out of DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Model Provider Setup install completion card links directly into the safe provider setup smoke, making the installed model/provider template a visible end-to-end entry point while keeping generated/source/API-auth markers, token text, and secret-looking values out of DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link model setup install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Model Provider Setup install status includes a `Run provider setup smoke` action wired to `demo_provider_setup`, while preserving `Open model setup` / `Manage provider widgets` and continuing to omit hostile renderer/script/API-auth markers, token text, and secret-looking values from DOM.
 
 - `feat(spaces): link camera install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Camera Dashboard install status includes a `Run camera smoke` action wired to `demo_camera_dashboard`, while preserving `Open camera dashboard` / `Manage camera widgets` and continuing to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.

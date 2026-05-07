@@ -2057,11 +2057,20 @@ def test_spaces_ui_install_local_service_dashboard_posts_template_and_shows_safe
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_model_setup_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_model_setup_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installModelSetup")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install model setup" in out["rootHtml"]
+    assert "Model setup installed" in out["rootHtml"]
+    assert "Model Provider Setup" in out["rootHtml"]
+    assert "4 widgets" in out["rootHtml"]
+    assert "Open model setup" in out["rootHtml"]
+    assert "Manage provider widgets" in out["rootHtml"]
+    assert "Run provider setup smoke" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="model-provider-setup"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="model-provider-setup"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_provider_setup"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "model-setup"}
     assert out["calls"][-1]["path"] == "api/spaces"
