@@ -161,6 +161,56 @@ class TestGetProviders:
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
 
+    def test_openai_codex_provider_card_prefers_live_catalog(self, monkeypatch, tmp_path):
+        """OpenAI Codex provider cards should not advertise stale static fallback models.
+
+        /api/models already uses hermes_cli/Codex cache discovery for Codex.  The
+        provider card should share that source order so rejected stale entries
+        such as gpt-5.5-mini are not presented as currently available when the
+        live account catalog excludes them (#1807).
+        """
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        fake_models = sys.modules["hermes_cli.models"]
+        fake_models.provider_model_ids = lambda pid: (
+            ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"]
+            if pid == "openai-codex"
+            else []
+        )
+        codex_home = tmp_path / "empty-codex-home"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "openai-codex", "default": "gpt-5.5"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            codex = next(p for p in result["providers"] if p["id"] == "openai-codex")
+            model_ids = [m["id"] for m in codex["models"]]
+            assert model_ids == [
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.2",
+            ]
+            assert "gpt-5.5-mini" not in model_ids
+            assert codex["models_total"] == len(model_ids)
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
 
 class TestSetProviderKey:
     """Unit tests for set_provider_key() function."""
