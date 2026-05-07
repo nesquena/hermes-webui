@@ -643,10 +643,21 @@
   .rail-btn{width:36px;height:36px;border-radius:8px;border:none;background:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:color .15s,background .15s;flex-shrink:0;padding:0;}
   .rail-btn:hover{color:var(--text);background:var(--hover-bg);}
   .rail-btn.active{color:var(--accent-text);background:var(--accent-bg);}
-  .rail-btn.active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
-  .rail-spacer{flex:1;min-height:8px;}
-  .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
-  .rail .nav-tab:hover::after{content:none;}
+.rail-btn.active::before{content:'';position:absolute;left:-6px;top:50%;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
+  /* Custom tooltip — replaces native title="" for faster display (300ms vs ~1500ms). */
+  /* Usage: add data-tooltip="Label" and class="has-tooltip". For i18n, data-i18n-tooltip="key". */
+  .has-tooltip{position:relative;}
+  .has-tooltip::after{content:attr(data-tooltip);position:absolute;left:calc(100% + 10px);top:50%;transform:translateY(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:11px;font-weight:600;letter-spacing:.01em;padding:4px 10px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:60;box-shadow:0 2px 8px rgba(0,0,0,.25);opacity:0;transition:opacity .12s ease;}
+  .has-tooltip::before{content:'';position:absolute;left:calc(100% + 4px);top:50%;transform:translateY(-50%);border-width:5px;border-style:solid;border-color:transparent var(--accent-bg-strong) transparent transparent;pointer-events:none;z-index:61;opacity:0;transition:opacity .12s ease;}
+  .has-tooltip:hover::after,.has-tooltip:focus-visible::after{opacity:1;}
+  .has-tooltip:hover::before,.has-tooltip:focus-visible::before{opacity:1;}
+  /* For bottom-positioned tooltips (panel header buttons, non-rail elements) */
+  .has-tooltip--bottom::after{left:50%;top:auto;bottom:auto;transform:translateX(-50%);top:calc(100% + 8px);}
+  .has-tooltip--bottom::before{left:50%;top:calc(100% + 2px);transform:translateX(-50%);border-color:var(--accent-bg-strong) transparent transparent transparent;}
+  @media(prefers-reduced-motion:reduce){.has-tooltip::after,.has-tooltip::before{transition:none;}}
+.rail-spacer{flex:1;min-height:8px;}
+.rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
+.rail .nav-tab:hover::after{content:none;}
   .rail .nav-tab.active::before{content:'';position:absolute;left:-6px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
   .dashboard-link{position:relative;}
   .dashboard-link-visible{display:flex!important;}

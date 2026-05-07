@@ -8742,6 +8742,8 @@ function applyLocaleToDOM() {
     const key = el.getAttribute('data-i18n-title');
     const val = t(key);
     if (val && val !== key) el.title = val;
+    // Sync custom data-tooltip when present (replaces native title for faster display, #1775).
+    if (el.hasAttribute('data-tooltip') && val && val !== key) el.setAttribute('data-tooltip', val);
   });
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
     const key = el.getAttribute('data-i18n-placeholder');
