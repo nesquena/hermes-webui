@@ -667,7 +667,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', noAgent:false, script:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -685,6 +685,8 @@ function openCronEdit(job){
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
+    noAgent: !!job.no_agent,
+    script: job.script || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -695,13 +697,17 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, noAgent, script, isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
+  const promptRequired = !noAgent;
+  const promptHint = noAgent
+    ? `<div class="detail-form-hint">${esc(t('cron_no_agent_prompt_hint') || `No-agent mode runs the script directly; prompt is not used.${script ? ' Script: ' + script : ''}`)}</div>`
+    : '';
   body.innerHTML = `
     <div class="main-view-content">
       <form class="detail-form" onsubmit="event.preventDefault(); saveCronForm();">
@@ -716,7 +722,8 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, isEdit }){
         </div>
         <div class="detail-form-row">
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
-          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
+          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" ${promptRequired ? 'required' : ''}>${esc(prompt || '')}</textarea>
+          ${promptHint}
         </div>
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
@@ -825,12 +832,14 @@ async function saveCronForm(){
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
+  const isNoAgent = !!(_editingCronId && _cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
-  if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  if(!isNoAgent&&!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, prompt, profile: profile};
+      const updates = {job_id: _editingCronId, schedule, profile: profile};
+      if(!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
