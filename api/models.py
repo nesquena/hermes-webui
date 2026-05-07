@@ -964,12 +964,24 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
             session.update(metadata[sid])
 
 
-def all_sessions():
+def _diag_stage(diag, name: str) -> None:
+    if diag is not None:
+        try:
+            diag.stage(name)
+        except Exception:
+            pass
+
+
+def all_sessions(diag=None):
+    _diag_stage(diag, "all_sessions.active_streams")
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
+    _diag_stage(diag, "all_sessions.index_exists")
     if SESSION_INDEX_FILE.exists():
         try:
+            _diag_stage(diag, "all_sessions.read_index")
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            _diag_stage(diag, "all_sessions.prune_index")
             index = [
                 s for s in index
                 if _index_entry_exists(s.get('session_id'))
@@ -977,21 +989,25 @@ def all_sessions():
             backfilled = []
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:
+                    _diag_stage(diag, "all_sessions.backfill_load")
                     full = Session.load(s.get('session_id'))
                     if full:
                         index[i] = full.compact()
                         backfilled.append(full)
             if backfilled:
                 try:
+                    _diag_stage(diag, "all_sessions.backfill_write")
                     _write_session_index(updates=backfilled)
                 except Exception:
                     logger.debug("Failed to persist last_message_at backfill")
+            _diag_stage(diag, "all_sessions.mark_streaming")
             for s in index:
                 s['is_streaming'] = _is_streaming_session(
                     s.get('active_stream_id'),
                     active_stream_ids,
                 )
             # Overlay any in-memory sessions that may be newer than the index
+            _diag_stage(diag, "all_sessions.overlay_lock")
             index_map = {s['session_id']: s for s in index}
             with LOCK:
                 for s in SESSIONS.values():
@@ -999,6 +1015,7 @@ def all_sessions():
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
                     )
+            _diag_stage(diag, "all_sessions.sort_filter")
             result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), _session_sort_timestamp(s)), reverse=True)
             # Hide empty Untitled sessions from the UI entirely — they are ephemeral
             # scratch pads that only become real once the first message is sent (#1171).
@@ -1023,11 +1040,13 @@ def all_sessions():
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
+            _diag_stage(diag, "all_sessions.lineage_metadata")
             _enrich_sidebar_lineage_metadata(result)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
     # Full scan fallback
+    _diag_stage(diag, "all_sessions.full_scan")
     out = []
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
@@ -1036,8 +1055,10 @@ def all_sessions():
             if s: out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
+    _diag_stage(diag, "all_sessions.full_scan_overlay")
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
+    _diag_stage(diag, "all_sessions.full_scan_sort_filter")
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
@@ -1052,6 +1073,7 @@ def all_sessions():
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
+    _diag_stage(diag, "all_sessions.lineage_metadata")
     _enrich_sidebar_lineage_metadata(result)
     return result
 

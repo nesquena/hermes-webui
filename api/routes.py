@@ -587,6 +587,7 @@ from api.helpers import (
     _redact_text,
 )
 from api.agent_health import build_agent_health_payload
+from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
 
@@ -2966,80 +2967,96 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"results": get_results(sid)})
 
     if parsed.path == "/api/sessions":
-        webui_sessions = all_sessions()
-        settings = load_settings()
-        show_cli_sessions = bool(settings.get("show_cli_sessions"))
-        if show_cli_sessions:
-            cli = get_cli_sessions()
-            cli_by_id = {s["session_id"]: s for s in cli}
-            for s in webui_sessions:
-                meta = cli_by_id.get(s.get("session_id"))
-                if not meta:
-                    continue
-                if _is_messaging_session_record(meta):
-                    s.update(_merge_cli_sidebar_metadata(s, meta))
-                    if s.get("session_id") != meta.get("session_id"):
-                        s["session_id"] = meta.get("session_id")
-                else:
-                    for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                        if not s.get(key) and meta.get(key):
-                            s[key] = meta[key]
-            # Apply the same CLI visibility semantics to imported local copies so
-            # low-value imported artifacts do not leak into the sidebar.
-            webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-            webui_ids = {s["session_id"] for s in webui_sessions}
-            from api.models import _hide_from_default_sidebar as _cron_hide
-            deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
-        else:
-            webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-            deduped_cli = []
-        merged = webui_sessions + deduped_cli
-        merged.sort(
-            key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-            reverse=True,
-        )
-        # ── Profile scoping (#1611) ────────────────────────────────────────
-        # Default: filter to the active profile. ?all_profiles=1 opts into
-        # the aggregate view used by the "All profiles" sidebar toggle.
-        # The other_profile_count is always returned so the UI can render
-        # the "Show N from other profiles" affordance without sending the
-        # cross-profile rows by default.
-        #
-        # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
-        # _messaging_source_key is profile-blind (#1614 follow-up): if the
-        # same Slack/Telegram identity has sessions in profiles A and B, a
-        # profile-blind dedupe would discard the older one even when scoped
-        # to its own profile, leaving that profile with zero rows for that
-        # source. Filter first so the dedupe operates only within the active
-        # profile's rows.
-        from api.profiles import get_active_profile_name
-        active_profile = get_active_profile_name()
-        all_profiles = _all_profiles_query_flag(parsed)
-        if all_profiles:
-            scoped = merged
-            other_profile_count = 0
-        else:
-            scoped = [s for s in merged
-                      if _profiles_match(s.get("profile"), active_profile)]
-            other_profile_count = len(merged) - len(scoped)
-        scoped = _keep_latest_messaging_session_per_source(scoped)
-        if show_cli_sessions:
-            scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-        safe_merged = []
-        for s in scoped:
-            item = dict(s)
-            if isinstance(item.get("title"), str):
-                item["title"] = _redact_text(item["title"])
-            safe_merged.append(item)
-        return j(handler, {
-            "sessions": safe_merged,
-            "cli_count": len(deduped_cli),
-            "all_profiles": all_profiles,
-            "active_profile": active_profile,
-            "other_profile_count": other_profile_count,
-            "server_time": time.time(),
-            "server_tz": time.strftime("%z"),
-        })
+        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
+        try:
+            diag.stage("all_sessions")
+            webui_sessions = all_sessions(diag=diag)
+            diag.stage("load_settings")
+            settings = load_settings()
+            show_cli_sessions = bool(settings.get("show_cli_sessions"))
+            if show_cli_sessions:
+                diag.stage("get_cli_sessions")
+                cli = get_cli_sessions()
+                diag.stage("merge_cli_sessions")
+                cli_by_id = {s["session_id"]: s for s in cli}
+                for s in webui_sessions:
+                    meta = cli_by_id.get(s.get("session_id"))
+                    if not meta:
+                        continue
+                    if _is_messaging_session_record(meta):
+                        s.update(_merge_cli_sidebar_metadata(s, meta))
+                        if s.get("session_id") != meta.get("session_id"):
+                            s["session_id"] = meta.get("session_id")
+                    else:
+                        for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                            if not s.get(key) and meta.get(key):
+                                s[key] = meta[key]
+                # Apply the same CLI visibility semantics to imported local copies so
+                # low-value imported artifacts do not leak into the sidebar.
+                webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+                webui_ids = {s["session_id"] for s in webui_sessions}
+                from api.models import _hide_from_default_sidebar as _cron_hide
+                deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
+            else:
+                diag.stage("filter_webui_sessions")
+                webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+                deduped_cli = []
+            diag.stage("sort_sessions")
+            merged = webui_sessions + deduped_cli
+            merged.sort(
+                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+                reverse=True,
+            )
+            # ── Profile scoping (#1611) ────────────────────────────────────────
+            # Default: filter to the active profile. ?all_profiles=1 opts into
+            # the aggregate view used by the "All profiles" sidebar toggle.
+            # The other_profile_count is always returned so the UI can render
+            # the "Show N from other profiles" affordance without sending the
+            # cross-profile rows by default.
+            #
+            # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
+            # _messaging_source_key is profile-blind (#1614 follow-up): if the
+            # same Slack/Telegram identity has sessions in profiles A and B, a
+            # profile-blind dedupe would discard the older one even when scoped
+            # to its own profile, leaving that profile with zero rows for that
+            # source. Filter first so the dedupe operates only within the active
+            # profile's rows.
+            diag.stage("active_profile")
+            from api.profiles import get_active_profile_name
+            active_profile = get_active_profile_name()
+            all_profiles = _all_profiles_query_flag(parsed)
+            diag.stage("profile_filter")
+            if all_profiles:
+                scoped = merged
+                other_profile_count = 0
+            else:
+                scoped = [s for s in merged
+                          if _profiles_match(s.get("profile"), active_profile)]
+                other_profile_count = len(merged) - len(scoped)
+            diag.stage("messaging_dedupe")
+            scoped = _keep_latest_messaging_session_per_source(scoped)
+            if show_cli_sessions:
+                diag.stage("cli_cap")
+                scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+            diag.stage("redact_sessions")
+            safe_merged = []
+            for s in scoped:
+                item = dict(s)
+                if isinstance(item.get("title"), str):
+                    item["title"] = _redact_text(item["title"])
+                safe_merged.append(item)
+            diag.stage("response_write")
+            return j(handler, {
+                "sessions": safe_merged,
+                "cli_count": len(deduped_cli),
+                "all_profiles": all_profiles,
+                "active_profile": active_profile,
+                "other_profile_count": other_profile_count,
+                "server_time": time.time(),
+                "server_tz": time.strftime("%z"),
+            })
+        finally:
+            diag.finish()
 
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
@@ -3447,9 +3464,16 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
     # CSRF: reject cross-origin browser requests
+    if diag:
+        diag.stage("csrf")
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        try:
+            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        finally:
+            if diag:
+                diag.finish()
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
@@ -3459,7 +3483,14 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
 
-    body = read_body(handler)
+    if diag:
+        diag.stage("read_body")
+    try:
+        body = read_body(handler)
+    except Exception:
+        if diag:
+            diag.finish()
+        raise
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
@@ -3996,7 +4027,7 @@ def handle_post(handler, parsed) -> bool:
         return _handle_background(handler, body)
 
     if parsed.path == "/api/chat/start":
-        return _handle_chat_start(handler, body)
+        return _handle_chat_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
@@ -6164,104 +6195,126 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
-def _handle_chat_start(handler, body):
+def _handle_chat_start(handler, body, diag=None):
     try:
-        require(body, "session_id")
-    except ValueError as e:
-        return bad(handler, str(e))
-    try:
-        s = get_session(body["session_id"])
-    except KeyError:
-        return bad(handler, "Session not found", 404)
-    requested_profile = str(body.get("profile") or "").strip()
-    if requested_profile:
+        diag.stage("validate_session_id") if diag else None
         try:
-            from api.profiles import _PROFILE_ID_RE
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        diag.stage("get_session") if diag else None
+        try:
+            s = get_session(body["session_id"])
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        diag.stage("validate_profile") if diag else None
+        requested_profile = str(body.get("profile") or "").strip()
+        if requested_profile:
+            try:
+                from api.profiles import _PROFILE_ID_RE
 
-            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
-                return bad(handler, "invalid profile", 400)
-        except ImportError:
-            requested_profile = ""
-    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
-        if not has_persisted_turns:
-            # Empty sessions are placeholders. If the user switches profiles
-            # before sending the first turn, run the placeholder under the
-            # currently-selected profile instead of the stale one stamped at
-            # creation time.
-            s.profile = requested_profile
-    msg = str(body.get("message", "")).strip()
-    if not msg:
-        return bad(handler, "message is required")
-    attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
-    try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
-    except ValueError as e:
-        return bad(handler, str(e))
-    requested_model = body.get("model") or s.model
-    requested_provider = (
-        body.get("model_provider")
-        if "model_provider" in body
-        else getattr(s, "model_provider", None)
-    )
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-    )
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
-            return j(
-                handler,
-                {
-                    "error": "session already has an active stream",
-                    "active_stream_id": current_stream_id,
-                },
-                status=409,
+                if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                    return bad(handler, "invalid profile", 400)
+            except ImportError:
+                requested_profile = ""
+        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+            has_persisted_turns = bool(
+                getattr(s, "messages", None)
+                or getattr(s, "context_messages", None)
+                or getattr(s, "pending_user_message", None)
             )
-        # Stale stream id from a previous run; clear and continue.
-        _clear_stale_stream_state(s)
-    stream_id = uuid.uuid4().hex
-    with _get_session_agent_lock(s.session_id):
-        _prepare_chat_start_session_for_stream(
-            s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            stream_id=stream_id,
+            if not has_persisted_turns:
+                # Empty sessions are placeholders. If the user switches profiles
+                # before sending the first turn, run the placeholder under the
+                # currently-selected profile instead of the stale one stamped at
+                # creation time.
+                s.profile = requested_profile
+        diag.stage("normalize_message") if diag else None
+        msg = str(body.get("message", "")).strip()
+        if not msg:
+            return bad(handler, "message is required")
+        diag.stage("normalize_attachments") if diag else None
+        attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
+        diag.stage("resolve_workspace") if diag else None
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        except ValueError as e:
+            return bad(handler, str(e))
+        requested_model = body.get("model") or s.model
+        requested_provider = (
+            body.get("model_provider")
+            if "model_provider" in body
+            else getattr(s, "model_provider", None)
         )
-    set_last_workspace(workspace)
-    stream = create_stream_channel()
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs={"model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
-    response = {
-        "stream_id": stream_id,
-        "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-    }
-    if normalized_model:
-        response["effective_model"] = model
-    if model_provider:
-        response["effective_model_provider"] = model_provider
-    return j(handler, response)
+        diag.stage("resolve_model_provider") if diag else None
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+        )
+        # Prevent duplicate runs in the same session while a stream is still active.
+        # This commonly happens after page refresh/reconnect races and can produce
+        # duplicated clarify cards for what appears to be a single user request.
+        diag.stage("active_stream_check") if diag else None
+        current_stream_id = getattr(s, "active_stream_id", None)
+        if current_stream_id:
+            diag.stage("active_stream_lock_wait") if diag else None
+            with STREAMS_LOCK:
+                current_active = current_stream_id in STREAMS
+            if current_active:
+                diag.stage("response_write") if diag else None
+                return j(
+                    handler,
+                    {
+                        "error": "session already has an active stream",
+                        "active_stream_id": current_stream_id,
+                    },
+                    status=409,
+                )
+            # Stale stream id from a previous run; clear and continue.
+            diag.stage("stale_stream_cleanup") if diag else None
+            _clear_stale_stream_state(s)
+        stream_id = uuid.uuid4().hex
+        session_lock = _get_session_agent_lock(s.session_id)
+        diag.stage("session_lock_wait") if diag else None
+        with session_lock:
+            diag.stage("save_pending_state") if diag else None
+            _prepare_chat_start_session_for_stream(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                stream_id=stream_id,
+            )
+        diag.stage("set_last_workspace") if diag else None
+        set_last_workspace(workspace)
+        diag.stage("stream_registration") if diag else None
+        stream = create_stream_channel()
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+        diag.stage("worker_thread_start") if diag else None
+        thr = threading.Thread(
+            target=_run_agent_streaming,
+            args=(s.session_id, msg, model, workspace, stream_id, attachments),
+            kwargs={"model_provider": model_provider},
+            daemon=True,
+        )
+        thr.start()
+        response = {
+            "stream_id": stream_id,
+            "session_id": s.session_id,
+            "pending_started_at": s.pending_started_at,
+        }
+        if normalized_model:
+            response["effective_model"] = model
+        if model_provider:
+            response["effective_model_provider"] = model_provider
+        diag.stage("response_write") if diag else None
+        return j(handler, response)
+    finally:
+        if diag:
+            diag.finish()
 
 
 def _normalize_chat_attachments(raw_attachments):
