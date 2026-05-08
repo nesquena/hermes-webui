@@ -2102,6 +2102,17 @@ def _run_agent_streaming(
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                 _emit_metering()
 
+            def on_interim_assistant(text, **cb_kwargs):
+                if text is None:
+                    return
+                visible = str(text).strip()
+                if not visible:
+                    return
+                put('interim_assistant', {
+                    'text': visible,
+                    'already_streamed': bool(cb_kwargs.get('already_streamed', False)),
+                })
+
             # Pre-initialise the activity counter here so on_tool (which
             # closes over it) never captures an unbound name even if this
             # block is reordered later (Issue #765).
@@ -2353,6 +2364,8 @@ def _run_agent_streaming(
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
                 _agent_kwargs['reasoning_config'] = _reasoning_config
+            if 'interim_assistant_callback' in _agent_params:
+                _agent_kwargs['interim_assistant_callback'] = on_interim_assistant
             if 'status_callback' in _agent_params:
                 _agent_kwargs['status_callback'] = _agent_status_callback
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
@@ -2410,6 +2423,8 @@ def _run_agent_streaming(
                     agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
                     if hasattr(agent, 'status_callback'):
                         agent.status_callback = _agent_kwargs.get('status_callback')
+                    if hasattr(agent, 'interim_assistant_callback'):
+                        agent.interim_assistant_callback = _agent_kwargs.get('interim_assistant_callback')
                     if hasattr(agent, 'reasoning_callback'):
                         agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
                     if hasattr(agent, 'clarify_callback'):

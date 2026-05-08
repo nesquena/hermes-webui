@@ -645,6 +645,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
+  function _resetAssistantSegment(){
+    assistantRow=null;
+    assistantBody=null;
+    segmentStart=assistantText.length;
+    _freshSegment=true;
+    _smdEndParser();
+  }
+
   let _lastRenderMs=0;
   function _scheduleRender(){
     if(_renderPending) return;
@@ -725,6 +733,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
+    source.addEventListener('interim_assistant',e=>{
+      if(!S.session||S.session.session_id!==activeSid) return;
+      const d=JSON.parse(e.data);
+      const visible=String(d&&d.text?d.text:'').trim();
+      const alreadyStreamed=!!(d&&d.already_streamed);
+      if(!visible){
+        return;
+      }
+      if(alreadyStreamed){
+        _resetAssistantSegment();
+        return;
+      }
+      assistantText+=visible;
+      syncInflightAssistantMessage();
+      if(!S.session||S.session.session_id!==activeSid) return;
+      const parsed=_parseStreamState();
+      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
+      _scheduleRender();
+    });
+
     source.addEventListener('reasoning',e=>{
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
@@ -768,11 +796,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
-      assistantRow=null;
-      assistantBody=null;
-      segmentStart=assistantText.length; // new segment starts at current text length
-      _freshSegment=true;                // prevent reuse of old DOM node
-      _smdEndParser();                   // finalize current smd parser; new one created on next token
+      _resetAssistantSegment();
       scrollIfPinned();
     });
 

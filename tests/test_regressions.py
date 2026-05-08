@@ -693,6 +693,23 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must parse live stream state into reasoning + visible answer"
 
 
+def test_messages_js_supports_interim_assistant_events(cleanup_test_sessions):
+    """R18b: messages.js must render live interim assistant commentary when
+    `interim_assistant` SSE events arrive.
+
+    AIAgent emits completed mid-turn commentary through an interim callback.
+    Without a dedicated SSE handler, Codex-style interim status text disappears
+    from the live answer and users only see the final response after tool calls.
+    """
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "source.addEventListener('interim_assistant'" in src or 'source.addEventListener("interim_assistant"' in src, \
+        "messages.js must listen for interim_assistant SSE events"
+    assert "function _resetAssistantSegment()" in src, \
+        "messages.js should share live-segment reset logic between interim assistant updates and tool events"
+    assert "_resetAssistantSegment();" in src, \
+        "messages.js should apply segment reset when tool or interim assistant events require it"
+
+
 def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_test_sessions):
     """R19: ui.js must be able to replace the placeholder thinking spinner with
     streamed reasoning text while a turn is in progress.

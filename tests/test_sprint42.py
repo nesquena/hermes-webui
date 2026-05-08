@@ -251,6 +251,157 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertEqual(init_kwargs["api_key"], "rt-key")
         self.assertIs(init_kwargs["session_db"], fake_session_db)
 
+    def test_runtime_provider_forwards_interim_assistant_callback(self):
+        """WebUI must pass interim_assistant_callback to AIAgent and emit SSE events."""
+        import api.streaming as streaming
+
+        captured = {}
+
+        class CapturingAgent:
+            def __init__(
+                self,
+                model=None,
+                provider=None,
+                base_url=None,
+                api_key=None,
+                platform=None,
+                quiet_mode=False,
+                enabled_toolsets=None,
+                fallback_model=None,
+                session_id=None,
+                session_db=None,
+                stream_delta_callback=None,
+                reasoning_callback=None,
+                tool_progress_callback=None,
+                interim_assistant_callback=None,
+                clarify_callback=None,
+                **kwargs,
+            ):
+                captured["init_kwargs"] = dict(
+                    model=model, provider=provider, base_url=base_url, api_key=api_key,
+                    platform=platform, quiet_mode=quiet_mode,
+                    enabled_toolsets=enabled_toolsets, fallback_model=fallback_model,
+                    session_id=session_id, session_db=session_db,
+                    stream_delta_callback=stream_delta_callback,
+                    reasoning_callback=reasoning_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    interim_assistant_callback=interim_assistant_callback,
+                    clarify_callback=clarify_callback,
+                )
+                self.session_id = session_id
+                self.context_compressor = None
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_estimated_cost_usd = None
+                self.reasoning_config = None
+                self.ephemeral_system_prompt = None
+                self._last_error = None
+                self.interim_assistant_callback = interim_assistant_callback
+
+            def run_conversation(self, **kwargs):
+                if self.interim_assistant_callback:
+                    self.interim_assistant_callback("Inspecting repo structure.", already_streamed=False)
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                captured["interrupted"] = True
+
+        class FakeSession:
+            session_id = "sess-interim-test"
+            title = "Test"
+            workspace = "/tmp"
+            model = "gpt-4o"
+            messages = []
+            personality = None
+            input_tokens = 0
+            output_tokens = 0
+            estimated_cost = None
+            tool_calls = []
+            active_stream_id = None
+            pending_user_message = None
+            pending_attachments = []
+            pending_started_at = None
+
+            def save(self, touch_updated_at=True, skip_index=True):
+                pass
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id, "title": self.title,
+                    "workspace": self.workspace, "model": self.model,
+                    "created_at": 0, "updated_at": 0, "pinned": False,
+                    "archived": False, "project_id": None, "profile": None,
+                    "input_tokens": 0, "output_tokens": 0,
+                    "estimated_cost": None, "personality": None,
+                }
+
+            @property
+            def path(self):
+                return "/tmp/fake.json"
+
+        fake_stream_id = "stream-interim-callback"
+        fake_queue = queue.Queue()
+        fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
+            "provider": "openai-codex",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "rt-key",
+            "api_mode": "codex_responses",
+            "command": "codex",
+            "args": ["exec", "--json"],
+            "credential_pool": object(),
+        })
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_rt_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai-codex", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch.dict(sys.modules, {
+                 "hermes_cli": fake_hermes_cli,
+                 "hermes_cli.runtime_provider": fake_rt_module,
+                 "hermes_state": fake_hermes_state,
+             }):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id="sess-interim-test",
+                msg_text="hello",
+                model="gpt-4o",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        init_kwargs = captured["init_kwargs"]
+        self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
+        self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
+
+        interim_events = []
+        while not fake_queue.empty():
+            try:
+                interim_events.append(fake_queue.get_nowait())
+            except queue.Empty:
+                break
+        self.assertTrue(
+            any(event == "interim_assistant" for event, _ in interim_events),
+            "interim_assistant callback should emit interim_assistant SSE events",
+        )
+        self.assertTrue(
+            any(
+                event == "interim_assistant" and event_data.get("text") == "Inspecting repo structure."
+                for event, event_data in interim_events
+            ),
+            "interim_assistant event should carry the assistant commentary text"
+        )
+
 
 class TestSessionDBAST(unittest.TestCase):
     """AST-level checks: verify the try/except is not inside _ENV_LOCK (deadlock guard)."""
