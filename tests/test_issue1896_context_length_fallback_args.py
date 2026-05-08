@@ -179,3 +179,48 @@ def test_cfg_custom_providers_resolved_from_cfg_dict():
         "_cfg_ctx_len must be sourced from `_cfg.get('model', {}).get('context_length')` "
         "(per-profile config) so profile-scoped model.context_length overrides work."
     )
+
+
+# ── Sibling fallback in api/routes.py session-load path ─────────────────────
+
+ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+
+
+def test_routes_session_load_fallback_passes_config_overrides():
+    """The session-load fallback at api/routes.py (around 'older sessions
+    (pre-#1318) that have context_length=0 persisted') has the SAME bug shape
+    as the streaming.py fallbacks: it called `_get_cl(model, "")` with no
+    config overrides, so `/api/session/get` returned 256K for old sessions
+    even when the user had `model.context_length: 1048576` set.
+
+    The fix mirrors streaming.py's: pass config_context_length, provider,
+    and custom_providers, with a TypeError fallback to the legacy 2-arg
+    form. Without this, the very first paint of a reloaded old session shows
+    the wrong window until a turn is sent.
+    """
+    # Anchor: find the comment that pins this fallback's purpose.
+    anchor = "older sessions (pre-#1318) that have context_length=0 persisted"
+    idx = ROUTES_PY.find(anchor)
+    assert idx != -1, "session-load fallback comment moved/removed"
+    # Find the resolver callsite that follows.
+    block_end = ROUTES_PY.find("if _fb_cl:", idx)
+    assert block_end != -1, "_fb_cl assignment not found after fallback comment"
+    block = ROUTES_PY[idx:block_end]
+    # Same kwargs as the streaming.py fix.
+    assert "config_context_length=" in block, (
+        "session-load fallback in api/routes.py must pass config_context_length= "
+        "so user-set model.context_length wins over the 256K default. See #1896."
+    )
+    assert "provider=effective_provider" in block, (
+        "session-load fallback in api/routes.py must pass provider=effective_provider "
+        "so the registry lookup is provider-aware. See #1896."
+    )
+    assert "custom_providers=" in block, (
+        "session-load fallback in api/routes.py must pass custom_providers= "
+        "so the per-model override path applies. See #1896."
+    )
+    # Legacy fallback for older hermes-agent builds that pre-date the kwargs.
+    assert "except TypeError:" in block, (
+        "session-load fallback must catch TypeError to support older "
+        "hermes-agent builds without the new kwargs."
+    )

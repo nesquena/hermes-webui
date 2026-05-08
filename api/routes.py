@@ -2839,6 +2839,14 @@ def handle_get(handler, parsed) -> bool:
             # older sessions (pre-#1318) that have context_length=0 persisted
             # still render a meaningful indicator on load.  Mirrors the
             # SSE-path fallback in api/streaming.py:2333-2342.  Fixes #1436.
+            #
+            # #1896: pass config_context_length, provider, and custom_providers
+            # so explicit config overrides win over the 256K default fallback.
+            # Without these, an old session loaded after a user upgraded to a
+            # 1M-context model with `model.context_length: 1048576` in
+            # config.yaml gets a 256K window in the initial UI indicator and
+            # /api/session/get response — the same wrong-window display this
+            # fix addresses on the streaming side.
             _persisted_cl = getattr(s, "context_length", 0) or 0
             if not _persisted_cl:
                 _model_for_lookup = (
@@ -2847,7 +2855,37 @@ def handle_get(handler, parsed) -> bool:
                 if _model_for_lookup:
                     try:
                         from agent.model_metadata import get_model_context_length as _get_cl
-                        _fb_cl = _get_cl(_model_for_lookup, "") or 0
+                        from api.config import get_config as _get_config_for_cl
+                        _cfg_for_cl = _get_config_for_cl()
+                        _cfg_ctx_len_load = None
+                        _cfg_custom_providers_load = None
+                        try:
+                            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
+                            if isinstance(_model_cfg_load, dict):
+                                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
+                                if _raw_cfg_ctx_load is not None:
+                                    try:
+                                        _parsed_load = int(_raw_cfg_ctx_load)
+                                        if _parsed_load > 0:
+                                            _cfg_ctx_len_load = _parsed_load
+                                    except (TypeError, ValueError):
+                                        pass
+                            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
+                            if isinstance(_raw_cp_load, list):
+                                _cfg_custom_providers_load = _raw_cp_load
+                        except Exception:
+                            pass
+                        try:
+                            _fb_cl = _get_cl(
+                                _model_for_lookup,
+                                "",
+                                config_context_length=_cfg_ctx_len_load,
+                                provider=effective_provider or "",
+                                custom_providers=_cfg_custom_providers_load,
+                            ) or 0
+                        except TypeError:
+                            # Older hermes-agent builds: legacy 2-arg form.
+                            _fb_cl = _get_cl(_model_for_lookup, "") or 0
                         if _fb_cl:
                             _persisted_cl = _fb_cl
                     except Exception:
