@@ -330,6 +330,11 @@ async function newSession(flash){
 }
 
 async function loadSession(sid){
+  const currentSid = S.session ? S.session.session_id : null;
+  // Clicking the already-open session in the sidebar is a no-op. Reloading it
+  // tears down active pane state and can reset the long-session scroll window
+  // to the top even though the user did not navigate anywhere.
+  if(currentSid===sid) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -339,7 +344,6 @@ async function loadSession(sid){
   if(typeof hideClarifyCard==='function') hideClarifyCard();
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
-  const currentSid = S.session ? S.session.session_id : null;
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060).
   if (currentSid && currentSid !== sid) {

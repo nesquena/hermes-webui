@@ -142,13 +142,17 @@ def test_downward_path_preserves_macos_momentum_hysteresis():
     end_idx = block.index("const btn=", else_idx)
     downward_branch = block[else_idx:end_idx]
 
-    assert "_nearBottomCount=nearBottom?_nearBottomCount+1:0" in downward_branch, (
+    assert "if(nearBottom)" in downward_branch, (
+        "Downward path must branch on near-bottom state so the macOS momentum "
+        "re-pin guard still applies (#1360)."
+    )
+    assert "_nearBottomCount=_nearBottomCount+1" in downward_branch, (
         "Downward path must keep incrementing the near-bottom counter so "
         "the macOS momentum re-pin guard still applies (#1360)."
     )
-    assert "_scrollPinned=_nearBottomCount>=2" in downward_branch, (
+    assert "if(_nearBottomCount>=2) _scrollPinned=true" in downward_branch, (
         "Downward path must keep the >=2 hysteresis re-pin requirement "
-        "(#1360)."
+        "without downgrading an explicit bottom pin on the first near-bottom event (#1360)."
     )
 
 

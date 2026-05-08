@@ -1510,8 +1510,10 @@ let _lastScrollTop=null;
 let _lastNonMessageScrollIntentMs=0;
 let _lastMessageUpwardIntentMs=0;
 let _messageUserUnpinned=false;
+let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
 const MESSAGE_UPWARD_INTENT_MS=450;
+function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -1527,6 +1529,9 @@ function _recordNonMessageScrollIntent(e){
     // not masquerade as user intent and strand live streaming away from bottom.
     _lastMessageUpwardIntentMs=performance.now();
     _messageUserUnpinned=true;
+    // User is intentionally moving in the transcript. Cancel any delayed
+    // scrollToBottom settling that was scheduled by session-load/layout growth.
+    _cancelBottomSettle();
     _nearBottomCount=0;
     _scrollPinned=false;
   }
@@ -1559,8 +1564,14 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
       // scrollToBottomBtn visibility is updated below after pin state settles.
       const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
       _lastScrollTop=top;
-      if(movedUp){ _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
-      else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; if(_scrollPinned) _messageUserUnpinned=false; } // #1360
+      if(movedUp){ _cancelBottomSettle(); _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
+      else {
+        if(nearBottom){
+          _nearBottomCount=_nearBottomCount+1;
+          if(_nearBottomCount>=2) _scrollPinned=true;
+        } else { _nearBottomCount=0; _scrollPinned=false; }
+        if(_scrollPinned) _messageUserUnpinned=false;
+      } // #1360
       const btn=$('scrollToBottomBtn');
       if(btn) btn.style.display=_scrollPinned?'none':'flex';
       // Load older messages when scrolled near the top
@@ -1852,6 +1863,8 @@ function _setMessageScrollToBottom(){
   _programmaticScroll=true;
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;
+  _nearBottomCount=2;
+  _scrollPinned=true;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
 function _isMessagePaneNearBottom(threshold=250){
@@ -1862,16 +1875,42 @@ function _isMessagePaneNearBottom(threshold=250){
 function _shouldFollowMessagesOnDomReplace(){
   return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
 }
+function _settleMessageScrollToBottom(force){
+  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+  // can grow the transcript after the first scroll write. Re-apply the bottom
+  // position across a few frames while pinned so late layout does not leave the
+  // viewport a few lines above the real end. User scroll increments
+  // _bottomSettleToken and cancels the delayed passes.
+  const token=++_bottomSettleToken;
+  const passes=[0,16,80,180];
+  passes.forEach(delay=>setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    _setMessageScrollToBottom();
+  },delay));
+  requestAnimationFrame(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    requestAnimationFrame(()=>{
+      if(token!==_bottomSettleToken) return;
+      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    });
+  });
+}
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;_lastScrollTop=el.scrollTop;requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });}
+  _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
   _scrollPinned=true;
   _messageUserUnpinned=false;
+  // Write the first bottom position synchronously. A final renderMessages()
+  // rebuild can queue a native scroll event from the temporary scrollTop=0
+  // layout state; if we only schedule delayed settles, that event can cancel
+  // them before the viewport ever reaches the bottom.
   _setMessageScrollToBottom();
+  _settleMessageScrollToBottom(true);
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
 }
