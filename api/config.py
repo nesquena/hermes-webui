@@ -877,7 +877,7 @@ def _apply_provider_prefix(
     return result
 
 
-def _deduplicate_model_ids(groups: list[dict]) -> None:
+def _deduplicate_model_ids(groups: list[dict], active_provider: str | None = None) -> None:
     """Ensure every model ID across groups is globally unique.
 
     When multiple providers expose the same model ID (either bare names like
@@ -886,17 +886,11 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     collisions and prefixes colliding entries with ``@provider_id:`` so the
     frontend can treat them as distinct options.
 
-    The first occurrence (in provider-id order) is left unchanged for backward
-    compatibility with sessions that already store the original bare/slash
-    model name. If that provider is later removed from the config, the next
-    cache rebuild re-runs dedup — the remaining provider becomes the sole
-    occurrence and is left unchanged, so the session still matches.
-
-    .. note::
-       The "first occurrence wins" rule means the unchanged ID is not stable
-       across config changes (adding, removing, or reordering providers).
-       This is acceptable because the dedup runs on every cache rebuild,
-       so sessions always resolve to the current canonical unchanged ID.
+    The active provider's occurrence (if it participates in a collision) is
+    left unchanged — sessions that store a bare model ID will continue to
+    route through the active provider.  All other occurrences are prefixed
+    so selecting from a non-active provider routes through that provider
+    rather than being silently redirected to the active one.
 
     The ``@provider_id:model`` format is consistent with the existing
     ``_apply_provider_prefix()`` function and is handled by
@@ -908,12 +902,15 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     if not groups:
         return
 
-    # Collect {model_id: [(group_idx, model_idx), ...]} in alphabetical
-    # provider_id order so that the "first occurrence stays unchanged" rule is
-    # deterministic across config edits (adding/removing/reordering providers).
+    # Sort so the active provider appears first (keeps bare IDs);
+    # remaining groups are sorted alphabetically by provider_id for
+    # deterministic behaviour.
     sorted_group_indices = sorted(
         range(len(groups)),
-        key=lambda i: groups[i].get("provider_id", ""),
+        key=lambda i: (
+            0 if groups[i].get("provider_id") == active_provider else 1,
+            groups[i].get("provider_id", ""),
+        ),
     )
     id_map: dict[str, list[tuple[int, int]]] = {}
     for gi in sorted_group_indices:
@@ -2035,7 +2032,7 @@ def get_available_models() -> dict:
         # Post-process: ensure model IDs are globally unique across groups.
         # When multiple providers expose the same bare model ID, prefix
         # collisions with @provider_id: so the frontend can distinguish them.
-        _deduplicate_model_ids(groups)
+        _deduplicate_model_ids(groups, active_provider=active_provider)
 
         return {
             "active_provider": active_provider,
