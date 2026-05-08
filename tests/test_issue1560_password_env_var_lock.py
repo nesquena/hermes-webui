@@ -168,10 +168,13 @@ def test_i18n_locked_string_mentions_env_var_name_in_all_locales():
 # ── Live HTTP smoke test (env var NOT set in pytest) ──────────────────────
 
 
-def test_get_settings_returns_password_env_var_false_when_unset():
+def test_get_settings_returns_password_env_var_false_when_unset(monkeypatch):
     """When HERMES_WEBUI_PASSWORD is not set in the test process,
     GET /api/settings must include `password_env_var: False`."""
-    # The conftest server inherits this process's env; verify it's clean.
+    # Test the unset branch explicitly. Some suite neighbors intentionally set
+    # HERMES_WEBUI_PASSWORD while exercising the locked-password path.
+    monkeypatch.delenv('HERMES_WEBUI_PASSWORD', raising=False)
+    # The conftest server inherits a sanitized env; verify this process is clean.
     assert not os.getenv('HERMES_WEBUI_PASSWORD', '').strip(), \
         'this test requires HERMES_WEBUI_PASSWORD to be unset'
 

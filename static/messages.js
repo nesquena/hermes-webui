@@ -889,6 +889,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
+      const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
+        ? _shouldFollowMessagesOnDomReplace()
+        : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
       if(isActiveSession){
         S.activeStreamId=null;
       }
@@ -968,7 +971,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
         if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
-        syncTopbar();renderMessages({preserveScroll:true});loadDir('.');
+        syncTopbar();renderMessages({preserveScroll:true});
+        if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+        loadDir('.');
         // TTS auto-read: speak the last assistant response if enabled (#499)
         if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
       }

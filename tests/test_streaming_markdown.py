@@ -418,6 +418,38 @@ class TestDoneEventSmd:
             "before renderMessages() in the 'done' handler source"
         )
 
+    def test_done_handler_preserves_bottom_follow_on_final_render(self):
+        """Final DOM replacement must keep auto-following users at the bottom.
+
+        The live stream path can be visually at bottom while _scrollPinned was
+        knocked false by history/windowing/layout preservation. On `done`, the
+        live DOM is replaced with persisted messages; if the handler blindly calls
+        renderMessages({preserveScroll:true}) while the pin flag is false, the
+        transcript can jump to the top. Capture bottom/follow intent before the
+        replacement and explicitly bottom only for those users.
+        """
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        assert "shouldFollowOnDone" in fn, (
+            "'done' handler must capture whether the viewed transcript should "
+            "continue following before replacing the live DOM."
+        )
+        follow_idx = fn.index("shouldFollowOnDone")
+        render_idx = fn.index("renderMessages({preserveScroll:true})")
+        assert follow_idx < render_idx, (
+            "Follow intent must be captured before renderMessages() replaces the "
+            "live transcript DOM."
+        )
+        after_render = fn[render_idx:render_idx + 500]
+        assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
+            "After final render, done handler must call scrollToBottom() when the "
+            "user was pinned/near-bottom before DOM replacement."
+        )
+        assert "_isMessagePaneNearBottom" in fn, (
+            "Done follow capture must include a near-bottom DOM check, not only "
+            "the possibly-stale _scrollPinned flag."
+        )
+
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────
 

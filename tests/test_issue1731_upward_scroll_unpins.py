@@ -91,6 +91,46 @@ def test_upward_scroll_unpins_immediately_without_hysteresis():
     )
 
 
+def test_upward_motion_only_unpins_after_recent_user_intent():
+    """Layout/programmatic scrollTop decreases must not masquerade as user scroll-up.
+
+    Long-session windowing can preserve/restore scroll positions while the live
+    stream is growing. If a plain scrollTop decrease always clears
+    ``_scrollPinned``, the viewport can be visually at bottom while the state says
+    "not pinned", so streaming stops auto-following. Explicit wheel/touch upward
+    input must still unpin immediately; passive layout movement must not.
+    """
+    assert "let _lastMessageUpwardIntentMs=" in UI_JS, (
+        "ui.js must track recent upward wheel/touch intent inside #messages so "
+        "programmatic/layout scroll changes do not permanently unpin streaming."
+    )
+    assert "function _recentMessageUpwardIntent()" in UI_JS, (
+        "ui.js must expose a recent upward transcript intent helper."
+    )
+    block = _scroll_listener_block()
+    moved_idx = block.index("const movedUp=")
+    moved_expr = block[moved_idx : block.find(";", moved_idx)]
+    assert "_recentMessageUpwardIntent()" in moved_expr, (
+        "movedUp must require recent wheel/touch upward intent, not only a "
+        "scrollTop decrease caused by DOM/layout changes."
+    )
+
+
+def test_wheel_touch_upward_intent_is_recorded_inside_messages():
+    """Wheel/touch gestures inside #messages must mark real upward user intent."""
+    fn_start = UI_JS.index("function _recordNonMessageScrollIntent")
+    fn_end = UI_JS.index("function _recentNonMessageScrollIntent", fn_start)
+    fn = UI_JS[fn_start:fn_end]
+    assert "_lastMessageUpwardIntentMs=performance.now()" in fn, (
+        "_recordNonMessageScrollIntent must timestamp real upward transcript "
+        "wheel/touch gestures before clearing _scrollPinned."
+    )
+    assert "e.deltaY<0" in fn and "e.type==='touchmove'" in fn, (
+        "Both wheel-up and touchmove gestures inside #messages should count as "
+        "user upward intent."
+    )
+
+
 def test_downward_path_preserves_macos_momentum_hysteresis():
     """Downward / stationary motion must still go through the original
     hysteresis re-pin path so the #1360 macOS trackpad momentum protection

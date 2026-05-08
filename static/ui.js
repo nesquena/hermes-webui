@@ -1498,7 +1498,10 @@ let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastNonMessageScrollIntentMs=0;
+let _lastMessageUpwardIntentMs=0;
+let _messageUserUnpinned=false;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+const MESSAGE_UPWARD_INTENT_MS=450;
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -1508,6 +1511,18 @@ function _recordNonMessageScrollIntent(e){
   // session sidebar (or another independent pane) must not be immediately fought
   // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
+    // User is intentionally moving upward in the transcript. Record the real
+    // input event so later scrollTop decreases caused by layout/windowing do
+    // not masquerade as user intent and strand live streaming away from bottom.
+    _lastMessageUpwardIntentMs=performance.now();
+    _messageUserUnpinned=true;
+    _nearBottomCount=0;
+    _scrollPinned=false;
+  }
+}
+function _recentMessageUpwardIntent(){
+  return performance.now()-_lastMessageUpwardIntentMs<MESSAGE_UPWARD_INTENT_MS;
 }
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
@@ -1531,10 +1546,11 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
       const nearBottom=el.scrollHeight-top-el.clientHeight<250;
-      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2;
+      // scrollToBottomBtn visibility is updated below after pin state settles.
+      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
       _lastScrollTop=top;
-      if(movedUp){ _nearBottomCount=0; _scrollPinned=false; } // #1731
-      else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; } // #1360
+      if(movedUp){ _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
+      else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; if(_scrollPinned) _messageUserUnpinned=false; } // #1360
       const btn=$('scrollToBottomBtn');
       if(btn) btn.style.display=_scrollPinned?'none':'flex';
       // Load older messages when scrolled near the top
@@ -1820,16 +1836,32 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
+function _setMessageScrollToBottom(){
+  const el=$('messages');
+  if(!el) return;
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _isMessagePaneNearBottom(threshold=250){
+  const el=$('messages');
+  if(!el) return false;
+  return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
+}
+function _shouldFollowMessagesOnDomReplace(){
+  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
+}
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;_lastScrollTop=el.scrollTop;requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });}
 }
 function scrollToBottom(){
   _scrollPinned=true;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  _messageUserUnpinned=false;
+  _setMessageScrollToBottom();
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
 }
