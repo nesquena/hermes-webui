@@ -249,9 +249,15 @@ function toggleSidebar(force){
   layout.classList.toggle('sidebar-collapsed',nextCollapsed);
   sidebar.classList.toggle('sidebar-collapsed',nextCollapsed);
   try{localStorage.setItem('hermes-webui-sidebar-collapsed',nextCollapsed?'1':'0');}catch(_){}
-  // Update the rail button's active state so the user can see it
+  // Swap rail button icon: panel-left open ↔ panel-left close
   const btn=$('btnToggleSidebar');
-  if(btn) btn.classList.toggle('active',nextCollapsed);
+  if(btn){
+    if(nextCollapsed){
+      btn.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>';
+    } else {
+      btn.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>';
+    }
+  }
 }
 function _initSidebarState(){
   // Clear the flash-prevention dataset first, regardless of DOM state
@@ -266,7 +272,7 @@ function _initSidebarState(){
     layout.classList.add('sidebar-collapsed');
     sidebar.classList.add('sidebar-collapsed');
     const btn=$('btnToggleSidebar');
-    if(btn) btn.classList.add('active');
+    if(btn) btn.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>';
   }
 }
 function mobileSwitchPanel(name){
@@ -1025,6 +1031,12 @@ document.addEventListener('keydown',async e=>{
       const bar=editArea.closest('.msg-row')&&editArea.closest('.msg-row').querySelector('.msg-edit-bar');
       if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
     }
+  }
+  // Cmd/Ctrl+B toggles sidebar collapse (VS Code convention)
+  if((e.metaKey||e.ctrlKey)&&e.key==='b'&&typeof toggleSidebar==='function'){
+    e.preventDefault();
+    toggleSidebar();
+    return;
   }
 });
 $('msg').addEventListener('paste',e=>{

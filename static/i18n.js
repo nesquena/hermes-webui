@@ -547,6 +547,8 @@ const LOCALES = {
     tab_logs: 'Logs',
     tab_settings: 'Settings',
     new_conversation: 'New conversation',
+    toggle_sidebar: 'Toggle sidebar',
+    close_sidebar: 'Close sidebar',
     filter_conversations: 'Filter conversations...',
     session_time_unknown: 'Unknown',
     session_time_minutes_ago: (n) => `${n}m`,
@@ -1568,6 +1570,8 @@ const LOCALES = {
     tab_logs: 'ログ',
     tab_settings: '設定',
     new_conversation: '新しい会話',
+    toggle_sidebar: 'サイドバーの切り替え',
+    close_sidebar: 'サイドバーを閉じる',
     filter_conversations: '会話を絞り込み...',
     session_time_unknown: '不明',
     session_time_minutes_ago: (n) => `${n}分前`,
@@ -2442,6 +2446,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: 'Новая беседа',
+    toggle_sidebar: 'Переключить боковую панель',
+    close_sidebar: 'Закрыть боковую панель',
     filter_conversations: 'Фильтр бесед...',
     session_time_unknown: 'Неизвестно',
     session_time_minutes_ago: (n) => `${n}м`,
@@ -3397,6 +3403,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: 'Nueva conversación',
+    toggle_sidebar: 'Alternar barra lateral',
+    close_sidebar: 'Cerrar barra lateral',
     filter_conversations: 'Filtrar conversaciones...',
     session_time_unknown: 'Desconocido',
     session_time_minutes_ago: (n) => `${n}m`,
@@ -4340,6 +4348,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: 'Neuer Chat',
+    toggle_sidebar: 'Seitenleiste umschalten',
+    close_sidebar: 'Seitenleiste schließen',
     filter_conversations: 'Chats filtern...',
     scheduled_jobs: 'Geplante Aufgaben',
     new_job: 'Neuer Job',
@@ -5306,6 +5316,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: '新建对话',
+    toggle_sidebar: '切换侧边栏',
+    close_sidebar: '关闭侧边栏',
     filter_conversations: '筛选对话…',
     session_time_unknown: '未知',
     session_time_minutes_ago: (n) => `${n}分`,
@@ -6203,6 +6215,8 @@ const LOCALES = {
     tab_logs: 'Logs',
     tab_workspaces: '\u5de5\u4f5c\u5340',
     new_conversation: '新對話',
+    toggle_sidebar: '切換側邊欄',
+    close_sidebar: '關閉側邊欄',
     filter_conversations: '篩選對話',
     scheduled_jobs: '排程任務',
     new_job: '\u65b0\u4efb\u52d9',
@@ -7301,6 +7315,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: 'Nova conversa',
+    toggle_sidebar: 'Alternar barra lateral',
+    close_sidebar: 'Fechar barra lateral',
     filter_conversations: 'Filtrar conversas...',
     session_time_unknown: 'Desconhecido',
     session_time_minutes_ago: (n) => `${n}m`,
@@ -8220,6 +8236,8 @@ const LOCALES = {
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
     new_conversation: '새 대화',
+    toggle_sidebar: '사이드바 토글',
+    close_sidebar: '사이드바 닫기',
     filter_conversations: '대화 필터…',
     session_time_unknown: 'Unknown',
     session_time_minutes_ago: (n) => `${n}m`,
