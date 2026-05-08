@@ -427,10 +427,11 @@ class TestMessagePaginationFrontend:
         assert "async function _ensureAllMessagesLoaded" in SESSIONS_JS
 
     def test_scroll_to_top_triggers_loading(self):
-        """Scroll event handler must trigger _loadOlderMessages near top."""
+        """Scroll event handler must trigger _loadOlderMessages near top when opt-in is enabled."""
         UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
-        assert "el.scrollTop<80" in UI_JS
+        assert "const olderPrefetchPx=Math.max(600,el.clientHeight*1.5)" in UI_JS
+        assert "_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx" in UI_JS
         assert "_loadOlderMessages" in UI_JS
 
     def test_load_older_indicator_in_render(self):
