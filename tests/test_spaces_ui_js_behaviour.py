@@ -1148,6 +1148,25 @@ async function dispatchWindowMessage(data, opts) {
       code: 'alert(SECRET_VALUE_DO_NOT_LEAK)',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeConflictingMessageType') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      message_type: 'capy:raw:eval',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Queue this benign-looking prompt',
+      source: 'eval(SECRET_VALUE_DO_NOT_LEAK)',
+      renderer: '<script>bad()</script>',
+    });
   } else if (scenario === 'runtimePromptCancelled') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2115,6 +2134,21 @@ def test_spaces_ui_sandbox_postmessage_blocks_raw_eval_without_network_call(driv
     assert "Sandbox event bridge" in out["beforeHtml"]
     assert "Sandbox message blocked: capy:raw:eval" in out["rootHtml"]
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_conflicting_message_type_aliases(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeConflictingMessageType")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox message blocked" in out["rootHtml"]
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Sandbox message blocked: capy:raw:eval" not in out["rootHtml"]
+    assert "eval(" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

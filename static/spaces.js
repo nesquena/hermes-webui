@@ -926,9 +926,24 @@
       '</div></div>';
   }
 
-  function runtimeMessageType(data){
-    const type = String(data && (data.type || data.message_type) || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  function runtimeMessageTypeValue(value){
+    const type = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     return /^capy:[a-z0-9:._-]+$/i.test(type) ? type : '';
+  }
+
+  function runtimeMessageTypeInfo(data){
+    const hasType = Object.prototype.hasOwnProperty.call(data || {}, 'type');
+    const hasMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'message_type');
+    const type = runtimeMessageTypeValue(data && data.type);
+    const messageType = runtimeMessageTypeValue(data && data.message_type);
+    if ((hasType && !type) || (hasMessageType && !messageType)) return { type: '', blocked: true, reflectedType: '' };
+    if (type && messageType && type.toLowerCase() !== messageType.toLowerCase()) return { type: '', blocked: true, reflectedType: '' };
+    const selected = type || messageType;
+    return { type: selected, blocked: isBlockedRuntimeMessageType(selected), reflectedType: selected };
+  }
+
+  function runtimeMessageType(data){
+    return runtimeMessageTypeInfo(data).type;
   }
 
   function isBlockedRuntimeMessageType(type){
@@ -951,18 +966,20 @@
 
   async function handleCapyWidgetRuntimeMessage(event){
     const data = event && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
-    const type = runtimeMessageType(data);
-    if (!type || !runtimeMessageOriginAllowed(event)) return;
+    const typeInfo = runtimeMessageTypeInfo(data);
+    if ((!typeInfo.type && !typeInfo.blocked) || !runtimeMessageOriginAllowed(event)) return;
     const token = String(data.runtime_token || '').trim();
     const session = token ? widgetRuntimeSessions[token] : null;
     if (!session) return;
     if (!runtimeSessionStillVisible(token)) return;
     if (data.space_id && runtimeTokenPart(data.space_id, '') !== session.spaceId) return;
     if (data.widget_id && runtimeTokenPart(data.widget_id, '') !== session.widgetId) return;
-    if (isBlockedRuntimeMessageType(type)) {
-      prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked: '+type, 'Blocked by Capy runtime contract; no widget event was queued.'));
+    if (typeInfo.blocked) {
+      const title = typeInfo.reflectedType ? 'Sandbox message blocked: '+typeInfo.reflectedType : 'Sandbox message blocked';
+      prependRuntimeStatus(renderSandboxRuntimeStatus(title, 'Blocked by Capy runtime contract; no widget event was queued.'));
       return;
     }
+    const type = typeInfo.type;
     if (type === 'capy:ready') {
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox ready', session.widgetId+' · metadata-only runtime handshake'));
       return;
