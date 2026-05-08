@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
+import threading
 import urllib.error
 from datetime import datetime, timezone
 from io import BytesIO
@@ -174,10 +176,10 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
     seen = {}
     previous_home = os.environ.get("HERMES_HOME")
 
-    def fake_fetch(provider, base_url=None, api_key=None):
+    def fake_fetch(provider, home, api_key=None):
         seen["provider"] = provider
+        seen["home"] = str(home)
         seen["api_key"] = api_key
-        seen["hermes_home"] = os.environ.get("HERMES_HOME")
         return SimpleNamespace(
             provider="openai-codex",
             source="usage_api",
@@ -203,7 +205,7 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
             unavailable_reason=None,
         )
 
-    monkeypatch.setattr(providers, "_agent_fetch_account_usage", fake_fetch)
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
     try:
         result = providers.get_provider_quota()
     finally:
@@ -211,8 +213,8 @@ def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, t
 
     assert seen == {
         "provider": "openai-codex",
+        "home": str(tmp_path),
         "api_key": None,
-        "hermes_home": str(tmp_path),
     }
     assert os.environ.get("HERMES_HOME") == previous_home
     assert result["ok"] is True
@@ -258,7 +260,7 @@ def test_codex_account_usage_unavailable_is_sanitized(monkeypatch, tmp_path):
     def fake_fetch(*_args, **_kwargs):
         raise RuntimeError("secret access token should not leak")
 
-    monkeypatch.setattr(providers, "_agent_fetch_account_usage", fake_fetch)
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
     try:
         result = providers.get_provider_quota()
     finally:
@@ -282,7 +284,7 @@ def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_p
 
     monkeypatch.setattr(
         providers,
-        "_agent_fetch_account_usage",
+        "_agent_fetch_account_usage_for_home",
         lambda *_args, **_kwargs: SimpleNamespace(
             provider="anthropic",
             source="oauth_usage_api",
@@ -306,6 +308,76 @@ def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_p
     assert result["status"] == "unavailable"
     assert result["account_limits"]["unavailable_reason"].startswith("Anthropic account limits")
     assert "OAuth-backed Claude accounts" in result["message"]
+
+
+def test_account_usage_profile_fetch_does_not_enter_cron_env_context():
+    """Quota probes must not reuse cron's process-global env/module swapper."""
+    import api.providers as providers
+
+    body = inspect.getsource(providers._fetch_account_usage_with_profile_context)
+    assert "cron_profile_context_for_home" not in body
+    assert "_agent_fetch_account_usage_for_home" in body
+
+
+def test_account_usage_profile_env_is_child_scoped(monkeypatch, tmp_path):
+    """Profile .env values should be passed to the child probe only."""
+    import api.providers as providers
+
+    home = tmp_path / "profile-a"
+    home.mkdir()
+    (home / ".env").write_text("ANTHROPIC_API_KEY=profile-key\n", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "process-key")
+
+    env = providers._account_usage_subprocess_env(home, "anthropic", None)
+
+    assert env["HERMES_HOME"] == str(home)
+    assert env["ANTHROPIC_API_KEY"] == "profile-key"
+    assert os.environ["ANTHROPIC_API_KEY"] == "process-key"
+
+
+def test_account_usage_profile_fetches_can_overlap_for_different_homes(monkeypatch, tmp_path):
+    """Different profile quota fetches should not serialize on cron's global lock."""
+    import api.providers as providers
+
+    homes = {
+        "quota-a": tmp_path / "a",
+        "quota-b": tmp_path / "b",
+    }
+    for home in homes.values():
+        home.mkdir()
+    barrier = threading.Barrier(2, timeout=2)
+    events = []
+    errors = []
+
+    def fake_home():
+        return homes[threading.current_thread().name]
+
+    def fake_fetch(provider, home, api_key=None):
+        events.append(("enter", str(home)))
+        barrier.wait()
+        events.append(("exit", str(home)))
+        return None
+
+    monkeypatch.setattr(providers, "_get_hermes_home", fake_home)
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
+
+    def worker():
+        try:
+            providers._fetch_account_usage_with_profile_context("openai-codex")
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, name="quota-a"),
+        threading.Thread(target=worker, name="quota-b"),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert [kind for kind, _home in events[:2]] == ["enter", "enter"]
 
 
 def test_provider_quota_route_is_registered():
