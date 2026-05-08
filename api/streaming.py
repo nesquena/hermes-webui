@@ -3106,35 +3106,44 @@ def _run_agent_streaming(
             # frontend surfaces the status line and queues continuation_prompt as
             # a normal next user message so /queue and user input keep priority.
             try:
-                from api.goals import evaluate_goal_after_turn
+                from api.goals import evaluate_goal_after_turn, has_active_goal
 
-                _last_goal_response = ''
-                for _goal_msg in reversed(s.messages or []):
-                    if not isinstance(_goal_msg, dict) or _goal_msg.get('role') != 'assistant':
-                        continue
-                    _goal_content = _goal_msg.get('content', '')
-                    if isinstance(_goal_content, list):
-                        _goal_parts = []
-                        for _goal_part in _goal_content:
-                            if isinstance(_goal_part, dict):
-                                _goal_text = _goal_part.get('text') or _goal_part.get('content')
-                                if _goal_text:
-                                    _goal_parts.append(str(_goal_text))
-                        _last_goal_response = '\n'.join(_goal_parts)
-                    else:
-                        _last_goal_response = str(_goal_content or '')
-                    break
-                _goal_decision = evaluate_goal_after_turn(
-                    session_id,
-                    _last_goal_response,
-                    user_initiated=True,
-                    profile_home=_profile_home,
-                )
+                if not has_active_goal(session_id, profile_home=_profile_home):
+                    _goal_decision = {}
+                else:
+                    _last_goal_response = ''
+                    for _goal_msg in reversed(s.messages or []):
+                        if not isinstance(_goal_msg, dict) or _goal_msg.get('role') != 'assistant':
+                            continue
+                        _goal_content = _goal_msg.get('content', '')
+                        if isinstance(_goal_content, list):
+                            _goal_parts = []
+                            for _goal_part in _goal_content:
+                                if isinstance(_goal_part, dict):
+                                    _goal_text = _goal_part.get('text') or _goal_part.get('content')
+                                    if _goal_text:
+                                        _goal_parts.append(str(_goal_text))
+                            _last_goal_response = '\n'.join(_goal_parts)
+                        else:
+                            _last_goal_response = str(_goal_content or '')
+                        break
+                    put('goal', {
+                        'session_id': session_id,
+                        'state': 'evaluating',
+                        'message': 'Evaluating goal progress…',
+                    })
+                    _goal_decision = evaluate_goal_after_turn(
+                        session_id,
+                        _last_goal_response,
+                        user_initiated=True,
+                        profile_home=_profile_home,
+                    )
                 decision = _goal_decision or {}
                 _goal_message = str(decision.get('message') or '').strip()
                 if _goal_message:
                     put('goal', {
                         'session_id': session_id,
+                        'state': 'continuing' if decision.get('should_continue') else 'idle',
                         'message': _goal_message,
                         'decision': decision,
                     })

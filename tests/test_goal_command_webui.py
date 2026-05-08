@@ -100,6 +100,25 @@ def test_goal_command_payload_rejects_new_goal_while_stream_running(monkeypatch)
     assert "use /goal status / pause / clear mid-run" in rejected["message"]
 
 
+def test_has_active_goal_reports_only_active_state(monkeypatch):
+    """Streaming can avoid showing an evaluating spinner when no standing goal is active."""
+    from api import goals as webui_goals
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+
+        def is_active(self):
+            return self.session_id == "sid-active-goal"
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    assert webui_goals.has_active_goal("sid-active-goal") is True
+    assert webui_goals.has_active_goal("sid-idle-goal") is False
+    assert webui_goals.has_active_goal("") is False
+
+
 def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypatch):
     """Post-turn hook returns the visible status event plus a normal continuation prompt."""
     from api import goals as webui_goals
@@ -221,6 +240,17 @@ def test_streaming_post_turn_goal_hook_surfaces_and_continues():
     assert goal_idx < done_idx, "goal status should be emitted before the terminal done payload"
 
 
+def test_streaming_goal_hook_emits_evaluating_state_before_judge():
+    evaluating_idx = STREAMING_PY.find("'state': 'evaluating'")
+    judge_idx = STREAMING_PY.find("_goal_decision = evaluate_goal_after_turn")
+    done_idx = STREAMING_PY.find("put('done'", judge_idx)
+    assert evaluating_idx != -1, "goal hook should emit an evaluating state before judge round-trip"
+    assert judge_idx != -1 and done_idx != -1
+    assert evaluating_idx < judge_idx < done_idx
+    assert "Evaluating goal progress…" in STREAMING_PY
+    assert "'state': 'continuing' if decision.get('should_continue') else 'idle'" in STREAMING_PY
+
+
 def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "{name:'goal'" in COMMANDS_JS
     assert "subArgs:['status','pause','resume','clear']" in COMMANDS_JS
@@ -232,3 +262,11 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
     assert "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
+
+
+def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
+    assert "const goalState=String(d.state||'').trim();" in MESSAGES_JS
+    assert "const goalEvaluatingMessage='Evaluating goal progress…';" in MESSAGES_JS
+    assert "if(goalState==='evaluating')" in MESSAGES_JS
+    assert "setComposerStatus(goalEvaluatingMessage);" in MESSAGES_JS
+    assert "return;" in MESSAGES_JS

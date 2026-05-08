@@ -885,9 +885,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        const goalState=String(d.state||'').trim();
+        const goalEvaluatingMessage='Evaluating goal progress…';
+        if(goalState==='evaluating'){
+          setComposerStatus(goalEvaluatingMessage);
+          return;
+        }
         const msg=String(d.message||'').trim();
         if(!msg)return;
-        _latestGoalStatus={message:msg,decision:d.decision||null};
+        _latestGoalStatus={message:msg,decision:d.decision||null,state:goalState||null};
         setComposerStatus(msg);
         showToast(msg.split('\n')[0],2600);
       }catch(_){}

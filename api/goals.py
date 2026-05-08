@@ -413,6 +413,25 @@ def goal_command_payload(
     )
 
 
+def has_active_goal(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> bool:
+    """Return True when the session has an active standing goal to evaluate."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    mgr = _manager(sid, profile_home=profile_home)
+    if mgr is None:
+        return False
+    try:
+        return bool(mgr.is_active())
+    except Exception as exc:
+        logger.debug("goal active-state check failed for session=%s: %s", sid, exc)
+        return False
+
+
 def evaluate_goal_after_turn(
     session_id: str,
     last_response: str,
