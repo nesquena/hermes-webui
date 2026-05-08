@@ -1020,18 +1020,32 @@ async function _loadOlderMessages() {
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
     S.messages = [...olderMsgs, ...S.messages];
+    // renderMessages() windows long transcripts from the end. If we do not
+    // expand that window before rendering, the newly prepended page stays
+    // hidden and the "hidden" counter rises while the viewport appears stuck.
+    // Count roughly by the same visible-message rules used by renderMessages().
+    const addedRenderable = olderMsgs.filter(m=>{
+      if(!m||!m.role||m.role==='tool') return false;
+      if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
+      if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
+    }).length;
+    _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
-    renderMessages();
-    // Restore scroll position so the user stays at the same message.
-    // renderMessages() calls scrollToBottom() at the end, so we must
-    // counter-scroll to where the user was before loading older messages.
+    renderMessages({ preserveScroll: true });
     if (container) {
+      // Prepending older messages must not teleport the reader. Preserve the
+      // currently visible viewport by adding the inserted height to scrollTop.
+      const oldTop = container.scrollTop;
       const newScrollH = container.scrollHeight;
-      container.scrollTop = newScrollH - prevScrollH;
+      const addedHeight = Math.max(0, newScrollH - prevScrollH);
+      _programmaticScroll = true;
+      container.scrollTop = oldTop + addedHeight;
+      requestAnimationFrame(()=>{ _programmaticScroll = false; });
     }
-    // renderMessages() called scrollToBottom() which set _scrollPinned=true.
-    // We just restored the user's scroll position, so mark as not pinned.
     _scrollPinned = false;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);

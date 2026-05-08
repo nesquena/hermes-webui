@@ -589,7 +589,7 @@ class TestScrollPositionPreservation:
         )
 
     def test_resets_scroll_pinned_after_restore(self):
-        """_scrollPinned must be set to false after restoring scroll position."""
+        """_scrollPinned must be false after older-history scroll anchoring."""
         SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
         src = SESSIONS_JS.read_text(encoding="utf-8")
 
@@ -598,13 +598,12 @@ class TestScrollPositionPreservation:
         fn_body = src[fn_start:fn_end]
 
         assert "_scrollPinned = false" in fn_body, (
-            "renderMessages() calls scrollToBottom() which sets _scrollPinned=true. "
-            "After restoring the user's scroll position we must set _scrollPinned=false "
-            "to prevent the next render from snapping back to the bottom."
+            "Older-history paging must leave the transcript unpinned so the next "
+            "render does not snap back to the newest output."
         )
-        # _scrollPinned must appear after the scrollTop restore
-        restore_idx = fn_body.find("container.scrollTop = newScrollH - prevScrollH")
-        pinned_idx = fn_body.find("_scrollPinned = false")
-        assert restore_idx >= 0 and pinned_idx >= 0 and restore_idx < pinned_idx, (
-            "_scrollPinned = false must appear AFTER the scrollTop restore."
+        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
+        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        pinned_idx = fn_body.rfind("_scrollPinned = false")
+        assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
+            "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
         )
