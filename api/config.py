@@ -940,6 +940,30 @@ def _deduplicate_model_ids(groups: list[dict], active_provider: str | None = Non
                 model["label"] = f"{original_id} ({provider_name})"
 
 
+def _provider_has_model(provider_id: str | None, model_id: str,
+                      custom_providers: list | None = None) -> bool:
+    """Check whether *provider_id* likely has *model_id* in its catalogue."""
+    if not provider_id or not model_id:
+        return False
+    if provider_id.startswith("custom:"):
+        name = provider_id[len("custom:"):]
+        for entry in (custom_providers or []):
+            if not isinstance(entry, dict):
+                continue
+            ename = (entry.get("name") or "").strip().lower().replace(" ", "-")
+            if ename == name:
+                if (entry.get("model") or "").strip() == model_id:
+                    return True
+                models = entry.get("models")
+                if isinstance(models, dict) and model_id in models:
+                    return True
+                return False
+        return False
+    # Built-in / known provider
+    pm = _PROVIDER_MODELS.get(provider_id, [])
+    return any(m.get("id") == model_id for m in pm if isinstance(m, dict))
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -976,15 +1000,52 @@ def resolve_model_provider(model_id: str) -> tuple:
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
+        # Collect ALL matching custom providers before deciding.
+        # A bare model ID can appear in multiple providers (e.g. gpt-5.4 in
+        # both edith and super-javis). Picking the first match blindly would
+        # hijack the model from the active provider (#1874).
+        cp_matches: list[tuple[str, str]] = []  # [(provider_hint, base_url), ...]
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get("model") or "").strip()
             entry_name = (entry.get("name") or "").strip()
+            if not entry_name:
+                continue
+            entry_model = (entry.get("model") or "").strip()
+            entry_models = entry.get("models")
             entry_base_url = (entry.get("base_url") or "").strip()
-            if entry_model and entry_name and model_id == entry_model:
+
+            is_match = bool(entry_model and model_id == entry_model)
+            if not is_match and isinstance(entry_models, dict):
+                is_match = model_id in entry_models
+
+            if is_match:
                 provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
-                return model_id, provider_hint, entry_base_url or None
+                if (provider_hint, entry_base_url) not in cp_matches:
+                    cp_matches.append((provider_hint, entry_base_url or None))
+
+        if cp_matches:
+            # If the active provider is itself one of the matching custom
+            # providers, prefer it — the user's configured default wins.
+            for provider_hint, base_url in cp_matches:
+                if config_provider and provider_hint == config_provider:
+                    return model_id, provider_hint, base_url
+            # If exactly one custom provider is a match, use it — unless
+            # the active provider also has this model (which would cause a
+            # hijack, e.g. openai-codex's bare gpt-5.5 being routed to
+            # super-javis).
+            if len(cp_matches) == 1:
+                if not config_provider or cp_matches[0][0] == config_provider:
+                    return model_id, cp_matches[0][0], cp_matches[0][1]
+                if not _provider_has_model(config_provider, model_id, custom_providers):
+                    return model_id, cp_matches[0][0], cp_matches[0][1]
+                # Active provider also has this model — don't hijack;
+                # let the normal resolution path handle it.
+            # Multiple custom providers match the same bare model ID.
+            # Don't guess — let the normal resolution path route through
+            # the active provider (which is the user's configured intent).
+            # Prefixed IDs from the dedup logic will still route correctly
+            # because they are handled by the @provider:model branch below.
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
@@ -1506,9 +1567,13 @@ def get_available_models() -> dict:
                             (m for m in matches if option_provider_lookup.get(m) == provider),
                             None,
                         )
-                        match_id = provider_match or exact_match or matches[0]
-                        if match_id:
+                        if provider_match:
+                            match_id = provider_match
                             break
+                        # Don't fall back to exact_match or matches[0] —
+                        # they may belong to a different provider and would
+                        # incorrectly assign the badge to the wrong model
+                        # (#1874 follow-up).
 
                 badge_payload = {"role": entry["role"], "label": entry["label"], "provider": provider}
                 # Only assign badges to keys that are real dropdown entries.
@@ -1523,7 +1588,12 @@ def get_available_models() -> dict:
                         continue
                     badges[candidate] = badge_payload
                 if match_id:
-                    badges[match_id] = badge_payload
+                    # Only assign the badge when match_id belongs to this
+                    # provider (defense-in-depth alongside the provider-aware
+                    # match_id selection above).
+                    match_provider = option_provider_lookup.get(match_id)
+                    if not match_provider or match_provider == provider:
+                        badges[match_id] = badge_payload
             return badges
 
         # 1. Read config.yaml model section
