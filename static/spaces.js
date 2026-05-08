@@ -939,6 +939,11 @@
       /^capy:data:(put|patch|post|set|delete|remove|merge|write|mutate)$/i.test(text);
   }
 
+  function runtimeMessageOriginAllowed(event){
+    // Sandboxed widget shells use an opaque origin; fail closed for normal page/foreign origins.
+    return String(event && event.origin || '') === 'null';
+  }
+
   function prependRuntimeStatus(html){
     const root = document.getElementById('capySpacesRoot');
     if (root) root.innerHTML = html + root.innerHTML;
@@ -947,9 +952,10 @@
   async function handleCapyWidgetRuntimeMessage(event){
     const data = event && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
     const type = runtimeMessageType(data);
+    if (!type || !runtimeMessageOriginAllowed(event)) return;
     const token = String(data.runtime_token || '').trim();
     const session = token ? widgetRuntimeSessions[token] : null;
-    if (!type || !session) return;
+    if (!session) return;
     if (!runtimeSessionStillVisible(token)) return;
     if (data.space_id && runtimeTokenPart(data.space_id, '') !== session.spaceId) return;
     if (data.widget_id && runtimeTokenPart(data.widget_id, '') !== session.widgetId) return;

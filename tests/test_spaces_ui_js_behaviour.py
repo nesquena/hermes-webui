@@ -1074,10 +1074,11 @@ async function click(action, dataset) {
   });
 }
 
-async function dispatchWindowMessage(data) {
+async function dispatchWindowMessage(data, opts) {
   const listener = windowListeners.message;
   if (!listener) return;
-  await listener({ data, origin: 'null', source: { mockFrame: true } });
+  opts = opts || {};
+  await listener({ data, origin: opts.origin || 'null', source: opts.source || { mockFrame: true } });
 }
 
 (async () => {
@@ -1157,6 +1158,22 @@ async function dispatchWindowMessage(data) {
     const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
     if (!match) throw new Error('runtime token missing from widget detail shell');
     await dispatchWindowMessage({ type: 'capy:agent:prompt', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', prompt: 'Refresh safely' });
+  } else if (scenario === 'runtimePromptForeignOrigin') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Refresh safely',
+    }, { origin: 'https://evil.example' });
   } else if (scenario === 'runtimePromptStaleShell') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2108,6 +2125,15 @@ def test_spaces_ui_sandbox_postmessage_cancelled_prompt_does_not_queue_event(dri
 
     assert "Sandbox event bridge" in out["beforeHtml"]
     assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_foreign_origin_even_with_valid_token(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptForeignOrigin")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
     assert "Sandbox prompt queued" not in out["rootHtml"]
 
