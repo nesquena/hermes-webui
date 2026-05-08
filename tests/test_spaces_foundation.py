@@ -1594,6 +1594,125 @@ def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(
     assert "api_key" not in serialized
 
 
+def test_creator_preview_targets_existing_space_with_revision_diff_without_persistence(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "existing-creator-lab",
+            "name": "Existing Creator Lab",
+            "description": "Original safe description",
+            "agent_instructions": "Preserve awareness of existing metadata before commit approval.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "old-panel",
+            "kind": "html",
+            "title": "Old Panel",
+            "layout": {"x": 0, "y": 0, "w": 6, "h": 4},
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "TOKEN_VALUE"},
+        },
+    )
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research_notes",
+        {"summary": "Safe notes", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        {"source_widget": "old-panel", "token": "TOKEN_VALUE"},
+    )
+    before = spaces.read_space("existing-creator-lab")
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": "existing-creator-lab",
+            "spaceName": "Existing Creator Lab Revised",
+            "description": "Safe revised preview",
+            "widgets": [
+                {
+                    "widgetId": "latest-panel",
+                    "title": "Latest Panel",
+                    "kind": "status",
+                    "layout": {"x": 0, "y": 0, "w": 8, "h": 4},
+                    "status": {"phase": "draft"},
+                    "renderer": "<script>badcall()</script>",
+                    "html": "<img src=x onerror=steal()>",
+                    "source": "SECRET_SOURCE",
+                    "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+                }
+            ],
+        },
+    )
+    after = spaces.read_space("existing-creator-lab")
+    serialized = json.dumps(preview).lower()
+
+    assert preview["ok"] is True
+    assert preview["action"] == "space.creator.preview"
+    assert preview["space"] == {
+        "space_id": "existing-creator-lab",
+        "name": "Existing Creator Lab Revised",
+        "description": "Safe revised preview",
+    }
+    assert preview["stored"] is False
+    assert preview["executed"] is False
+    assert preview["creator_loop"]["mode"] == "metadata-only"
+    assert preview["creator_loop"]["stored"] is False
+    assert preview["creator_loop"]["executed"] is False
+    assert preview["revision_preview"]["space_id"] == "existing-creator-lab"
+    assert preview["revision_preview"]["name"] == "Existing Creator Lab Revised"
+    assert preview["revision_preview"]["description"] == "Safe revised preview"
+    assert preview["revision_preview"]["widget_count"] == 1
+    assert [widget["id"] for widget in preview["revision_preview"]["widgets"]] == ["latest-panel"]
+    assert preview["revision_diff"]["has_changes"] is True
+    assert preview["revision_diff"]["widgets_to_add"] == ["latest-panel"]
+    assert preview["revision_diff"]["widgets_to_remove"] == ["old-panel"]
+    assert preview["revision_diff"]["widgets_to_update"] == []
+    assert "agent_instructions" in preview["revision_diff"]["space_fields_to_update"]
+    assert "description" in preview["revision_diff"]["space_fields_to_update"]
+    assert "shared_data" in preview["revision_diff"]["space_fields_to_update"]
+    assert after == before
+    assert after["revision_event_id"] == before["revision_event_id"]
+    assert after["revision_events"] == before["revision_events"]
+    assert "badcall" not in serialized
+    assert "stored()" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"script":' not in serialized
+    assert '"data":' not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "token_value" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+
+
+def test_creator_preview_ignores_ambient_current_space_id_for_new_drafts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "ambient-existing-lab", "name": "Ambient Existing Lab"})
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "currentSpaceId": "ambient-existing-lab",
+            "spaceName": "New Creator Draft",
+            "widgets": [{"widgetId": "new-panel", "title": "New Panel", "kind": "markdown"}],
+        },
+    )
+
+    assert preview["ok"] is True
+    assert preview["space"]["space_id"] == "new-creator-draft"
+    assert preview["space"]["name"] == "New Creator Draft"
+    assert "revision_preview" not in preview
+    assert "revision_diff" not in preview
+    assert spaces.read_space("ambient-existing-lab")["name"] == "Ambient Existing Lab"
+
+
 def test_creator_commit_with_preview_id_commits_exact_previewed_sanitized_spec(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

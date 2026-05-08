@@ -1001,6 +1001,10 @@ def _restore_diff_summary(target_snapshot: dict[str, Any], current_snapshot: dic
     for field in ("layout", "capabilities"):
         if _payload_summary(target_snapshot.get(field) or {}) != _payload_summary(current_snapshot.get(field) or {}):
             space_fields_to_update.append(field)
+    target_shared_data = _data_slot_summaries(target_snapshot)
+    current_shared_data = _data_slot_summaries(current_snapshot)
+    if target_shared_data != current_shared_data:
+        space_fields_to_update.append("shared_data")
 
     widget_count_delta = len(target_widgets) - len(current_widgets)
     has_changes = bool(
@@ -2015,21 +2019,44 @@ def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
     return detail
 
 
+def _space_creator_target_space_id(payload: dict[str, Any]) -> str | None:
+    """Return an explicit existing-space target id for creator previews/commits."""
+    for key in ("target_space_id", "targetSpaceId", "space_id", "spaceId"):
+        raw = payload.get(key)
+        if raw:
+            return validate_space_id(str(raw))
+    return None
+
+
 def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
     """Build a sanitized creator-loop draft shared by preview and commit gates."""
     explicit_prompt = any(key in payload for key in ("prompt", "request"))
     prompt_text = str(payload.get("prompt") or payload.get("request") or payload.get("description") or "")
     prompt_summary = _payload_text_summary(prompt_text, 500)
     unsafe_prompt_redacted = prompt_summary == "[REDACTED]"
+    target_space_id = _space_creator_target_space_id(payload)
+    target_space: dict[str, Any] | None = None
+    if target_space_id:
+        if not _manifest_path(target_space_id).exists():
+            raise FileNotFoundError("Target Space not found")
+        target_space = read_space(target_space_id)
 
-    raw_space_name = payload.get("spaceName") or payload.get("space_name") or payload.get("name") or "Creator Preview"
+    raw_space_name = (
+        payload.get("spaceName")
+        or payload.get("space_name")
+        or payload.get("name")
+        or (target_space.get("name") if target_space else "Creator Preview")
+    )
     safe_space_name = _payload_text_summary(raw_space_name, 120)
     if not safe_space_name or safe_space_name == "[REDACTED]":
+        safe_space_name = _payload_text_summary(target_space.get("name"), 120) if target_space else "Creator Preview"
+    if not safe_space_name or safe_space_name == "[REDACTED]":
         safe_space_name = "Creator Preview"
-    space_id = validate_space_id(_source_slugify_segment(safe_space_name, "creator-preview")[:64])
+    space_id = target_space_id or validate_space_id(_source_slugify_segment(safe_space_name, "creator-preview")[:64])
     space: dict[str, Any] = {"space_id": space_id, "name": safe_space_name}
-    safe_description = _payload_text_summary(payload.get("description") or payload.get("summary") or "", 300)
-    if explicit_prompt and safe_description and safe_description != "[REDACTED]":
+    raw_description = payload.get("description") or payload.get("summary") or (target_space.get("description") if target_space else "")
+    safe_description = _payload_text_summary(raw_description or "", 300)
+    if (target_space is not None or explicit_prompt) and safe_description and safe_description != "[REDACTED]":
         space["description"] = safe_description
 
     raw_widgets = payload.get("widgets") if isinstance(payload.get("widgets"), list) else []
@@ -2080,6 +2107,29 @@ def _space_creator_preview_gates() -> dict[str, bool]:
 def _space_creator_preview_spec(draft: dict[str, Any]) -> dict[str, Any]:
     widgets = copy.deepcopy(draft["widget_details"])
     return {"space": copy.deepcopy(draft["space"]), "widgets": widgets, "widget_count": len(widgets)}
+
+
+def _space_creator_revision_candidate(draft: dict[str, Any], current_space: dict[str, Any]) -> dict[str, Any]:
+    """Build the metadata-only manifest shape a creator commit would revise to."""
+    space = draft["space"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "space_id": space["space_id"],
+        "name": space["name"],
+        "description": space.get("description", ""),
+        "agent_instructions": "",
+        "template": "creator-loop",
+        "layout": {"columns": 24},
+        "widgets": copy.deepcopy(draft["widget_payloads"]),
+        "capabilities": {
+            "creator_loop": {
+                "mode": "metadata-only",
+                "sandbox_previewed": False,
+                "visual_qa_passed": False,
+                "generated_bodies_rendered": False,
+            }
+        },
+    }
 
 
 def _space_creator_prune_preview_receipts_locked(now: float | None = None) -> None:
@@ -2135,7 +2185,7 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     draft = _space_creator_sanitized_draft(payload)
     widgets = draft["widget_details"]
     preview_id = _space_creator_store_preview_receipt(draft)
-    return {
+    response = {
         "ok": True,
         "action": name,
         "preview_id": preview_id,
@@ -2158,6 +2208,13 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
         "widget_count": len(widgets),
         "safety": draft["safety"],
     }
+    target_space_id = _space_creator_target_space_id(payload)
+    if target_space_id and _manifest_path(target_space_id).exists():
+        current_space = read_space(target_space_id)
+        candidate = _space_creator_revision_candidate(draft, current_space)
+        response["revision_preview"] = _restore_preview_summary(candidate, target_space_id)
+        response["revision_diff"] = _restore_diff_summary(candidate, current_space)
+    return response
 
 
 def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
