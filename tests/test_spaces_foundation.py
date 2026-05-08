@@ -4294,6 +4294,48 @@ def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monke
     assert "secret" not in serialized
 
 
+def test_restore_revision_preserves_future_history_for_return_to_present_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Return To Present"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    patched = spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched"})
+
+    spaces.restore_revision(created["space_id"], original["revision_event_id"])
+
+    after_rollback = spaces.list_revision_events(created["space_id"], limit=10)
+    after_rollback_ids = [event["event_id"] for event in after_rollback]
+    assert patched["revision_event_id"] in after_rollback_ids
+    assert after_rollback[0]["event_type"] == "space.restored"
+
+    restored_present = spaces.restore_revision(created["space_id"], patched["revision_event_id"])
+
+    assert restored_present["ok"] is True
+    assert restored_present["restored_event_id"] == patched["revision_event_id"]
+    assert restored_present["space"]["widgets"][0]["title"] == "Weather patched"
+    after_return = spaces.list_revision_events(created["space_id"], limit=10)
+    after_return_ids = [event["event_id"] for event in after_return]
+    assert original["revision_event_id"] in after_return_ids
+    assert patched["revision_event_id"] in after_return_ids
+    serialized = json.dumps({"rollback": after_rollback, "return": after_return, "present": restored_present}).lower()
+    assert "keptbutneverreturned" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "source" not in serialized
+
+
 def test_restore_widget_revision_restores_one_widget_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Widget Rollback", "description": "Current space survives"})

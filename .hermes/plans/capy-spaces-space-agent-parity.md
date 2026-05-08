@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: active-space prompt context now redacts unsafe source-derived metadata labels before they enter `build_agent_context()` or streaming system prompts, keeping secret-looking/API-auth/renderer/script markers out while preserving safe Space ids, widget ids/kinds, queued event anchors, and revision ids. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: full-space rollback now preserves the safe revision timeline when restoring older snapshots, so recovery/history UIs can discover newer revisions and restore back to the present without exposing generated widget bodies or secret-looking metadata. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): preserve rollback return history`
+  - Added RED/GREEN backend coverage proving a full-space restore to an older widget snapshot keeps newer revision IDs visible in `list_revision_events(...)`, then supports restoring back to that newer revision while public responses stay metadata-only.
+  - Hardened `restore_revision(...)` to merge safe snapshot revision IDs with the current manifest timeline before recording `space.restored`, preserving time-travel history instead of truncating it to the restored snapshot's past.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`1 passed`); rollback/history regression set passed (`4 passed`); full Spaces foundation suite passed (`175 passed`); Spaces UI JS behavior + demo parity suites passed (`124 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` browser QA harness leak checks passed. Screenshot artifact: `/private/tmp/capy-spaces-browser-harness/artifacts/capy-spaces-next-slice.png`.
 
 - `fix(spaces): redact active context metadata`
   - Added RED/GREEN backend coverage proving unsafe Space description/instructions, widget titles, shared-data keys, and queued event names are redacted from compact active-space prompt context while safe Space id/name, widget id/kind, event id/status, and mutation guidance remain visible.

@@ -3389,7 +3389,13 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
         restored["layout"] = {}
     if not isinstance(restored.get("capabilities"), dict):
         restored["capabilities"] = {}
-    restored["revision_events"] = [str(rev) for rev in (restored.get("revision_events") or []) if _event_id_is_safe(rev)]
+    snapshot_revision_events = [str(rev) for rev in (restored.get("revision_events") or []) if _event_id_is_safe(rev)]
+    current_revision_events = [str(rev) for rev in (current.get("revision_events") or []) if _event_id_is_safe(rev)]
+    merged_revision_events: list[str] = []
+    for rev in [*snapshot_revision_events, *current_revision_events]:
+        if rev not in merged_revision_events:
+            merged_revision_events.append(rev)
+    restored["revision_events"] = merged_revision_events
     saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id})
     return {
         "ok": True,
