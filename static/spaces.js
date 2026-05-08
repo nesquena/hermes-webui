@@ -3,6 +3,8 @@
 (function(){
   var handlersBound = false;
   var recoveryHandlersBound = false;
+  var runtimeMessagesBound = false;
+  var widgetRuntimeSessions = {};
 
   async function fetchSpacesJson(path, options){
     const res = await fetch(path, Object.assign({cache: 'no-store'}, options || {}));
@@ -755,6 +757,136 @@
       '</div></div>';
   }
 
+  function runtimeTokenPart(value, fallback){
+    const text = String(value || fallback || '').replace(/[^a-z0-9._-]/gi, '-').replace(/-+/g, '-').slice(0, 80);
+    return text || String(fallback || 'runtime');
+  }
+
+  function generateRuntimeToken(){
+    const randomPart = (typeof crypto !== 'undefined' && crypto.getRandomValues)
+      ? Array.from(crypto.getRandomValues(new Uint32Array(2))).map(function(n){ return n.toString(36); }).join('-')
+      : Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+    return 'capy-runtime-' + randomPart;
+  }
+
+  function registerWidgetRuntimeSession(spaceId, widgetId, title){
+    const safeSpaceId = runtimeTokenPart(spaceId, 'space');
+    const safeWidgetId = runtimeTokenPart(widgetId, 'widget');
+    const key = safeSpaceId + '::' + safeWidgetId;
+    const existing = widgetRuntimeSessions[key];
+    if (existing && existing.token) delete widgetRuntimeSessions[existing.token];
+    const session = { token: generateRuntimeToken(), spaceId: safeSpaceId, widgetId: safeWidgetId, title: String(title || widgetId || 'widget').replace(/\s+/g, ' ').trim().slice(0, 120) };
+    widgetRuntimeSessions[key] = session;
+    widgetRuntimeSessions[session.token] = session;
+    return session;
+  }
+
+  function redactRuntimeText(value, maxLen){
+    let text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLen || 500);
+    const unsafeAssignmentMarker = /\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|token|authorization|password|credential(?:s)?|cookie|secret|prompt|generated[_-]?code|source|html|data)\b\s*[:=]|javascript\s*:|\bon[a-z]+\s*=/i;
+    const standaloneSecretShape = /\b(sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{12,})\b/;
+    if (unsafeAssignmentMarker.test(text) || standaloneSecretShape.test(text)) return '[REDACTED] sandbox prompt: unsafe markers omitted';
+    text = text.replace(/<\/?script[^>]*>/gi, '');
+    text = text.replace(/<[^>]*>/g, '');
+    text = text.replace(/javascript\s*:/gi, '[REDACTED]');
+    text = text.replace(/\bon[a-z]+\s*=\s*[^\s,;]+/gi, '[REDACTED]');
+    text = text.replace(/SECRET[_A-Z0-9-]*/gi, '[REDACTED]');
+    text = text.replace(/\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|token|authorization|password|credential(?:s)?|cookie|secret|prompt|generated[_-]?code|source|html|data)\b\s*[:=]\s*[^\s,;]*/gi, '[REDACTED]');
+    text = text.replace(/\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|authorization|password|credential(?:s)?|cookie)\b\s+[^\s,;]+/gi, '[REDACTED]');
+    text = text.replace(/\bbearer\s+[^\s,;]+/gi, '[REDACTED]');
+    text = text.replace(standaloneSecretShape, '[REDACTED]');
+    return text.replace(/\s+/g, ' ').trim().slice(0, maxLen || 500);
+  }
+
+  function runtimeSessionStillVisible(token){
+    const root = document.getElementById('capySpacesRoot');
+    const safeToken = escapeHtml(String(token || ''));
+    return !!(root && typeof root.innerHTML === 'string' && safeToken && root.innerHTML.indexOf('data-runtime-token="'+safeToken+'"') !== -1);
+  }
+
+  function renderSandboxRuntimeStatus(title, message){
+    return '<div class="capy-spaces-card capy-spaces-runtime-status" role="status"><h3>'+escapeHtml(title)+'</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(message || 'Metadata-only sandbox event handled.')+'</div></div>';
+  }
+
+  function renderSandboxRuntimeShell(spaceId, widgetId, title){
+    if (!spaceId || !widgetId) return '';
+    const session = registerWidgetRuntimeSession(spaceId, widgetId, title);
+    return '<div class="capy-spaces-widget capy-spaces-sandbox-shell" data-runtime-token="'+escapeHtml(session.token)+'" data-space-id="'+escapeHtml(session.spaceId)+'" data-widget-id="'+escapeHtml(session.widgetId)+'">' +
+      '<div><strong>Sandbox event bridge</strong>' +
+      '<div class="capy-spaces-muted">postMessage contract: capy:ready, capy:resize, capy:agent:prompt</div>' +
+      '<div class="capy-spaces-muted">Generated bodies remain disabled; prompts require approval and metadata-only queueing.</div>' +
+      '<div class="capy-spaces-muted">Runtime status: waiting for safe sandbox message</div>' +
+      '</div></div>';
+  }
+
+  function runtimeMessageType(data){
+    const type = String(data && (data.type || data.message_type) || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return /^capy:[a-z0-9:._-]+$/i.test(type) ? type : '';
+  }
+
+  function isBlockedRuntimeMessageType(type){
+    const text = String(type || '').toLowerCase();
+    return text === 'capy:raw:eval' ||
+      /^capy:raw:/.test(text) ||
+      /^capy:eval(?::|$)/.test(text) ||
+      /^capy:data:(put|patch|post|set|delete|remove|merge|write|mutate)$/i.test(text);
+  }
+
+  function prependRuntimeStatus(html){
+    const root = document.getElementById('capySpacesRoot');
+    if (root) root.innerHTML = html + root.innerHTML;
+  }
+
+  async function handleCapyWidgetRuntimeMessage(event){
+    const data = event && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
+    const type = runtimeMessageType(data);
+    const token = String(data.runtime_token || '').trim();
+    const session = token ? widgetRuntimeSessions[token] : null;
+    if (!type || !session) return;
+    if (!runtimeSessionStillVisible(token)) return;
+    if (data.space_id && runtimeTokenPart(data.space_id, '') !== session.spaceId) return;
+    if (data.widget_id && runtimeTokenPart(data.widget_id, '') !== session.widgetId) return;
+    if (isBlockedRuntimeMessageType(type)) {
+      prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked: '+type, 'Blocked by Capy runtime contract; no widget event was queued.'));
+      return;
+    }
+    if (type === 'capy:ready') {
+      prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox ready', session.widgetId+' · metadata-only runtime handshake'));
+      return;
+    }
+    if (type === 'capy:resize') {
+      const height = Math.max(120, Math.min(900, parseInt(data.height || data.h || 0, 10) || 240));
+      prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox resize noted', session.widgetId+' · bounded height '+height+'px'));
+      return;
+    }
+    if (type !== 'capy:agent:prompt') return;
+    if (typeof showConfirmDialog !== 'function') return;
+    const promptText = redactRuntimeText(data.prompt || data.message || '', 500);
+    if (!promptText) return;
+    const ok = await showConfirmDialog({
+      title: 'Queue sandbox widget prompt?',
+      message: 'Sandbox widget "'+session.title+'" requested a Capy prompt. Preview: '+promptText,
+      confirmLabel: 'Queue prompt',
+      focusCancel: true,
+    });
+    if (!ok) return;
+    const result = await postSpacesJson('api/spaces/widget/event', {
+      space_id: session.spaceId,
+      widget_id: session.widgetId,
+      event_name: 'agent.prompt',
+      prompt: promptText,
+      payload: {source: 'sandbox-postmessage', message_type: 'capy:agent:prompt'},
+    });
+    prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox prompt queued', 'Widget event queued · '+session.widgetId+' · agent.prompt') + renderWidgetEventQueuedStatus(result || {}));
+  }
+
+  function ensureCapyWidgetRuntimeMessageHandler(){
+    if (runtimeMessagesBound || typeof window === 'undefined' || !window.addEventListener) return;
+    window.addEventListener('message', handleCapyWidgetRuntimeMessage);
+    runtimeMessagesBound = true;
+  }
+
   function renderWidgetRuntimeContract(contract){
     const safeContract = contract && typeof contract === 'object' && !Array.isArray(contract) ? contract : {};
     const mode = String(safeContract.mode || '').replace(/\s+/g, ' ').trim().slice(0, 80);
@@ -1046,6 +1178,7 @@
       metadataRow +
       eventBridgeRow +
       renderWidgetRuntimeContract(runtimeContract) +
+      renderSandboxRuntimeShell(spaceId || '', widgetId, title) +
       '</div>'+pdfExportAction+'</div></div>' + renderWidgetPrompt(metadata) + renderWeatherObservation(metadata) + notesEditor + '</div>';
   }
 
@@ -1973,6 +2106,7 @@
   }
 
   function ensureCapySpacesHandlers(){
+    ensureCapyWidgetRuntimeMessageHandler();
     if (handlersBound) return;
     const root = document.getElementById('capySpacesRoot');
     if (!root || !root.addEventListener) return;

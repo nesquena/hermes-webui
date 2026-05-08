@@ -23,6 +23,7 @@ const calls = [];
 const dialogs = [];
 const switchedPanels = [];
 const capySpaceSyncs = [];
+const windowListeners = {};
 let beforeHtml = '';
 const values = {
   '#capyWidgetId': 'notes',
@@ -69,6 +70,7 @@ function response(data) {
 global.window = {
   addEventListener(type, fn) {
     if (type === 'DOMContentLoaded') this._domReady = fn;
+    windowListeners[type] = fn;
   },
 };
 global.S = { session: { session_id: 'session-123', active_space_id: null } };
@@ -912,6 +914,12 @@ async function click(action, dataset) {
   });
 }
 
+async function dispatchWindowMessage(data) {
+  const listener = windowListeners.message;
+  if (!listener) return;
+  await listener({ data, origin: 'null', source: { mockFrame: true } });
+}
+
 (async () => {
   if (scenario === 'list') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -946,6 +954,134 @@ async function click(action, dataset) {
     await window.loadSpaceWidgets('lab');
     beforeHtml = root.innerHTML;
     await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'runtimePromptMessage') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Refresh safely without SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
+      payload: { renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', action: 'prompt' },
+    });
+  } else if (scenario === 'runtimeBlockedMessage') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:raw:eval',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      code: 'alert(SECRET_VALUE_DO_NOT_LEAK)',
+      renderer: '<script>bad()</script>',
+    });
+  } else if (scenario === 'runtimePromptCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({ type: 'capy:agent:prompt', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', prompt: 'Refresh safely' });
+  } else if (scenario === 'runtimePromptStaleShell') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    root.innerHTML = '<div class="capy-spaces-card">navigated away</div>';
+    await dispatchWindowMessage({ type: 'capy:agent:prompt', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', prompt: 'Refresh safely' });
+  } else if (scenario === 'runtimeSensitivePromptMessage') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Check access_token=TOKEN_VALUE api_auth=Bearer cookie=session credential=abc source=raw html=<img onerror=alert(1)> javascript:bad() SECRET_VALUE_DO_NOT_LEAK',
+    });
+  } else if (scenario === 'runtimeCodeLikeSensitivePrompt') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'source = function bad() { return api_auth: Bearer abcdef; } data = {"cookie":"session abc def", "ok": true }',
+    });
+  } else if (scenario === 'runtimeGeneratedAuthPromptMarkers') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'auth = sk-TESTSECRETLOOKING1234567890 prompt = hidden generated-code: function render(){ return "unsafe" }',
+    });
+  } else if (scenario === 'runtimeBlockedMutationMessages') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({ type: 'capy:data:put', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', data: { cookie: 'session abc def' } });
+    await dispatchWindowMessage({ type: 'capy:eval:run', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', source: 'eval(SECRET_VALUE_DO_NOT_LEAK)' });
+    await dispatchWindowMessage({ type: 'capy:raw:source', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', renderer: '<script>bad()</script>' });
+  } else if (scenario === 'runtimeTokenRotates') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    const firstMatch = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!firstMatch) throw new Error('first runtime token missing from widget detail shell');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const secondMatch = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!secondMatch) throw new Error('second runtime token missing from widget detail shell');
+    await dispatchWindowMessage({ type: 'capy:agent:prompt', runtime_token: firstMatch[1], space_id: 'lab', widget_id: 'weather', prompt: 'Refresh safely' });
+    root.dataset.firstRuntimeToken = firstMatch[1];
+    root.dataset.secondRuntimeToken = secondMatch[1];
   } else if (scenario === 'requestWidgetPdfExport') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -1733,6 +1869,138 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "onerror" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues_metadata_only_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptMessage")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert "data-runtime-token=" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert body == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "agent.prompt",
+        "prompt": "Refresh safely without [REDACTED] or bad()",
+        "payload": {"source": "sandbox-postmessage", "message_type": "capy:agent:prompt"},
+    }
+    assert "Widget event queued" in out["rootHtml"]
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "SECRET" not in dialog_blob
+    assert "<script" not in dialog_blob.lower()
+
+
+def test_spaces_ui_sandbox_postmessage_blocks_raw_eval_without_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeBlockedMessage")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert "Sandbox message blocked: capy:raw:eval" in out["rootHtml"]
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_cancelled_prompt_does_not_queue_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptCancelled")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_ignores_stale_runtime_shell(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptStaleShell")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_redacts_broad_sensitive_prompt_markers(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeSensitivePromptMessage")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = body["prompt"] + " " + dialog_blob + " " + out["rootHtml"]
+
+    assert "[REDACTED]" in body["prompt"]
+    assert "access_token" not in combined.lower()
+    assert "api_auth" not in combined.lower()
+    assert "cookie" not in combined.lower()
+    assert "credential" not in combined.lower()
+    assert "source=" not in combined.lower()
+    assert "html=" not in combined.lower()
+    assert "javascript:" not in combined.lower()
+    assert "onerror" not in combined.lower()
+    assert "SECRET" not in combined
+    assert "<script" not in combined.lower()
+
+
+def test_spaces_ui_sandbox_postmessage_redacts_code_like_sensitive_prompt_values(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeCodeLikeSensitivePrompt")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = body["prompt"] + " " + dialog_blob + " " + out["rootHtml"]
+
+    assert body["prompt"] == "[REDACTED] sandbox prompt: unsafe markers omitted"
+    assert "function bad" not in combined.lower()
+    assert "api_auth" not in combined.lower()
+    assert "bearer" not in combined.lower()
+    assert "cookie" not in combined.lower()
+    assert "session abc" not in combined.lower()
+    assert "source =" not in combined.lower()
+    assert "data =" not in combined.lower()
+
+
+def test_spaces_ui_sandbox_postmessage_redacts_auth_prompt_generated_code_and_secret_shapes(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeGeneratedAuthPromptMarkers")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = body["prompt"] + " " + dialog_blob + " " + out["rootHtml"]
+    prompt_and_dialog = body["prompt"] + " " + dialog_blob
+
+    assert body["prompt"] == "[REDACTED] sandbox prompt: unsafe markers omitted"
+    assert "auth =" not in combined.lower()
+    assert "prompt =" not in combined.lower()
+    assert "generated-code:" not in prompt_and_dialog.lower()
+    assert "sk-testsecretlooking" not in prompt_and_dialog.lower()
+    assert "function render" not in prompt_and_dialog.lower()
+
+
+def test_spaces_ui_sandbox_postmessage_blocks_data_and_raw_eval_mutations_without_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeBlockedMutationMessages")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert "Sandbox message blocked: capy:data:put" in out["rootHtml"]
+    assert "Sandbox message blocked: capy:eval:run" in out["rootHtml"]
+    assert "Sandbox message blocked: capy:raw:source" in out["rootHtml"]
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "session abc" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_runtime_tokens_rotate_and_invalidate_old_token(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeTokenRotates")
+
+    assert out["rootDataset"]["firstRuntimeToken"]
+    assert out["rootDataset"]["secondRuntimeToken"]
+    assert out["rootDataset"]["firstRuntimeToken"] != out["rootDataset"]["secondRuntimeToken"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
 
 
 def test_spaces_ui_widget_detail_shows_visible_weather_observation_without_generated_body(driver_path):

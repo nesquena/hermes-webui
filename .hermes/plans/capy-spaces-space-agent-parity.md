@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: revision history now supports widget-level rollback actions from safe restore diffs, so a single widget can be restored from a revision snapshot while leaving the rest of the Space intact and without rendering generated widget bodies. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: widget details now expose a metadata-only sandbox/runtime `postMessage` event bridge contract. Approved `capy:agent:prompt` messages queue safe widget events through the shared confirm dialog, raw/eval/data mutation messages are blocked without network calls, prompt/auth/source/data/generated-code markers are redacted, and runtime tokens rotate so stale shells fail closed. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add sandbox postmessage event bridge`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving widget details show the safe runtime contract, approved sandbox prompts queue metadata-only `agent.prompt` events, cancelled/stale/old-token prompts do not queue, raw/eval/data mutation messages are blocked, and prompt/auth/source/data/generated-code/secret-looking values stay redacted.
+  - Added runtime token rotation per rendered widget detail shell, fail-closed visible-shell checks, broader prompt redaction, and metadata-only queued status cards; generated widget bodies remain disabled and are never rendered or executed.
+  - Validation at completion: focused RED failed before implementation for code-like prompt redaction and old-token invalidation, then follow-up RED failed for auth/prompt/generated-code marker redaction and raw/eval/data mutation blocking; focused GREEN passed; Spaces UI behavior + demo parity suites passed (`116 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, read-only review, and `/tmp` browser QA harness leak checks passed.
 
 - `feat(spaces): restore individual widgets from revisions`
   - Added RED/GREEN backend and real-`static/spaces.js` coverage proving a single widget can be restored from a revision snapshot while other widgets remain intact.
