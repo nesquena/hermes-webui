@@ -472,9 +472,15 @@ global.fetch = async function(path, opts = {}) {
         disabled_widget_count: 1,
         rollback_point_count: 2,
         queued_event_count: 1,
+        module_count: 2,
+        disabled_module_count: 1,
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      modules: [
+        { module_id: 'safe-module', name: 'Safe Module', description: 'Metadata-only module descriptor', scope: 'space', disabled: false, source: 'SECRET_SOURCE', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        { module_id: 'unsafe-module', name: '[REDACTED]', description: '[REDACTED]', scope: 'global', disabled: true, disabled_reason: '[REDACTED]', revision_event_id: 'module-rev', source: 'SECRET_SOURCE', script: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      ],
       spaces: [
         {
           space_id: 'broken',
@@ -3376,7 +3382,13 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Generated widgets rendered: false" in out["recoveryHtml"]
     assert "Recovery hard gate" in out["recoveryHtml"]
     assert "metadata-only recovery · generated widgets not rendered · rollback controls available · disable and repair controls available" in out["recoveryHtml"]
-    assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 2 rollback points · 1 queued event" in out["recoveryHtml"]
+    assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 2 rollback points · 1 queued event · 2 modules · 1 disabled module" in out["recoveryHtml"]
+    assert "Quarantined modules" in out["recoveryHtml"]
+    assert "Safe Module" in out["recoveryHtml"]
+    assert "Metadata-only module descriptor" in out["recoveryHtml"]
+    assert "safe-module" in out["recoveryHtml"]
+    assert "unsafe-module" in out["recoveryHtml"]
+    assert "Disabled: [REDACTED]" in out["recoveryHtml"]
     assert "/api/spaces/recovery" in out["recoveryHtml"]
     assert "/api/spaces/revision/restore-widget" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]

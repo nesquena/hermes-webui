@@ -2329,6 +2329,8 @@
       recoveryCountLabel(summary.disabled_widget_count, 'disabled widget'),
       recoveryCountLabel(summary.rollback_point_count, 'rollback point'),
       recoveryCountLabel(summary.queued_event_count, 'queued event'),
+      recoveryCountLabel(summary.module_count, 'module'),
+      recoveryCountLabel(summary.disabled_module_count, 'disabled module'),
     ].join(' · ');
     const gateText = labels.length ? labels.join(' · ') : 'metadata-only recovery · generated widgets not rendered';
     return '<div class="capy-spaces-card"><h4>Recovery hard gate</h4>' +
@@ -2336,6 +2338,29 @@
       '<div class="capy-spaces-muted">Recovery summary: '+escapeHtml(summaryText)+'</div>' +
       (route || restoreRoutes.length ? '<div class="capy-spaces-muted">Routes: '+escapeHtml([route].concat(restoreRoutes).filter(Boolean).join(' · '))+'</div>' : '') +
       '</div>';
+  }
+
+  function renderRecoveryModules(data){
+    const modules = Array.isArray(data && data.modules) ? data.modules.slice(0, 20) : [];
+    if (!modules.length) return '';
+    const rows = modules.map(function(module){
+      const moduleId = safeCreatorSummaryText(module && (module.module_id || module.id) || '');
+      const name = safeCreatorSummaryText(module && module.name || moduleId || 'Untitled module');
+      const description = safeCreatorSummaryText(module && module.description || '');
+      const scope = safeCreatorSummaryText(module && module.scope || 'global');
+      const disabled = !!(module && module.disabled);
+      const disabledReason = safeCreatorSummaryText(module && module.disabled_reason || '');
+      const revision = safeCreatorSummaryText(module && module.revision_event_id || '');
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(name || moduleId || 'Untitled module')+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml([scope, moduleId].filter(Boolean).join(' · '))+'</div>' +
+        (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
+        (disabled ? '<div class="capy-spaces-muted">Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '')+'</div>' : '') +
+        (revision ? '<div class="capy-spaces-muted">Revision: '+escapeHtml(revision.slice(0, 12))+'</div>' : '') +
+        '</div><div class="capy-spaces-actions"><span class="capy-spaces-muted">metadata-only</span></div></div>';
+    }).join('');
+    return '<div class="capy-spaces-card"><h4>Quarantined modules</h4>' +
+      '<div class="capy-spaces-muted">Generated module bodies stay quarantined for repair/rollback; this panel shows safe metadata only.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
   function renderRecoverySnapshot(data){
@@ -2382,6 +2407,7 @@
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
       renderRecoveryAdminGate(data || {}) +
+      renderRecoveryModules(data || {}) +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 

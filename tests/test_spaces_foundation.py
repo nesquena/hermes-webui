@@ -4500,6 +4500,7 @@ def test_recovery_snapshot_exposes_safe_admin_gate_summary(monkeypatch, tmp_path
             "generated widgets not rendered",
             "rollback controls available",
             "disable and repair controls available",
+            "module quarantine available",
         ],
     }
     assert recovery["summary"] == {
@@ -4509,6 +4510,8 @@ def test_recovery_snapshot_exposes_safe_admin_gate_summary(monkeypatch, tmp_path
         "disabled_widget_count": 1,
         "rollback_point_count": 4,
         "queued_event_count": 1,
+        "module_count": 0,
+        "disabled_module_count": 0,
     }
     assert recovery["spaces"][0]["disabled_reason"] == "[REDACTED]"
     assert recovery["spaces"][0]["widgets"][0]["disabled_reason"] == "[REDACTED]"
@@ -4806,6 +4809,99 @@ def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, t
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "api_key" not in serialized
+
+
+def test_recovery_snapshot_includes_safe_module_quarantine_without_leaking_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    module = spaces.upsert_recovery_module(
+        {
+            "id": "unsafe-module",
+            "name": "Renderer module <script>bad()</script>",
+            "description": "generated code raw prompt should stay quarantined",
+            "scope": "space",
+            "source": "export function run(){ return SECRET_VALUE_DO_NOT_LEAK }",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+    disabled = spaces.disable_module_for_recovery(
+        "unsafe-module",
+        reason="module renderer failed with api_auth bearer placeholder",
+    )
+
+    stored = spaces.read_recovery_module("unsafe-module")
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery).lower()
+
+    assert module["module_id"] == "unsafe-module"
+    assert disabled["disabled"] is True
+    assert disabled["module_id"] == "unsafe-module"
+    assert disabled["revision_event_id"]
+    assert stored["source"] == "export function run(){ return SECRET_VALUE_DO_NOT_LEAK }"
+    assert stored["renderer"] == "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>"
+    assert recovery["summary"]["module_count"] == 1
+    assert recovery["summary"]["disabled_module_count"] == 1
+    assert recovery["modules"] == [
+        {
+            "module_id": "unsafe-module",
+            "name": "[REDACTED]",
+            "description": "[REDACTED]",
+            "scope": "space",
+            "disabled": True,
+            "disabled_reason": "[REDACTED]",
+            "revision_event_id": disabled["revision_event_id"],
+        }
+    ]
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "generated code" not in serialized
+    assert "raw prompt" not in serialized
+
+
+def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-tool",
+            "name": "Safe Module",
+            "description": "Module manager fixture",
+            "scope": "group",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "script": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.recovery.disable_module",
+        {"module_id": "module-tool", "reason": "script crashed with bearer placeholder"},
+    )
+    snapshot = spaces.run_space_tool("space.recovery.snapshot", {})
+    enabled = spaces.run_space_tool("space.recovery.enable_module", {"module_id": "module-tool"})
+    serialized = json.dumps({"disabled": disabled, "snapshot": snapshot, "enabled": enabled}).lower()
+
+    assert disabled["ok"] is True
+    assert disabled["action"] == "space.recovery.disable_module"
+    assert disabled["disabled"] is True
+    assert disabled["module_id"] == "module-tool"
+    assert snapshot["ok"] is True
+    assert snapshot["recovery"]["summary"]["module_count"] == 1
+    assert snapshot["recovery"]["modules"][0]["disabled"] is True
+    assert enabled["ok"] is True
+    assert enabled["action"] == "space.recovery.enable_module"
+    assert enabled["disabled"] is False
+    assert "source" not in serialized
+    assert "<script" not in serialized
+    assert "script crashed" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
 
 
 def test_import_space_agent_yaml_package_quarantines_generated_sources(monkeypatch, tmp_path):

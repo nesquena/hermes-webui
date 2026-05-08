@@ -146,9 +146,14 @@ def events_dir() -> Path:
     return spaces_root() / "events"
 
 
+def recovery_modules_dir() -> Path:
+    return spaces_root() / "recovery-modules"
+
+
 def _ensure_dirs() -> None:
     manifests_dir().mkdir(parents=True, exist_ok=True)
     events_dir().mkdir(parents=True, exist_ok=True)
+    recovery_modules_dir().mkdir(parents=True, exist_ok=True)
 
 
 def _slugify(value: str) -> str:
@@ -197,6 +202,13 @@ def validate_widget_id(widget_id: str) -> str:
     return wid
 
 
+def validate_module_id(module_id: str) -> str:
+    mid = str(module_id or "").strip()
+    if not _WIDGET_ID_RE.fullmatch(mid):
+        raise ValueError("Invalid module_id")
+    return mid
+
+
 def validate_data_key(key: str) -> str:
     data_key = str(key or "").strip()
     if not _WIDGET_ID_RE.fullmatch(data_key):
@@ -221,6 +233,14 @@ def _space_dir(space_id: str) -> Path:
 
 def _manifest_path(space_id: str) -> Path:
     return _space_dir(space_id) / "space.json"
+
+
+def _recovery_module_path(module_id: str) -> Path:
+    mid = validate_module_id(module_id)
+    root = recovery_modules_dir().resolve()
+    path = (root / f"{mid}.json").resolve()
+    path.relative_to(root)
+    return path
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -3250,6 +3270,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.disable_module", "space.module.recovery.disable", "module.recovery.disable"}:
+        module_id = validate_module_id(data.get("module_id") or data.get("id"))
+        result = disable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.enable_module", "space.module.recovery.enable", "module.recovery.enable"}:
+        module_id = validate_module_id(data.get("module_id") or data.get("id"))
+        result = enable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "widgets": list_widgets(space_id)}
@@ -5069,6 +5097,128 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     }
 
 
+def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
+    recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
+    return {
+        "module_id": validate_module_id(module.get("module_id") or module.get("id")),
+        "name": _public_display_text_summary(module.get("name") or module.get("module_id") or module.get("id"), 160),
+        "description": _public_display_text_summary(module.get("description", ""), 300),
+        "scope": _public_display_text_summary(module.get("scope") or "global", 80),
+        "disabled": bool(recovery.get("disabled")),
+        "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
+        "revision_event_id": module.get("revision_event_id"),
+    }
+
+
+def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
+    """Persist a generated module in quarantine and return metadata-only summary.
+
+    Raw module bodies are retained on disk for repair/rollback, but recovery
+    snapshots and tool responses expose only sanitized labels/status.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    if not isinstance(module, dict):
+        raise ValueError("module must be an object")
+    mid = validate_module_id(module.get("module_id") or module.get("id"))
+    existing: dict[str, Any] = {}
+    module_path = _recovery_module_path(mid)
+    if module_path.exists():
+        try:
+            loaded = json.loads(module_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    now = time.time()
+    stored = dict(existing)
+    stored.update(copy.deepcopy(module))
+    stored["module_id"] = mid
+    stored.setdefault("created_at", existing.get("created_at") or now)
+    stored["updated_at"] = now
+    stored.setdefault("recovery", existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"disabled": False, "disabled_reason": ""})
+    event_id = _record_event("recovery-modules", "module.quarantined", {"module_id": mid}, snapshot=stored)
+    stored["revision_event_id"] = event_id
+    _atomic_write_json(module_path, stored)
+    return _module_summary(stored)
+
+
+def read_recovery_module(module_id: str) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    module_path = _recovery_module_path(module_id)
+    if not module_path.exists():
+        raise FileNotFoundError(module_id)
+    loaded = json.loads(module_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise FileNotFoundError(module_id)
+    return loaded
+
+
+def list_recovery_modules() -> list[dict[str, Any]]:
+    if not spaces_enabled():
+        return []
+    _ensure_dirs()
+    modules: list[dict[str, Any]] = []
+    for module_path in recovery_modules_dir().glob("*.json"):
+        try:
+            loaded = json.loads(module_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        try:
+            modules.append(_module_summary(loaded))
+        except ValueError:
+            continue
+    modules.sort(key=lambda item: str(item.get("module_id") or ""))
+    return modules
+
+
+def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    mid = validate_module_id(module_id)
+    module = read_recovery_module(mid)
+    recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["disabled"] = True
+    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    module["recovery"] = recovery
+    module["updated_at"] = time.time()
+    event_id = _record_event(
+        "recovery-modules",
+        "module.recovery_disabled",
+        {"module_id": mid, "reason": _recovery_reason_summary(recovery["disabled_reason"])},
+        snapshot=module,
+    )
+    module["revision_event_id"] = event_id
+    _atomic_write_json(_recovery_module_path(mid), module)
+    return {"disabled": True, "module_id": mid, "revision_event_id": event_id}
+
+
+def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    mid = validate_module_id(module_id)
+    module = read_recovery_module(mid)
+    recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["disabled"] = False
+    recovery["disabled_reason"] = ""
+    module["recovery"] = recovery
+    module["updated_at"] = time.time()
+    event_id = _record_event(
+        "recovery-modules",
+        "module.recovery_enabled",
+        {"module_id": mid, "reason": _recovery_reason_summary(reason or "enabled from recovery")},
+        snapshot=module,
+    )
+    module["revision_event_id"] = event_id
+    _atomic_write_json(_recovery_module_path(mid), module)
+    return {"disabled": False, "module_id": mid, "revision_event_id": event_id}
+
+
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
@@ -5178,6 +5328,7 @@ def _recovery_safe_admin_contract() -> dict[str, Any]:
             "generated widgets not rendered",
             "rollback controls available",
             "disable and repair controls available",
+            "module quarantine available",
         ],
     }
 
@@ -5191,6 +5342,8 @@ def recovery_snapshot() -> dict[str, Any]:
         "disabled_widget_count": 0,
         "rollback_point_count": 0,
         "queued_event_count": 0,
+        "module_count": 0,
+        "disabled_module_count": 0,
     }
     if not spaces_enabled():
         return {
@@ -5199,10 +5352,14 @@ def recovery_snapshot() -> dict[str, Any]:
             "safe_admin": _recovery_safe_admin_contract(),
             "summary": empty_summary,
             "spaces": [],
+            "modules": [],
         }
     _ensure_dirs()
     spaces: list[dict[str, Any]] = []
     counts = dict(empty_summary)
+    modules = list_recovery_modules()
+    counts["module_count"] = len(modules)
+    counts["disabled_module_count"] = sum(1 for module in modules if module.get("disabled"))
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))
@@ -5249,4 +5406,5 @@ def recovery_snapshot() -> dict[str, Any]:
         "safe_admin": _recovery_safe_admin_contract(),
         "summary": counts,
         "spaces": spaces,
+        "modules": modules,
     }
