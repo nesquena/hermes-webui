@@ -139,7 +139,7 @@
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runSnakeWalkthrough">Run snake repair walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runMusicWalkthrough">Run music walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runProviderSetupWalkthrough">Run provider setup walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBigBangWalkthrough">Run Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="runLocalServiceWalkthrough">Run local service walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runTimeTravelWalkthrough">Run time travel walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runAdminRecoveryWalkthrough">Run admin recovery walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
-      renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
+      renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderCreatorLoopForm() + renderSpaceAgentImportForm() + renderSpaceForm();
   }
 
   function renderDemoSmokeRunner(demos){
@@ -367,6 +367,71 @@
       '<button type="button" class="capy-spaces-btn" data-capy-action="saveSpace">Save space</button>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button>' +
       '</div></div>';
+  }
+
+  function renderCreatorLoopForm(){
+    return '<div class="capy-spaces-card"><h3>Safe creator loop</h3>' +
+      '<div class="capy-spaces-muted">Prompt → bounded metadata spec → sandbox preview → visual QA → revisioned commit. The preview and commit cards show metadata summaries only.</div>' +
+      '<div class="capy-spaces-form" aria-label="Preview safe creator loop">' +
+      '<label>Creator prompt<textarea id="capyCreatorPrompt" rows="4" autocomplete="off" placeholder="Describe a workspace tool to draft safely"></textarea></label>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="previewCreatorSpec">Preview bounded spec</button>' +
+      '</div></div>';
+  }
+
+  function safeCreatorSummaryText(value){
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw_prompt|generated_code|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    return text && !unsafeValuePattern.test(text) ? text : '';
+  }
+
+  function renderCreatorSpecSummary(spec){
+    const safeSpec = spec && typeof spec === 'object' && !Array.isArray(spec) ? spec : {};
+    const space = safeSpec.space && typeof safeSpec.space === 'object' && !Array.isArray(safeSpec.space) ? safeSpec.space : {};
+    const spaceName = safeCreatorSummaryText(space.name || space.space_id || 'Draft Space') || 'Draft Space';
+    const spaceId = safeCreatorSummaryText(space.space_id || '');
+    const widgets = Array.isArray(safeSpec.widgets) ? safeSpec.widgets.slice(0, 6) : [];
+    const widgetRows = widgets.map(function(widget){
+      if (!widget || typeof widget !== 'object' || Array.isArray(widget)) return '';
+      const widgetId = safeCreatorSummaryText(widget.id || '');
+      const title = safeCreatorSummaryText(widget.title || widgetId || 'Draft widget') || 'Draft widget';
+      const kind = safeCreatorSummaryText(widget.kind || 'custom') || 'custom';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+(widgetId ? ' · '+escapeHtml(widgetId) : '')+'</div></div></div>';
+    }).filter(Boolean).join('') || '<div class="capy-spaces-muted">No widget metadata returned.</div>';
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
+      (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
+      '</div></div>'+widgetRows+'</div>';
+  }
+
+  function renderCreatorPreviewResult(data){
+    const previewId = safeCreatorSummaryText(data && data.preview_id || '');
+    const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
+    const stored = data && data.stored === true ? 'true' : 'false';
+    const executed = data && data.executed === true ? 'true' : 'false';
+    const gates = data && data.gates && typeof data.gates === 'object' && !Array.isArray(data.gates) ? data.gates : {};
+    const gateLabels = [];
+    if (gates.sandbox_preview_required) gateLabels.push('sandbox preview required');
+    if (gates.visual_qa_required) gateLabels.push('visual QA required');
+    if (gates.approve_commit_required) gateLabels.push('approval required');
+    const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
+    return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
+      renderCreatorSpecSummary(data && data.spec) + commitButton + '</div>';
+  }
+
+  function renderCreatorCommitResult(data){
+    const space = data && data.space && typeof data.space === 'object' && !Array.isArray(data.space) ? data.space : {};
+    const spaceName = safeCreatorSummaryText(space.name || space.space_id || 'Committed Space') || 'Committed Space';
+    const spaceId = safeCreatorSummaryText(space.space_id || '');
+    const rev = safeCreatorSummaryText(space.revision_event_id || data && data.revision_event && data.revision_event.event_id || '');
+    const stage = safeCreatorSummaryText(data && data.stage || 'revisioned-commit') || 'revisioned-commit';
+    const stored = data && data.stored === true ? 'true' : 'false';
+    const executed = data && data.executed === true ? 'true' : 'false';
+    return '<div class="capy-spaces-card" role="status"><h3>Creator commit saved</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(rev ? ' · Revision: '+escapeHtml(rev) : '')+'</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
+      (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
+      '</div></div></div></div>';
   }
 
   async function loadSpaceWidgets(spaceId){
@@ -1419,6 +1484,39 @@
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderSpaceImportResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'previewCreatorSpec') {
+      const root = document.getElementById('capySpacesRoot');
+      const promptInput = getRootInput(root, '#capyCreatorPrompt');
+      const prompt = promptInput && promptInput.value ? String(promptInput.value) : '';
+      const data = await postSpacesJson('api/spaces/tool', {action: 'space.creator.preview', prompt: prompt});
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorPreviewResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'commitCreatorSpec') {
+      const previewId = button.dataset.previewId || '';
+      if (!previewId) return;
+      if (typeof showConfirmDialog !== 'function') return;
+      const confirmed = await showConfirmDialog({
+        title: 'Commit creator preview?',
+        message: 'Commit this sandbox-previewed, visually QA-approved creator spec as a revisioned metadata-only Space.',
+        confirmLabel: 'Commit revision',
+        cancelLabel: 'Cancel',
+        danger: true,
+      });
+      if (!confirmed) return;
+      const data = await postSpacesJson('api/spaces/tool', {
+        action: 'space.creator.commit',
+        preview_id: previewId,
+        sandbox_previewed: true,
+        visual_qa_passed: true,
+        approve_commit: true,
+      });
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitResult(data || {}) + refreshedRoot.innerHTML;
       return;
     }
     if (action === 'runDemoSmoke') {

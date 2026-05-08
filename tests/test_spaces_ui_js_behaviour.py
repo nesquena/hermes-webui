@@ -40,6 +40,7 @@ const values = {
   '#capySpaceAgentImportWidgetsJson': JSON.stringify({'widgets/weather.yaml': 'id: weather\ntitle: Weather\ntype: html\nrenderer: <script>bad()</script>\napi_key: SECRET'}, null, 2),
   '#capySpaceAgentImportZipB64': 'UEsDBBQAAAAIAAxTSFsAAAAAAAAAAAAAAAALAAAAc3BhY2UueWFtbA==',
   '#capyWidgetNotesBody': 'Initial notes body',
+  '#capyCreatorPrompt': 'Create an ops dashboard without leaking SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
 };
 const inputs = {};
 const elements = {};
@@ -335,6 +336,42 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+      });
+    }
+    if (body.action === 'space.creator.preview') {
+      return response({
+        ok: true,
+        action: 'space.creator.preview',
+        stored: false,
+        executed: false,
+        stage: 'sandbox-preview-required',
+        preview_id: 'preview-safe-1',
+        gates: {
+          sandbox_preview_required: true,
+          visual_qa_required: true,
+          approve_commit_required: true,
+        },
+        spec: {
+          space: { space_id: 'creator-lab', name: 'Creator Lab <Safe>', description: 'Metadata-only preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          widgets: [
+            { id: 'safe-summary', kind: 'markdown', title: 'Summary <Widget>', metadata: { checklist: { items: ['sandbox preview', 'visual QA', 'revision commit'], renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, prompt: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          ],
+        },
+        prompt: body.prompt,
+        raw_prompt: body.prompt,
+        generated_code: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      });
+    }
+    if (body.action === 'space.creator.commit') {
+      return response({
+        ok: true,
+        action: 'space.creator.commit',
+        stored: true,
+        executed: false,
+        stage: 'revisioned-commit',
+        space: { space_id: 'creator-lab', name: 'Creator Lab <Safe>', widget_count: 1, revision_event_id: 'rev-creator-commit', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        revision_event: { event_id: 'rev-creator-commit', event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
       });
     }
   }
@@ -1568,6 +1605,20 @@ async function dispatchWindowMessage(data) {
         }
       }
     });
+  } else if (scenario === 'creatorPreviewGate') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('previewCreatorSpec', {});
+  } else if (scenario === 'creatorCommitConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
+    beforeHtml = root.innerHTML;
+    await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
+  } else if (scenario === 'creatorCommitNoDialog') {
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
+    await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -3573,3 +3624,61 @@ def test_spaces_ui_adds_trusted_system_widget_to_active_space_metadata_only(driv
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_fields(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewGate")
+
+    assert "Safe creator loop" in out["beforeHtml"]
+    assert "Preview bounded spec" in out["beforeHtml"]
+    preview_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.preview" in call["body"])
+    preview_body = json.loads(preview_call["body"])
+    assert preview_body == {
+        "action": "space.creator.preview",
+        "prompt": "Create an ops dashboard without leaking SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>",
+    }
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "stored: false" in out["rootHtml"]
+    assert "executed: false" in out["rootHtml"]
+    assert "sandbox preview required" in out["rootHtml"]
+    assert "visual QA required" in out["rootHtml"]
+    assert "Approve revisioned commit" in out["rootHtml"]
+    assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
+    assert "Summary &lt;Widget&gt;" in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitConfirmed")
+
+    commit_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"])
+    assert json.loads(commit_call["body"]) == {
+        "action": "space.creator.commit",
+        "preview_id": "preview-safe-1",
+        "sandbox_previewed": True,
+        "visual_qa_passed": True,
+        "approve_commit": True,
+    }
+    assert out["dialogs"]
+    assert "Commit creator preview?" in json.dumps(out["dialogs"])
+    assert "Creator commit saved" in out["rootHtml"]
+    assert "stored: true" in out["rootHtml"]
+    assert "executed: false" in out["rootHtml"]
+    assert "revisioned-commit" in out["rootHtml"]
+    assert "rev-creator-commit" in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_fails_closed_without_shared_confirm_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitNoDialog")
+
+    assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
+    assert "Creator preview ready" in out["rootHtml"]
