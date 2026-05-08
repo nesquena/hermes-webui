@@ -27,6 +27,7 @@ from api.config import (
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     model_with_provider_context,
+    get_config,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.metering import meter
@@ -59,6 +60,72 @@ def _get_ai_agent():
         except ImportError:
             pass
     return AIAgent
+
+
+def _coerce_positive_int(value) -> Optional[int]:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _resolve_context_length_fallback(
+    agent,
+    *,
+    resolved_model: str | None = None,
+    resolved_provider: str | None = None,
+    resolved_base_url: str | None = None,
+) -> int:
+    """Resolve a context window for fallback UI/session metering.
+
+    Mirrors AIAgent startup context resolution closely enough for the two
+    post-stream fallback sites: explicit ``model.context_length`` and
+    ``custom_providers`` per-model overrides must be forwarded to
+    ``agent.model_metadata.get_model_context_length()`` before it reaches the
+    broad 256K default.
+    """
+    try:
+        active_cfg = get_config()
+    except Exception:
+        active_cfg = {}
+    if not isinstance(active_cfg, dict):
+        active_cfg = {}
+
+    model_cfg = active_cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+
+    config_context_length = _coerce_positive_int(
+        getattr(agent, "_config_context_length", None)
+    )
+    if config_context_length is None:
+        config_context_length = _coerce_positive_int(
+            model_cfg.get("context_length")
+        )
+
+    custom_providers = active_cfg.get("custom_providers")
+    if not isinstance(custom_providers, list):
+        custom_providers = None
+
+    model = getattr(agent, 'model', resolved_model or '') or resolved_model or ''
+    base_url = getattr(agent, 'base_url', '') or resolved_base_url or ''
+    provider = getattr(agent, 'provider', resolved_provider or '') or resolved_provider or ''
+
+    try:
+        from agent.model_metadata import get_model_context_length
+        return get_model_context_length(
+            model,
+            base_url,
+            config_context_length=config_context_length,
+            provider=provider,
+            custom_providers=custom_providers,
+        )
+    except Exception:
+        # Older hermes-agent builds may not expose this helper or may not accept
+        # the newer keyword arguments. Leave the caller's context_length unset
+        # rather than breaking stream completion/session persistence.
+        return 0
 
 
 def _is_quota_error_text(err_text: str) -> bool:
@@ -2949,15 +3016,15 @@ def _run_agent_streaming(
                 # follow-up after PR #1344 was closed as superseded by #1341.
                 if not getattr(s, 'context_length', 0):
                     try:
-                        from agent.model_metadata import get_model_context_length
-                        _resolved_cl = get_model_context_length(
-                            getattr(agent, 'model', resolved_model or '') or '',
-                            getattr(agent, 'base_url', '') or '',
+                        _resolved_cl = _resolve_context_length_fallback(
+                            agent,
+                            resolved_model=resolved_model,
+                            resolved_provider=resolved_provider,
+                            resolved_base_url=resolved_base_url,
                         )
                         if _resolved_cl:
                             s.context_length = _resolved_cl
                     except Exception:
-                        # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
                 s.save()
@@ -3001,10 +3068,11 @@ def _run_agent_streaming(
             # JS default.  Mirrors the session-save fallback above (lines ~2205-2217).
             if not usage.get('context_length'):
                 try:
-                    from agent.model_metadata import get_model_context_length as _get_cl
-                    _fb_cl = _get_cl(
-                        getattr(agent, 'model', resolved_model or '') or '',
-                        getattr(agent, 'base_url', '') or '',
+                    _fb_cl = _resolve_context_length_fallback(
+                        agent,
+                        resolved_model=resolved_model,
+                        resolved_provider=resolved_provider,
+                        resolved_base_url=resolved_base_url,
                     )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
