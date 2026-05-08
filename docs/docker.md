@@ -13,6 +13,24 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 
 If something stops working, **start with the single-container setup** — it's the simplest path and fixes most permission/UID/path-mismatch issues by construction.
 
+## Production image security model
+
+The production Docker image is hardened for the normal single-tenant container threat model:
+Hermes WebUI assumes one operator controls the container, mounted Hermes home, and workspace.
+The image does **not** install `sudo`, does not add runtime users to a sudo group, and does not
+grant `NOPASSWD` escalation. If an agent/tool process gains a shell as `hermeswebui`, it should
+not be able to become root with a passwordless sudo command.
+
+The entrypoint still starts as `root` for a narrow init phase because Docker bind mounts often need
+UID/GID alignment and ownership preparation before the app can read `~/.hermes`, `/workspace`,
+`/app`, and `/uv_cache`. After that setup, `docker_init.bash` re-execs itself as the unprivileged
+`hermeswebui` user and starts the server there. Init scratch files under `/tmp/hermeswebui_init`
+are owner-only (`0700` directory, `0600` files), not world-writable.
+
+For multi-tenant or hostile-container environments, rebuild with your own runtime user, mount policy,
+and supervisor assumptions. Development images that need package-manager convenience should add
+those tools in a dev-only Dockerfile instead of reintroducing passwordless sudo to production.
+
 ## 5-minute quickstart (single container)
 
 ```bash

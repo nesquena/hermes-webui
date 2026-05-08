@@ -21,7 +21,6 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     apt-utils \
     locales \
     ca-certificates \
-    sudo \
     curl \
     rsync \
     openssh-client \
@@ -41,24 +40,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /apptoo
 
-# Every sudo group user does not need a password
-RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-
-# Create a new group for the hermeswebui and hermeswebuitoo users
-RUN groupadd -g 1024 hermeswebui \ 
-    && groupadd -g 1025 hermeswebuitoo
-
-# The hermeswebui (resp. hermeswebuitoo) user will have UID 1024 (resp. 1025), 
-# be part of the hermeswebui (resp. hermeswebuitoo) and users groups and be sudo capable (passwordless) 
-RUN useradd -u 1024 -d /home/hermeswebui -g hermeswebui -s /bin/bash -m hermeswebui \
-    && usermod -G users hermeswebui \
-    && adduser hermeswebui sudo
-RUN useradd -u 1025 -d /home/hermeswebuitoo -g hermeswebuitoo -s /bin/bash -m hermeswebuitoo \
-    && usermod -G users hermeswebuitoo \
-    && adduser hermeswebuitoo sudo
-RUN chown -R hermeswebuitoo:hermeswebuitoo /apptoo
-
-USER root
+# Create the unprivileged runtime user. The entrypoint starts as root only for
+# UID/GID alignment and filesystem preparation, then execs the server as this user.
+RUN groupadd -g 1024 hermeswebui \
+    && useradd -u 1024 -d /home/hermeswebui -g hermeswebui -G users -s /bin/bash -m hermeswebui \
+    && mkdir -p /app /uv_cache \
+    && chown -R hermeswebui:hermeswebui /home/hermeswebui /app /uv_cache
 
 COPY --chmod=555 docker_init.bash /hermeswebui_init.bash
 
@@ -75,9 +62,7 @@ USER root
 # The init script will skip the download when uv is already on PATH.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-USER hermeswebuitoo
-
-COPY --chown=hermeswebuitoo:hermeswebuitoo . /apptoo
+COPY --chown=root:root . /apptoo
 
 # Bake the git version tag into the image so the settings badge works even
 # when .git is not present (it is excluded by .dockerignore).
@@ -95,5 +80,8 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8787/health || exit 1
 
+# docker_init.bash performs root-only bind-mount setup, then drops to hermeswebui
+# before starting the WebUI server. The production image does not ship sudo.
+USER root
 CMD ["/hermeswebui_init.bash"]
 
