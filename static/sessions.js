@@ -1835,6 +1835,16 @@ function _sessionLineageContainsSession(s, sid){
   return false;
 }
 
+function _sessionSegmentCount(s){
+  if(!s) return 0;
+  const counts=[];
+  if(typeof s._lineage_collapsed_count==='number') counts.push(s._lineage_collapsed_count);
+  if(typeof s._compression_segment_count==='number') counts.push(s._compression_segment_count);
+  if(Array.isArray(s._lineage_segments)) counts.push(s._lineage_segments.length);
+  const count=Math.max(0,...counts.map(n=>Number.isFinite(n)?n:0));
+  return count>1?count:0;
+}
+
 function _sidebarLineageKeyForRow(s){
   if(!s) return null;
   return s._lineage_key||s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id||null;
@@ -2393,6 +2403,15 @@ function renderSessionListFromCache(){
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    const segmentCount=_sessionSegmentCount(s);
+    if(segmentCount>0){
+      const segmentCountEl=document.createElement('span');
+      segmentCountEl.className='session-lineage-count';
+      const segmentLabel=t('session_meta_segments', segmentCount);
+      segmentCountEl.textContent=segmentLabel;
+      segmentCountEl.title=segmentLabel;
+      titleRow.appendChild(segmentCountEl);
+    }
     const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
     if(childCount>0){
       const childCountEl=document.createElement('span');

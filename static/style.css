@@ -2654,6 +2654,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .session-item.archived .session-title{font-style:italic;}
 
 /* ── Subagent session tree (#494) ── */
+.session-lineage-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;}
+.session-item.active .session-lineage-count{color:var(--accent-text);background:rgba(255,255,255,.14);}
 .session-child-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(99,179,237,.16);color:#63b3ed;margin-left:6px;flex-shrink:0;user-select:none;cursor:pointer;}
 .session-child-count:hover{background:rgba(99,179,237,.26);color:#90cdf4;}
 .session-child-sessions{display:flex;flex-direction:column;gap:3px;margin-top:6px;margin-left:12px;padding-left:8px;border-left:1px solid var(--border,rgba(255,255,255,.1));}
