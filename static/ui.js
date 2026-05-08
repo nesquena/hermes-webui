@@ -1,6 +1,8 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+const MAX_UPLOAD_BYTES=20*1024*1024;
+const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
 // Set to activeSid just before setBusy(false) in done/error handlers so the
 // queue drains the session that *finished*, not the one currently viewed.
@@ -6758,7 +6760,22 @@ function renderTray(){ // non-media files use paperclip chip
     tray.appendChild(chip);
   });
 }
-function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
+function _uploadTooLargeMessage(file){
+  const fileSizeMb=Math.ceil(((file&&file.size)||0)/1024/1024);
+  return t('upload_too_large',MAX_UPLOAD_MB,fileSizeMb);
+}
+function _showUploadTooLarge(file){
+  const message=`${t('upload_failed')}${file&&file.name?file.name:'file'} \u2014 ${_uploadTooLargeMessage(file)}`;
+  if(typeof setStatus==='function')setStatus(`\u274c ${message}`);
+  else if(typeof showToast==='function')showToast(message,5000,'error');
+}
+function addFiles(files){
+  for(const f of files){
+    if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
+    if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
+  }
+  renderTray();
+}
 async function uploadPendingFiles(){
   if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
@@ -6766,9 +6783,11 @@ async function uploadPendingFiles(){
   barWrap.classList.add('active');bar.style.width='0%';
   const total=S.pendingFiles.length;
   for(let i=0;i<total;i++){
-    const f=S.pendingFiles[i];const fd=new FormData();
-    fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
+    const f=S.pendingFiles[i];
     try{
+      if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
+      const fd=new FormData();
+      fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});

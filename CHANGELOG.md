@@ -1,5 +1,33 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.24] — 2026-05-08 — 5-PR contributor batch (Release B: local-server custom-provider model preservation, oversized upload preflight, ai-gateway phantom Custom group fix, Kanban lifecycle controls, cross-container gateway liveness)
+
+### Fixed (5 PRs)
+
+- **PR #1862** by @franksong2702 — Recognize `custom:<local-server>` provider ids as local model server providers (Ollama, LM Studio, vLLM, Tabby) and preserve full slashed model ids on non-loopback hosts. Pre-fix, slashed model ids from non-loopback Ollama instances were stripped because `_is_local_server_provider()` did not unwrap `custom:` prefixes. Now: explicit set membership check across the standard local-server provider slugs (`lmstudio`, `lm-studio`, `ollama`, `llamacpp`, `llama-cpp`, `vllm`, `tabby`, `tabbyapi`, `koboldcpp`, `textgen`, `localai`). Note: renamed local-server providers (`custom:my-vllm-prod`) on non-private hostnames are still handled via the existing `_base_url_points_at_local_server()` LAN/loopback fallback; a follow-up could thread the configured `kind`/`provider` field for full coverage. Closes #1830.
+
+- **PR #1868** by @franksong2702 — Add browser-side upload size preflight check matching the server's 20 MB limit. Pre-fix, Firefox would attempt a 182 MB multipart upload and surface `NS_ERROR_NET_RESET` / `NetworkError` to the user instead of the server's clean 413 JSON. Now: `static/ui.js` checks file size before starting upload and surfaces a clear error message in the user's locale via `static/i18n.js`. Closes #1867.
+
+- **PR #1883** by @Sanjays2402 — Two cooperating bugs in `get_available_models()` produced a phantom Custom group when the active provider was ai-gateway with `custom_providers` declared in `config.yaml`. (1) `custom:*` PIDs not in `_named_custom_groups` were dropped at the wrong stage, leaving entries that should have been pre-filtered to slip through. (2) The fallback Custom group was synthesized for any leftover entries, including auto-detected ai-gateway models that weren't supposed to be in the Custom group at all. Fix scopes both checks correctly. Cross-talk between fix paths verified to be impossible (the two fixes operate on disjoint PID shapes). Closes #1881.
+
+- **PR #1886** by @franksong2702 — Three Kanban UI lifecycle improvements: (1) remove Kanban card Start and bulk Running controls (PATCH-task-to-running was unsafe — bypassed dispatcher claim flow). (2) Rename dispatcher dry-run action from "Nudge dispatcher" to "Preview dispatcher" so the UI matches what `/api/kanban/dispatch?dry_run=1` actually does. (3) Add empty-board guidance (`kanban_work_queue_hint`) framing the Kanban panel as the Hermes Agent work queue. **Mid-stage maintainer notes:** PR was based against pre-v0.51.23 master, so during stage rebase the maintainer (a) resolved the CHANGELOG.md conflict (accept master), (b) merged the Kanban i18n additions with #1863's Japanese refresh (Japanese hint translated; other locales fall back to English to match existing kanban_* fallback pattern), and (c) restored two silent reverts from #1886's stale-base diff: #1872's `static/index.html` workspace-heading change (no role=button/tabindex) and #1871's `static/panels.js:837` `_cronPreFormDetail` reference. Both restorations verified by Opus advisor against post-merge master. Co-authored-by trailer preserves Frank Song's authorship. Closes #1885.
+
+- **PR #1887** by @Sanjays2402 — Cross-container gateway liveness via state-file freshness fallback. `gateway/status.py:get_running_pid()` walks two PID-namespace-scoped checks (file lock via `fcntl.flock(LOCK_EX | LOCK_NB)` on `gateway.lock`, and `/proc/<pid>` access checks). Both fail across container boundaries — WebUI in container A can't see the gateway in container B even when both share a writable volume. Adds a state-file freshness fallback: if the canonical lock+pid checks fail but the gateway's `gateway.json` was updated within the last 120s (two cron ticks), treat the gateway as alive. **Implementation note:** parses the embedded `updated_at` ISO-8601 string from inside the JSON content (more robust against NFS lazy mtime updates than `os.path.getmtime()`). Tolerates clock skew up to 120s in the future, rejects naive timestamps, requires `gateway_state == "running"` in the file (prevents trusting cleanup-skipped crashes). Closes #1879.
+
+### Tests
+
+4830 → **4858 collected, 4847 passing, 0 regressions** (+28 net new). Full suite ~143s on Python 3.11. JS syntax check (`node -c`) passes on all 3 modified `.js` files. Browser API sanity harness (port 8789) all-green: 11 endpoints verified. Opus advisor pass: SHIP with two follow-up flags, neither blocking.
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **4847 passed, 8 skipped, 1 xfailed, 2 xpassed, 8 subtests passed** in 142.86s.
+- Browser API harness against stage-319 on port 8789: all 11 checks PASS.
+- `node -c` on `static/i18n.js`, `static/panels.js`, `static/ui.js`: clean.
+- Stage diff: 11 files, +849/-43.
+- Opus advisor pass on stage-319 brief: **SHIP** with one minor follow-up (#1862 narrow gap on renamed local-server provider non-private hostnames). No MUST-FIX.
+- Pre-stamp re-fetch of all 5 PR heads: no contributor force-pushes during the Opus window. Stage commits match contributor heads.
+- Mid-stage edits applied (test failures from #1886's stale-base reverts of #1871 + #1872): both fix-restorations re-applied surgically, full pytest re-run clean post-fix.
+
 ## [v0.51.23] — 2026-05-08 — 7-PR contributor batch (Release A: stale-cleanup pending-turn preservation, title refresh marker persistence, Japanese i18n refresh, Kanban predicate hardening, cron edit snapshot fix, workspace heading affordance polish)
 
 ### Fixed (7 PRs)
