@@ -7,6 +7,9 @@ import urllib.parse
 import urllib.request
 
 from tests._pytest_port import BASE
+from tests.conftest import requires_agent_modules
+
+pytestmark = requires_agent_modules
 
 
 def _state_dir() -> pathlib.Path:
