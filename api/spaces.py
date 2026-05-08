@@ -2009,14 +2009,8 @@ def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
     return detail
 
 
-def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Return a bounded, non-persisted creator-loop preview spec.
-
-    This is the first generic creator-loop gate: accept an untrusted prompt plus
-    optional proposed widgets, then produce a metadata-only draft contract for
-    sandbox preview / visual QA without creating a Space, executing generated
-    bodies, or echoing raw prompt/source/auth material.
-    """
+def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a sanitized creator-loop draft shared by preview and commit gates."""
     explicit_prompt = any(key in payload for key in ("prompt", "request"))
     prompt_text = str(payload.get("prompt") or payload.get("request") or payload.get("description") or "")
     prompt_summary = _payload_text_summary(prompt_text, 500)
@@ -2043,7 +2037,8 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             }
         ]
 
-    widgets: list[dict[str, Any]] = []
+    widget_payloads: list[dict[str, Any]] = []
+    widget_details: list[dict[str, Any]] = []
     used_widget_ids: set[str] = set()
     omitted_field_count = 1 if unsafe_prompt_redacted else 0
     for index, raw_widget in enumerate(raw_widgets[:20], start=1):
@@ -2051,9 +2046,33 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             continue
         safe_widget, creator_omitted = _space_creator_safe_widget_input(raw_widget, index, used_widget_ids)
         widget_payload, omitted_count = _space_tool_render_widget_payload({"widget": safe_widget})
-        widgets.append(_space_tool_preview_widget_detail(widget_payload))
+        widget_payloads.append(widget_payload)
+        widget_details.append(_space_tool_preview_widget_detail(widget_payload))
         omitted_field_count += omitted_count + creator_omitted
 
+    return {
+        "space": space,
+        "widget_payloads": widget_payloads,
+        "widget_details": widget_details,
+        "safety": {
+            "prompt_echoed": False,
+            "unsafe_prompt_redacted": unsafe_prompt_redacted,
+            "generated_bodies_rendered": False,
+            "omitted_field_count": omitted_field_count,
+        },
+    }
+
+
+def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded, non-persisted creator-loop preview spec.
+
+    This is the first generic creator-loop gate: accept an untrusted prompt plus
+    optional proposed widgets, then produce a metadata-only draft contract for
+    sandbox preview / visual QA without creating a Space, executing generated
+    bodies, or echoing raw prompt/source/auth material.
+    """
+    draft = _space_creator_sanitized_draft(payload)
+    widgets = draft["widget_details"]
     return {
         "ok": True,
         "action": name,
@@ -2066,15 +2085,87 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             "requires_visual_qa": True,
             "commit_requires_revision": True,
         },
-        "space": space,
+        "space": draft["space"],
         "widgets": widgets,
         "widget_count": len(widgets),
-        "safety": {
-            "prompt_echoed": False,
-            "unsafe_prompt_redacted": unsafe_prompt_redacted,
-            "generated_bodies_rendered": False,
-            "omitted_field_count": omitted_field_count,
+        "safety": draft["safety"],
+    }
+
+
+def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a creator-loop draft only after sandbox, visual-QA, and approval gates."""
+    sandbox_previewed = _truthy_bool(payload.get("sandbox_previewed") or payload.get("sandboxPreviewed"))
+    visual_qa_passed = _truthy_bool(payload.get("visual_qa_passed") or payload.get("visualQaPassed"))
+    approve_commit = _truthy_bool(payload.get("approve_commit") or payload.get("approveCommit") or payload.get("commit_approved"))
+    if not (sandbox_previewed and visual_qa_passed and approve_commit):
+        raise ValueError("Creator commit requires sandbox preview, visual QA, and explicit approval")
+
+    draft = _space_creator_sanitized_draft(payload)
+    space = draft["space"]
+    create_payload = {
+        "space_id": space["space_id"],
+        "name": space["name"],
+        "description": space.get("description", ""),
+        "template": "creator-loop",
+        "layout": {"columns": 24},
+        "widgets": draft["widget_payloads"],
+        "capabilities": {
+            "creator_loop": {
+                "mode": "metadata-only",
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "generated_bodies_rendered": False,
+            }
         },
+    }
+    if _manifest_path(space["space_id"]).exists():
+        if not spaces_enabled():
+            raise RuntimeError("Capy Spaces is disabled")
+        existing = read_space(space["space_id"])
+        revised_manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "space_id": space["space_id"],
+            "name": space["name"],
+            "description": space.get("description", ""),
+            "agent_instructions": "",
+            "template": "creator-loop",
+            "created_at": existing.get("created_at") or time.time(),
+            "updated_at": existing.get("updated_at") or time.time(),
+            "layout": create_payload["layout"],
+            "widgets": create_payload["widgets"],
+            "capabilities": create_payload["capabilities"],
+            "recovery": existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"safe_mode_available": True},
+            "revision_events": list(existing.get("revision_events") or []),
+            "revision_event_id": existing.get("revision_event_id"),
+        }
+        created = _write_manifest(
+            revised_manifest,
+            "space.creator.committed",
+            {"mode": "metadata-only", "widget_count": len(draft["widget_payloads"])},
+        )
+    else:
+        created = create_space(create_payload)
+    widgets = [read_widget_detail(created["space_id"], widget["id"]) for widget in draft["widget_payloads"]]
+    space_detail = read_space_detail(created["space_id"])
+    space_detail["widget_count"] = len(widgets)
+    return {
+        "ok": True,
+        "action": name,
+        "creator_loop": {
+            "stage": "revisioned-commit",
+            "mode": "metadata-only",
+            "stored": True,
+            "executed": False,
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "revision_created": bool(created.get("revision_event_id")),
+        },
+        "space_id": created["space_id"],
+        "space": space_detail,
+        "widgets": widgets,
+        "widget_count": len(widgets),
+        "revision_event_id": created.get("revision_event_id"),
+        "safety": draft["safety"],
     }
 
 
@@ -2123,7 +2214,7 @@ def _space_creator_safe_widget_input(raw_widget: dict[str, Any], index: int, use
         if prompt_key in safe_widget:
             safe_widget.pop(prompt_key, None)
             omitted += 1
-    for metadata_field in _WIDGET_DETAIL_METADATA_FIELDS:
+    for metadata_field in (*_WIDGET_DETAIL_METADATA_FIELDS, "metadata"):
         if metadata_field in safe_widget:
             safe_value, stripped_count = _space_creator_strip_prompt_metadata(safe_widget[metadata_field])
             safe_widget[metadata_field] = safe_value
@@ -2570,6 +2661,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "space": space}
     if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
         return _space_creator_preview_payload(name, data)
+    if name in {"space.creator.commit", "space.creator.spec.commit", "space.spaces.commitcreatorspec"}:
+        return _space_creator_commit_payload(name, data)
     if name in {
         "space.get",
         "space.spaces.get",

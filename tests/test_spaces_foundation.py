@@ -1669,6 +1669,171 @@ def test_creator_preview_bounds_wide_metadata_without_full_iteration(monkeypatch
     assert preview["safety"]["omitted_field_count"] >= 950
 
 
+def test_creator_commit_requires_preview_visual_qa_and_explicit_commit_gate(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for missing_gate_payload in [
+        {"sandbox_previewed": False, "visual_qa_passed": True, "approve_commit": True},
+        {"sandbox_previewed": True, "visual_qa_passed": False, "approve_commit": True},
+        {"sandbox_previewed": True, "visual_qa_passed": True, "approve_commit": False},
+    ]:
+        with pytest.raises(ValueError, match="Creator commit requires sandbox preview, visual QA, and explicit approval"):
+            spaces.run_space_tool(
+                "space.creator.commit",
+                {
+                    **missing_gate_payload,
+                    "prompt": "Build a private dashboard from SECRET_SOURCE",
+                    "spaceName": "Unsafe Commit Attempt",
+                    "widgets": [{"widgetId": "unsafe", "title": "Unsafe", "renderer": "<script>steal()</script>"}],
+                },
+            )
+
+    assert spaces.list_spaces() == []
+
+
+def test_creator_commit_persists_metadata_only_revisioned_space_after_gates(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    committed = spaces.run_space_tool(
+        "space.spaces.commitCreatorSpec",
+        {
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "prompt": "Build a research dashboard using access_token=TOKEN_VALUE and <script>steal()</script>",
+            "spaceName": "Research Creator Lab",
+            "description": "Safe creator commit",
+            "widgets": [
+                {
+                    "widgetId": "summary-panel",
+                    "title": "Summary Panel",
+                    "kind": "markdown",
+                    "layout": {"x": 0, "y": 0, "w": 8, "h": 4},
+                    "status": {"phase": "draft"},
+                    "renderer": "async () => ({html: '<script>steal()</script>'})",
+                    "source": "SECRET_SOURCE",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+                {"widgetId": "summary-panel", "title": "Duplicate Safe", "kind": "status"},
+            ],
+        },
+    )
+    serialized = json.dumps({"committed": committed, "spaces": spaces.list_spaces(), "detail": spaces.read_space("research-creator-lab")}).lower()
+
+    assert committed["ok"] is True
+    assert committed["action"] == "space.spaces.commitcreatorspec"
+    assert committed["creator_loop"] == {
+        "stage": "revisioned-commit",
+        "mode": "metadata-only",
+        "stored": True,
+        "executed": False,
+        "sandbox_previewed": True,
+        "visual_qa_passed": True,
+        "revision_created": True,
+    }
+    assert committed["space"]["space_id"] == "research-creator-lab"
+    assert committed["space"]["widget_count"] == 2
+    assert committed["space"]["revision_event_id"]
+    assert [widget["id"] for widget in committed["widgets"]] == ["summary-panel", "summary-panel-2"]
+    assert committed["widgets"][0]["metadata"]["content_status"]["status"] == "quarantined"
+    assert spaces.list_spaces()[0]["space_id"] == "research-creator-lab"
+    assert spaces.read_space("research-creator-lab")["revision_event_id"] == committed["revision_event_id"]
+    assert "research dashboard" not in serialized
+    assert "access_token" not in serialized
+    assert "token_value" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_creator_commit_revises_existing_space_with_new_safe_manifest(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    first = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "spaceName": "Revisioned Creator Lab",
+            "widgets": [{"widgetId": "summary-panel", "title": "Summary Panel", "kind": "markdown"}],
+        },
+    )
+    second = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "spaceName": "Revisioned Creator Lab",
+            "description": "Safe revised creator commit",
+            "widgets": [
+                {
+                    "widgetId": "latest-panel",
+                    "title": "Latest Panel",
+                    "kind": "status",
+                    "renderer": "<script>badcall()</script>",
+                    "token": "SECRET...LEAK",
+                }
+            ],
+        },
+    )
+    detail = spaces.read_space("revisioned-creator-lab")
+    serialized = json.dumps({"second": second, "detail": detail}).lower()
+
+    assert first["revision_event_id"] != second["revision_event_id"]
+    assert second["creator_loop"]["stage"] == "revisioned-commit"
+    assert second["space"]["revision_event_id"] == second["revision_event_id"]
+    assert len(detail["revision_events"]) == 2
+    assert [widget["id"] for widget in detail["widgets"]] == ["latest-panel"]
+    assert "summary-panel" not in [widget["id"] for widget in detail["widgets"]]
+    assert "badcall" not in serialized
+    assert "renderer" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
+def test_creator_commit_strips_nested_generic_metadata_prompts_from_persisted_revisions(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "spaceName": "Nested Metadata Creator Lab",
+            "widgets": [
+                {
+                    "widgetId": "metadata-panel",
+                    "title": "Metadata Panel",
+                    "kind": "markdown",
+                    "metadata": {
+                        "nested": {
+                            "prompt": "private prompt must not persist",
+                            "agentPrompt": "private agent prompt must not persist",
+                        },
+                        "safe_label": "Visible safe label",
+                    },
+                }
+            ],
+        },
+    )
+    manifest = spaces.read_space("nested-metadata-creator-lab")
+    event_path = spaces.events_dir() / f"{committed['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    persisted = json.dumps({"manifest": manifest, "event": event}).lower()
+
+    assert manifest["widgets"][0]["metadata"]["safe_label"] == "Visible safe label"
+    assert "private prompt" not in persisted
+    assert "agent prompt" not in persisted
+    assert "\"prompt\"" not in persisted
+    assert "agentprompt" not in persisted
+
+
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
