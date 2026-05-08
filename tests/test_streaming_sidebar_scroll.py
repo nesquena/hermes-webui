@@ -36,10 +36,15 @@ def test_sidebar_wheel_intent_is_recorded_passively():
 def test_scroll_if_pinned_skips_during_recent_non_message_scroll():
     """Token rendering must not force-scroll #messages while the sidebar is being scrolled."""
     fn = _extract_fn(UI_JS, "scrollIfPinned")
+    settle = _extract_fn(UI_JS, "_settleMessageScrollToBottom")
+    writer = _extract_fn(UI_JS, "_setMessageScrollToBottom")
     assert "_recentNonMessageScrollIntent()" in fn
     guard_index = fn.find("_recentNonMessageScrollIntent()")
-    write_index = fn.find("scrollTop=el.scrollHeight")
-    assert guard_index >= 0 and write_index >= 0 and guard_index < write_index
+    call_index = fn.find("_settleMessageScrollToBottom(false)")
+    settle_call_index = settle.find("_setMessageScrollToBottom()")
+    write_index = writer.find("el.scrollTop=el.scrollHeight")
+    assert guard_index >= 0 and call_index >= 0 and guard_index < call_index
+    assert settle_call_index >= 0 and write_index >= 0
 
 
 def test_session_list_has_its_own_scroll_boundary():
