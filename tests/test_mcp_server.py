@@ -426,3 +426,63 @@ class TestApiPassword:
             assert self.mod._api_password() == "secret123"
         finally:
             os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  _profiles_match parity (mcp_server vs api.routes vs api.profiles)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Locks the canonical-helper relocation: mcp_server.py and api/routes.py both
+# now import _profiles_match from api/profiles.py. If anyone re-introduces a
+# local copy in either module, both the identity check and the input-matrix
+# parametrize trip immediately.
+
+async def test_profiles_match_single_source_of_truth():
+    """All three module names resolve to the same canonical object.
+
+    This locks the relocation: mcp_server.py and api/routes.py both import
+    _profiles_match from api/profiles.py rather than carrying a local copy.
+    Re-introducing a local definition in either module trips this test
+    immediately.
+
+    Imported here in a clean module-import context (not via _reimport_mcp,
+    which would re-execute api/profiles.py and produce a distinct function
+    object that's behaviorally identical but fails the `is` check).
+    """
+    # Make sure no test fixture left a re-import side-effect on these modules.
+    for k in ('mcp_server', 'api.routes', 'api.profiles'):
+        sys.modules.pop(k, None)
+    import api.profiles as _profiles_mod
+    import api.routes as _routes_mod
+    import mcp_server as _mcp_mod
+    canonical = _profiles_mod._profiles_match
+    assert _routes_mod._profiles_match is canonical
+    assert _mcp_mod._profiles_match is canonical
+
+
+@pytest.mark.parametrize("a, b", [
+    (None, None),
+    (None, ''),
+    ('', None),
+    ('', ''),
+    (None, 'default'),
+    ('default', None),
+    ('default', 'default'),
+    ('foo', 'foo'),
+    ('foo', 'bar'),
+    ('foo', None),
+    (None, 'foo'),
+    ('default', 'foo'),
+    ('foo', 'default'),
+])
+async def test_profiles_match_input_matrix(a, b):
+    """mcp_server._profiles_match agrees with api.routes._profiles_match
+    on every (row, active) pair across the visibility matrix.
+
+    Note: function-object identity is checked separately in
+    test_profiles_match_single_source_of_truth — here we only assert
+    behavioral parity, which is robust to test-fixture re-imports that
+    clear and re-execute api.profiles."""
+    from mcp_server import _profiles_match as mcp_match
+    from api.routes import _profiles_match as routes_match
+    assert mcp_match(a, b) == routes_match(a, b)

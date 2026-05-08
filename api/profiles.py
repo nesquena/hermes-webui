@@ -170,6 +170,33 @@ def _is_root_profile(name: str) -> bool:
         return name in _root_profile_name_cache
 
 
+def _profiles_match(row_profile, active_profile) -> bool:
+    """Return True if a session/project row's profile matches the active profile.
+
+    Treats both the literal alias 'default' and any renamed-root display name
+    (per _is_root_profile) as equivalent, so legacy rows tagged 'default'
+    still surface when the user has renamed the root profile to e.g. 'kinni',
+    and vice versa.
+
+    A row with no profile (`None` or empty string) is treated as belonging to
+    the root profile — that's the convention used by the legacy backfill at
+    api/models.py::all_sessions, and matches the default seen in
+    `static/sessions.js` (`S.activeProfile||'default'`).
+
+    Originally lived in api/routes.py; relocated here so both routes.py and
+    out-of-process consumers (mcp_server.py) can import the canonical helper
+    instead of duplicating the body. See #1614 for the visibility model.
+    """
+    row = row_profile or 'default'
+    active = active_profile or 'default'
+    if row == active:
+        return True
+    # Cross-alias the renamed root.
+    if _is_root_profile(row) and _is_root_profile(active):
+        return True
+    return False
+
+
 def get_active_profile_name() -> str:
     """Return the currently active profile name.
 

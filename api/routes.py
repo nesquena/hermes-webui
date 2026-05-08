@@ -72,29 +72,11 @@ _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 # when the active profile is `'default'`. _is_root_profile() is the
 # canonical check.
 
-def _profiles_match(row_profile, active_profile) -> bool:
-    """Return True if a session/project row's profile matches the active profile.
-
-    Treats both the literal alias 'default' and any renamed-root display name
-    (per _is_root_profile) as equivalent, so legacy rows tagged 'default'
-    still surface when the user has renamed the root profile to e.g. 'kinni',
-    and vice versa.
-
-    A row with no profile (`None` or empty string) is treated as belonging to
-    the root profile — that's the convention used by the legacy backfill at
-    api/models.py::all_sessions, and matches the default seen in
-    `static/sessions.js` (`S.activeProfile||'default'`).
-    """
-    from api.profiles import _is_root_profile
-
-    row = row_profile or 'default'
-    active = active_profile or 'default'
-    if row == active:
-        return True
-    # Cross-alias the renamed root.
-    if _is_root_profile(row) and _is_root_profile(active):
-        return True
-    return False
+# Canonical helper now lives in api.profiles so out-of-process consumers
+# (mcp_server.py) can import it without duplicating the visibility model.
+# Re-exported here so existing `_profiles_match(...)` call sites in this
+# module keep resolving without per-call-site refactors.
+from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:

@@ -56,7 +56,7 @@ from api.config import (
     STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
 )
 from api.models import load_projects, save_projects
-from api.profiles import get_active_profile_name, _is_root_profile
+from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
 
 # ── Apply --profile override before any module uses get_active_profile_name
 if _profile_arg is not None:
@@ -90,24 +90,6 @@ def _validate_color(color: str | None) -> str | None:
     if color is not None and not re.match(r"^#[0-9a-fA-F]{3,8}$", color):
         return "Invalid color format (use #RGB, #RRGGBB, or #RRGGBBAA)"
     return None
-
-
-def _profiles_match(row_profile: str | None, active: str | None) -> bool:
-    """Cross-profile ownership check — mirrors api/routes.py:_profiles_match (#1614).
-
-    A row with no profile (None or empty) is treated as belonging to the root
-    profile ('default'), per the canonical webapp convention. This keeps the
-    MCP visibility model identical to the HTTP API: a non-root profile cannot
-    see legacy untagged projects, only the root profile (or a renamed-root
-    alias) can.
-    """
-    row = row_profile or 'default'
-    act = active or 'default'
-    if row == act:
-        return True
-    if _is_root_profile(row) and _is_root_profile(act):
-        return True
-    return False
 
 
 def _load_index() -> list:
