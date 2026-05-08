@@ -1,5 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Session usage counters now store the latest completed turn's token/cost usage
+  instead of adding each full-context prompt total to stale session values.
+  This prevents long sessions from showing quadratically inflated token counts
+  in session metadata and Insights. Fixes #1857.
+
 ## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
 
 ### Fixed (3 PRs)

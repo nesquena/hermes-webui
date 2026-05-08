@@ -2866,10 +2866,9 @@ def _run_agent_streaming(
                 input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
                 output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0
                 estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
-                s.input_tokens = (s.input_tokens or 0) + input_tokens
-                s.output_tokens = (s.output_tokens or 0) + output_tokens
-                if estimated_cost:
-                    s.estimated_cost = (s.estimated_cost or 0) + estimated_cost
+                s.input_tokens = input_tokens
+                s.output_tokens = output_tokens
+                s.estimated_cost = estimated_cost
                 # Persist tool-call summaries even when the final message history only
                 # kept bare tool rows and omitted explicit assistant tool_call IDs.
                 tool_calls = _extract_tool_calls_from_messages(
