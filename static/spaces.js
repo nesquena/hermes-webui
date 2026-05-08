@@ -374,6 +374,7 @@
       '<div class="capy-spaces-muted">Prompt → bounded metadata spec → sandbox preview → visual QA → revisioned commit. The preview and commit cards show metadata summaries only.</div>' +
       '<div class="capy-spaces-form" aria-label="Preview safe creator loop">' +
       '<label>Creator prompt<textarea id="capyCreatorPrompt" rows="4" autocomplete="off" placeholder="Describe a workspace tool to draft safely"></textarea></label>' +
+      '<label>Target existing Space ID (optional)<input id="capyCreatorTargetSpaceId" autocomplete="off" placeholder="existing-space-id"></label>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="previewCreatorSpec">Preview bounded spec</button>' +
       '</div></div>';
   }
@@ -408,6 +409,22 @@
       '</div></div>'+widgetRows+'</div>';
   }
 
+  function renderCreatorRevisionPreview(data){
+    const preview = data && data.revision_preview && typeof data.revision_preview === 'object' && !Array.isArray(data.revision_preview) ? data.revision_preview : null;
+    const diff = data && data.revision_diff && typeof data.revision_diff === 'object' && !Array.isArray(data.revision_diff) ? data.revision_diff : null;
+    if (!preview && !diff) return '';
+    const space = data && data.space && typeof data.space === 'object' && !Array.isArray(data.space) ? data.space : {};
+    const spaceId = safeCreatorIdText((preview && preview.space_id) || space.space_id || '');
+    const spaceName = safeCreatorSummaryText((preview && preview.name) || space.name || spaceId || 'Target Space') || 'Target Space';
+    const previewText = formatRestorePreview(preview);
+    const diffText = formatRestoreDiff(diff);
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Revision preview</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+(spaceId ? ' · Space ID: '+escapeHtml(spaceId) : '')+'</div>' +
+      (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
+      (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
+      '</div></div></div>';
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorSummaryText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -421,7 +438,7 @@
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){
@@ -663,14 +680,17 @@
 
   function formatRestorePreview(preview){
     if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return '';
-    const name = String(preview.name || preview.space_id || 'unnamed snapshot');
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw_prompt|generated_code|source|(?:^|[_\-\s<>])(?:script|data)(?:$|[_\-\s<>]))/i;
+    function safePreviewText(value){
+      const text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      return text && !unsafeValuePattern.test(text) ? text : '';
+    }
+    const name = safePreviewText(preview.name || preview.space_id) || 'unnamed snapshot';
     const count = Number(preview.widget_count || 0);
     const countLabel = count === 1 ? '1 widget' : count+' widgets';
     const widgets = Array.isArray(preview.widgets) ? preview.widgets.slice(0, 5).map(function(widget){
       if (!widget || typeof widget !== 'object' || Array.isArray(widget)) return '';
-      return [widget.id, widget.title, widget.kind].map(function(part){
-        return String(part || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-      }).filter(Boolean).join(' / ');
+      return [widget.id, widget.title, widget.kind].map(safePreviewText).filter(Boolean).join(' / ');
     }).filter(Boolean) : [];
     return 'Preview: '+name+' · '+countLabel+(widgets.length ? ' · Widgets: '+widgets.join(', ') : '');
   }
@@ -682,6 +702,7 @@
       if (!Array.isArray(value)) return [];
       return value.slice(0, 10).map(function(item){
         const text = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (text === 'shared_data') return text;
         return text && !unsafeValuePattern.test(text) ? text : '';
       }).filter(Boolean);
     }
@@ -1498,8 +1519,12 @@
     if (action === 'previewCreatorSpec') {
       const root = document.getElementById('capySpacesRoot');
       const promptInput = getRootInput(root, '#capyCreatorPrompt');
+      const targetInput = getRootInput(root, '#capyCreatorTargetSpaceId');
       const prompt = promptInput && promptInput.value ? String(promptInput.value) : '';
-      const data = await postSpacesJson('api/spaces/tool', {action: 'space.creator.preview', prompt: prompt});
+      const targetSpaceId = safeCreatorIdText(targetInput && targetInput.value ? String(targetInput.value) : '');
+      const payload = {action: 'space.creator.preview', prompt: prompt};
+      if (targetSpaceId) payload.space_id = targetSpaceId;
+      const data = await postSpacesJson('api/spaces/tool', payload);
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorPreviewResult(data || {}) + refreshedRoot.innerHTML;
       return;

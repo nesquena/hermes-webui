@@ -41,6 +41,7 @@ const values = {
   '#capySpaceAgentImportZipB64': 'UEsDBBQAAAAIAAxTSFsAAAAAAAAAAAAAAAALAAAAc3BhY2UueWFtbA==',
   '#capyWidgetNotesBody': 'Initial notes body',
   '#capyCreatorPrompt': 'Create an ops dashboard without leaking SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
+  '#capyCreatorTargetSpaceId': '',
 };
 const inputs = {};
 const elements = {};
@@ -339,6 +340,53 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.preview') {
+      if (scenario === 'creatorPreviewExistingSpace') {
+        return response({
+          ok: true,
+          action: 'space.creator.preview',
+          stored: false,
+          executed: false,
+          stage: 'sandbox-preview-required',
+          preview_id: 'preview-existing-safe-1',
+          gates: {
+            sandbox_preview_required: true,
+            visual_qa_required: true,
+            approve_commit_required: true,
+          },
+          space: { space_id: 'existing-creator-lab', name: 'Existing Creator Lab Revised', description: 'Safe revised preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          revision_preview: {
+            space_id: 'existing-creator-lab',
+            name: 'Existing Creator Lab Revised',
+            description: 'Safe revised preview',
+            widget_count: 1,
+            widgets: [
+              { id: 'latest-panel', kind: 'status', title: 'Latest Panel', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+              { id: 'renderer-panel', kind: 'api_key', title: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+            renderer: '<script>bad()</script>',
+            api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+          },
+          revision_diff: {
+            has_changes: true,
+            space_fields_to_update: ['description', 'agent_instructions', 'shared_data', 'api_key'],
+            widgets_to_add: ['latest-panel'],
+            widgets_to_remove: ['old-panel'],
+            widgets_to_update: [],
+            renderer: '<script>bad()</script>',
+            api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+          },
+          spec: {
+            space: { space_id: 'existing-creator-lab', name: 'Existing Creator Lab Revised', description: 'Safe revised preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            widgets: [
+              { id: 'latest-panel', kind: 'status', title: 'Latest Panel', metadata: { prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+          },
+          prompt: body.prompt,
+          raw_prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        });
+      }
       return response({
         ok: true,
         action: 'space.creator.preview',
@@ -1613,6 +1661,11 @@ async function dispatchWindowMessage(data) {
       }
     });
   } else if (scenario === 'creatorPreviewGate') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('previewCreatorSpec', {});
+  } else if (scenario === 'creatorPreviewExistingSpace') {
+    values['#capyCreatorTargetSpaceId'] = 'existing-creator-lab';
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
@@ -3656,6 +3709,34 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_can_target_existing_space_and_render_revision_diff_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewExistingSpace")
+
+    assert "Target existing Space ID" in out["beforeHtml"]
+    preview_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.preview" in call["body"])
+    preview_body = json.loads(preview_call["body"])
+    assert preview_body == {
+        "action": "space.creator.preview",
+        "prompt": "Create an ops dashboard without leaking SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>",
+        "space_id": "existing-creator-lab",
+    }
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Revision preview" in out["rootHtml"]
+    assert "Existing Creator Lab Revised" in out["rootHtml"]
+    assert "Space ID: existing-creator-lab" in out["rootHtml"]
+    assert "Preview: Existing Creator Lab Revised · 1 widget · Widgets: latest-panel / Latest Panel / status" in out["rootHtml"]
+    assert "Diff: restore changes 3 fields, adds 1 widget, removes 1 widget" in out["rootHtml"]
+    assert "Fields: description, agent_instructions, shared_data" in out["rootHtml"]
+    assert "Add widgets: latest-panel" in out["rootHtml"]
+    assert "Remove widgets: old-panel" in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
     assert "generated_code" not in out["rootHtml"]
 
