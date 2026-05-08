@@ -1130,10 +1130,17 @@ function _normalizeAppearance(theme,skin){
 // the meta tag.
 function _syncThemeColorMeta(){
   try{
-    const meta=document.getElementById('hermes-theme-color');
-    if(!meta) return;
     const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
-    if(bg) meta.setAttribute('content',bg);
+    if(!bg) return;
+    const known=document.getElementById('hermes-theme-color');
+    if(known){
+      known.setAttribute('content',bg);
+      known.removeAttribute('media');
+    }
+    document.querySelectorAll('meta[name="theme-color"]').forEach(meta=>{
+      meta.setAttribute('content',bg);
+      meta.removeAttribute('media');
+    });
   }catch(e){}
 }
 

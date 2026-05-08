@@ -5,6 +5,13 @@
 
 const LOCALES = {
   en: {
+    offline_title: 'Connection lost',
+    offline_browser_detail: 'Your browser reports that this device is offline.',
+    offline_network_detail: 'Hermes is unreachable from this browser right now.',
+    offline_autorefresh: 'I will refresh this page automatically when Hermes is reachable again.',
+    offline_check_now: 'Check now',
+    offline_checking: 'Checking…',
+    offline_stream_waiting: 'Connection lost. Waiting to refresh…',
     _lang: 'en',
     _label: 'English',
     _speech: 'en-US',
@@ -1023,6 +1030,13 @@ const LOCALES = {
   },
 
   ja: {
+    offline_title: '接続が切断されました',
+    offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
+    offline_network_detail: '現在、このブラウザからHermesに到達できません。',
+    offline_autorefresh: 'Hermesに再接続できたら、このページを自動的に更新します。',
+    offline_check_now: '今すぐ確認',
+    offline_checking: '確認中…',
+    offline_stream_waiting: '接続が切断されました。更新を待っています…',
     _lang: 'ja',
     _label: '日本語',
     _speech: 'ja-JP',
@@ -2041,6 +2055,13 @@ const LOCALES = {
   },
 
   ru: {
+    offline_title: 'Соединение потеряно',
+    offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
+    offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
+    offline_autorefresh: 'Я автоматически обновлю страницу, когда Hermes снова станет доступен.',
+    offline_check_now: 'Проверить сейчас',
+    offline_checking: 'Проверка…',
+    offline_stream_waiting: 'Соединение потеряно. Ожидаю обновления…',
     _lang: 'ru',
     _label: 'Русский',
     _speech: 'ru-RU',
@@ -2997,6 +3018,13 @@ const LOCALES = {
   },
 
   es: {
+    offline_title: 'Conexión perdida',
+    offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
+    offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
+    offline_autorefresh: 'Actualizaré esta página automáticamente cuando Hermes vuelva a estar disponible.',
+    offline_check_now: 'Comprobar ahora',
+    offline_checking: 'Comprobando…',
+    offline_stream_waiting: 'Conexión perdida. Esperando para actualizar…',
     _lang: 'es',
     _label: 'Español',
     _speech: 'es-ES',
@@ -3947,6 +3975,13 @@ const LOCALES = {
   },
 
   de: {
+    offline_title: 'Verbindung verloren',
+    offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
+    offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
+    offline_autorefresh: 'Ich aktualisiere diese Seite automatisch, sobald Hermes wieder erreichbar ist.',
+    offline_check_now: 'Jetzt prüfen',
+    offline_checking: 'Prüfe…',
+    offline_stream_waiting: 'Verbindung verloren. Warte auf Aktualisierung…',
     _lang: 'de',
     _label: 'Deutsch',
     _speech: 'de-DE',
@@ -4901,6 +4936,13 @@ const LOCALES = {
   },
 
   zh: {
+    offline_title: '连接已断开',
+    offline_browser_detail: '浏览器报告此设备当前离线。',
+    offline_network_detail: '此浏览器当前无法连接到 Hermes。',
+    offline_autorefresh: '当 Hermes 可访问时，我会自动刷新此页面。',
+    offline_check_now: '立即检查',
+    offline_checking: '正在检查…',
+    offline_stream_waiting: '连接已断开。正在等待刷新…',
     _lang: 'zh',
     _label: '\u7b80\u4f53\u4e2d\u6587',
     _speech: 'zh-CN',
@@ -6834,6 +6876,13 @@ const LOCALES = {
   },
 
   pt: {
+    offline_title: 'Conexão perdida',
+    offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
+    offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
+    offline_autorefresh: 'Vou atualizar esta página automaticamente quando o Hermes voltar a responder.',
+    offline_check_now: 'Verificar agora',
+    offline_checking: 'Verificando…',
+    offline_stream_waiting: 'Conexão perdida. Aguardando para atualizar…',
     _lang: 'pt',
     _label: 'Português',
     _speech: 'pt-BR',
@@ -7680,6 +7729,13 @@ const LOCALES = {
     disable_auth_confirm_title: 'Desativar proteção por senha',
   },
   ko: {
+    offline_title: '연결이 끊겼습니다',
+    offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
+    offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
+    offline_autorefresh: 'Hermes에 다시 연결되면 이 페이지를 자동으로 새로고침합니다.',
+    offline_check_now: '지금 확인',
+    offline_checking: '확인 중…',
+    offline_stream_waiting: '연결이 끊겼습니다. 새로고침을 기다리는 중…',
     _lang: 'ko',
     _label: '한국어',
     _speech: 'ko-KR',

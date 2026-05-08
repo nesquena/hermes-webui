@@ -32,6 +32,19 @@ function _markActiveSessionViewedOnReturn() {
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
+function _deferStreamErrorIfOffline(){
+  if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
+    setComposerStatus(t('offline_stream_waiting'));
+    return true;
+  }
+  if(typeof showOfflineBanner==='function' && navigator.onLine===false){
+    showOfflineBanner('browser');
+    setComposerStatus(t('offline_stream_waiting'));
+    return true;
+  }
+  return false;
+}
+
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
 // TTS: pause speech synthesis when user focuses the composer (#499)
@@ -1118,6 +1131,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('error',async e=>{
       source.close();
+      if(_deferStreamErrorIfOffline()) return;
       if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
@@ -1134,13 +1148,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
-          }catch(_){}
+          }catch(_){
+            if(_deferStreamErrorIfOffline()) return;
+          }
           if(await _restoreSettledSession()) return;
+          if(_deferStreamErrorIfOffline()) return;
           _handleStreamError();
         },1500);
         return;
       }
       if(await _restoreSettledSession()) return;
+      if(_deferStreamErrorIfOffline()) return;
       _handleStreamError();
     });
 

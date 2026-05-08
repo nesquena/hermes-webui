@@ -536,6 +536,14 @@
   .reconnect-banner.visible{display:flex;}
   .reconnect-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg-strong);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;}
   .reconnect-btn:hover{background:var(--accent-bg-strong);}
+  .offline-banner{position:fixed;left:0;right:0;top:0;z-index:1200;display:none;align-items:center;justify-content:space-between;gap:14px;padding:12px 18px;border-bottom:1px solid color-mix(in srgb,var(--warning,#f6c343) 55%,var(--surface));background:color-mix(in srgb,var(--bg-1,#0d0d1a) 88%,var(--warning,#f6c343));color:var(--text);box-shadow:0 12px 40px rgba(0,0,0,.22);backdrop-filter:blur(10px);}
+  .offline-banner.visible{display:flex;}
+  .offline-copy{display:flex;flex-direction:column;gap:3px;min-width:0;font-size:13px;line-height:1.35;}
+  .offline-copy strong{color:var(--warning,#f6c343);font-size:13px;letter-spacing:.08em;text-transform:uppercase;}
+  .offline-copy span{color:var(--muted);}
+  .offline-action{flex-shrink:0;padding:7px 13px;border-radius:9px;border:1px solid color-mix(in srgb,var(--warning,#f6c343) 48%,var(--surface));background:color-mix(in srgb,var(--warning,#f6c343) 12%,var(--surface));color:var(--warning,#f6c343);font-size:12px;font-weight:700;cursor:pointer;}
+  .offline-action:hover{background:color-mix(in srgb,var(--warning,#f6c343) 20%,var(--surface));}
+  .offline-action[disabled]{cursor:wait;opacity:.65;}
   .agent-health-banner{position:sticky;bottom:0;z-index:4;display:none;align-items:center;justify-content:space-between;gap:12px;margin:10px auto 0;max-width:var(--msg-max);width:calc(100% - 40px);padding:12px 16px;border:1px solid color-mix(in srgb,var(--error) 55%,var(--surface));border-radius:12px;background:color-mix(in srgb,var(--error) 14%,var(--surface));color:var(--text);box-shadow:0 10px 32px rgba(0,0,0,.16);}
   .agent-health-banner.visible{display:flex;}
   .agent-health-copy{display:flex;flex-direction:column;gap:3px;min-width:0;font-size:13px;line-height:1.35;}
