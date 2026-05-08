@@ -1308,6 +1308,8 @@ function applyBotName(){
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
+    window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
@@ -1335,6 +1337,8 @@ function applyBotName(){
     window._notificationsEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._sessionJumpButtonsEnabled=false;
+    window._sessionEndlessScrollEnabled=false;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
     window._botName='Hermes';

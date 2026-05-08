@@ -195,6 +195,63 @@ function _showEarlierRenderedMessages(){
   }
   _scrollPinned=false;
 }
+function _isSessionJumpButtonsEnabled(){
+  return window._sessionJumpButtonsEnabled===true;
+}
+function _isSessionEndlessScrollEnabled(){
+  return window._sessionEndlessScrollEnabled===true;
+}
+function _applySessionNavigationPrefs(){
+  _updateSessionStartJumpButton();
+  const endBtn=$('scrollToBottomBtn');
+  if(endBtn&&!_isSessionJumpButtonsEnabled()) endBtn.style.display='none';
+}
+let _sessionStartJumpAvailable=false;
+function _resetSessionStartJumpButton(){
+  _sessionStartJumpAvailable=false;
+  _updateSessionStartJumpButton();
+}
+function _markSessionStartJumpAvailable(){
+  _sessionStartJumpAvailable=true;
+  _updateSessionStartJumpButton();
+}
+function _updateSessionStartJumpButton(){
+  const btn=$('jumpToSessionStartBtn');
+  const container=$('messages');
+  if(!btn||!container) return;
+  if(!_isSessionJumpButtonsEnabled()){
+    btn.style.display='none';
+    return;
+  }
+  const hasSession=!!(S&&S.session&&S.messages&&S.messages.length);
+  const awayFromStart=container.scrollTop>Math.max(240,container.clientHeight*0.35);
+  const canRevealStart=_sessionStartJumpAvailable||_messageHiddenBeforeCount()>0||!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
+}
+async function jumpToSessionStart(){
+  const container=$('messages');
+  if(!container||!S.session) return;
+  if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+  _scrollPinned=false;
+  _programmaticScroll=true;
+  try{
+    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      container.scrollTop=0;
+      // Keep availability for this session. At scrollTop=0 the button hides
+      // via awayFromStart; if the user later scrolls down and wants to return
+      // to the beginning again, it should reappear without another history load.
+      _sessionStartJumpAvailable=true;
+      _updateSessionStartJumpButton();
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+  }catch(e){
+    console.warn('jumpToSessionStart failed:',e);
+    _programmaticScroll=false;
+  }
+}
 
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
@@ -1498,7 +1555,9 @@ let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastNonMessageScrollIntentMs=0;
+let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
@@ -1508,6 +1567,13 @@ function _recordNonMessageScrollIntent(e){
   // session sidebar (or another independent pane) must not be immediately fought
   // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
+    // User is intentionally moving in the transcript. Cancel any delayed
+    // scrollToBottom settling that was scheduled by session-load/layout growth.
+    _cancelBottomSettle();
+    _nearBottomCount=0;
+    _scrollPinned=false;
+  }
 }
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
@@ -1527,6 +1593,7 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
+    _cancelBottomSettle();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
@@ -1536,9 +1603,13 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
       if(movedUp){ _nearBottomCount=0; _scrollPinned=false; } // #1731
       else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; } // #1360
       const btn=$('scrollToBottomBtn');
-      if(btn) btn.style.display=_scrollPinned?'none':'flex';
-      // Load older messages when scrolled near the top
-      if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+      if(btn) btn.style.display=(!_isSessionJumpButtonsEnabled()||_scrollPinned)?'none':'flex';
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      // Prefetch older messages before the reader hits the hard top. Prepending
+      // then preserving scrollTop is seamless only if there is runway left for
+      // the user's continued upward wheel/touch movement.
+      const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+      if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
         _loadOlderMessages();
       }
     });
@@ -1820,18 +1891,46 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
+function _setMessageScrollToBottom(){
+  const el=$('messages');
+  if(!el) return;
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  setTimeout(()=>{_programmaticScroll=false;},0);
+}
+function _settleMessageScrollToBottom(force){
+  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+  // can grow the transcript after the first scroll write. Re-apply the bottom
+  // position across a few frames while pinned so late layout does not leave the
+  // viewport a few lines above the real end. User scroll increments
+  // _bottomSettleToken and cancels the delayed passes.
+  const token=++_bottomSettleToken;
+  const passes=[0,16,80,180];
+  passes.forEach(delay=>setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    _setMessageScrollToBottom();
+  },delay));
+  requestAnimationFrame(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    requestAnimationFrame(()=>{
+      if(token!==_bottomSettleToken) return;
+      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    });
+  });
+}
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
   _scrollPinned=true;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  _settleMessageScrollToBottom(true);
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
 function _fmtOllamaLabel(mid){
@@ -4483,6 +4582,7 @@ function renderMessages(options){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
       _scrollAfterMessageRender(preserveScroll);
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
@@ -4558,6 +4658,7 @@ function renderMessages(options){
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
   }
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -4623,8 +4724,27 @@ function renderMessages(options){
         }
       }
     }
+    const tsVal=m._ts||m.timestamp;
     const isUser=m.role==='user';
     const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    // Context-compaction cards are synthetic transcript markers, not normal
+    // user bubbles. Handle them before the user/assistant branch so a preserved
+    // compaction note can never be rendered as editable user text.
+    if(_isContextCompactionMessage(m)){
+      const _fmtSv=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
+      const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
+      if(compressionState || referenceNode){
+        continue;
+      }else{
+        currentAssistantTurn=null;
+        const row=document.createElement('div');
+        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
+        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
+        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
+        inner.appendChild(row.firstElementChild);
+        continue;
+      }
+    }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -4650,7 +4770,6 @@ function renderMessages(options){
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const forkBtn  = `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
-    const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
     const _fmtSv=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
@@ -4658,20 +4777,6 @@ function renderMessages(options){
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
-
-    if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
-        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
-    }
 
     if(isUser){
       currentAssistantTurn=null;
