@@ -462,8 +462,10 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text()
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "s.messages = _restore_reasoning_metadata(" in src, \
-        "streaming.py must merge prior reasoning metadata back after run_conversation()"
+    assert "s.context_messages = _next_context_messages" in src, \
+        "streaming.py must restore prior reasoning metadata into model context"
+    assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
+        "streaming.py must merge restored result messages into the visible transcript"
     assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
         "streaming.py must reinsert dropped reasoning-only assistant messages"
 
@@ -473,8 +475,10 @@ def test_routes_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'routes.py').read_text()
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
-    assert 's.messages = _restore_reasoning_metadata(' in src, \
-        "routes.py must merge prior reasoning metadata back after run_conversation()"
+    assert "s.context_messages = _next_context_messages" in src, \
+        "routes.py must restore prior reasoning metadata into model context"
+    assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
+        "routes.py must merge restored result messages into the visible transcript"
 
 
 class TestCredentialPoolBackwardCompat(unittest.TestCase):

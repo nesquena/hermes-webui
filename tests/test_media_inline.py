@@ -23,6 +23,7 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
@@ -50,6 +51,10 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("api/media?path=", UI_JS,
                       "renderMd must build api/media?path=... URL for local files")
 
+    def test_local_audio_video_media_tokens_request_inline_streaming(self):
+        self.assertIn("apiUrl+'&inline=1'", UI_JS,
+                      "MEDIA: audio/video local paths must request inline streaming")
+
     def test_media_stash_uses_null_byte_token(self):
         self.assertIn("\\x00D", UI_JS,
                       "MEDIA stash must use null-byte token (\\x00D) to avoid conflicts")
@@ -76,8 +81,9 @@ class TestMediaRenderMdStash(unittest.TestCase):
         )
 
     def test_zoom_toggle_on_click(self):
-        self.assertIn("msg-media-img--full", UI_JS,
-                      "Clicking the image must toggle msg-media-img--full class for zoom")
+        # PR #1135: CSS class toggle replaced by proper lightbox overlay
+        self.assertIn("_openImgLightbox", UI_JS,
+                      "Clicking the image must open lightbox overlay (_openImgLightbox)")
 
 
 # ── Static analysis: CSS ──────────────────────────────────────────────────────
@@ -90,20 +96,107 @@ class TestMediaCSS(unittest.TestCase):
         self.assertIn(".msg-media-img", self.CSS)
 
     def test_msg_media_img_max_width(self):
-        # Should have a max-width to prevent huge images breaking layout
+        # PR #1135: resting thumbnail is 120x90px (fixed size); no max-width needed.
+        # Lightbox shows full-size. Check width is set instead.
         idx = self.CSS.find(".msg-media-img{")
         self.assertGreater(idx, 0)
         rule = self.CSS[idx:idx+200]
-        self.assertIn("max-width", rule)
+        self.assertIn("width:120px", rule, "Thumbnail must have fixed 120px width")
 
     def test_msg_media_img_full_class_defined(self):
-        self.assertIn(".msg-media-img--full", self.CSS,
+        # PR #1135: .msg-media-img--full removed; lightbox replaces inline zoom.
+        self.assertIn(".img-lightbox", self.CSS,
                       "Full-size toggle class must exist for zoom-on-click")
 
     def test_msg_media_link_class_defined(self):
         self.assertIn(".msg-media-link", self.CSS,
                       "Download link style must be defined for non-image media")
 
+
+
+class TestInlineAudioVideoEditor(unittest.TestCase):
+    """Static checks for inline audio/video preview controls in chat and workspace."""
+
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_audio_and_video_extension_detection_exists(self):
+        self.assertIn("_AUDIO_EXTS", UI_JS)
+        self.assertIn("_VIDEO_EXTS", UI_JS)
+        for ext in ["mp3", "wav", "m4a", "mp4", "mov", "webm"]:
+            self.assertIn(ext, UI_JS)
+
+    def test_media_player_markup_has_native_controls(self):
+        self.assertIn("_mediaPlayerHtml", UI_JS)
+        self.assertIn("<audio", UI_JS)
+        self.assertIn("<video", UI_JS)
+        self.assertIn("controls", UI_JS)
+        self.assertIn("playsinline", UI_JS)
+
+    def test_variable_speed_buttons_and_playback_rate_handler_exist(self):
+        self.assertIn("MEDIA_PLAYBACK_RATES", UI_JS)
+        for rate in ["0.5", "0.75", "1.25", "1.5", "2"]:
+            self.assertIn(rate, UI_JS)
+        self.assertIn("playbackRate", UI_JS)
+        self.assertIn("media-speed-btn", UI_JS)
+        self.assertIn("aria-pressed", UI_JS)
+
+    def test_playback_speed_preference_persists_in_localstorage(self):
+        self.assertIn("MEDIA_PLAYBACK_STORAGE_KEY", UI_JS)
+        self.assertIn("localStorage.getItem(MEDIA_PLAYBACK_STORAGE_KEY)", UI_JS)
+        self.assertIn("localStorage.setItem(MEDIA_PLAYBACK_STORAGE_KEY", UI_JS)
+        self.assertIn("_applyMediaPlaybackRate", UI_JS)
+        self.assertIn('addEventListener("loadedmetadata"', UI_JS)
+        self.assertIn("MutationObserver", UI_JS)
+        self.assertIn("setTimeout(_initMediaPlaybackObserver,0)", UI_JS)
+        self.assertIn("_applyMediaPlaybackPreferences(inner)", UI_JS)
+        self.assertIn("_applyMediaPlaybackPreferences(wrap)", WORKSPACE_JS)
+
+    def test_message_attachments_render_audio_video_instead_of_badges(self):
+        self.assertIn("_renderAttachmentHtml", UI_JS)
+        self.assertIn("data-media-kind", UI_JS)
+        self.assertIn("api/file/raw?session_id=", UI_JS)
+
+    def test_composer_tray_recognizes_audio_video_files(self):
+        self.assertIn("attach-chip--media", UI_JS)
+        self.assertIn("attach-chip--'+mediaKind", UI_JS)
+        self.assertIn("URL.createObjectURL(f)", UI_JS)
+
+    def test_workspace_preview_routes_audio_video_inline(self):
+        self.assertIn("AUDIO_EXTS", self.WORKSPACE_JS)
+        self.assertIn("VIDEO_EXTS", self.WORKSPACE_JS)
+        self.assertIn("previewMediaWrap", self.WORKSPACE_JS)
+        self.assertIn("showPreview(mode)", self.WORKSPACE_JS)
+        self.assertIn("&inline=1", self.WORKSPACE_JS)
+        self.assertIn('id="previewMediaWrap"', self.INDEX_HTML)
+
+    def test_media_editor_css_defined(self):
+        for cls in [".msg-media-editor", ".msg-media-player", ".msg-media-video", ".media-speed-controls", ".media-speed-btn", ".preview-media-wrap"]:
+            self.assertIn(cls, self.CSS)
+
+
+class TestWorkspacePdfViewer(unittest.TestCase):
+    """Static checks for inline PDF preview support in the workspace panel."""
+
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_pdf_extension_routes_to_inline_viewer(self):
+        self.assertIn("PDF_EXTS", self.WORKSPACE_JS)
+        self.assertIn("PDF_EXTS.has(ext)", self.WORKSPACE_JS)
+        self.assertIn("showPreview('pdf')", self.WORKSPACE_JS)
+        self.assertIn("&inline=1", self.WORKSPACE_JS)
+
+    def test_pdf_viewer_markup_exists(self):
+        self.assertIn('id="previewPdfWrap"', self.INDEX_HTML)
+        self.assertIn('id="previewPdfFrame"', self.INDEX_HTML)
+        self.assertIn('title="PDF preview"', self.INDEX_HTML)
+
+    def test_pdf_preview_css_defined(self):
+        for cls in [".preview-pdf-wrap", ".preview-pdf-frame", ".preview-badge.pdf"]:
+            self.assertIn(cls, self.CSS)
 
 # ── Backend: /api/media endpoint (unit-level, no server needed) ─────────────
 
@@ -142,6 +235,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
+    def test_media_endpoints_advertise_byte_range_support(self):
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("Accept-Ranges", routes_src)
+        self.assertIn("Content-Range", routes_src)
+        self.assertIn("206", routes_src)
+
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
 # No collection-time skip guard — conftest.py starts the server via its
@@ -158,9 +257,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         except Exception as exc:
             self.fail(f"Test server at {BASE} is not reachable: {exc}")
 
-    def _get(self, path):
+    def _get(self, path, headers=None):
+        req = urllib.request.Request(BASE + path, headers=headers or {})
         try:
-            with urllib.request.urlopen(BASE + path, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read(), r.status, r.headers
         except urllib.error.HTTPError as e:
             return e.read(), e.code, e.headers
@@ -199,6 +299,66 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             ct = headers.get("Content-Type", "")
             self.assertIn("image/png", ct, f"Expected image/png, got {ct}")
             self.assertEqual(body, png_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_audio_media_endpoint_inline_and_range(self):
+        """MEDIA: audio paths stream inline and support byte ranges for playback."""
+        audio_bytes = b"RIFF" + (b"\x00" * 256)
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("audio/wav", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get("Accept-Ranges"), "bytes")
+            self.assertEqual(body, audio_bytes)
+
+            body, status, headers = self._get(
+                f"/api/media?path={encoded}&inline=1",
+                headers={"Range": "bytes=0-3"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"RIFF")
+            self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_html_media_endpoint_inline_requires_csp_sandbox(self):
+        """HTML opens inline only when requested and always carries CSP sandbox."""
+        html_bytes = b"<!doctype html><title>Hermes</title><script>window.ok=1</script>"
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(html_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("attachment", headers.get("Content-Disposition", ""))
+            self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
+            self.assertFalse(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get_all("X-Frame-Options", []), [])
+            self.assertTrue(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 

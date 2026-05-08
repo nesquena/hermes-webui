@@ -88,6 +88,21 @@ class TestXmlToolCallStrip:
         assert 'middle' in result
         assert 'end' in result
 
+    def test_dsml_prefixed_truncated_opening_tag_removed(self):
+        fn = self._load_fn()
+        text = "Answer before tool tag <｜DSML｜function_calls"
+        result = fn(text)
+        assert 'function_calls' not in result.lower()
+        assert 'Answer before tool tag' in result
+
+    def test_malformed_dsml_fragment_removed(self):
+        fn = self._load_fn()
+        text = "Answer <｜DSML | still streaming"
+        result = fn(text)
+        assert '<｜DSML |' not in result
+        assert 'Answer' in result
+        assert 'still streaming' in result
+
     def test_function_defined_in_streaming_py(self):
         src = read('api/streaming.py')
         assert 'def _strip_xml_tool_calls(' in src, (
@@ -119,6 +134,18 @@ class TestXmlToolCallStrip:
         src = read('static/ui.js')
         assert '_stripXmlToolCallsDisplay' in src, (
             "_stripXmlToolCallsDisplay must exist in static/ui.js"
+        )
+
+    def test_thinking_card_text_is_sanitized(self):
+        src = read('static/ui.js')
+        assert '_sanitizeThinkingDisplayText' in src, (
+            "Thinking card text sanitizer must exist in static/ui.js"
+        )
+        assert '_thinkingCardHtml' in src and '_thinkingMarkup' in src, (
+            "Thinking card render helpers must exist in static/ui.js"
+        )
+        assert src.count('_sanitizeThinkingDisplayText(') >= 3, (
+            "Thinking card helpers must call _sanitizeThinkingDisplayText"
         )
 
 

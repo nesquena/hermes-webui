@@ -1,32 +1,49 @@
 # Two-container Docker Compose: Hermes Agent + Hermes WebUI
 #
-# This runs the agent and web UI in separate containers connected via
-# shared volumes. The WebUI installs the agent's Python dependencies
-# at startup from the shared agent source volume.
-#
-# Usage:
+# QUICK START:
 #   docker compose -f docker-compose.two-container.yml up -d
+#   Open http://localhost:8787
 #
-# The agent container runs the gateway (CLI, Telegram, cron, etc.).
-# The WebUI container serves the browser interface on port 8787.
-# Both share ~/.hermes for config, sessions, and state.
+# This runs the agent and web UI in separate containers connected via shared
+# Docker volumes. The WebUI installs the agent's Python dependencies from the
+# shared agent source volume at startup.
+#
+# WHEN TO USE THIS:
+#   - You want isolation between the agent gateway and the WebUI
+#   - You're already running hermes-agent in its own container
+#   - You don't need the dashboard (use docker-compose.three-container.yml for that)
+#
+# WHEN NOT TO USE THIS:
+#   - You hit "Permission denied" trying to share an existing ~/.hermes directory
+#     → use docker-compose.yml (single-container) instead, OR
+#     → keep this file but switch to NAMED VOLUMES (the default) instead of bind mounts
+#   - You're on Podman 3.4 or older without keep-id namespace support
+#     → see https://github.com/sunnysktsang/hermes-suite for an all-in-one image
+#
+# KNOWN LIMITATION (#681): tools triggered from the WebUI run in the WebUI
+# container, not the agent container. If you need git/node/etc. on the
+# WebUI's filesystem, install them in the WebUI image — or use a single-
+# container setup where everything lives in one place.
 #
 # NOTE ON VOLUMES:
 #   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
-#   work out of the box. If you prefer bind mounts (e.g. to an existing directory),
-#   replace the named volumes at the bottom. Example for hermes-agent-src:
+#   work out of the box on every Docker installation. If you prefer bind mounts
+#   to share an existing host directory:
 #
-#     hermes-agent-src:
-#       driver: local
-#       driver_opts:
-#         type: none
-#         o: bind
-#         device: /opt/hermes-agent
+#     volumes:
+#       hermes-home:
+#         driver: local
+#         driver_opts:
+#           type: none
+#           o: bind
+#           device: /home/youruser/.hermes
 #
-#   When using bind mounts, BOTH containers must mount the same host path.
-#   The agent exposes source at /opt/hermes, the WebUI reads it from
-#   /home/hermeswebui/.hermes/hermes-agent — as long as both point to the
-#   same host directory, the paths align correctly.
+#   When using bind mounts, BOTH containers must mount the same host path,
+#   AND your host directory must be readable by UID 1000 (the default). Run:
+#     id -u && id -g
+#   to find your host UID/GID, then put them in a .env file:
+#     echo "UID=$(id -u)" >> .env
+#     echo "GID=$(id -g)" >> .env
 
 services:
   hermes-agent:
@@ -40,11 +57,25 @@ services:
       - "127.0.0.1:8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
-      - hermes-home:/root/.hermes
+      - hermes-home:/home/hermes/.hermes
       # Expose agent source so the WebUI can install dependencies from it
       - hermes-agent-src:/opt/hermes
     environment:
-      - HERMES_HOME=/root/.hermes
+      - HERMES_HOME=/home/hermes/.hermes
+      # Align UID/GID across containers sharing the hermes-home volume.
+      # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
+      # The agent image's entrypoint already supports usermod remapping.
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      # Bind-mount permission handling for the agent — narrow set of overrides.
+      # NOTE: The agent's HERMES_HOME_MODE applies to the HERMES_HOME *directory*
+      # mode (default 0700) — NOT to credential files like the WebUI's variant.
+      # If you set this, you MUST keep the owner-execute bit so the agent can
+      # traverse its own home directory. 0640 BREAKS the agent (no x bit → no
+      # traversal). Use 0750 for group-traversable or 0701 for x-only.
+      # The agent's container detection (/.dockerenv) already auto-skips
+      # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
+      # - HERMES_HOME_MODE=0750
     restart: unless-stopped
     networks:
       - hermes-net
@@ -81,7 +112,14 @@ services:
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
       # Optional: set a password for remote access
-      # - HERMES_WEBUI_PASSWORD=***
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+      # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
+      # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
+      # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's
+      # which applies to the HERMES_HOME directory itself. 0640 is correct
+      # for the WebUI; do NOT copy this value to the agent service block.
+      # - HERMES_SKIP_CHMOD=1
+      # - HERMES_HOME_MODE=0640
     restart: unless-stopped
     networks:
       - hermes-net

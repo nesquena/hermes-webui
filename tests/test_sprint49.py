@@ -41,8 +41,11 @@ def test_timestamp_footer_stays_on_visible_response_segments():
     assert 'seg.insertAdjacentHTML(\'beforeend\', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);' in UI_JS, (
         "Footer timestamp should stay attached to visible response segments"
     )
-    assert "else if(!thinkingText){" in UI_JS, (
-        "Thinking-only assistant segments should still avoid rendering a footer"
+    assert "assistantThinking.set(rawIdx, thinkingText);" in UI_JS, (
+        "Thinking-only assistant segments should preserve thinking for the shared activity dropdown without rendering a footer"
+    )
+    assert "seg.classList.add('assistant-segment-anchor');" in UI_JS, (
+        "Empty assistant anchor segments should stay footerless while anchoring activity metadata"
     )
 
 
@@ -57,7 +60,10 @@ def test_footer_chrome_is_hover_only_for_user_and_assistant_messages():
 def test_last_assistant_keeps_usage_visible_and_reveals_time_and_actions_on_hover():
     assert "usage.className='msg-usage-inline';" in UI_JS
     assert "targetFoot.classList.add('msg-foot-with-usage');" in UI_JS
-    assert "targetFoot.insertBefore(usage, targetFoot.firstChild);" in UI_JS
+    assert (
+        "targetFoot.insertBefore(usage, targetFoot.firstChild);" in UI_JS
+        or "targetFoot.insertBefore(fragments[i], targetFoot.firstChild);" in UI_JS
+    )
     assert ".assistant-turn .msg-foot-with-usage," in UI_CSS
     assert ".msg-row[data-role=\"assistant\"] .msg-foot-with-usage {\n  opacity: 1;" in UI_CSS
     assert ".msg-foot-with-usage .msg-time,\n.msg-foot-with-usage .msg-actions {\n  opacity: 0;" in UI_CSS

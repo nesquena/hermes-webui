@@ -13,7 +13,7 @@ def test_index_contains_onboarding_overlay_markup():
     assert 'id="onboardingOverlay"' in html
     assert 'id="onboardingBody"' in html
     assert 'id="onboardingNextBtn"' in html
-    assert 'src="static/onboarding.js"' in html
+    assert 'src="static/onboarding.js?v=__WEBUI_VERSION__"' in html
 
 
 def test_onboarding_css_rules_exist():

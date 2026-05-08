@@ -9,7 +9,7 @@ def test_workspace_suggest_endpoint_is_wired():
 def test_spaces_panel_uses_workspace_suggest_autocomplete():
     src = pathlib.Path("static/panels.js").read_text(encoding="utf-8")
     assert "/api/workspaces/suggest" in src
-    assert "wsAddSuggestions" in src
+    assert "workspaceFormPathSuggestions" in src
     assert "scheduleWorkspacePathSuggestions" in src
     assert "if(!prefix)" in src
     assert "dataset.path" in src

@@ -1,17 +1,43 @@
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
-  const url=new URL(rel,location.href);
-  const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
-  if(!res.ok){
-    const text=await res.text();
-    // Parse JSON error body and surface the human-readable message,
-    // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-    try{const j=JSON.parse(text);throw new Error(j.error||j.message||text);}
-    catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
+  const url=new URL(rel,document.baseURI||location.href);
+  // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
+  // Server errors (4xx/5xx) are NOT retried — only connection failures.
+  let lastErr;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
+      if(!res.ok){
+        // 401 means the auth session expired. Redirect to login so the user can
+        // re-authenticate. This is especially important for iOS PWA (standalone mode)
+        // and for subpath mounts like /hermes/, where /login escapes to the site root.
+        if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+        const text=await res.text();
+        // Parse JSON error body and surface the human-readable message,
+        // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
+        let message=text;
+        try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+        // Attach the raw HTTP context so callers can branch on status (404 stale-session
+        // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
+        const err=new Error(message);
+        err.status=res.status;
+        err.statusText=res.statusText;
+        err.body=text;
+        throw err;
+      }
+      const ct=res.headers.get('content-type')||'';
+      return ct.includes('application/json')?res.json():res.text();
+    }catch(e){
+      lastErr=e;
+      // Only retry on network errors (TypeError from fetch), not on HTTP errors
+      // that were already thrown above. Re-throw 401 redirects immediately.
+      if(e.message&&/401/.test(e.message)) throw e;
+      if(attempt<2 && e instanceof TypeError) continue;
+      throw e;
+    }
   }
-  const ct=res.headers.get('content-type')||'';
-  return ct.includes('application/json')?res.json():res.text();
+  throw lastErr;
 }
 
 // Persist/restore expanded directory state per workspace in localStorage
@@ -43,22 +69,25 @@ async function loadDir(path){
     const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
+    // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){
-      for(const dirPath of (S._expandedDirs||[])){
-        if(!S._dirCache[dirPath]){
-          try{
-            const dc=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`);
-            S._dirCache[dirPath]=dc.entries||[];
-          }catch(e2){S._dirCache[dirPath]=[];}
-        }
+      const expanded=S._expandedDirs||new Set();
+      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
+      if(pending.length){
+        const results=await Promise.all(pending.map(dirPath=>
+          api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`)
+            .then(dc=>({dirPath,entries:dc.entries||[]}))
+            .catch(()=>({dirPath,entries:[]}))
+        ));
+        for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
-      if(S._expandedDirs&&S._expandedDirs.size>0)renderFileTree();
+      if(expanded.size>0)renderFileTree();
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
       }else{
-        clearPreview();
+        clearPreview({keepPanelOpen:true});
       }
     }
     // Fetch git info for workspace root (non-blocking)
@@ -97,11 +126,14 @@ function navigateUp(){
 // File extension sets for preview routing (must match server-side sets)
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
 const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
+const HTML_EXTS   = new Set(['.html','.htm']);
+const PDF_EXTS    = new Set(['.pdf']);
+const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
+const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
-  '.pdf','.zip','.tar','.gz','.bz2','.7z','.rar',
-  '.mp3','.mp4','.wav','.m4a','.ogg','.flac','.mov','.avi','.mkv','.webm',
+  '.zip','.tar','.gz','.bz2','.7z','.rar',
   '.exe','.dmg','.pkg','.deb','.rpm',
   '.woff','.woff2','.ttf','.otf','.eot',
   '.bin','.dat','.db','.sqlite','.pyc','.class','.so','.dylib','.dll',
@@ -110,21 +142,27 @@ const DOWNLOAD_EXTS = new Set([
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
-let _previewCurrentMode = '';  // 'code' | 'md' | 'image'
+let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
 
 function showPreview(mode){
-  // mode: 'code' | 'image' | 'md'
+  // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
+  const mediaWrap=$('previewMediaWrap'); if(mediaWrap) mediaWrap.style.display = (mode==='audio'||mode==='video') ? '' : 'none';
+  const pdfWrap=$('previewPdfWrap'); if(pdfWrap) pdfWrap.style.display = mode==='pdf' ? '' : 'none';
   $('previewMd').style.display       = mode==='md'    ? '' : 'none';
+  $('previewHtmlWrap').style.display = mode==='html'  ? '' : 'none';
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='md'?'md':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
+  // Show "Open in browser" button for iframe-backed document previews
+  const openBtn=$('btnOpenInBrowser');
+  if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
 }
 
 function updateEditBtn(){
@@ -210,6 +248,26 @@ async function openFile(path){
     $('previewImg').alt=path;
     $('previewImg').src=url;
     $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
+  } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
+    const mode=VIDEO_EXTS.has(ext)?'video':'audio';
+    showPreview(mode);
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const wrap=$('previewMediaWrap');
+    if(wrap){
+      wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
+        ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
+        : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
+    }
+  } else if(PDF_EXTS.has(ext)){
+    showPreview('pdf');
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const frame=$('previewPdfFrame');
+    if(frame){
+      frame.src=''; // clear first to avoid stale content
+      frame.src=url;
+      frame.title=`PDF preview: ${path.split('/').pop()||path}`;
+    }
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
@@ -219,6 +277,22 @@ async function openFile(path){
       $('previewMd').innerHTML=renderMd(data.content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
+  } else if(HTML_EXTS.has(ext)){
+    // HTML: render in sandboxed iframe via raw endpoint.
+    // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
+    // but prevents access to the parent frame (origin isolation). This is a
+    // deliberate choice — the user is previewing their own workspace files, so
+    // blocking scripts entirely would break most HTML documents. The sandbox
+    // still prevents the preview from navigating the parent, accessing cookies,
+    // or reading other origin data. If a stricter mode is needed, remove
+    // allow-scripts (or add sandbox="") to disable all JS execution.
+    showPreview('html');
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const iframe=$('previewHtmlIframe');
+    if(iframe){
+      iframe.src=''; // clear first to avoid stale content
+      iframe.src=url;
+    }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
@@ -263,7 +337,7 @@ function renderFileBreadcrumb(filePath) {
   const root = document.createElement('span');
   root.className = 'breadcrumb-seg breadcrumb-link';
   root.textContent = '~';
-  root.onclick = () => { clearPreview(); loadDir('.'); };
+  root.onclick = () => { loadDir('.'); };
   bar.appendChild(root);
 
   const parts = filePath.split('/');
@@ -280,10 +354,16 @@ function renderFileBreadcrumb(filePath) {
     if (i < parts.length - 1) {
       seg.className = 'breadcrumb-seg breadcrumb-link';
       const target = accumulated;
-      seg.onclick = () => { clearPreview(); loadDir(target); };
+      seg.onclick = () => { loadDir(target); };
     } else {
       seg.className = 'breadcrumb-seg breadcrumb-current';
     }
     bar.appendChild(seg);
   }
+}
+
+function openInBrowser(){
+  if(!_previewCurrentPath||!S.session) return;
+  const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}`;
+  window.open(url,'_blank');
 }

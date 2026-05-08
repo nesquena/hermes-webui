@@ -14,7 +14,25 @@ _SENSITIVE_FILES = (
 
 
 def fix_credential_permissions() -> None:
-    """Ensure sensitive files in HERMES_HOME are chmod 600 (owner-only)."""
+    """Ensure sensitive files in HERMES_HOME have safe permissions.
+
+    Respects:
+      - HERMES_SKIP_CHMOD=1  → bypass entirely
+      - HERMES_HOME_MODE     → group bits are allowed if set by the operator,
+                               only world-readable/world-writable files are fixed
+    """
+    if os.environ.get('HERMES_SKIP_CHMOD', '').strip() in ('1', 'true'):
+        return
+
+    # Parse operator-declared mode to know if group bits are intentional
+    declared_mode = None
+    raw_mode = os.environ.get('HERMES_HOME_MODE', '').strip()
+    if raw_mode:
+        try:
+            declared_mode = int(raw_mode, 8)
+        except ValueError:
+            pass
+
     hermes_home = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes')))
     if not hermes_home.is_dir():
         return
@@ -24,9 +42,15 @@ def fix_credential_permissions() -> None:
             continue
         try:
             current = stat.S_IMODE(fpath.stat().st_mode)
-            if current & 0o077:  # group or other bits set
-                fpath.chmod(0o600)
-                print(f'  [security] fixed permissions on {fpath.name} ({oct(current)} -> 0600)', flush=True)
+            # If operator declared a mode, allow group bits but still fix world bits
+            if declared_mode is not None:
+                if current & 0o007:  # other bits set (world-readable/writable)
+                    fpath.chmod(current & ~0o007)
+                    print(f'  [security] removed world bits on {fpath.name} ({oct(current)} -> {oct(current & ~0o007)})', flush=True)
+            else:
+                if current & 0o077:  # group or other bits set
+                    fpath.chmod(0o600)
+                    print(f'  [security] fixed permissions on {fpath.name} ({oct(current)} -> 0600)', flush=True)
         except OSError:
             pass  # best-effort; don't abort startup
 

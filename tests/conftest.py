@@ -57,10 +57,22 @@ TEST_STATE_DIR = pathlib.Path(os.getenv(
 ))
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
 
-# Publish at module level so _pytest_port.py (imported at collection time)
-# and any test file using os.environ sees the right values immediately.
-os.environ.setdefault('HERMES_WEBUI_TEST_PORT', str(TEST_PORT))
-os.environ.setdefault('HERMES_WEBUI_TEST_STATE_DIR', str(TEST_STATE_DIR))
+# Publish at module level so api.config, _pytest_port.py, and any test module
+# importing stateful API code during collection see the isolated test paths.
+#
+# Direct assignment is intentional for production-risk paths: tests that import
+# api.config/api.models in the pytest process must never inherit the real
+# ~/.hermes state tree before the server subprocess fixture starts.
+os.environ['HERMES_WEBUI_TEST_PORT'] = str(TEST_PORT)
+os.environ['HERMES_WEBUI_TEST_STATE_DIR'] = str(TEST_STATE_DIR)
+os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
+os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
+os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
+os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
+# Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
+# ~/.hermes/config.yaml.  Override it before any product modules are imported so
+# tests that read/write config.yaml stay inside the isolated test home.
+os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
@@ -289,6 +301,7 @@ def test_server():
         "HERMES_WEBUI_DEFAULT_WORKSPACE": str(TEST_WORKSPACE),
         "HERMES_WEBUI_DEFAULT_MODEL":     "openai/gpt-5.4-mini",
         "HERMES_HOME":                    str(TEST_STATE_DIR),
+        "HERMES_CONFIG_PATH":             str(TEST_STATE_DIR / 'config.yaml'),
         # Belt-and-suspenders: HERMES_BASE_HOME hard-locks _DEFAULT_HERMES_HOME
         # in api/profiles.py to the test state dir regardless of profile switching
         # or any os.environ mutation that happens inside the server process.
@@ -297,6 +310,7 @@ def test_server():
         # causing onboarding writes (config.yaml, .env) to land in the production
         # ~/.hermes/profiles/webui/ and overwrite real API keys.
         "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
+        "HERMES_WEBUI_PASSWORD":          "",
     })
 
     # Pass agent dir if discovered so server.py doesn't have to re-discover

@@ -20,8 +20,10 @@ class TestCronRefreshButtonHtml:
         )
 
     def test_refresh_button_has_accessibility_labels(self):
-        """Icon-only buttons need aria-label + title so screen readers and
-        hover tooltips work."""
+        """Icon-only buttons need aria-label + a hover tooltip so screen readers
+        and sighted users both have an affordance. Accept either the native
+        `title=` attribute or the custom `data-tooltip=` attribute introduced
+        in #1775 (faster ~120ms display vs the native ~1.5s delay)."""
         html = _read("static/index.html")
         m = re.search(r'<button[^>]*id="cronRefreshBtn"[^>]*>', html)
         assert m, "cronRefreshBtn tag not found"
@@ -29,8 +31,9 @@ class TestCronRefreshButtonHtml:
         assert 'aria-label=' in tag, (
             "#cronRefreshBtn is icon-only and must have aria-label"
         )
-        assert 'title=' in tag, (
-            "#cronRefreshBtn should have a title tooltip"
+        assert 'title=' in tag or 'data-tooltip=' in tag, (
+            "#cronRefreshBtn should have a hover tooltip "
+            "(native title= or custom data-tooltip= per #1775)"
         )
 
     def test_refresh_button_calls_load_crons_with_animate(self):
@@ -47,7 +50,7 @@ class TestCronRefreshButtonHtml:
         button so the header layout stays tight."""
         html = _read("static/index.html")
         ref_pos = html.find('id="cronRefreshBtn"')
-        newjob_pos = html.find('toggleCronForm()')
+        newjob_pos = html.find('openCronCreate()')
         assert ref_pos != -1 and newjob_pos != -1
         # Must be close enough to be in the same header row (single SVG-inline
         # button can be around 500 chars by itself due to inline styles/attrs).

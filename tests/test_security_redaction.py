@@ -11,8 +11,10 @@ Tests run against the isolated test test_server on port 8788.
 """
 
 import json
+import importlib
 import pathlib
 import sys
+import types
 import urllib.request
 import urllib.error
 import pytest
@@ -103,6 +105,28 @@ def test_redact_value_list():
     result = _redact_value(lst)
     assert _FAKE_GITHUB_PAT not in result[0]["content"]
     assert result[1]["content"] == "safe text"
+
+
+def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
+    """_redact_text must tolerate older redact_sensitive_text(text) signatures."""
+    fake_agent = types.ModuleType("agent")
+    fake_redact = types.ModuleType("agent.redact")
+
+    def _legacy_redact_sensitive_text(text):
+        return text
+
+    fake_redact.redact_sensitive_text = _legacy_redact_sensitive_text
+    monkeypatch.setitem(sys.modules, "agent", fake_agent)
+    monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
+
+    import api.helpers as helpers
+    helpers = importlib.reload(helpers)
+    try:
+        result = helpers._redact_value(f"token={_FAKE_GITHUB_PAT}")
+        assert _FAKE_GITHUB_PAT not in result
+        assert "ghp_Te" in result
+    finally:
+        importlib.reload(helpers)
 
 
 def test_redact_session_data_messages():

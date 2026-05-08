@@ -35,8 +35,8 @@ def test_index_html_served():
     raw, headers, status = get_raw("/")
     assert status == 200
     assert b"sidebarResize" in raw, "Resize handle not found in HTML"
-    assert b"cronCreateForm" in raw, "Cron create form not found in HTML"
-    assert b"btnHermesPanel" in raw, "Hermes control center trigger not found in HTML"
+    assert b'id="mainTasks"' in raw, "Tasks main-view not found in HTML"
+    assert b'id="settingsMenu"' in raw, "Settings left-rail menu not found in HTML"
     assert b"btnExportJSON" in raw, "Export JSON button not found in HTML"
 
 def test_index_html_file_exists():

@@ -19,8 +19,10 @@ def test_done_path_marks_active_session_as_viewed():
     done_idx = MESSAGES_JS.find("source.addEventListener('done'")
     assert done_idx != -1, "done handler not found in messages.js"
     done_block = MESSAGES_JS[done_idx:MESSAGES_JS.find("source.addEventListener('stream_end'", done_idx)]
-    assert "_markSessionViewed(activeSid" in done_block, (
-        "done handler must mark the active session as viewed so unread dot does not linger"
+    assert "const completedSid=completedSession.session_id||activeSid;" in done_block
+    assert "_markSessionViewed(completedSid" in done_block, (
+        "done handler must mark the final active session id as viewed so unread dot "
+        "does not linger after compression rotates session_id"
     )
 
 
@@ -37,8 +39,9 @@ def test_restore_and_error_paths_mark_active_session_as_viewed():
     restore_idx = MESSAGES_JS.find("async function _restoreSettledSession()")
     assert restore_idx != -1, "_restoreSettledSession() not found in messages.js"
     restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError()", restore_idx)]
-    assert "_markSessionViewed(activeSid" in restore_block, (
-        "_restoreSettledSession() must mark the active session as viewed"
+    assert "const completedSid=session.session_id||activeSid;" in restore_block
+    assert "_markSessionViewed(completedSid" in restore_block, (
+        "_restoreSettledSession() must mark the final session id as viewed"
     )
 
     error_idx = MESSAGES_JS.find("function _handleStreamError()")

@@ -1,0 +1,25 @@
+{
+  "issue": 1772,
+  "check": "api.models.get_cli_session_messages preserves CLI tool metadata for WebUI rendering",
+  "session_id": "cli_issue_1772_demo",
+  "message_count": 2,
+  "assistant_tool_calls": [
+    {
+      "id": "call_1772_demo",
+      "type": "function",
+      "function": {
+        "name": "terminal",
+        "arguments": "{\"command\": \"printf ok\"}"
+      }
+    }
+  ],
+  "tool_result": {
+    "role": "tool",
+    "tool_call_id": "call_1772_demo",
+    "tool_name": "terminal",
+    "name": "terminal",
+    "content": {
+      "output": "ok"
+    }
+  }
+}

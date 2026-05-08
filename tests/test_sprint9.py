@@ -68,19 +68,19 @@ def test_app_js_no_longer_referenced_in_html(cleanup_test_sessions):
     """index.html must not reference the old monolithic app.js."""
     html = get_text("/")
     assert 'src="static/app.js"' not in html
-    # All 6 modules must be present
+    # All split modules must be present with the server-injected cache-busting version query.
     for module in ["ui.js", "workspace.js", "sessions.js", "messages.js", "panels.js", "boot.js"]:
-        assert f'src="static/{module}"' in html, f"Missing {module} in index.html"
+        assert f'src="static/{module}?v=' in html, f"Missing versioned {module} in index.html"
 
 def test_module_load_order_correct(cleanup_test_sessions):
     """ui.js must appear before sessions.js which must appear before boot.js."""
     html = get_text("/")
-    ui_pos = html.find('src="static/ui.js"')
-    ws_pos = html.find('src="static/workspace.js"')
-    sess_pos = html.find('src="static/sessions.js"')
-    msg_pos = html.find('src="static/messages.js"')
-    panels_pos = html.find('src="static/panels.js"')
-    boot_pos = html.find('src="static/boot.js"')
+    ui_pos = html.find('src="static/ui.js?v=')
+    ws_pos = html.find('src="static/workspace.js?v=')
+    sess_pos = html.find('src="static/sessions.js?v=')
+    msg_pos = html.find('src="static/messages.js?v=')
+    panels_pos = html.find('src="static/panels.js?v=')
+    boot_pos = html.find('src="static/boot.js?v=')
     assert ui_pos < ws_pos < sess_pos < msg_pos < panels_pos < boot_pos
 
 def test_no_duplicate_function_definitions(cleanup_test_sessions):

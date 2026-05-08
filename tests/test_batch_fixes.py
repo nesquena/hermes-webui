@@ -30,10 +30,16 @@ class TestRootWorkspaceUnblocked:
         )
 
     def test_etc_still_blocked(self):
-        """Sanity: other dangerous paths remain blocked."""
+        """Sanity: other dangerous paths remain blocked.
+
+        After the macOS symlink fix, blocked roots are listed as bare strings
+        in a tuple and ``_workspace_blocked_roots()`` materialises both the
+        literal and resolved-canonical Path forms.  Assert the source still
+        names ``/etc`` and ``/proc`` as blocked roots.
+        """
         src = read("api/workspace.py")
-        assert "Path('/etc')" in src
-        assert "Path('/proc')" in src
+        assert "'/etc'" in src or 'Path("/etc")' in src or "Path('/etc')" in src
+        assert "'/proc'" in src or 'Path("/proc")' in src or "Path('/proc')" in src
 
     def test_split_guard_present(self):
         src = read("api/streaming.py")
@@ -77,32 +83,40 @@ class TestCronSkillCacheInvalidation:
     def test_cache_busted_on_form_open(self):
         src = self._panels_src()
         # toggleCronForm should set cache to null unconditionally
+        # openCronCreate() opens the task create form (renamed from toggleCronForm
+        # in the main-view refactor). It must null the skills cache before fetching.
         m = re.search(
-            r'function toggleCronForm\(\)\{.*?_cronSkillsCache=null',
+            r'function openCronCreate\(\)\{.*?_cronSkillsCache\s*=\s*null',
             src, re.DOTALL
         )
         assert m, (
-            "toggleCronForm must unconditionally null _cronSkillsCache "
+            "openCronCreate must unconditionally null _cronSkillsCache "
             "before fetching skills"
         )
 
     def test_cache_not_guarded_by_if_on_open(self):
         src = self._panels_src()
-        # The old guard should be gone
-        assert "if(!_cronSkillsCache)" not in src, (
-            "toggleCronForm should not use 'if(!_cronSkillsCache)' guard — "
+        # openCronCreate must not gate the fetch behind an if(!_cronSkillsCache) guard.
+        m = re.search(
+            r'function openCronCreate\(\)\{.*?\}',
+            src, re.DOTALL
+        )
+        assert m, "openCronCreate definition not found"
+        assert "if(!_cronSkillsCache)" not in m.group(0), (
+            "openCronCreate should not use 'if(!_cronSkillsCache)' guard — "
             "cache must always be busted on open"
         )
 
     def test_cache_busted_on_skill_save(self):
         src = self._panels_src()
-        # After submitSkillSave's api() call, _cronSkillsCache must be nulled
+        # saveSkillForm() is the handler invoked on skill save (renamed from
+        # submitSkillSave in the main-view refactor; the old name still aliases it).
         m = re.search(
-            r'async function submitSkillSave\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
+            r'async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
             src, re.DOTALL
         )
         assert m, (
-            "_cronSkillsCache must be set to null in submitSkillSave() "
+            "_cronSkillsCache must be set to null in saveSkillForm() "
             "right after _skillsData = null"
         )
 
@@ -180,10 +194,16 @@ class TestSystemTheme:
 
     def test_panels_reverts_via_apply_theme(self):
         src = read("static/panels.js")
-        assert "_applyTheme(_settingsThemeOnOpen)" in src or \
-               "_applyTheme(" in src, (
-            "_revertSettingsPreview must call _applyTheme() so 'system' "
-            "is correctly re-activated on settings discard"
+        block = re.search(r"function _revertSettingsPreview\(\)\{.*?\n\}", src, re.DOTALL)
+        assert block, "_revertSettingsPreview() should be present"
+        assert "_applyTheme(" not in block.group(0), (
+            "_revertSettingsPreview must no longer call _applyTheme() since Appearance now autosaves"
+        )
+
+    def test_system_theme_apply_path_uses_apply_theme(self):
+        src = read("static/boot.js")
+        assert "_applyTheme(appearance.theme)" in src, (
+            "System theme still must be activated through _applyTheme() in boot/theme application"
         )
 
     def test_panels_saves_system_string_not_resolved(self):

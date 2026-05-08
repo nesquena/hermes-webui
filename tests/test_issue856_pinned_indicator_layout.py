@@ -11,6 +11,11 @@ def test_pinned_indicator_renders_inside_title_row():
     title_row_idx = SESSIONS_JS.find("titleRow.className='session-title-row';")
     assert title_row_idx != -1, "session title row construction not found"
 
+    assert ("body.appendChild(_renderOneSession(s, Boolean(g.isPinned)))" in SESSIONS_JS
+            or "body.appendChild(parentEl)" in SESSIONS_JS)
+    assert "function _renderOneSession(s, isPinnedGroup=false)" in SESSIONS_JS
+    assert "if(s.pinned&&!isPinnedGroup){" in SESSIONS_JS
+
     pin_idx = SESSIONS_JS.find("pinInd.className='session-pin-indicator';", title_row_idx)
     assert pin_idx != -1, "pinned indicator creation not found after title row"
 
@@ -32,25 +37,114 @@ def test_pinned_indicator_uses_fixed_indicator_box():
     assert "justify-content:center;" in css_block, "pin indicator should center the star inside its box"
 
 
-def test_state_indicator_always_appended_to_prevent_layout_shift():
-    """State span is always added to the DOM (visibility:hidden when inactive) to prevent
-    titles shifting left/right when the spinner or unread dot appears/disappears."""
+def test_state_indicator_uses_right_actions_slot_to_prevent_title_shift():
+    """State span reuses the right-side action slot so the title start position
+    does not shift when the spinner or unread dot appears/disappears."""
     title_row_idx = SESSIONS_JS.find("titleRow.className='session-title-row';")
     assert title_row_idx != -1, "title row construction not found"
 
-    # state span must be appended unconditionally (no surrounding if-check)
-    append_idx = SESSIONS_JS.find("titleRow.appendChild(state);", title_row_idx)
-    assert append_idx != -1, "state span must always be appended to titleRow"
-
-    # Verify CSS uses visibility:hidden to reserve the slot
-    assert "session-state-indicator{" in STYLE_CSS, "session-state-indicator CSS rule missing"
-    base_block_start = STYLE_CSS.find("session-state-indicator{")
-    base_block_end = STYLE_CSS.find("}", base_block_start)
-    base_block = STYLE_CSS[base_block_start:base_block_end]
-    assert "visibility:hidden;" in base_block, (
-        "session-state-indicator should default to visibility:hidden so it reserves slot "
-        "without being visible — prevents title layout shift on state changes"
+    title_row_append_idx = SESSIONS_JS.find("titleRow.appendChild(state);", title_row_idx)
+    assert title_row_append_idx == -1, (
+        "state indicator should not be inserted before the title; it should reuse "
+        "the right-side actions slot to avoid title shift"
     )
+
+    state_idx = SESSIONS_JS.find("state.className='session-attention-indicator session-state-indicator'")
+    assert state_idx != -1, "right-side attention indicator creation not found"
+
+    append_to_row_idx = SESSIONS_JS.find("el.appendChild(state);", state_idx)
+    assert append_to_row_idx != -1, "state indicator should be appended to the outer row"
+
+    actions_idx = SESSIONS_JS.find("actions.className='session-actions';", append_to_row_idx)
+    assert actions_idx != -1, "session actions should still be appended after attention indicator"
+
+    assert ".session-attention-indicator{" in STYLE_CSS, "attention indicator CSS rule missing"
+    css_block = STYLE_CSS[
+        STYLE_CSS.find(".session-attention-indicator{"):
+        STYLE_CSS.find(".session-item:hover .session-attention-indicator")
+    ]
+    assert "position:absolute;" in css_block, "attention indicator should be positioned in the row action slot"
+    assert "right:6px;" in css_block, "attention indicator should align with the actions trigger"
+    assert "width:26px;" in css_block, "attention indicator should use the same width as the actions trigger"
+    assert "height:26px;" in css_block, "attention indicator should use the same height as the actions trigger"
+    assert ".session-attention-indicator.is-streaming::before{" in STYLE_CSS
+    inner_spinner_block = STYLE_CSS[
+        STYLE_CSS.find(".session-attention-indicator.is-streaming::before{"):
+        STYLE_CSS.find(".session-attention-indicator.is-unread::before{")
+    ]
+    assert "width:10px;" in inner_spinner_block, "spinner glyph should stay 10px inside the 26px action slot"
+    assert "height:10px;" in inner_spinner_block, "spinner glyph should stay 10px inside the 26px action slot"
+
+    hover_rule = ".session-item:hover .session-attention-indicator"
+    assert hover_rule in STYLE_CSS, "hover rule should hide attention indicator when actions appear"
+
+
+def test_timestamp_hidden_when_attention_state_is_present():
+    assert "+(hasUnread?' unread':'')" in SESSIONS_JS
+    assert "const hasAttentionState=isStreaming||hasUnread;" in SESSIONS_JS
+    assert "ts.className='session-time'+(hasAttentionState?' is-hidden':'');" in SESSIONS_JS
+    assert "ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);" in SESSIONS_JS
+    assert ".session-time.is-hidden{display:none;}" in STYLE_CSS
+    # padding-right was 86px when the timestamp was position:absolute. Now that
+    # the timestamp lives in the flex flow of .session-title-row, the rest
+    # state needs no right reservation; hover/streaming/unread/menu-open/
+    # focus-within all expand to 40px to make room for the absolute action
+    # button + attention indicator.
+    assert ".session-item{padding:8px 8px;" in STYLE_CSS
+    # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
+    # Instead, hover padding is restored via @media (hover:hover) which only applies to
+    # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
+    # and skip that block, preventing the layout-reflow mid-tap bug.
+    assert ".session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    # Desktop hover padding restored via media query (mouse devices only)
+    assert "@media (hover:hover)" in STYLE_CSS
+    assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+    # Timestamp now uses margin-left:auto inside the flex row instead of
+    # absolute positioning. This stops the title's flex:1 bound from running
+    # underneath the timestamp and lets the project dot sit beside it.
+    session_time_block = STYLE_CSS[
+        STYLE_CSS.find(".session-time{"):
+        STYLE_CSS.find(".session-time.is-hidden")
+    ]
+    assert "position:absolute;" not in session_time_block, (
+        "Timestamp must live in flex flow (margin-left:auto), not absolute"
+    )
+    assert "margin-left:auto;" in session_time_block
+    assert ".session-item:hover .session-time" in STYLE_CSS
+    assert ".session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
+    assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
+
+
+def test_plain_mouse_hover_does_not_mark_session_row_dragging():
+    """Pointermove fires during ordinary hover; drag styling must require an active press."""
+    assert "let _pointerActive=false;" in SESSIONS_JS
+    assert "_pointerActive=true;" in SESSIONS_JS
+    assert "if(!_pointerActive) return;" in SESSIONS_JS
+    assert "_pointerActive=false;" in SESSIONS_JS
+    assert ".session-item.dragging:hover" in STYLE_CSS
+
+
+def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
+    messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
+
+    assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
+    assert "(isActive && S.busy)" in SESSIONS_JS
+    assert "INFLIGHT[s.session_id]" in SESSIONS_JS
+    assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
+    assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
+
+
+def test_date_group_caret_expanded_down_collapsed_right():
+    assert "caret.textContent='\\u25BE';" in SESSIONS_JS
+    assert ".session-date-caret{" in STYLE_CSS
+    caret_block = STYLE_CSS[
+        STYLE_CSS.find(".session-date-caret{"):
+        STYLE_CSS.find(".session-date-caret.collapsed")
+    ]
+    assert "transform:rotate(0deg);" in caret_block
+    assert ".session-date-caret.collapsed{transform:rotate(-90deg);}" in STYLE_CSS
 
 
 def test_apperror_path_calls_render_session_list():
@@ -65,4 +159,15 @@ def test_apperror_path_calls_render_session_list():
     assert "renderSessionList()" in apperror_block, (
         "apperror handler must call renderSessionList() so the streaming indicator "
         "clears immediately on server errors, not after a 5s poll delay"
+    )
+
+
+def test_pointerup_ignores_non_primary_mouse_buttons():
+    """Right-click and middle-click must not trigger session navigation.
+    onpointerup fires for all mouse buttons; we filter to button===0
+    (primary). pointerType==='mouse' scopes the check to mouse only —
+    touch/stylus always report button===0 so they're unaffected."""
+    assert "e.pointerType==='mouse' && e.button!==0" in SESSIONS_JS, (
+        "pointerup handler must filter out non-primary mouse buttons "
+        "(right-click / middle-click must not navigate)"
     )

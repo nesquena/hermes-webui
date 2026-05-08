@@ -16,7 +16,12 @@ def test_tool_card_toggle_uses_transformable_layout_and_transition():
 def test_tool_card_detail_uses_transitionable_collapsed_state():
     assert ".tool-card-detail{display:block;max-height:0;opacity:0;overflow:hidden;" in COMPACT_CSS
     assert re.search(
-        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*max-height:\s*520px;[^}]*opacity:\s*1;",
+        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*max-height:\s*600px;[^}]*opacity:\s*1;",
+        STYLE_CSS,
+    )
+    # Open state must set overflow to auto so the inner <pre> scroll is not clipped (#1170).
+    assert re.search(
+        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*overflow:\s*auto;",
         STYLE_CSS,
     )
 
@@ -36,7 +41,7 @@ def test_thinking_card_toggle_and_body_use_animation_friendly_state():
 def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
     assert "<span class=\"thinking-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
     assert "<span class=\"tool-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
-    assert "<div class=\"thinking-card open\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
+    assert "<div class=\"thinking-card\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
 
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():

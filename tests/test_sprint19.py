@@ -60,6 +60,25 @@ def test_login_page_served():
         assert r.status == 200
         assert "Sign in" in html
         assert "Hermes" in html
+        assert 'src="static/login.js?v=' in html
+        assert 'src="/static/login.js"' not in html
+
+
+def test_login_page_cache_busts_login_script():
+    """GET /login must version login.js so stale cache/SW entries cannot trap old auth code."""
+    from api import routes
+
+    assert "static/login.js?v={{WEBUI_VERSION}}" in routes._LOGIN_PAGE_HTML
+
+
+def test_login_route_injects_webui_version_for_login_script():
+    """The /login route should replace the login.js version placeholder."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
+    login_block = src[src.find('if parsed.path == "/login"'):src.find('if parsed.path == "/api/auth/status"')]
+    assert "WEBUI_VERSION" in login_block
+    assert "{{WEBUI_VERSION}}" in login_block
 
 
 # ── Security headers ─────────────────────────────────────────────────────

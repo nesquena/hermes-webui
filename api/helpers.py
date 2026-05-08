@@ -2,6 +2,7 @@
 Hermes Web UI -- HTTP helper functions.
 """
 import json as _json
+import os
 import re as _re
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
@@ -42,16 +43,26 @@ def _security_headers(handler):
     handler.send_header('Referrer-Policy', 'same-origin')
     handler.send_header(
         'Content-Security-Policy',
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; "
+        "default-src 'self' https://*.cloudflareaccess.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
+        "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )
     handler.send_header(
         'Permissions-Policy',
-        'camera=(), microphone=(self), geolocation=()'
+        'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
     )
+
+
+def _accepts_gzip(handler) -> bool:
+    """Check if the client accepts gzip encoding."""
+    headers = getattr(handler, 'headers', None)
+    if not headers:
+        return False
+    ae = headers.get('Accept-Encoding', '')
+    return 'gzip' in ae
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
@@ -63,6 +74,15 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
+
+    # Gzip-compress responses over 1KB when the client accepts it.
+    # Typical JSON API responses compress 70-80%, giving a big speedup
+    # for large payloads (session history, message lists).
+    if _accepts_gzip(handler) and len(body) > 1024:
+        import gzip
+        body = gzip.compress(body, compresslevel=4)
+        handler.send_header('Content-Encoding', 'gzip')
+
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
@@ -91,14 +111,10 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 # ── Credential redaction ──────────────────────────────────────────────────────
 
 def _build_redact_fn():
-    """Return redact_sensitive_text from hermes-agent if available, else a fallback."""
-    try:
-        from agent.redact import redact_sensitive_text
-        return redact_sensitive_text
-    except ImportError:
-        pass
-
-    # Minimal fallback covering the most common credential prefixes
+    """Return a redactor backed by hermes-agent plus local fallback patterns."""
+    # Minimal fallback covering the most common credential prefixes.
+    # Keep this active even when hermes-agent is importable so API responses do
+    # not regress if the agent redactor misses a token shape.
     _CRED_RE = _re.compile(
         r"(?<![A-Za-z0-9_-])("
         r"sk-[A-Za-z0-9_-]{10,}"          # OpenAI / Anthropic / OpenRouter
@@ -137,20 +153,62 @@ def _build_redact_fn():
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
-    return _fallback_redact
+    try:
+        from agent.redact import redact_sensitive_text
+    except ImportError:
+        return _fallback_redact
+
+    def _combined_redact(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        # WebUI API responses are a hard safety boundary — pass force=True so the
+        # agent's broader patterns (Stripe sk_live_, Google AIza…, JWT eyJ…, DB
+        # connection strings, Telegram bot tokens) run regardless of the user's
+        # HERMES_REDACT_SECRETS opt-in. The local fallback then handles the
+        # common short-prefix shapes the agent omits (ghp_, sk-, hf_, AKIA).
+        try:
+            agent_redacted = redact_sensitive_text(text, force=True)
+        except TypeError:
+            # Older hermes-agent builds that predate the force kwarg.
+            agent_redacted = redact_sensitive_text(text)
+        return _fallback_redact(agent_redacted)
+
+    return _combined_redact
 
 
-_redact_text = _build_redact_fn()
+_redact_fn_cached = _build_redact_fn()
 
 
-def _redact_value(v):
-    """Recursively redact credentials from strings, dicts, and lists."""
+def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
+    """Redact sensitive text from API responses. Respects api_redact_enabled setting.
+
+    The ``_enabled`` parameter is an internal optimization for callers that
+    redact many strings in a single response — `redact_session_data()` reads
+    the setting once and threads it through ``_redact_value`` so we avoid
+    re-loading settings.json from disk per string. (Opus pre-release perf fix.)
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    if _enabled is None:
+        from api.config import load_settings
+        _enabled = bool(load_settings().get("api_redact_enabled", True))
+    if not _enabled:
+        return text
+    return _redact_fn_cached(text)
+
+
+def _redact_value(v, *, _enabled: bool | None = None):
+    """Recursively redact credentials from strings, dicts, and lists.
+
+    ``_enabled`` is threaded through so a single response-level redact pass
+    only reads settings.json once. (Opus pre-release perf fix.)
+    """
     if isinstance(v, str):
-        return _redact_text(v)
+        return _redact_text(v, _enabled=_enabled)
     if isinstance(v, dict):
-        return {k: _redact_value(val) for k, val in v.items()}
+        return {k: _redact_value(val, _enabled=_enabled) for k, val in v.items()}
     if isinstance(v, list):
-        return [_redact_value(item) for item in v]
+        return [_redact_value(item, _enabled=_enabled) for item in v]
     return v
 
 
@@ -159,14 +217,22 @@ def redact_session_data(session_dict: dict) -> dict:
 
     Applies to: messages[], tool_calls[], and title.
     The underlying session file is not modified; redaction is response-layer only.
+
+    Reads the ``api_redact_enabled`` setting ONCE for the entire response and
+    threads it through to avoid hundreds of settings.json reads per session
+    payload (a 50-message session has hundreds of nested strings). When the
+    setting is disabled this is also a fast path: the recursion still walks
+    but every string returns early.
     """
+    from api.config import load_settings
+    _enabled = bool(load_settings().get("api_redact_enabled", True))
     result = dict(session_dict)
     if isinstance(result.get('title'), str):
-        result['title'] = _redact_text(result['title'])
+        result['title'] = _redact_text(result['title'], _enabled=_enabled)
     if 'messages' in result:
-        result['messages'] = _redact_value(result['messages'])
+        result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
-        result['tool_calls'] = _redact_value(result['tool_calls'])
+        result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
     return result
 
 
@@ -187,8 +253,13 @@ def read_body(handler) -> dict:
 PROFILE_COOKIE_NAME = 'hermes_profile'
 
 
+def get_profile_cookie_name() -> str:
+    """Return the cookie name used to persist the active WebUI profile."""
+    return os.getenv('WEBUI_PROFILE_COOKIE_NAME', PROFILE_COOKIE_NAME)
+
+
 def get_profile_cookie(handler) -> str | None:
-    """Extract the hermes_profile cookie value from the request, or None."""
+    """Extract the active-profile cookie value from the request, or None."""
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -198,7 +269,8 @@ def get_profile_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except _hc.CookieError:
         return None
-    morsel = cookie.get(PROFILE_COOKIE_NAME)
+    cookie_name = get_profile_cookie_name()
+    morsel = cookie.get(cookie_name)
     if morsel and morsel.value:
         # Validate against profile-name pattern before trusting
         from api.profiles import _PROFILE_ID_RE
@@ -209,7 +281,7 @@ def get_profile_cookie(handler) -> str | None:
 
 
 def build_profile_cookie(name: str) -> str:
-    """Build a Set-Cookie header value for the hermes_profile cookie.
+    """Build a Set-Cookie header value for the active-profile cookie.
 
     Always persist the selected profile in the cookie, including 'default'.
     Clearing the cookie causes the backend to fall back to process-global
@@ -222,8 +294,9 @@ def build_profile_cookie(name: str) -> str:
     """
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
-    cookie[PROFILE_COOKIE_NAME] = name
-    cookie[PROFILE_COOKIE_NAME]['path'] = '/'
-    cookie[PROFILE_COOKIE_NAME]['httponly'] = True
-    cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'
-    return cookie[PROFILE_COOKIE_NAME].OutputString()
+    cookie_name = get_profile_cookie_name()
+    cookie[cookie_name] = name
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    return cookie[cookie_name].OutputString()

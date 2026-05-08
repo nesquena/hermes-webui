@@ -188,8 +188,27 @@ if [ "A${whoami}" == "Ahermeswebuitoo" ]; then
   # We are altering the UID/GID of the hermeswebui user to the desired ones and restarting as that user
   # using usermod for the already create hermeswebui user, knowing it is not already in use
   # per usermod manual: "You must make certain that the named user is not executing any processes when this command is being executed"
-  sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-  sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+  # Guard for read-only root filesystem (podman with read_only=true, issue #1470).
+  # The script runs as hermeswebuitoo (non-root), but groupmod/usermod use sudo.
+  # So we must check writability via sudo — a non-root user cannot write /etc/group
+  # even on a normal writable rootfs, which caused a false positive (issue #1658).
+  _readonly_root=false
+  if ! sudo sh -c 'test -w /etc/group && test -w /etc/passwd' 2>/dev/null; then
+    _readonly_root=true
+    echo "  !! Detected read-only root filesystem — /etc/group or /etc/passwd is not writable (even via sudo)"
+  fi
+  if [ "A${_readonly_root}" == "Atrue" ]; then
+    _current_hermeswebui_gid=$(id -g hermeswebui 2>/dev/null || echo "")
+    _current_hermeswebui_uid=$(id -u hermeswebui 2>/dev/null || echo "")
+    if [ "A${_current_hermeswebui_gid}" == "A${WANTED_GID}" ] && [ "A${_current_hermeswebui_uid}" == "A${WANTED_UID}" ]; then
+      echo "  -- Skipping groupmod/usermod — hermeswebui already has UID ${WANTED_UID} GID ${WANTED_GID} and root fs is read-only"
+    else
+      error_exit "Cannot modify /etc/group or /etc/passwd (read-only root fs). Set UID=${_current_hermeswebui_uid} and GID=${_current_hermeswebui_gid} to match, or run without read_only=true. See issue #1470."
+    fi
+  else
+    sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
+    sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+  fi
   sudo chown -R ${WANTED_UID}:${WANTED_GID} /home/hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
   save_env /tmp/hermeswebuitoo_env.txt  
   # restart the script as hermeswebui set with the correct UID/GID this time
@@ -285,6 +304,19 @@ echo "";echo "== Activating hermes webui's virtual environment"
 source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
 test -x /app/venv/bin/python3
 
+ensure_hindsight_client_docker_dependency() {
+  # Keep this outside the .deps_installed fast-restart guard so existing
+  # two-container Docker venvs self-heal after this dependency was added.
+  _hindsight_client_requirement="hindsight-client>=0.4.22"
+  echo ""; echo "== Checking Hindsight memory provider dependency"
+  if uv pip show hindsight-client >/dev/null 2>&1; then
+    echo "-- hindsight-client already installed"
+  else
+    echo "-- Installing ${_hindsight_client_requirement} for Hindsight memory provider support"
+    uv pip install "${_hindsight_client_requirement}" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hindsight-client"
+  fi
+}
+
 if [ -f /app/venv/.deps_installed ]; then
   echo ""; echo "== Dependencies already installed — skipping (fast restart)"
 else
@@ -322,6 +354,8 @@ else
   fi
   touch /app/venv/.deps_installed
 fi
+
+ensure_hindsight_client_docker_dependency
 
 echo ""; echo "== Running hermes-webui"
 cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
