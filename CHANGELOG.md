@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Named custom providers whose slug matches a known local model server now preserve full slashed model IDs on non-loopback hosts such as `ollama.lan`, preventing local servers from loading a fresh default model instance. Fixes #1830.
+
 ## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
 
 ### Fixed (3 PRs)

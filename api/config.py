@@ -1385,6 +1385,20 @@ _LOCAL_SERVER_PROVIDERS = {
 }
 
 
+def _is_local_server_provider(provider_id: str) -> bool:
+    """True when provider_id names a local model server.
+
+    Named custom providers resolve to ``custom:<slug>``. Treat those as local
+    when the bare slug is one of the known local-server provider names too.
+    """
+    provider = str(provider_id or "").strip().lower()
+    if provider in _LOCAL_SERVER_PROVIDERS:
+        return True
+    if provider.startswith("custom:"):
+        return provider.removeprefix("custom:") in _LOCAL_SERVER_PROVIDERS
+    return False
+
+
 def _base_url_points_at_local_server(base_url: str) -> bool:
     """True if base_url's host is a loopback or private IP (likely local server).
 
@@ -1561,7 +1575,7 @@ def resolve_model_provider(model_id: str) -> tuple:
             # default settings, ignoring user-tuned context length / parallel slots.
             # See #1625. Detect either by canonical provider name OR by base_url
             # pointing at a loopback/private host.
-            if (str(config_provider or "").lower() in _LOCAL_SERVER_PROVIDERS
+            if (_is_local_server_provider(config_provider)
                     or _base_url_points_at_local_server(config_base_url)):
                 return model_id, config_provider, config_base_url
             # Only strip the provider prefix when it's a known provider namespace
