@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Persisted login rate-limit attempts under the WebUI state directory so failed password attempts survive server restarts. Closes #1910.
+
 ## [v0.51.26] — 2026-05-08 — 5-PR follow-on contributor batch (Release D: profile-isolation hardening across cache + skills + gateway-health, context-length config-override threading, sidebar segment count UI polish)
 
 ### Fixed (5 PRs + 1 absorbed test)

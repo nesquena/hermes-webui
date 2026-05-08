@@ -77,9 +77,58 @@ def _save_sessions(sessions: dict[str, float]) -> None:
 _sessions = _load_sessions()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
-_login_attempts = {}  # ip -> [timestamp, ...]
+_LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_WINDOW = 60  # seconds
+
+
+def _load_login_attempts() -> dict[str, list[float]]:
+    """Load persisted login attempts from STATE_DIR, pruning expired entries."""
+    try:
+        if _LOGIN_ATTEMPTS_FILE.exists():
+            data = json.loads(_LOGIN_ATTEMPTS_FILE.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('malformed login-attempts file — expected dict')
+            now = time.time()
+            attempts: dict[str, list[float]] = {}
+            for ip, raw_times in data.items():
+                if not isinstance(ip, str) or not isinstance(raw_times, list):
+                    continue
+                fresh = [
+                    float(t)
+                    for t in raw_times
+                    if isinstance(t, (int, float)) and now - float(t) < _LOGIN_WINDOW
+                ]
+                if fresh:
+                    attempts[ip] = fresh
+            return attempts
+    except Exception as e:
+        logger.debug("Failed to load login attempts file, starting fresh: %s", e)
+    return {}
+
+
+def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
+    """Atomically persist login attempts to STATE_DIR/.login_attempts.json (0600)."""
+    try:
+        _LOGIN_ATTEMPTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=_LOGIN_ATTEMPTS_FILE.parent, suffix='.login_attempts.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(attempts, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, _LOGIN_ATTEMPTS_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug("Failed to persist login attempts: %s", e)
+
+
+_login_attempts = _load_login_attempts()  # ip -> [timestamp, ...]
+
 
 def _check_login_rate(ip: str) -> bool:
     """Return True if the IP is allowed to attempt login."""
@@ -87,14 +136,20 @@ def _check_login_rate(ip: str) -> bool:
     attempts = _login_attempts.get(ip, [])
     # Prune old attempts
     attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
-    _login_attempts[ip] = attempts
+    if attempts:
+        _login_attempts[ip] = attempts
+    else:
+        _login_attempts.pop(ip, None)
+    _save_login_attempts(_login_attempts)
     return len(attempts) < _LOGIN_MAX_ATTEMPTS
+
 
 def _record_login_attempt(ip: str) -> None:
     now = time.time()
     attempts = _login_attempts.get(ip, [])
     attempts.append(now)
     _login_attempts[ip] = attempts
+    _save_login_attempts(_login_attempts)
 
 
 def _signing_key():
