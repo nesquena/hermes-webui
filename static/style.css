@@ -1788,6 +1788,9 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   .layout.sidebar-collapsed .sidebar{width:0!important;min-width:0;border-right:none;opacity:0;pointer-events:none;overflow:hidden;}
   .layout.sidebar-collapsed .sidebar .resize-handle{display:none;}
 }
+/* Suppress sidebar transition during resize drag so cursor tracking feels instant.
+   body.resizing is toggled by the existing initResize handler in boot.js. */
+body.resizing .sidebar{transition:none!important;}
 .sidebar .resize-handle{right:-2px;}
 .rightpanel .resize-handle{left:-2px;}
 /* Prevent text selection during drag */

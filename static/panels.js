@@ -183,13 +183,14 @@ async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
   // ── Desktop sidebar collapse toggle ──
+  // Only triggered from rail button clicks (opts.fromRailClick).
   // If sidebar is collapsed, any rail click expands it first.
-  // If clicking the already-active panel, toggle sidebar collapsed instead.
-  if (typeof _isSidebarCollapsed === 'function' && window.matchMedia('(min-width:641px)').matches) {
+  // If clicking the already-active panel from the rail, collapse sidebar instead.
+  if (opts.fromRailClick && typeof _isSidebarCollapsed === 'function' && window.matchMedia('(min-width:641px)').matches) {
     if (_isSidebarCollapsed()) {
       expandSidebar();
       // Continue to normal panel switch below — first click after expand
-    } else if (prevPanel === nextPanel && !opts.force) {
+    } else if (prevPanel === nextPanel) {
       // Same panel clicked while sidebar is open → collapse sidebar
       toggleSidebar(true);
       return false;
@@ -205,6 +206,8 @@ async function switchPanel(name, opts = {}) {
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
+  // Sync aria-expanded on the newly-active rail button
+  if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));

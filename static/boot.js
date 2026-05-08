@@ -233,6 +233,13 @@ function _isSidebarCollapsed(){
   return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
 }
 
+function _syncSidebarAria(){
+  // Set aria-expanded on the active rail button to reflect sidebar state.
+  // Screen readers announce the toggle action via this attribute.
+  const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
+  if(active)active.setAttribute('aria-expanded', !_isSidebarCollapsed());
+}
+
 function toggleSidebar(forceState){
   const layout=document.querySelector('.layout');
   if(!layout)return;
@@ -240,6 +247,7 @@ function toggleSidebar(forceState){
   const nextCollapsed=typeof forceState==='boolean'?forceState:!isCollapsed;
   layout.classList.toggle('sidebar-collapsed',nextCollapsed);
   try{localStorage.setItem(_SIDEBAR_COLLAPSED_KEY,nextCollapsed?'1':'0');}catch(e){}
+  _syncSidebarAria();
 }
 
 function expandSidebar(){
@@ -257,6 +265,7 @@ function expandSidebar(){
       if(layout)layout.classList.add('sidebar-collapsed');
     }
   }catch(e){}
+  _syncSidebarAria();
 })();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
@@ -1545,4 +1554,15 @@ window.addEventListener('pageshow', async (event) => {
   }
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
+  // Re-sync sidebar collapse state from localStorage (bfcache restores the
+  // frozen DOM, but another tab may have toggled the sidebar since).
+  if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {
+    try {
+      const _want = localStorage.getItem('hermes-sidebar-collapsed') === '1';
+      const _have = _isSidebarCollapsed();
+      if (_want !== _have) toggleSidebar(_want);
+      // Re-apply aria-expanded to the active rail button after DOM restore
+      if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
+    } catch (_) {}
+  }
 });
