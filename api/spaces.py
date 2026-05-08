@@ -78,6 +78,8 @@ _SOURCE_PACKING_VIEWPORT_HEADROOM_COLS = 2
 _SOURCE_SPACES_ROOT_PATH = "~/spaces/"
 _SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
 _SOURCE_SPACE_WIDGETS_DIR = "widgets/"
+_RECOVERY_MODULE_EVENT_SPACE_ID = "__capy_recovery_modules__"
+_RECOVERY_MODULE_SUMMARY_LIMIT = 20
 _SOURCE_SPACE_WIDGET_FILE_EXTENSION = ".yaml"
 _SOURCE_SPACE_DATA_DIR = "data/"
 _CREATOR_PREVIEW_TTL_SECONDS = 30 * 60
@@ -3393,6 +3395,9 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     if not _event_id_is_safe(safe_event_id):
         raise ValueError("Invalid event_id")
     current = read_space(sid)
+    current_revision_events = [str(rev) for rev in (current.get("revision_events") or []) if _event_id_is_safe(rev)]
+    if safe_event_id not in current_revision_events:
+        raise ValueError("Revision event is not in this space timeline")
     event_path = events_dir() / f"{safe_event_id}.json"
     if not event_path.exists():
         raise FileNotFoundError("Revision event not found")
@@ -3443,6 +3448,9 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
     if not _event_id_is_safe(safe_event_id):
         raise ValueError("Invalid event_id")
     current = read_space(sid)
+    current_revision_events = [str(rev) for rev in (current.get("revision_events") or []) if _event_id_is_safe(rev)]
+    if safe_event_id not in current_revision_events:
+        raise ValueError("Revision event is not in this space timeline")
     event_path = events_dir() / f"{safe_event_id}.json"
     if not event_path.exists():
         raise FileNotFoundError("Revision event not found")
@@ -5099,7 +5107,7 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
 
 def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
-    return {
+    summary = {
         "module_id": validate_module_id(module.get("module_id") or module.get("id")),
         "name": _public_display_text_summary(module.get("name") or module.get("module_id") or module.get("id"), 160),
         "description": _public_display_text_summary(module.get("description", ""), 300),
@@ -5108,6 +5116,17 @@ def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
         "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
         "revision_event_id": module.get("revision_event_id"),
     }
+    return summary
+
+
+def _record_module_event(event_type: str, module: dict[str, Any], details: dict[str, Any] | None = None) -> str:
+    """Record module recovery metadata without copying raw quarantined bodies."""
+    return _record_event(
+        _RECOVERY_MODULE_EVENT_SPACE_ID,
+        event_type,
+        details or {"module_id": validate_module_id(module.get("module_id") or module.get("id"))},
+        snapshot=_module_summary(module),
+    )
 
 
 def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
@@ -5137,7 +5156,7 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
     stored.setdefault("created_at", existing.get("created_at") or now)
     stored["updated_at"] = now
     stored.setdefault("recovery", existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"disabled": False, "disabled_reason": ""})
-    event_id = _record_event("recovery-modules", "module.quarantined", {"module_id": mid}, snapshot=stored)
+    event_id = _record_module_event("module.quarantined", stored, {"module_id": mid})
     stored["revision_event_id"] = event_id
     _atomic_write_json(module_path, stored)
     return _module_summary(stored)
@@ -5155,12 +5174,23 @@ def read_recovery_module(module_id: str) -> dict[str, Any]:
     return loaded
 
 
-def list_recovery_modules() -> list[dict[str, Any]]:
+def list_recovery_modules(limit: int = _RECOVERY_MODULE_SUMMARY_LIMIT) -> list[dict[str, Any]]:
     if not spaces_enabled():
         return []
+    max_modules = _clamped_int(limit, _RECOVERY_MODULE_SUMMARY_LIMIT, 1, 100)
+    modules, _, _ = _collect_recovery_module_summaries(max_modules)
+    return modules
+
+
+def _collect_recovery_module_summaries(limit: int = _RECOVERY_MODULE_SUMMARY_LIMIT) -> tuple[list[dict[str, Any]], int, int]:
+    if not spaces_enabled():
+        return [], 0, 0
     _ensure_dirs()
+    max_modules = _clamped_int(limit, _RECOVERY_MODULE_SUMMARY_LIMIT, 1, 100)
     modules: list[dict[str, Any]] = []
-    for module_path in recovery_modules_dir().glob("*.json"):
+    total = 0
+    disabled_total = 0
+    for module_path in sorted(recovery_modules_dir().glob("*.json"), key=lambda path: path.name):
         try:
             loaded = json.loads(module_path.read_text(encoding="utf-8"))
         except Exception:
@@ -5168,11 +5198,15 @@ def list_recovery_modules() -> list[dict[str, Any]]:
         if not isinstance(loaded, dict):
             continue
         try:
-            modules.append(_module_summary(loaded))
+            summary = _module_summary(loaded)
         except ValueError:
             continue
-    modules.sort(key=lambda item: str(item.get("module_id") or ""))
-    return modules
+        total += 1
+        if summary.get("disabled"):
+            disabled_total += 1
+        if len(modules) < max_modules:
+            modules.append(summary)
+    return modules, total, disabled_total
 
 
 def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
@@ -5186,15 +5220,14 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
     module["recovery"] = recovery
     module["updated_at"] = time.time()
-    event_id = _record_event(
-        "recovery-modules",
+    event_id = _record_module_event(
         "module.recovery_disabled",
+        module,
         {"module_id": mid, "reason": _recovery_reason_summary(recovery["disabled_reason"])},
-        snapshot=module,
     )
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
-    return {"disabled": True, "module_id": mid, "revision_event_id": event_id}
+    return _module_summary(module)
 
 
 def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
@@ -5208,15 +5241,14 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     recovery["disabled_reason"] = ""
     module["recovery"] = recovery
     module["updated_at"] = time.time()
-    event_id = _record_event(
-        "recovery-modules",
+    event_id = _record_module_event(
         "module.recovery_enabled",
+        module,
         {"module_id": mid, "reason": _recovery_reason_summary(reason or "enabled from recovery")},
-        snapshot=module,
     )
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
-    return {"disabled": False, "module_id": mid, "revision_event_id": event_id}
+    return _module_summary(module)
 
 
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
@@ -5357,9 +5389,9 @@ def recovery_snapshot() -> dict[str, Any]:
     _ensure_dirs()
     spaces: list[dict[str, Any]] = []
     counts = dict(empty_summary)
-    modules = list_recovery_modules()
-    counts["module_count"] = len(modules)
-    counts["disabled_module_count"] = sum(1 for module in modules if module.get("disabled"))
+    modules, module_count, disabled_module_count = _collect_recovery_module_summaries(_RECOVERY_MODULE_SUMMARY_LIMIT)
+    counts["module_count"] = module_count
+    counts["disabled_module_count"] = disabled_module_count
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))

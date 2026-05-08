@@ -4840,6 +4840,15 @@ def test_recovery_snapshot_includes_safe_module_quarantine_without_leaking_sourc
     assert disabled["revision_event_id"]
     assert stored["source"] == "export function run(){ return SECRET_VALUE_DO_NOT_LEAK }"
     assert stored["renderer"] == "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>"
+    for event_id in (module["revision_event_id"], disabled["revision_event_id"]):
+        event = json.loads((spaces.events_dir() / f"{event_id}.json").read_text(encoding="utf-8"))
+        event_serialized = json.dumps(event).lower()
+        assert event.get("space_id") != "unsafe-module"
+        assert "source" not in event_serialized
+        assert "renderer" not in event_serialized
+        assert "api_key" not in event_serialized
+        assert "secret_value_do_not_leak" not in event_serialized
+        assert "<script" not in event_serialized
     assert recovery["summary"]["module_count"] == 1
     assert recovery["summary"]["disabled_module_count"] == 1
     assert recovery["modules"] == [
@@ -4889,12 +4898,20 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert disabled["action"] == "space.recovery.disable_module"
     assert disabled["disabled"] is True
     assert disabled["module_id"] == "module-tool"
+    assert disabled["name"] == "Safe Module"
+    assert disabled["description"] == "Module manager fixture"
+    assert disabled["scope"] == "group"
+    assert disabled["disabled_reason"] == "[REDACTED]"
     assert snapshot["ok"] is True
     assert snapshot["recovery"]["summary"]["module_count"] == 1
     assert snapshot["recovery"]["modules"][0]["disabled"] is True
     assert enabled["ok"] is True
     assert enabled["action"] == "space.recovery.enable_module"
     assert enabled["disabled"] is False
+    assert enabled["name"] == "Safe Module"
+    assert enabled["description"] == "Module manager fixture"
+    assert enabled["scope"] == "group"
+    assert enabled["disabled_reason"] == ""
     assert "source" not in serialized
     assert "<script" not in serialized
     assert "script crashed" not in serialized
@@ -4902,6 +4919,47 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
+
+
+def test_recovery_module_events_cannot_restore_user_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "recovery-modules", "name": "User Space"})
+    module = spaces.upsert_recovery_module(
+        {
+            "module_id": "module-event",
+            "name": "Unsafe module",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+        }
+    )
+
+    with pytest.raises(ValueError):
+        spaces.restore_revision("recovery-modules", module["revision_event_id"])
+
+
+def test_recovery_snapshot_bounds_module_summaries_but_counts_all_modules(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    for index in range(25):
+        spaces.upsert_recovery_module(
+            {
+                "module_id": f"module-{index:02d}",
+                "name": f"Module {index:02d}",
+                "description": "Safe module metadata",
+                "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            }
+        )
+    spaces.disable_module_for_recovery("module-24", reason="disabled for recovery")
+
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery).lower()
+
+    assert recovery["summary"]["module_count"] == 25
+    assert recovery["summary"]["disabled_module_count"] == 1
+    assert len(recovery["modules"]) == 20
+    assert recovery["modules"][0]["module_id"] == "module-00"
+    assert recovery["modules"][-1]["module_id"] == "module-19"
+    assert "source" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_import_space_agent_yaml_package_quarantines_generated_sources(monkeypatch, tmp_path):
