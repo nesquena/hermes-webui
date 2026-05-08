@@ -1063,17 +1063,36 @@ async function _loadOlderMessages() {
 
 // Ensure the full message history is loaded (for undo, export, etc).
 // If the session was loaded with msg_limit, this fetches all messages.
+async function _waitForOlderMessagesIdle() {
+  while (_loadingOlder) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
   const sid = S.session.session_id;
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
-  const msgs = (data.session.messages || []).filter(m => m && m.role);
-  S.messages = msgs;
-  _messagesTruncated = false;
-  if(S.session && S.session.session_id === sid){
-    S.session.message_count = Number(data.session.message_count || msgs.length);
+  // Share _loadOlderMessages()'s lock so Start-jump full-history loads do not
+  // race with an in-flight endless-scroll prefetch and then get overwritten by
+  // that prefetch prepending an already-loaded page (#1937).
+  await _waitForOlderMessagesIdle();
+  if (!_messagesTruncated || !S.session || S.session.session_id !== sid) return;
+  _loadingOlder = true;
+  try {
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+    // Guard: api() may have redirected (401) and returned undefined.
+    if (!data || !data.session) return;
+    if (!S.session || S.session.session_id !== sid) return;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const msgs = (data.session.messages || []).filter(m => m && m.role);
+    S.messages = msgs;
+    _messagesTruncated = false;
+    _oldestIdx = 0;
+    if(S.session && S.session.session_id === sid){
+      S.session.message_count = Number(data.session.message_count || msgs.length);
+    }
+  } finally {
+    _loadingOlder = false;
   }
 }
 

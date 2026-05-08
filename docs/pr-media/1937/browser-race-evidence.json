@@ -1,0 +1,16 @@
+{
+  "issue": 1937,
+  "scenario": "Synthetic browser validation of Start-jump while endless-scroll older-page prefetch is in flight (>3 message-window pages).",
+  "apiCallKinds": ["older-prefetch", "full-history"],
+  "fullCalledBeforeOlderSettled": false,
+  "messageCount": 90,
+  "uniqueCount": 90,
+  "duplicates": 0,
+  "first": "msg-00",
+  "last": "msg-89",
+  "truncated": false,
+  "oldestIdx": 0,
+  "loadingOlder": false,
+  "visualEvidence": "browser-race-start.png",
+  "notes": "Validated in an isolated local WebUI server on 127.0.0.1:18737 with synthetic non-private messages. The full-history request waits until the in-flight older-prefetch settles, then renders a 90-message unique transcript starting at msg-00."
+}
