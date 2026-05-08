@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Clarified Kanban task lifecycle controls: removed UI actions that attempted to set tasks directly to `running`, renamed the dispatcher dry-run action to "Preview dispatcher", and added empty-board guidance for the Hermes Agent work queue. Refs #1885.
+
 ## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
 
 ### Fixed (3 PRs)
