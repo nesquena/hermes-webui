@@ -449,12 +449,14 @@
     const stage = safeCreatorSummaryText(data && data.stage || 'revisioned-commit') || 'revisioned-commit';
     const stored = data && data.stored === true ? 'true' : 'false';
     const executed = data && data.executed === true ? 'true' : 'false';
+    const revisionReceipt = renderCreatorRevisionPreview(data || {});
     const actions = spaceId ? '<div class="capy-spaces-actions">' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open committed Space</button>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage committed widgets</button>' +
       '</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator commit saved</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(rev ? ' · Revision: '+escapeHtml(rev) : '')+'</div>' +
+      revisionReceipt +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
       '</div>'+actions+'</div></div></div>';

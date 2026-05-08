@@ -979,7 +979,10 @@ def _restore_diff_summary(target_snapshot: dict[str, Any], current_snapshot: dic
                 summary = _widget_summary(widget)
             except ValueError:
                 continue
-            mapped[str(summary["id"])] = summary
+            widget_id = str(summary["id"])
+            if not _payload_key_is_safe(widget_id):
+                continue
+            mapped[widget_id] = summary
         return mapped
 
     target_widgets = widget_map(target_snapshot)
@@ -2243,6 +2246,8 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
             }
         },
     }
+    revision_preview: dict[str, Any] | None = None
+    revision_diff: dict[str, Any] | None = None
     if _manifest_path(space["space_id"]).exists():
         if not spaces_enabled():
             raise RuntimeError("Capy Spaces is disabled")
@@ -2268,12 +2273,14 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
             "space.creator.committed",
             {"mode": "metadata-only", "widget_count": len(draft["widget_payloads"])},
         )
+        revision_preview = _restore_preview_summary(created, created["space_id"])
+        revision_diff = _restore_diff_summary(created, existing)
     else:
         created = create_space(create_payload)
     widgets = [read_widget_detail(created["space_id"], widget["id"]) for widget in draft["widget_payloads"]]
     space_detail = read_space_detail(created["space_id"])
     space_detail["widget_count"] = len(widgets)
-    return {
+    response = {
         "ok": True,
         "action": name,
         "preview_id": preview_id,
@@ -2296,6 +2303,11 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         "revision_event_id": created.get("revision_event_id"),
         "safety": draft["safety"],
     }
+    if revision_preview is not None:
+        response["revision_preview"] = revision_preview
+    if revision_diff is not None:
+        response["revision_diff"] = revision_diff
+    return response
 
 
 def _space_creator_safe_widget_input(raw_widget: dict[str, Any], index: int, used_widget_ids: set[str]) -> tuple[dict[str, Any], int]:

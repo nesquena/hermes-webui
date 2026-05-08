@@ -1692,6 +1692,117 @@ def test_creator_preview_targets_existing_space_with_revision_diff_without_persi
     assert "secret_source" not in serialized
 
 
+def test_creator_commit_existing_preview_returns_revision_receipt_diff(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "existing-creator-commit-lab",
+            "name": "Existing Creator Commit Lab",
+            "description": "Original safe description",
+            "agent_instructions": "Preserve old operational notes until an approved commit.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "old-panel",
+            "kind": "html",
+            "title": "Old Panel",
+            "layout": {"x": 0, "y": 0, "w": 6, "h": 4},
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "TOKEN_VALUE"},
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "api_key",
+            "kind": "token",
+            "title": "SECRET_VALUE_DO_NOT_LEAK",
+            "layout": {"x": 6, "y": 0, "w": 6, "h": 4},
+            "renderer": "<script>stored()</script>",
+        },
+    )
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research_notes",
+        {"summary": "Safe notes", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        {"source_widget": "old-panel", "token": "TOKEN_VALUE"},
+    )
+    before = spaces.read_space("existing-creator-commit-lab")
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": "existing-creator-commit-lab",
+            "spaceName": "Existing Creator Commit Lab Revised",
+            "description": "Safe committed description",
+            "widgets": [
+                {
+                    "widgetId": "latest-panel",
+                    "title": "Latest Panel",
+                    "kind": "status",
+                    "status": {"phase": "approved"},
+                    "renderer": "<script>badcall()</script>",
+                    "source": "SECRET_SOURCE",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "widgets": [{"widgetId": "payload-override", "renderer": "<script>ignore()</script>"}],
+            "spaceName": "Payload Override Should Not Win",
+        },
+    )
+    after = spaces.read_space("existing-creator-commit-lab")
+    event = json.loads((spaces.events_dir() / f"{committed['revision_event_id']}.json").read_text(encoding="utf-8"))
+    serialized = json.dumps({"committed": committed, "manifest": after, "event": event}).lower()
+
+    assert committed["ok"] is True
+    assert committed["stored"] is True
+    assert committed["executed"] is False
+    assert committed["stage"] == "revisioned-commit"
+    assert committed["space_id"] == "existing-creator-commit-lab"
+    assert committed["space"]["name"] == "Existing Creator Commit Lab Revised"
+    assert committed["revision_event_id"] != before["revision_event_id"]
+    assert after["revision_event_id"] == committed["revision_event_id"]
+    assert [widget["id"] for widget in after["widgets"]] == ["latest-panel"]
+    assert "payload-override" not in serialized
+    assert "payload override should not win" not in serialized
+    assert committed["revision_preview"]["space_id"] == "existing-creator-commit-lab"
+    assert committed["revision_preview"]["name"] == "Existing Creator Commit Lab Revised"
+    assert committed["revision_preview"]["description"] == "Safe committed description"
+    assert committed["revision_preview"]["widget_count"] == 1
+    assert [widget["id"] for widget in committed["revision_preview"]["widgets"]] == ["latest-panel"]
+    assert committed["revision_diff"]["has_changes"] is True
+    assert committed["revision_diff"]["widgets_to_add"] == ["latest-panel"]
+    assert committed["revision_diff"]["widgets_to_remove"] == ["old-panel"]
+    assert committed["revision_diff"]["widgets_to_update"] == []
+    assert "description" in committed["revision_diff"]["space_fields_to_update"]
+    assert "agent_instructions" in committed["revision_diff"]["space_fields_to_update"]
+    assert "shared_data" in committed["revision_diff"]["space_fields_to_update"]
+    assert "badcall" not in serialized
+    assert "ignore()" not in serialized
+    assert "stored()" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"data":' not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "token_value" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+
+
 def test_creator_preview_ignores_ambient_current_space_id_for_new_drafts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.create_space({"space_id": "ambient-existing-lab", "name": "Ambient Existing Lab"})

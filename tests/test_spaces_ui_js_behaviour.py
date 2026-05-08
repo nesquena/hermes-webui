@@ -340,7 +340,7 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.preview') {
-      if (scenario === 'creatorPreviewExistingSpace') {
+      if (scenario === 'creatorPreviewExistingSpace' || scenario === 'creatorCommitExistingSpaceReceipt') {
         return response({
           ok: true,
           action: 'space.creator.preview',
@@ -412,6 +412,7 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.commit') {
+      const existingSpaceCommit = scenario === 'creatorCommitExistingSpaceReceipt';
       return response({
         ok: true,
         action: 'space.creator.commit',
@@ -419,13 +420,34 @@ global.fetch = async function(path, opts = {}) {
         executed: false,
         stage: 'revisioned-commit',
         space: {
-          space_id: scenario === 'creatorCommitUnsafeSpaceId' ? 'creator/../lab' : 'creator-lab',
-          name: 'Creator Lab <Safe>',
+          space_id: existingSpaceCommit ? 'existing-creator-lab' : (scenario === 'creatorCommitUnsafeSpaceId' ? 'creator/../lab' : 'creator-lab'),
+          name: existingSpaceCommit ? 'Existing Creator Lab Revised' : 'Creator Lab <Safe>',
           widget_count: 1,
           revision_event_id: 'rev-creator-commit',
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK'
         },
+        revision_preview: existingSpaceCommit ? {
+          space_id: 'existing-creator-lab',
+          name: 'Existing Creator Lab Revised',
+          description: 'Safe committed preview',
+          widget_count: 1,
+          widgets: [
+            { id: 'latest-panel', kind: 'status', title: 'Latest Panel', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            { id: 'renderer-panel', kind: 'api_key', title: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          ],
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        } : undefined,
+        revision_diff: existingSpaceCommit ? {
+          has_changes: true,
+          space_fields_to_update: ['description', 'agent_instructions', 'shared_data', 'api_key'],
+          widgets_to_add: ['latest-panel'],
+          widgets_to_remove: ['old-panel'],
+          widgets_to_update: [],
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        } : undefined,
         revision_event: { event_id: 'rev-creator-commit', event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
       });
     }
@@ -1669,6 +1691,13 @@ async function dispatchWindowMessage(data) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
+  } else if (scenario === 'creatorCommitExistingSpaceReceipt') {
+    values['#capyCreatorTargetSpaceId'] = 'existing-creator-lab';
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
+    beforeHtml = root.innerHTML;
+    await click('commitCreatorSpec', { previewId: 'preview-existing-safe-1' });
   } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
@@ -3767,6 +3796,39 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_existing_space_renders_revision_receipt_diff_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitExistingSpaceReceipt")
+
+    commit_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"])
+    assert json.loads(commit_call["body"]) == {
+        "action": "space.creator.commit",
+        "preview_id": "preview-existing-safe-1",
+        "sandbox_previewed": True,
+        "visual_qa_passed": True,
+        "approve_commit": True,
+    }
+    assert out["dialogs"]
+    assert "Creator commit saved" in out["rootHtml"]
+    assert "Revision preview" in out["rootHtml"]
+    assert "Existing Creator Lab Revised" in out["rootHtml"]
+    assert "Space ID: existing-creator-lab" in out["rootHtml"]
+    assert "Preview: Existing Creator Lab Revised · 1 widget · Widgets: latest-panel / Latest Panel / status" in out["rootHtml"]
+    assert "Diff: restore changes 3 fields, adds 1 widget, removes 1 widget" in out["rootHtml"]
+    assert "Fields: description, agent_instructions, shared_data" in out["rootHtml"]
+    assert "Add widgets: latest-panel" in out["rootHtml"]
+    assert "Remove widgets: old-panel" in out["rootHtml"]
+    assert "Open committed Space" in out["rootHtml"]
+    assert "Manage committed widgets" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="existing-creator-lab"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="existing-creator-lab"' in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
 
 
 def test_creator_commit_omits_followup_actions_for_unsafe_space_id(driver_path):
