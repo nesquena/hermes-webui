@@ -384,6 +384,11 @@
     return text && !unsafeValuePattern.test(text) ? text : '';
   }
 
+  function safeCreatorIdText(value){
+    const text = safeCreatorSummaryText(value);
+    return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) ? text : '';
+  }
+
   function renderCreatorSpecSummary(spec){
     const safeSpec = spec && typeof spec === 'object' && !Array.isArray(spec) ? spec : {};
     const space = safeSpec.space && typeof safeSpec.space === 'object' && !Array.isArray(safeSpec.space) ? safeSpec.space : {};
@@ -422,16 +427,20 @@
   function renderCreatorCommitResult(data){
     const space = data && data.space && typeof data.space === 'object' && !Array.isArray(data.space) ? data.space : {};
     const spaceName = safeCreatorSummaryText(space.name || space.space_id || 'Committed Space') || 'Committed Space';
-    const spaceId = safeCreatorSummaryText(space.space_id || '');
+    const spaceId = safeCreatorIdText(space.space_id || '');
     const rev = safeCreatorSummaryText(space.revision_event_id || data && data.revision_event && data.revision_event.event_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'revisioned-commit') || 'revisioned-commit';
     const stored = data && data.stored === true ? 'true' : 'false';
     const executed = data && data.executed === true ? 'true' : 'false';
+    const actions = spaceId ? '<div class="capy-spaces-actions">' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open committed Space</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage committed widgets</button>' +
+      '</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator commit saved</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(rev ? ' · Revision: '+escapeHtml(rev) : '')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
-      '</div></div></div></div>';
+      '</div>'+actions+'</div></div></div>';
   }
 
   async function loadSpaceWidgets(spaceId){

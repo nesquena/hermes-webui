@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the backend Spaces tool adapter now has a generic creator-loop preview gate (`space.creator.preview`) that turns an untrusted prompt plus proposed widget specs into a bounded, metadata-only, non-persisted space/widget draft. The response does not echo the prompt, quarantines generated bodies, omits raw renderer/html/script/source/data/auth fields, requires sandbox preview and visual QA before commit, and reserves revisioned commit/rollback for the next gate. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Safe creator loop commit receipt now exposes metadata-only follow-up actions to open the committed Space/revision history and manage committed widgets after `space.creator.commit`, reusing existing safe `openSpace` / `loadWidgets` handlers without rendering generated widget bodies or leaking raw renderer/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link creator commits to recovery actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the `space.creator.commit` UI receipt keeps the revisioned metadata-only gate envelope and now shows `Open committed Space` plus `Manage committed widgets` actions wired to the sanitized committed `space_id`.
+  - The receipt remains fail-closed for unsafe/missing path-style ids through a path-safe creator-id filter and continues to omit hostile renderer/script/API-auth markers and secret-looking values from DOM.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`1 passed`); follow-up unsafe-id RED failed before the path-safe id filter and then passed; focused creator UI gate tests passed (`4 passed`); Spaces UI JS behavior + demo parity suites passed (`120 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, and `/tmp` browser QA harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_5df4fc44c34548d08b1f764f1505a971.png`.
 
 - `feat(spaces): add creator preview gate`
   - Added RED/GREEN backend coverage proving `space.creator.preview` returns a bounded non-persisted creator-loop spec (`stored: false`, `executed: false`) from a hostile prompt + widget fixture while preserving safe space/widget metadata, quarantining generated bodies, and omitting prompt/auth/source/data/generated-body markers and secret-looking values from serialized responses.

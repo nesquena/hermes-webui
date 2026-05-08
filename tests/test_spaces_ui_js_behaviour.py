@@ -370,7 +370,14 @@ global.fetch = async function(path, opts = {}) {
         stored: true,
         executed: false,
         stage: 'revisioned-commit',
-        space: { space_id: 'creator-lab', name: 'Creator Lab <Safe>', widget_count: 1, revision_event_id: 'rev-creator-commit', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        space: {
+          space_id: scenario === 'creatorCommitUnsafeSpaceId' ? 'creator/../lab' : 'creator-lab',
+          name: 'Creator Lab <Safe>',
+          widget_count: 1,
+          revision_event_id: 'rev-creator-commit',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK'
+        },
         revision_event: { event_id: 'rev-creator-commit', event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
       });
     }
@@ -1609,7 +1616,7 @@ async function dispatchWindowMessage(data) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
-  } else if (scenario === 'creatorCommitConfirmed') {
+  } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
@@ -3671,6 +3678,25 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "executed: false" in out["rootHtml"]
     assert "revisioned-commit" in out["rootHtml"]
     assert "rev-creator-commit" in out["rootHtml"]
+    assert "Open committed Space" in out["rootHtml"]
+    assert "Manage committed widgets" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="creator-lab"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="creator-lab"' in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_omits_followup_actions_for_unsafe_space_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitUnsafeSpaceId")
+
+    assert "Creator commit saved" in out["rootHtml"]
+    assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
+    assert "creator/../lab" not in out["rootHtml"]
+    assert "Open committed Space" not in out["rootHtml"]
+    assert "Manage committed widgets" not in out["rootHtml"]
+    assert 'data-space-id="creator/../lab"' not in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
