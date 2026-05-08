@@ -4251,6 +4251,7 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
   };
 }
 
@@ -4297,6 +4298,10 @@ async function _autosaveAppearanceSettings(payload){
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    if(saved){
+      window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
@@ -4454,6 +4459,17 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
+    const jumpButtonsCb=$('settingsSessionJumpButtons');
+    if(jumpButtonsCb){
+      jumpButtonsCb.checked=!!settings.session_jump_buttons;
+      window._sessionJumpButtonsEnabled=jumpButtonsCb.checked;
+      jumpButtonsCb.onchange=function(){
+        window._sessionJumpButtonsEnabled=this.checked;
+        if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     // Workspace panel default-open toggle (localStorage-backed)
     // Uses a separate key (hermes-webui-workspace-panel-pref) so that
     // closing the panel via toolbar X does not clear the user's preference.
@@ -5124,6 +5140,8 @@ function _applySavedSettingsUi(saved, body, opts){
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=body.simplified_tool_calling!==false;
+  window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._botName=body.bot_name||'Hermes';
@@ -5221,6 +5239,7 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
+  body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_tps=showTps;

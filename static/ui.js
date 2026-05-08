@@ -205,6 +205,48 @@ function _showEarlierRenderedMessages(){
   }
   _scrollPinned=false;
 }
+function _isSessionJumpButtonsEnabled(){
+  return window._sessionJumpButtonsEnabled===true;
+}
+function _applySessionNavigationPrefs(){
+  const container=$('messages');
+  if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
+  _updateSessionStartJumpButton();
+}
+function _updateSessionStartJumpButton(){
+  const btn=$('jumpToSessionStartBtn');
+  const container=$('messages');
+  if(!btn||!container) return;
+  if(!_isSessionJumpButtonsEnabled()){
+    btn.style.display='none';
+    return;
+  }
+  const hasSession=!!(S&&S.session&&S.messages&&S.messages.length);
+  const awayFromStart=container.scrollTop>Math.max(240,container.clientHeight*0.35);
+  const hasScrollableHistory=container.scrollHeight>container.clientHeight+Math.max(240,container.clientHeight*0.35);
+  const canRevealStart=hasScrollableHistory||_messageHiddenBeforeCount()>0||!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
+}
+async function jumpToSessionStart(){
+  const container=$('messages');
+  if(!container||!S.session) return;
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _programmaticScroll=true;
+  try{
+    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      container.scrollTop=0;
+      _updateSessionStartJumpButton();
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+  }catch(e){
+    console.warn('jumpToSessionStart failed:',e);
+    _programmaticScroll=false;
+  }
+}
 
 const DASHBOARD_STATUS_TTL_MS=60000;
 let _dashboardStatusCache=null;
@@ -1563,6 +1605,7 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
       else { _nearBottomCount=nearBottom?_nearBottomCount+1:0; _scrollPinned=_nearBottomCount>=2; if(_scrollPinned) _messageUserUnpinned=false; } // #1360
       const btn=$('scrollToBottomBtn');
       if(btn) btn.style.display=_scrollPinned?'none':'flex';
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
       // Load older messages when scrolled near the top
       if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
         _loadOlderMessages();
@@ -1874,6 +1917,7 @@ function scrollToBottom(){
   _setMessageScrollToBottom();
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
 function _fmtOllamaLabel(mid){
@@ -4527,6 +4571,7 @@ function renderMessages(options){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll);
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
@@ -4587,6 +4632,7 @@ function renderMessages(options){
   const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   if(hiddenBeforeCount>0 || hasServerOlder){
     const indicator=document.createElement('button');
     indicator.type='button';

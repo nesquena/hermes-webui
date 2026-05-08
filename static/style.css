@@ -772,9 +772,16 @@
   .workspace-toggle-btn:disabled{opacity:.38;cursor:not-allowed;}
   .chip.model{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
   .messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior-y:contain;overflow-anchor:none;}
-  /* sticky-first-child: button is first child of .messages so its natural position is above viewport; sticky+bottom:16px pins it there when visible */
-  .scroll-to-bottom-btn{position:sticky;bottom:16px;align-self:flex-end;margin-right:20px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s;}
+  /* sticky-first-child: button is early in .messages so its natural position is above viewport; sticky+bottom pins it there when visible */
+  .scroll-to-bottom-btn{position:sticky;bottom:16px;align-self:flex-end;margin-right:20px;width:32px;height:32px;border-radius:50%;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:10;transition:color .12s,border-color .12s,background .12s,transform .12s;}
   .scroll-to-bottom-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);}
+  .session-jump-btn__text{display:none;}
+  .session-jump-btn{position:sticky;align-self:flex-end;flex:0 0 32px;min-height:32px;margin-right:20px;height:32px;border-radius:999px;border:1px solid var(--border2);background:var(--code-bg);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;box-shadow:0 2px 8px rgba(0,0,0,.25);z-index:11;transition:color .12s,border-color .12s,background .12s,opacity .12s,transform .12s;}
+  .session-jump-btn:hover{color:var(--text);border-color:var(--border);background:var(--hover-bg);transform:translateY(-1px);}
+  .session-jump-btn--start{top:16px;margin-bottom:-36px;}
+  .messages.session-nav-enabled .scroll-to-bottom-btn{width:auto;min-width:32px;border-radius:999px;font-size:12px;font-weight:600;gap:5px;padding:0 11px;}
+  .messages.session-nav-enabled .scroll-to-bottom-btn:hover{transform:translateY(-1px);}
+  .messages.session-nav-enabled .session-jump-btn__text{display:inline;}
   .messages-inner{margin:0 auto;width:100%;padding:20px 24px 32px;display:flex;flex-direction:column;}
   @media(min-width:1400px){.messages-inner{max-width:1100px;}}
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
