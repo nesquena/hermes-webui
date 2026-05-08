@@ -209,6 +209,7 @@ def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes(
 def test_kanban_lifecycle_controls_do_not_offer_manual_running_start():
     assert "quickKanbanCardAction(event,'${id}','running')" not in PANELS
     assert "kanban_card_start" not in PANELS
+    assert "kanban_card_start" not in I18N
     assert '<option value="running">Running</option>' not in INDEX
     assert "Cannot set status to 'running' directly" not in PANELS
     assert "kanban_work_queue_hint" in PANELS
