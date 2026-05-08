@@ -126,6 +126,49 @@ console.log(JSON.stringify({{sid: collapsed[0].session_id, containsRoot: _sessio
     assert '"containsRoot":true' in result
 
 
+def test_stale_optimistic_compression_tips_collapse_even_when_parents_are_visible():
+    """Active compression can leave old streaming tips in browser memory.
+
+    The server/index already expose only the latest tip, but client-side
+    optimistic rows from previous tips may still include parent_session_id links.
+    Those rows carry explicit lineage metadata and must collapse as one sidebar
+    conversation instead of rendering 7/8/9/10 segment duplicates.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'seg7', title:'Graphify', parent_session_id:'seg6', message_count:1141, updated_at:70, last_message_at:70, _lineage_root_id:'root', _compression_segment_count:7}},
+  {{session_id:'seg8', title:'Graphify', parent_session_id:'seg7', message_count:1254, updated_at:80, last_message_at:80, _lineage_root_id:'root', _compression_segment_count:8, pending_user_message:'old'}},
+  {{session_id:'seg9', title:'Graphify', parent_session_id:'seg8', message_count:1404, updated_at:90, last_message_at:90, _lineage_root_id:'root', _compression_segment_count:9, active_stream_id:'old-stream'}},
+  {{session_id:'seg10', title:'Graphify', parent_session_id:'seg9', message_count:1490, updated_at:100, last_message_at:100, _lineage_root_id:'root', _compression_segment_count:10, active_stream_id:'current-stream'}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["seg10"]
+    assert collapsed[0]["_lineage_collapsed_count"] == 4
+    assert collapsed[0]["_compression_segment_count"] == 10
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg10", "seg9", "seg8", "seg7"]
+
 
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
