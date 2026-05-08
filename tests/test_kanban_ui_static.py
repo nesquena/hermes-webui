@@ -93,6 +93,17 @@ def test_kanban_board_has_native_css_classes():
     assert "overflow-x:auto" in COMPACT_STYLE
 
 
+def test_kanban_main_view_scrolls_when_task_preview_is_tall():
+    """The app shell keeps body overflow hidden, so the Kanban main view
+    must own vertical scrolling. Otherwise a selected task with a long body
+    can push the board below the viewport with no way to reach it.
+    """
+    assert re.search(
+        r"main\.main\.showing-kanban\s*>\s*#mainKanban\s*\{[^}]*display:flex;[^}]*overflow-y:auto;",
+        COMPACT_STYLE,
+    ), "Kanban main view must expose a vertical scrollbar when detail content is taller than the viewport"
+
+
 def test_kanban_i18n_keys_exist_in_every_locale_block():
     locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
     assert len(locale_blocks) >= 8
