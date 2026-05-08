@@ -107,6 +107,230 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
 
+
+def _active_skills_dir() -> Path:
+    """Return the skills directory for the request's active Hermes profile.
+
+    WebUI profile switches are cookie/thread-local scoped, so the agent
+    module-level ``tools.skills_tool.SKILLS_DIR`` can still point at the server
+    startup profile. Skills UI endpoints must derive the directory from
+    ``get_active_hermes_home()`` for every request instead of reading that
+    process-global constant.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+
+        return Path(get_active_hermes_home()) / "skills"
+    except Exception:
+        try:
+            from tools.skills_tool import SKILLS_DIR
+
+            return Path(SKILLS_DIR)
+        except Exception:
+            return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser() / "skills"
+
+
+def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(base_dir.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
+    for skills_dir in skills_dirs:
+        try:
+            rel_path = skill_md.relative_to(skills_dir)
+        except ValueError:
+            continue
+        parts = rel_path.parts
+        if len(parts) >= 3:
+            return parts[0]
+        return None
+    return None
+
+
+def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+    dirs = [skills_dir]
+    try:
+        from agent.skill_utils import get_external_skills_dirs
+
+        dirs.extend(Path(p) for p in get_external_skills_dirs())
+    except Exception:
+        pass
+    return [p for p in dirs if p.exists()]
+
+
+def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
+    """List skills using an explicit local skills directory.
+
+    This mirrors ``tools.skills_tool.skills_list`` closely, but keeps the local
+    scan root explicit so per-client WebUI profile switches do not race on or
+    leak through the skills tool's module-global ``SKILLS_DIR``.
+    """
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skills_tool import (
+        MAX_DESCRIPTION_LENGTH,
+        _EXCLUDED_SKILL_DIRS,
+        _get_disabled_skill_names,
+        _parse_frontmatter,
+        _sort_skills,
+        skill_matches_platform,
+    )
+
+    if not skills_dir.exists():
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "success": True,
+            "skills": [],
+            "categories": [],
+            "message": f"No skills found. Skills directory created at {skills_dir}/",
+        }
+
+    all_skills = []
+    seen_names: set[str] = set()
+    disabled = _get_disabled_skill_names()
+    search_dirs = _active_skill_search_dirs(skills_dir)
+
+    for scan_dir in search_dirs:
+        for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            skill_dir = skill_md.parent
+            try:
+                content = skill_md.read_text(encoding="utf-8")[:4000]
+                frontmatter, body = _parse_frontmatter(content)
+                if not skill_matches_platform(frontmatter):
+                    continue
+                name = frontmatter.get("name", skill_dir.name)[:64]
+                if name in seen_names or name in disabled:
+                    continue
+                description = frontmatter.get("description", "")
+                if not description:
+                    for line in body.strip().split("\n"):
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            description = line
+                            break
+                if len(description) > MAX_DESCRIPTION_LENGTH:
+                    description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
+                seen_names.add(name)
+                all_skills.append(
+                    {
+                        "name": name,
+                        "description": description,
+                        "category": _skill_category_from_path(skill_md, search_dirs),
+                    }
+                )
+            except (UnicodeDecodeError, PermissionError) as e:
+                logger.debug("Failed to read skill file %s: %s", skill_md, e)
+            except Exception as e:
+                logger.debug(
+                    "Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True
+                )
+
+    if category:
+        all_skills = [s for s in all_skills if s.get("category") == category]
+    all_skills = _sort_skills(all_skills)
+    categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
+    result = {
+        "success": True,
+        "skills": all_skills,
+        "categories": categories,
+        "count": len(all_skills),
+    }
+    if all_skills:
+        result["hint"] = "Use skill_view(name) to see full content, tags, and linked files"
+    else:
+        result["message"] = "No skills found in skills/ directory."
+    return result
+
+
+def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
+    """Resolve a WebUI skill name inside an explicit skills directory."""
+    from agent.skill_utils import iter_skill_index_files
+    from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
+
+    raw_name = str(name or "").strip().strip("/")
+    if not raw_name or not skills_dir.exists():
+        return None, None
+
+    candidate_names = [raw_name]
+    if ":" in raw_name:
+        namespace, bare = raw_name.split(":", 1)
+        if namespace and bare:
+            candidate_names.append(f"{namespace}/{bare}")
+
+    for candidate_name in candidate_names:
+        direct_path = skills_dir / candidate_name
+        if not _skill_path_within(skills_dir, direct_path):
+            continue
+        if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
+            return direct_path, direct_path / "SKILL.md"
+        legacy_md = direct_path.with_suffix(".md")
+        if legacy_md.exists() and _skill_path_within(skills_dir, legacy_md):
+            return legacy_md.parent, legacy_md
+
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+            continue
+        skill_dir = skill_md.parent
+        if skill_dir.name == raw_name:
+            return skill_dir, skill_md
+        try:
+            frontmatter, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+            if frontmatter.get("name") == raw_name:
+                return skill_dir, skill_md
+        except Exception:
+            continue
+
+    for legacy_md in skills_dir.rglob("*.md"):
+        if legacy_md.name == "SKILL.md":
+            continue
+        if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
+            return legacy_md.parent, legacy_md
+    return None, None
+
+
+def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
+    available = [s["name"] for s in _skills_list_from_dir(skills_dir).get("skills", [])[:20]]
+    return {
+        "success": False,
+        "error": f"Skill '{name}' not found.",
+        "available_skills": available,
+        "hint": "Use skills_list to see all available skills",
+    }
+
+
+def _skill_view_from_active_dir(name: str) -> dict:
+    from tools.skills_tool import skill_view as _skill_view
+
+    skills_dir = _active_skills_dir()
+    skill_dir, skill_md = _find_skill_in_dir(name, skills_dir)
+    if not skill_md:
+        # Preserve plugin-qualified skill viewing without falling back to the
+        # startup/root profile's local skills tree for ordinary missing skills.
+        if ":" in str(name or ""):
+            try:
+                from agent.skill_utils import is_valid_namespace, parse_qualified_name
+                from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+                namespace, _bare = parse_qualified_name(name)
+                if is_valid_namespace(namespace):
+                    discover_plugins()
+                    pm = get_plugin_manager()
+                    if pm.find_plugin_skill(name) is not None or pm.list_plugin_skills(namespace):
+                        raw = _skill_view(name)
+                        return json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                pass
+        return _skill_not_found_payload(name, skills_dir)
+    target_name = str(skill_dir) if skill_dir and (skill_dir / "SKILL.md") == skill_md else str(skill_md)
+    raw = _skill_view(target_name)
+    data = json.loads(raw) if isinstance(raw, str) else raw
+    return data
+
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
 # Kernel TCP keepalive (server.py setsockopt block) declares a peer dead at
@@ -3277,15 +3501,12 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
-        from tools.skills_tool import skills_list as _skills_list
-
-        raw = _skills_list()
-        data = json.loads(raw) if isinstance(raw, str) else raw
+        qs = parse_qs(parsed.query)
+        category = qs.get("category", [None])[0]
+        data = _skills_list_from_dir(_active_skills_dir(), category=category)
         return j(handler, {"skills": data.get("skills", [])})
 
     if parsed.path == "/api/skills/content":
-        from tools.skills_tool import skill_view as _skill_view, SKILLS_DIR
-
         qs = parse_qs(parsed.query)
         name = qs.get("name", [""])[0]
         if not name:
@@ -3297,11 +3518,8 @@ def handle_get(handler, parsed) -> bool:
 
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
-            skill_dir = None
-            for p in SKILLS_DIR.rglob(name):
-                if p.is_dir():
-                    skill_dir = p
-                    break
+            skills_dir = _active_skills_dir()
+            skill_dir, _skill_md = _find_skill_in_dir(name, skills_dir)
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
             target = (skill_dir / file_path).resolve()
@@ -3315,8 +3533,7 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
-        raw = _skill_view(name)
-        data = json.loads(raw) if isinstance(raw, str) else raw
+        data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)
@@ -7867,15 +8084,15 @@ def _handle_skill_save(handler, body):
     category = body.get("category", "").strip()
     if category and ("/" in category or ".." in category):
         return bad(handler, "Invalid category")
-    from tools.skills_tool import SKILLS_DIR
+    skills_dir = _active_skills_dir()
 
     if category:
-        skill_dir = SKILLS_DIR / category / skill_name
+        skill_dir = skills_dir / category / skill_name
     else:
-        skill_dir = SKILLS_DIR / skill_name
-    # Validate resolved path stays within SKILLS_DIR
+        skill_dir = skills_dir / skill_name
+    # Validate resolved path stays within the active profile skills dir.
     try:
-        skill_dir.resolve().relative_to(SKILLS_DIR.resolve())
+        skill_dir.resolve().relative_to(skills_dir.resolve())
     except ValueError:
         return bad(handler, "Invalid skill path")
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -7889,10 +8106,13 @@ def _handle_skill_delete(handler, body):
         require(body, "name")
     except ValueError as e:
         return bad(handler, str(e))
-    from tools.skills_tool import SKILLS_DIR
     import shutil
 
-    matches = list(SKILLS_DIR.rglob(f"{body['name']}/SKILL.md"))
+    skill_name = str(body["name"]).strip().lower().replace(" ", "-")
+    if not skill_name or "/" in skill_name or ".." in skill_name:
+        return bad(handler, "Invalid skill name")
+    skills_dir = _active_skills_dir()
+    matches = [p for p in skills_dir.rglob("SKILL.md") if p.parent.name == skill_name]
     if not matches:
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
