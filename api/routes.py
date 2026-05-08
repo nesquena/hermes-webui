@@ -72,11 +72,29 @@ _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 # when the active profile is `'default'`. _is_root_profile() is the
 # canonical check.
 
-# Canonical helper now lives in api.profiles so out-of-process consumers
-# (mcp_server.py) can import it without duplicating the visibility model.
-# Re-exported here so existing `_profiles_match(...)` call sites in this
-# module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+def _profiles_match(row_profile, active_profile) -> bool:
+    """Return True if a session/project row's profile matches the active profile.
+
+    Treats both the literal alias 'default' and any renamed-root display name
+    (per _is_root_profile) as equivalent, so legacy rows tagged 'default'
+    still surface when the user has renamed the root profile to e.g. 'kinni',
+    and vice versa.
+
+    A row with no profile (`None` or empty string) is treated as belonging to
+    the root profile — that's the convention used by the legacy backfill at
+    api/models.py::all_sessions, and matches the default seen in
+    `static/sessions.js` (`S.activeProfile||'default'`).
+    """
+    from api.profiles import _is_root_profile
+
+    row = row_profile or 'default'
+    active = active_profile or 'default'
+    if row == active:
+        return True
+    # Cross-alias the renamed root.
+    if _is_root_profile(row) and _is_root_profile(active):
+        return True
+    return False
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -88,230 +106,6 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     qs = parse_qs(parsed_url.query)
     raw = qs.get('all_profiles', [''])[0].strip().lower()
     return raw in ('1', 'true', 'yes', 'on')
-
-
-def _active_skills_dir() -> Path:
-    """Return the skills directory for the request's active Hermes profile.
-
-    WebUI profile switches are cookie/thread-local scoped, so the agent
-    module-level ``tools.skills_tool.SKILLS_DIR`` can still point at the server
-    startup profile. Skills UI endpoints must derive the directory from
-    ``get_active_hermes_home()`` for every request instead of reading that
-    process-global constant.
-    """
-    try:
-        from api.profiles import get_active_hermes_home
-
-        return Path(get_active_hermes_home()) / "skills"
-    except Exception:
-        try:
-            from tools.skills_tool import SKILLS_DIR
-
-            return Path(SKILLS_DIR)
-        except Exception:
-            return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser() / "skills"
-
-
-def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
-    try:
-        candidate.resolve().relative_to(base_dir.resolve())
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
-    for skills_dir in skills_dirs:
-        try:
-            rel_path = skill_md.relative_to(skills_dir)
-        except ValueError:
-            continue
-        parts = rel_path.parts
-        if len(parts) >= 3:
-            return parts[0]
-        return None
-    return None
-
-
-def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
-    dirs = [skills_dir]
-    try:
-        from agent.skill_utils import get_external_skills_dirs
-
-        dirs.extend(Path(p) for p in get_external_skills_dirs())
-    except Exception:
-        pass
-    return [p for p in dirs if p.exists()]
-
-
-def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
-    """List skills using an explicit local skills directory.
-
-    This mirrors ``tools.skills_tool.skills_list`` closely, but keeps the local
-    scan root explicit so per-client WebUI profile switches do not race on or
-    leak through the skills tool's module-global ``SKILLS_DIR``.
-    """
-    from agent.skill_utils import iter_skill_index_files
-    from tools.skills_tool import (
-        MAX_DESCRIPTION_LENGTH,
-        _EXCLUDED_SKILL_DIRS,
-        _get_disabled_skill_names,
-        _parse_frontmatter,
-        _sort_skills,
-        skill_matches_platform,
-    )
-
-    if not skills_dir.exists():
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        return {
-            "success": True,
-            "skills": [],
-            "categories": [],
-            "message": f"No skills found. Skills directory created at {skills_dir}/",
-        }
-
-    all_skills = []
-    seen_names: set[str] = set()
-    disabled = _get_disabled_skill_names()
-    search_dirs = _active_skill_search_dirs(skills_dir)
-
-    for scan_dir in search_dirs:
-        for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
-            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
-                continue
-            skill_dir = skill_md.parent
-            try:
-                content = skill_md.read_text(encoding="utf-8")[:4000]
-                frontmatter, body = _parse_frontmatter(content)
-                if not skill_matches_platform(frontmatter):
-                    continue
-                name = frontmatter.get("name", skill_dir.name)[:64]
-                if name in seen_names or name in disabled:
-                    continue
-                description = frontmatter.get("description", "")
-                if not description:
-                    for line in body.strip().split("\n"):
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            description = line
-                            break
-                if len(description) > MAX_DESCRIPTION_LENGTH:
-                    description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
-                seen_names.add(name)
-                all_skills.append(
-                    {
-                        "name": name,
-                        "description": description,
-                        "category": _skill_category_from_path(skill_md, search_dirs),
-                    }
-                )
-            except (UnicodeDecodeError, PermissionError) as e:
-                logger.debug("Failed to read skill file %s: %s", skill_md, e)
-            except Exception as e:
-                logger.debug(
-                    "Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True
-                )
-
-    if category:
-        all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
-    categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
-    result = {
-        "success": True,
-        "skills": all_skills,
-        "categories": categories,
-        "count": len(all_skills),
-    }
-    if all_skills:
-        result["hint"] = "Use skill_view(name) to see full content, tags, and linked files"
-    else:
-        result["message"] = "No skills found in skills/ directory."
-    return result
-
-
-def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
-    """Resolve a WebUI skill name inside an explicit skills directory."""
-    from agent.skill_utils import iter_skill_index_files
-    from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
-
-    raw_name = str(name or "").strip().strip("/")
-    if not raw_name or not skills_dir.exists():
-        return None, None
-
-    candidate_names = [raw_name]
-    if ":" in raw_name:
-        namespace, bare = raw_name.split(":", 1)
-        if namespace and bare:
-            candidate_names.append(f"{namespace}/{bare}")
-
-    for candidate_name in candidate_names:
-        direct_path = skills_dir / candidate_name
-        if not _skill_path_within(skills_dir, direct_path):
-            continue
-        if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-            return direct_path, direct_path / "SKILL.md"
-        legacy_md = direct_path.with_suffix(".md")
-        if legacy_md.exists() and _skill_path_within(skills_dir, legacy_md):
-            return legacy_md.parent, legacy_md
-
-    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
-        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
-            continue
-        skill_dir = skill_md.parent
-        if skill_dir.name == raw_name:
-            return skill_dir, skill_md
-        try:
-            frontmatter, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
-            if frontmatter.get("name") == raw_name:
-                return skill_dir, skill_md
-        except Exception:
-            continue
-
-    for legacy_md in skills_dir.rglob("*.md"):
-        if legacy_md.name == "SKILL.md":
-            continue
-        if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
-            return legacy_md.parent, legacy_md
-    return None, None
-
-
-def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
-    available = [s["name"] for s in _skills_list_from_dir(skills_dir).get("skills", [])[:20]]
-    return {
-        "success": False,
-        "error": f"Skill '{name}' not found.",
-        "available_skills": available,
-        "hint": "Use skills_list to see all available skills",
-    }
-
-
-def _skill_view_from_active_dir(name: str) -> dict:
-    from tools.skills_tool import skill_view as _skill_view
-
-    skills_dir = _active_skills_dir()
-    skill_dir, skill_md = _find_skill_in_dir(name, skills_dir)
-    if not skill_md:
-        # Preserve plugin-qualified skill viewing without falling back to the
-        # startup/root profile's local skills tree for ordinary missing skills.
-        if ":" in str(name or ""):
-            try:
-                from agent.skill_utils import is_valid_namespace, parse_qualified_name
-                from hermes_cli.plugins import discover_plugins, get_plugin_manager
-
-                namespace, _bare = parse_qualified_name(name)
-                if is_valid_namespace(namespace):
-                    discover_plugins()
-                    pm = get_plugin_manager()
-                    if pm.find_plugin_skill(name) is not None or pm.list_plugin_skills(namespace):
-                        raw = _skill_view(name)
-                        return json.loads(raw) if isinstance(raw, str) else raw
-            except Exception:
-                pass
-        return _skill_not_found_payload(name, skills_dir)
-    target_name = str(skill_dir) if skill_dir and (skill_dir / "SKILL.md") == skill_md else str(skill_md)
-    raw = _skill_view(target_name)
-    data = json.loads(raw) if isinstance(raw, str) else raw
-    return data
 
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
@@ -793,7 +587,6 @@ from api.helpers import (
     _redact_text,
 )
 from api.agent_health import build_agent_health_payload
-from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
 
@@ -882,7 +675,6 @@ def _clear_stale_stream_state(session) -> bool:
     with _get_session_agent_lock(session.session_id):
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
-        _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
             session.pending_user_message = None
@@ -1716,12 +1508,7 @@ from api.workspace import (
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe
-from api.streaming import (
-    _sse,
-    _run_agent_streaming,
-    cancel_stream,
-    _materialize_pending_user_turn_before_error,
-)
+from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
@@ -3052,14 +2839,6 @@ def handle_get(handler, parsed) -> bool:
             # older sessions (pre-#1318) that have context_length=0 persisted
             # still render a meaningful indicator on load.  Mirrors the
             # SSE-path fallback in api/streaming.py:2333-2342.  Fixes #1436.
-            #
-            # #1896: pass config_context_length, provider, and custom_providers
-            # so explicit config overrides win over the 256K default fallback.
-            # Without these, an old session loaded after a user upgraded to a
-            # 1M-context model with `model.context_length: 1048576` in
-            # config.yaml gets a 256K window in the initial UI indicator and
-            # /api/session/get response — the same wrong-window display this
-            # fix addresses on the streaming side.
             _persisted_cl = getattr(s, "context_length", 0) or 0
             if not _persisted_cl:
                 _model_for_lookup = (
@@ -3068,37 +2847,7 @@ def handle_get(handler, parsed) -> bool:
                 if _model_for_lookup:
                     try:
                         from agent.model_metadata import get_model_context_length as _get_cl
-                        from api.config import get_config as _get_config_for_cl
-                        _cfg_for_cl = _get_config_for_cl()
-                        _cfg_ctx_len_load = None
-                        _cfg_custom_providers_load = None
-                        try:
-                            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
-                            if isinstance(_model_cfg_load, dict):
-                                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                                if _raw_cfg_ctx_load is not None:
-                                    try:
-                                        _parsed_load = int(_raw_cfg_ctx_load)
-                                        if _parsed_load > 0:
-                                            _cfg_ctx_len_load = _parsed_load
-                                    except (TypeError, ValueError):
-                                        pass
-                            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-                            if isinstance(_raw_cp_load, list):
-                                _cfg_custom_providers_load = _raw_cp_load
-                        except Exception:
-                            pass
-                        try:
-                            _fb_cl = _get_cl(
-                                _model_for_lookup,
-                                "",
-                                config_context_length=_cfg_ctx_len_load,
-                                provider=effective_provider or "",
-                                custom_providers=_cfg_custom_providers_load,
-                            ) or 0
-                        except TypeError:
-                            # Older hermes-agent builds: legacy 2-arg form.
-                            _fb_cl = _get_cl(_model_for_lookup, "") or 0
+                        _fb_cl = _get_cl(_model_for_lookup, "") or 0
                         if _fb_cl:
                             _persisted_cl = _fb_cl
                     except Exception:
@@ -3217,96 +2966,80 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"results": get_results(sid)})
 
     if parsed.path == "/api/sessions":
-        diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
-        try:
-            diag.stage("all_sessions")
-            webui_sessions = all_sessions(diag=diag)
-            diag.stage("load_settings")
-            settings = load_settings()
-            show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            if show_cli_sessions:
-                diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
-                diag.stage("merge_cli_sessions")
-                cli_by_id = {s["session_id"]: s for s in cli}
-                for s in webui_sessions:
-                    meta = cli_by_id.get(s.get("session_id"))
-                    if not meta:
-                        continue
-                    if _is_messaging_session_record(meta):
-                        s.update(_merge_cli_sidebar_metadata(s, meta))
-                        if s.get("session_id") != meta.get("session_id"):
-                            s["session_id"] = meta.get("session_id")
-                    else:
-                        for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                            if not s.get(key) and meta.get(key):
-                                s[key] = meta[key]
-                # Apply the same CLI visibility semantics to imported local copies so
-                # low-value imported artifacts do not leak into the sidebar.
-                webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-                webui_ids = {s["session_id"] for s in webui_sessions}
-                from api.models import _hide_from_default_sidebar as _cron_hide
-                deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
-            else:
-                diag.stage("filter_webui_sessions")
-                webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-                deduped_cli = []
-            diag.stage("sort_sessions")
-            merged = webui_sessions + deduped_cli
-            merged.sort(
-                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-                reverse=True,
-            )
-            # ── Profile scoping (#1611) ────────────────────────────────────────
-            # Default: filter to the active profile. ?all_profiles=1 opts into
-            # the aggregate view used by the "All profiles" sidebar toggle.
-            # The other_profile_count is always returned so the UI can render
-            # the "Show N from other profiles" affordance without sending the
-            # cross-profile rows by default.
-            #
-            # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
-            # _messaging_source_key is profile-blind (#1614 follow-up): if the
-            # same Slack/Telegram identity has sessions in profiles A and B, a
-            # profile-blind dedupe would discard the older one even when scoped
-            # to its own profile, leaving that profile with zero rows for that
-            # source. Filter first so the dedupe operates only within the active
-            # profile's rows.
-            diag.stage("active_profile")
-            from api.profiles import get_active_profile_name
-            active_profile = get_active_profile_name()
-            all_profiles = _all_profiles_query_flag(parsed)
-            diag.stage("profile_filter")
-            if all_profiles:
-                scoped = merged
-                other_profile_count = 0
-            else:
-                scoped = [s for s in merged
-                          if _profiles_match(s.get("profile"), active_profile)]
-                other_profile_count = len(merged) - len(scoped)
-            diag.stage("messaging_dedupe")
-            scoped = _keep_latest_messaging_session_per_source(scoped)
-            if show_cli_sessions:
-                diag.stage("cli_cap")
-                scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
-            diag.stage("redact_sessions")
-            safe_merged = []
-            for s in scoped:
-                item = dict(s)
-                if isinstance(item.get("title"), str):
-                    item["title"] = _redact_text(item["title"])
-                safe_merged.append(item)
-            diag.stage("response_write")
-            return j(handler, {
-                "sessions": safe_merged,
-                "cli_count": len(deduped_cli),
-                "all_profiles": all_profiles,
-                "active_profile": active_profile,
-                "other_profile_count": other_profile_count,
-                "server_time": time.time(),
-                "server_tz": time.strftime("%z"),
-            })
-        finally:
-            diag.finish()
+        webui_sessions = all_sessions()
+        settings = load_settings()
+        show_cli_sessions = bool(settings.get("show_cli_sessions"))
+        if show_cli_sessions:
+            cli = get_cli_sessions()
+            cli_by_id = {s["session_id"]: s for s in cli}
+            for s in webui_sessions:
+                meta = cli_by_id.get(s.get("session_id"))
+                if not meta:
+                    continue
+                if _is_messaging_session_record(meta):
+                    s.update(_merge_cli_sidebar_metadata(s, meta))
+                    if s.get("session_id") != meta.get("session_id"):
+                        s["session_id"] = meta.get("session_id")
+                else:
+                    for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
+            # Apply the same CLI visibility semantics to imported local copies so
+            # low-value imported artifacts do not leak into the sidebar.
+            webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+            webui_ids = {s["session_id"] for s in webui_sessions}
+            from api.models import _hide_from_default_sidebar as _cron_hide
+            deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
+        else:
+            webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+            deduped_cli = []
+        merged = webui_sessions + deduped_cli
+        merged.sort(
+            key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+            reverse=True,
+        )
+        # ── Profile scoping (#1611) ────────────────────────────────────────
+        # Default: filter to the active profile. ?all_profiles=1 opts into
+        # the aggregate view used by the "All profiles" sidebar toggle.
+        # The other_profile_count is always returned so the UI can render
+        # the "Show N from other profiles" affordance without sending the
+        # cross-profile rows by default.
+        #
+        # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
+        # _messaging_source_key is profile-blind (#1614 follow-up): if the
+        # same Slack/Telegram identity has sessions in profiles A and B, a
+        # profile-blind dedupe would discard the older one even when scoped
+        # to its own profile, leaving that profile with zero rows for that
+        # source. Filter first so the dedupe operates only within the active
+        # profile's rows.
+        from api.profiles import get_active_profile_name
+        active_profile = get_active_profile_name()
+        all_profiles = _all_profiles_query_flag(parsed)
+        if all_profiles:
+            scoped = merged
+            other_profile_count = 0
+        else:
+            scoped = [s for s in merged
+                      if _profiles_match(s.get("profile"), active_profile)]
+            other_profile_count = len(merged) - len(scoped)
+        scoped = _keep_latest_messaging_session_per_source(scoped)
+        if show_cli_sessions:
+            scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+        safe_merged = []
+        for s in scoped:
+            item = dict(s)
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"])
+            safe_merged.append(item)
+        return j(handler, {
+            "sessions": safe_merged,
+            "cli_count": len(deduped_cli),
+            "all_profiles": all_profiles,
+            "active_profile": active_profile,
+            "other_profile_count": other_profile_count,
+            "server_time": time.time(),
+            "server_tz": time.strftime("%z"),
+        })
 
     if parsed.path == "/api/projects":
         # ── Profile scoping (#1614) ────────────────────────────────────────
@@ -3538,12 +3271,15 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
-        qs = parse_qs(parsed.query)
-        category = qs.get("category", [None])[0]
-        data = _skills_list_from_dir(_active_skills_dir(), category=category)
+        from tools.skills_tool import skills_list as _skills_list
+
+        raw = _skills_list()
+        data = json.loads(raw) if isinstance(raw, str) else raw
         return j(handler, {"skills": data.get("skills", [])})
 
     if parsed.path == "/api/skills/content":
+        from tools.skills_tool import skill_view as _skill_view, SKILLS_DIR
+
         qs = parse_qs(parsed.query)
         name = qs.get("name", [""])[0]
         if not name:
@@ -3555,8 +3291,11 @@ def handle_get(handler, parsed) -> bool:
 
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
-            skills_dir = _active_skills_dir()
-            skill_dir, _skill_md = _find_skill_in_dir(name, skills_dir)
+            skill_dir = None
+            for p in SKILLS_DIR.rglob(name):
+                if p.is_dir():
+                    skill_dir = p
+                    break
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
             target = (skill_dir / file_path).resolve()
@@ -3570,7 +3309,8 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
-        data = _skill_view_from_active_dir(name)
+        raw = _skill_view(name)
+        data = json.loads(raw) if isinstance(raw, str) else raw
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)
@@ -3707,16 +3447,9 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
-    diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
     # CSRF: reject cross-origin browser requests
-    if diag:
-        diag.stage("csrf")
     if not _check_csrf(handler):
-        try:
-            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
-        finally:
-            if diag:
-                diag.finish()
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
@@ -3726,14 +3459,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
 
-    if diag:
-        diag.stage("read_body")
-    try:
-        body = read_body(handler)
-    except Exception:
-        if diag:
-            diag.finish()
-        raise
+    body = read_body(handler)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
@@ -4269,11 +3995,8 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
 
-    if parsed.path == "/api/goal":
-        return _handle_goal_command(handler, body)
-
     if parsed.path == "/api/chat/start":
-        return _handle_chat_start(handler, body, diag=diag)
+        return _handle_chat_start(handler, body)
 
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
@@ -4375,6 +4098,22 @@ def handle_post(handler, parsed) -> bool:
     # ── Clarify (POST) ──
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
+
+    # ── Commands (POST) ──
+    if parsed.path == "/api/commands/exec":
+        from api.commands import execute_plugin_command
+
+        command = str(body.get("command", "") or "").strip()
+        if not command:
+            return bad(handler, "command is required")
+        try:
+            return j(handler, {"output": execute_plugin_command(command)})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Plugin command not found", 404)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
@@ -6441,80 +6180,7 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
-def _start_chat_stream_for_session(
-    s,
-    *,
-    msg: str,
-    attachments=None,
-    workspace: str,
-    model: str,
-    model_provider=None,
-    normalized_model: bool = False,
-    diag=None,
-):
-    """Persist pending state, register an SSE channel, and start an agent turn."""
-    attachments = attachments or []
-    # Prevent duplicate runs in the same session while a stream is still active.
-    # This commonly happens after page refresh/reconnect races and can produce
-    # duplicated clarify cards for what appears to be a single user request.
-    diag.stage("active_stream_check") if diag else None
-    current_stream_id = getattr(s, "active_stream_id", None)
-    if current_stream_id:
-        diag.stage("active_stream_lock_wait") if diag else None
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
-            diag.stage("response_write") if diag else None
-            return {
-                "error": "session already has an active stream",
-                "active_stream_id": current_stream_id,
-                "_status": 409,
-            }
-        # Stale stream id from a previous run; clear and continue.
-        diag.stage("stale_stream_cleanup") if diag else None
-        _clear_stale_stream_state(s)
-    stream_id = uuid.uuid4().hex
-    session_lock = _get_session_agent_lock(s.session_id)
-    diag.stage("session_lock_wait") if diag else None
-    with session_lock:
-        diag.stage("save_pending_state") if diag else None
-        _prepare_chat_start_session_for_stream(
-            s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            stream_id=stream_id,
-        )
-    diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
-    diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    diag.stage("worker_thread_start") if diag else None
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs={"model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
-    response = {
-        "stream_id": stream_id,
-        "session_id": s.session_id,
-        "pending_started_at": s.pending_started_at,
-    }
-    if normalized_model:
-        response["effective_model"] = model
-    if model_provider:
-        response["effective_model_provider"] = model_provider
-    return response
-
-
-def _handle_goal_command(handler, body):
-    """Handle WebUI /goal command controls and optional kickoff stream."""
+def _handle_chat_start(handler, body):
     try:
         require(body, "session_id")
     except ValueError as e:
@@ -6523,7 +6189,6 @@ def _handle_goal_command(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
-
     requested_profile = str(body.get("profile") or "").strip()
     if requested_profile:
         try:
@@ -6540,171 +6205,79 @@ def _handle_goal_command(handler, body):
             or getattr(s, "pending_user_message", None)
         )
         if not has_persisted_turns:
+            # Empty sessions are placeholders. If the user switches profiles
+            # before sending the first turn, run the placeholder under the
+            # currently-selected profile instead of the stale one stamped at
+            # creation time.
             s.profile = requested_profile
-
+    msg = str(body.get("message", "")).strip()
+    if not msg:
+        return bad(handler, "message is required")
+    attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+    except ValueError as e:
+        return bad(handler, str(e))
+    requested_model = body.get("model") or s.model
+    requested_provider = (
+        body.get("model_provider")
+        if "model_provider" in body
+        else getattr(s, "model_provider", None)
+    )
+    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+    )
+    # Prevent duplicate runs in the same session while a stream is still active.
+    # This commonly happens after page refresh/reconnect races and can produce
+    # duplicated clarify cards for what appears to be a single user request.
     current_stream_id = getattr(s, "active_stream_id", None)
-    stream_running = False
     if current_stream_id:
         with STREAMS_LOCK:
-            stream_running = current_stream_id in STREAMS
-        if not stream_running:
-            _clear_stale_stream_state(s)
-
-    try:
-        from api.profiles import get_hermes_home_for_profile
-
-        profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
-    except Exception:
-        profile_home = None
-
-    from api.goals import goal_command_payload, goal_state_snapshot, restore_goal_state
-
-    goal_args = str(body.get("args", "") or body.get("text", "") or "")
-    goal_action = goal_args.strip().lower()
-    will_kickoff = bool(
-        goal_args.strip()
-        and goal_action not in ("status", "pause", "resume", "clear", "stop", "done")
-        and not stream_running
-    )
-    workspace = model = model_provider = normalized_model = None
-    previous_goal_state = None
-    if will_kickoff:
-        try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
-        except ValueError as e:
-            return bad(handler, str(e))
-        requested_model = body.get("model") or s.model
-        requested_provider = (
-            body.get("model_provider")
-            if "model_provider" in body
-            else getattr(s, "model_provider", None)
-        )
-        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-            requested_model,
-            requested_provider,
-        )
-        previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
-
-    payload = goal_command_payload(
-        s.session_id,
-        goal_args,
-        stream_running=stream_running,
-        profile_home=profile_home,
-    )
-    if not payload.get("ok", True):
-        status = 409 if payload.get("error") == "agent_running" else 400
-        return j(handler, payload, status=status)
-
-    kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
-    if kickoff_prompt:
-        if workspace is None:
-            try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
-            except ValueError as e:
-                return bad(handler, str(e))
-        if model is None:
-            requested_model = body.get("model") or s.model
-            requested_provider = (
-                body.get("model_provider")
-                if "model_provider" in body
-                else getattr(s, "model_provider", None)
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            return j(
+                handler,
+                {
+                    "error": "session already has an active stream",
+                    "active_stream_id": current_stream_id,
+                },
+                status=409,
             )
-            model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-                requested_model,
-                requested_provider,
-            )
-        stream_response = _start_chat_stream_for_session(
-            s,
-            msg=kickoff_prompt,
-            attachments=[],
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-        )
-        status = int(stream_response.pop("_status", 200) or 200)
-        payload.update(stream_response)
-        if status >= 400:
-            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
-            payload["ok"] = False
-            return j(handler, payload, status=status)
-
-    return j(handler, payload)
-
-
-def _handle_chat_start(handler, body, diag=None):
-    try:
-        diag.stage("validate_session_id") if diag else None
-        try:
-            require(body, "session_id")
-        except ValueError as e:
-            return bad(handler, str(e))
-        diag.stage("get_session") if diag else None
-        try:
-            s = get_session(body["session_id"])
-        except KeyError:
-            return bad(handler, "Session not found", 404)
-        diag.stage("validate_profile") if diag else None
-        requested_profile = str(body.get("profile") or "").strip()
-        if requested_profile:
-            try:
-                from api.profiles import _PROFILE_ID_RE
-
-                if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
-                    return bad(handler, "invalid profile", 400)
-            except ImportError:
-                requested_profile = ""
-        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-            has_persisted_turns = bool(
-                getattr(s, "messages", None)
-                or getattr(s, "context_messages", None)
-                or getattr(s, "pending_user_message", None)
-            )
-            if not has_persisted_turns:
-                # Empty sessions are placeholders. If the user switches profiles
-                # before sending the first turn, run the placeholder under the
-                # currently-selected profile instead of the stale one stamped at
-                # creation time.
-                s.profile = requested_profile
-        diag.stage("normalize_message") if diag else None
-        msg = str(body.get("message", "")).strip()
-        if not msg:
-            return bad(handler, "message is required")
-        diag.stage("normalize_attachments") if diag else None
-        attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
-        diag.stage("resolve_workspace") if diag else None
-        try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
-        except ValueError as e:
-            return bad(handler, str(e))
-        requested_model = body.get("model") or s.model
-        requested_provider = (
-            body.get("model_provider")
-            if "model_provider" in body
-            else getattr(s, "model_provider", None)
-        )
-        diag.stage("resolve_model_provider") if diag else None
-        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-            requested_model,
-            requested_provider,
-        )
-        response = _start_chat_stream_for_session(
+        # Stale stream id from a previous run; clear and continue.
+        _clear_stale_stream_state(s)
+    stream_id = uuid.uuid4().hex
+    with _get_session_agent_lock(s.session_id):
+        _prepare_chat_start_session_for_stream(
             s,
             msg=msg,
             attachments=attachments,
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            normalized_model=normalized_model,
-            diag=diag,
+            stream_id=stream_id,
         )
-        status = int(response.pop("_status", 200) or 200)
-        diag.stage("response_write") if diag else None
-        return j(handler, response, status=status)
-    finally:
-        if diag:
-            diag.finish()
-
+    set_last_workspace(workspace)
+    stream = create_stream_channel()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+    thr = threading.Thread(
+        target=_run_agent_streaming,
+        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        kwargs={"model_provider": model_provider},
+        daemon=True,
+    )
+    thr.start()
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": s.pending_started_at,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return j(handler, response)
 
 
 def _normalize_chat_attachments(raw_attachments):
@@ -6768,10 +6341,7 @@ def _handle_chat_sync(handler, body):
         from run_agent import AIAgent
 
         with CHAT_LOCK:
-            from api.config import (
-                resolve_model_provider,
-                resolve_custom_provider_connection,
-            )
+            from api.config import resolve_model_provider
 
             _model, _provider, _base_url = resolve_model_provider(
                 model_with_provider_context(s.model, getattr(s, "model_provider", None))
@@ -6797,12 +6367,6 @@ def _handle_chat_sync(handler, body):
                     f"[webui] WARNING: resolve_runtime_provider failed: {_e}",
                     flush=True,
                 )
-            if isinstance(_provider, str) and _provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
-                if not _api_key and _cp_key:
-                    _api_key = _cp_key
-                if not _base_url and _cp_base:
-                    _base_url = _cp_base
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -6815,24 +6379,23 @@ def _handle_chat_sync(handler, body):
                 enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
             )
+            workspace_ctx = f"[Workspace: {s.workspace}]\n"
+            workspace_system_msg = (
+                f"Active workspace at session start: {s.workspace}\n"
+                "Every user message is prefixed with [Workspace: /absolute/path] indicating the "
+                "workspace the user has selected in the web UI at the time they sent that message. "
+                "This tag is the single authoritative source of the active workspace and updates "
+                "with every message. It overrides any prior workspace mentioned in this system "
+                "prompt, memory, or conversation history. Always use the value from the most recent "
+                "[Workspace: ...] tag as your default working directory for ALL file operations: "
+                "write_file, read_file, search_files, terminal workdir, and patch. "
+                "Never fall back to a hardcoded path when this tag is present."
+            )
             from api.streaming import (
                 _merge_display_messages_after_agent_result,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _session_context_messages,
-                _workspace_context_prefix,
-            )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
             )
 
             _previous_messages = list(s.messages or [])
@@ -7566,13 +7129,6 @@ def _handle_session_compress(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for compression: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
-
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
 
@@ -8187,13 +7743,6 @@ def _handle_handoff_summary(handler, body):
         except Exception as _e:
             logger.warning("resolve_runtime_provider failed for handoff summary: %s", _e)
 
-        if isinstance(resolved_provider, str) and resolved_provider.startswith("custom:"):
-            _cp_key, _cp_base = _cfg.resolve_custom_provider_connection(resolved_provider)
-            if not resolved_api_key and _cp_key:
-                resolved_api_key = _cp_key
-            if not resolved_base_url and _cp_base:
-                resolved_base_url = _cp_base
-
         if not resolved_api_key:
             summary_text = _fallback_handoff_summary(msgs)
             try:
@@ -8328,15 +7877,15 @@ def _handle_skill_save(handler, body):
     category = body.get("category", "").strip()
     if category and ("/" in category or ".." in category):
         return bad(handler, "Invalid category")
-    skills_dir = _active_skills_dir()
+    from tools.skills_tool import SKILLS_DIR
 
     if category:
-        skill_dir = skills_dir / category / skill_name
+        skill_dir = SKILLS_DIR / category / skill_name
     else:
-        skill_dir = skills_dir / skill_name
-    # Validate resolved path stays within the active profile skills dir.
+        skill_dir = SKILLS_DIR / skill_name
+    # Validate resolved path stays within SKILLS_DIR
     try:
-        skill_dir.resolve().relative_to(skills_dir.resolve())
+        skill_dir.resolve().relative_to(SKILLS_DIR.resolve())
     except ValueError:
         return bad(handler, "Invalid skill path")
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -8350,13 +7899,10 @@ def _handle_skill_delete(handler, body):
         require(body, "name")
     except ValueError as e:
         return bad(handler, str(e))
+    from tools.skills_tool import SKILLS_DIR
     import shutil
 
-    skill_name = str(body["name"]).strip().lower().replace(" ", "-")
-    if not skill_name or "/" in skill_name or ".." in skill_name:
-        return bad(handler, "Invalid skill name")
-    skills_dir = _active_skills_dir()
-    matches = [p for p in skills_dir.rglob("SKILL.md") if p.parent.name == skill_name]
+    matches = list(SKILLS_DIR.rglob(f"{body['name']}/SKILL.md"))
     if not matches:
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
