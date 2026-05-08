@@ -60,8 +60,8 @@ def test_unknown_kanban_endpoint_routes_are_wrapped_for_all_methods():
 def test_kanban_stale_client_error_renders_hard_refresh_escape_hatch():
     assert "function _kanbanLooksLikeStaleClientError(err)" in PANELS
     assert "err.status === 404" in PANELS
-    assert "msg === 'not found'" in PANELS
     assert "msg.includes('unknown kanban endpoint')" in PANELS
+    assert "msg.includes('stale cached bundle')" in PANELS
     assert "Kanban needs a hard refresh" in PANELS
     assert "Hard refresh now" in PANELS
     assert "navigator.serviceWorker.getRegistrations()" in PANELS

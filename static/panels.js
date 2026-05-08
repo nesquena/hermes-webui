@@ -1219,7 +1219,6 @@ async function hardRefreshWebUIClient(){
 function _kanbanLooksLikeStaleClientError(err){
   const msg = String((err && err.message) || err || '').toLowerCase();
   return !!(err && err.status === 404 && (
-    msg === 'not found' ||
     msg.includes('unknown kanban endpoint') ||
     msg.includes('stale cached bundle')
   ));
