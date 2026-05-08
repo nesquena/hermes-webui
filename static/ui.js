@@ -443,7 +443,7 @@ function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   if(provider){
     const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);
     if(providerMatch) return providerMatch;
-    return matches.length===1 ? matches[0] : null;
+    return null;
   }
   return matches[0];
 }

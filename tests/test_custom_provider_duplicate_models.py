@@ -70,3 +70,22 @@ def test_named_custom_providers_keep_duplicate_model_ids(monkeypatch, tmp_path):
     assert "gpt-5.4" in edith_ids
     assert "@custom:super-javis:gpt-5.4" in super_ids
     assert "gpt-5.5" in super_ids
+
+    # Badge must NOT leak across providers: only super-javis's gpt-5.4 gets
+    # the PRIMARY badge — Edith's bare gpt-5.4 must be left alone.
+    badges = result.get("configured_model_badges", {})
+    # Only the deduplicated ID for super-javis should carry the "primary" badge.
+    primary_keys = [k for k, v in badges.items() if v.get("role") == "primary"]
+    assert any(k.startswith("@custom:super-javis:") and "gpt-5.4" in k for k in primary_keys), (
+        f"Expected a PRIMARY badge on super-javis's gpt-5.4; got {primary_keys}"
+    )
+    # The bare "gpt-5.4" (Edith's) must NOT receive the super-javis PRIMARY badge.
+    bare_badge = badges.get("gpt-5.4")
+    assert not bare_badge or bare_badge.get("role") != "primary", (
+        f"Edith's bare gpt-5.4 leaked a PRIMARY badge from super-javis: {bare_badge}"
+    )
+    # The provider field on the super-javis badge must correctly identify super-javis.
+    for k in primary_keys:
+        assert badges[k].get("provider") == "custom:super-javis", (
+            f"Badge provider mismatch: {badges[k]}"
+        )

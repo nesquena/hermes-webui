@@ -1514,7 +1514,13 @@ def get_available_models() -> dict:
                             break
 
                 badge_payload = {"role": entry["role"], "label": entry["label"], "provider": provider}
+                # Only assign badges to keys that are real dropdown entries.
+                # Synthetic keys like "custom:provider/model" can normalize to
+                # the same string as a bare model id from a different provider,
+                # leaking the PRIMARY badge across providers (#1874 follow-up).
                 for candidate in raw_candidates:
+                    if candidate not in option_lookup:
+                        continue
                     candidate_provider = option_provider_lookup.get(candidate)
                     if candidate_provider and candidate_provider != provider:
                         continue
