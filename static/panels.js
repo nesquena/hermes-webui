@@ -182,6 +182,19 @@ function _consumeSettingsTargetPanel(fallback = 'chat') {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
+  // ── Desktop sidebar collapse toggle ──
+  // If sidebar is collapsed, any rail click expands it first.
+  // If clicking the already-active panel, toggle sidebar collapsed instead.
+  if (typeof _isSidebarCollapsed === 'function' && window.matchMedia('(min-width:641px)').matches) {
+    if (_isSidebarCollapsed()) {
+      expandSidebar();
+      // Continue to normal panel switch below — first click after expand
+    } else if (prevPanel === nextPanel && !opts.force) {
+      // Same panel clicked while sidebar is open → collapse sidebar
+      toggleSidebar(true);
+      return false;
+    }
+  }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel

@@ -223,6 +223,41 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+
+// ── Desktop sidebar collapse toggle ──
+// Clicking the already-active rail button collapses/expands the sidebar panel,
+// leaving only the 48px rail visible. State is persisted via localStorage.
+const _SIDEBAR_COLLAPSED_KEY='hermes-sidebar-collapsed';
+
+function _isSidebarCollapsed(){
+  return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
+}
+
+function toggleSidebar(forceState){
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const isCollapsed=_isSidebarCollapsed();
+  const nextCollapsed=typeof forceState==='boolean'?forceState:!isCollapsed;
+  layout.classList.toggle('sidebar-collapsed',nextCollapsed);
+  try{localStorage.setItem(_SIDEBAR_COLLAPSED_KEY,nextCollapsed?'1':'0');}catch(e){}
+}
+
+function expandSidebar(){
+  if(_isSidebarCollapsed())toggleSidebar(false);
+}
+
+// Restore persisted sidebar collapse state on boot (desktop only).
+// Runs early so the layout renders in the correct state without a flash.
+(function _restoreSidebarState(){
+  if(window.matchMedia('(max-width:640px)').matches)return; // mobile uses own overlay
+  try{
+    const saved=localStorage.getItem(_SIDEBAR_COLLAPSED_KEY);
+    if(saved==='1'){
+      const layout=document.querySelector('.layout');
+      if(layout)layout.classList.add('sidebar-collapsed');
+    }
+  }catch(e){}
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }

@@ -1782,8 +1782,11 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
    Must be scoped to min-width:641px so it doesn't override the mobile
    position:fixed slide-in overlay set in the max-width:640px @media block above. */
 @media(min-width:641px){
-  .sidebar{position:relative;}
+  .sidebar{position:relative;transition:width .2s ease,opacity .2s ease;overflow:hidden;}
   .rightpanel{position:relative;}
+  /* Collapsed sidebar: hide the panel, keep the rail */
+  .layout.sidebar-collapsed .sidebar{width:0!important;min-width:0;border-right:none;opacity:0;pointer-events:none;overflow:hidden;}
+  .layout.sidebar-collapsed .sidebar .resize-handle{display:none;}
 }
 .sidebar .resize-handle{right:-2px;}
 .rightpanel .resize-handle{left:-2px;}
