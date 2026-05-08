@@ -238,6 +238,37 @@ function toggleWorkspacePanel(force){
   const nextMode=_hasWorkspacePreviewVisible()?'preview':'browse';
   openWorkspacePanel(nextMode);
 }
+// ── Sidebar collapse toggle (session list on left) ─────────────────────────
+function toggleSidebar(force){
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const sidebar=layout.querySelector('.sidebar');
+  if(!sidebar)return;
+  const currentlyCollapsed=layout.classList.contains('sidebar-collapsed');
+  const nextCollapsed=typeof force==='boolean'?force:!currentlyCollapsed;
+  layout.classList.toggle('sidebar-collapsed',nextCollapsed);
+  sidebar.classList.toggle('sidebar-collapsed',nextCollapsed);
+  try{localStorage.setItem('hermes-webui-sidebar-collapsed',nextCollapsed?'1':'0');}catch(_){}
+  // Update the rail button's active state so the user can see it
+  const btn=$('btnToggleSidebar');
+  if(btn) btn.classList.toggle('active',nextCollapsed);
+}
+function _initSidebarState(){
+  // Clear the flash-prevention dataset first, regardless of DOM state
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const sidebar=layout.querySelector('.sidebar');
+  if(!sidebar)return;
+  let collapsed=false;
+  try{collapsed=localStorage.getItem('hermes-webui-sidebar-collapsed')==='1';}catch(_){}
+  if(collapsed){
+    layout.classList.add('sidebar-collapsed');
+    sidebar.classList.add('sidebar-collapsed');
+    const btn=$('btnToggleSidebar');
+    if(btn) btn.classList.add('active');
+  }
+}
 function mobileSwitchPanel(name){
   switchPanel(name);
   if(name==='chat'){
@@ -1349,6 +1380,7 @@ function applyBotName(){
     applyBotName();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
+  _initSidebarState();
   // Non-blocking update check (fire-and-forget, once per tab session)
   // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
