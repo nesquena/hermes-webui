@@ -486,3 +486,212 @@ async def test_profiles_match_input_matrix(a, b):
     from mcp_server import _profiles_match as mcp_match
     from api.routes import _profiles_match as routes_match
     assert mcp_match(a, b) == routes_match(a, b)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  --profile CLI ordering regression
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Maintainer ask: verify that --profile is applied to _active_profile *before*
+# any api.models / api.profiles consumer reads the active profile. The risk
+# is that if the canonical helpers cached the profile on first read at import
+# time, a --profile foo flag passed at startup would bind too late.
+#
+# Today the helpers read _active_profile lazily (api/profiles.py:173 reads
+# the module global at every call) so the override is safe. This test locks
+# the behaviour: setting _active_profile = 'foo' before the first list call
+# produces results filtered to 'foo', not the default.
+
+class TestProfileCliOrdering:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.state_dir = _fresh_state_dir()
+        self.mod, self.profiles = _reimport_mcp()
+        yield
+        _cleanup_state_dir(self.state_dir)
+
+    async def test_active_profile_override_takes_effect_before_first_read(self):
+        """--profile foo must filter list_projects to foo's rows immediately.
+
+        Simulates the CLI override path (mcp_server.py:62-64 sets
+        _profiles._active_profile = _profile_arg right after import). If a
+        helper had latched the profile at import time, the override here
+        would be too late and the test would see 'default'-tagged rows."""
+        from api.config import PROJECTS_FILE
+        # Pre-seed two projects: one for default, one for foo.
+        seeded = [
+            {"project_id": "p_default_0001", "name": "DefaultRow",
+             "color": None, "profile": "default", "created_at": 1.0},
+            {"project_id": "p_foo_0001", "name": "FooRow",
+             "color": None, "profile": "foo", "created_at": 2.0},
+        ]
+        PROJECTS_FILE.write_text(json.dumps(seeded), encoding="utf-8")
+
+        # Apply the override BEFORE the first list call. This is what
+        # mcp_server.py:62-64 does after argparse.
+        self.profiles._active_profile = 'foo'
+
+        projects = await _call(self.mod, "list_projects")
+        names = [p["name"] for p in projects]
+        assert "FooRow" in names
+        assert "DefaultRow" not in names
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  HTTP wire-format coverage for rename_session / move_session
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Maintainer ask: exercise the actual HTTP path so a typo in WEBUI_URL or in
+# the request body shape can't slip through validation-only tests. We stand
+# up a tiny http.server stub on a free localhost port, point WEBUI_URL at it,
+# and capture (path, body) from the requests our handlers issue. This is
+# the thing that would have caught the original 8788 vs 8787 mismatch.
+
+import http.server
+import socket
+import threading
+
+
+class _RecordingHandler(http.server.BaseHTTPRequestHandler):
+    """Captures POST path + body, returns canned JSON. Class-level state is
+    set by the fixture before each test so handlers can cross-reference."""
+    captured = None  # populated per-test as a list of (path, body, headers)
+    canned_response = None  # populated per-test: dict to be JSON-encoded
+
+    def log_message(self, *args, **kwargs):  # noqa: D401 — silence stderr
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:
+            body = {"_raw": raw.decode("utf-8", errors="replace")}
+        type(self).captured.append({
+            "path": self.path,
+            "body": body,
+            "cookie": self.headers.get("Cookie"),
+            "content_type": self.headers.get("Content-Type"),
+        })
+        payload = json.dumps(type(self).canned_response or {}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+def _free_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class TestApiWireFormat:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.state_dir = _fresh_state_dir()
+        # Stand up a recording HTTP server on a free port. We override
+        # WEBUI_URL on the imported mcp_server module to point at it.
+        self.port = _free_port()
+        _RecordingHandler.captured = []
+        _RecordingHandler.canned_response = {}
+        self.httpd = http.server.HTTPServer(("127.0.0.1", self.port),
+                                            _RecordingHandler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+        # Disable auth so _api_post() does not attempt a real /api/auth/login.
+        os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+        self.mod, self.profiles = _reimport_mcp()
+        # Override AFTER import so the value sticks in the loaded module.
+        self.mod.WEBUI_URL = f"http://127.0.0.1:{self.port}"
+        yield
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+        _cleanup_state_dir(self.state_dir)
+
+    async def test_rename_session_posts_to_canonical_path(self):
+        """rename_session must POST {session_id, title} to /api/session/rename."""
+        _RecordingHandler.canned_response = {
+            "session": {"session_id": "abc123", "title": "Renamed"}
+        }
+        result = await _call(self.mod, "rename_session",
+                             session_id="abc123", title="Renamed")
+        assert len(_RecordingHandler.captured) == 1
+        req = _RecordingHandler.captured[0]
+        assert req["path"] == "/api/session/rename"
+        assert req["body"] == {"session_id": "abc123", "title": "Renamed"}
+        assert req["content_type"] == "application/json"
+        # Handler returns success-shaped result on 200.
+        assert result["ok"] is True
+        assert result["session_id"] == "abc123"
+        assert result["title"] == "Renamed"
+        assert result["method"] == "api"
+
+    async def test_move_session_posts_to_canonical_path(self):
+        """move_session (with a project_id) POSTs to /api/session/move
+        after confirming the project exists locally."""
+        # Need a real project so the pre-flight profile check passes.
+        created = await _call(self.mod, "create_project", name="MoveTarget")
+        pid = created["project_id"]
+        _RecordingHandler.canned_response = {
+            "ok": True,
+            "session": {"session_id": "s1", "title": "T", "project_id": pid}
+        }
+        result = await _call(self.mod, "move_session",
+                             session_id="s1", project_id=pid)
+        assert len(_RecordingHandler.captured) == 1
+        req = _RecordingHandler.captured[0]
+        assert req["path"] == "/api/session/move"
+        assert req["body"] == {"session_id": "s1", "project_id": pid}
+        assert result["ok"] is True
+        assert result["session_id"] == "s1"
+        assert result["project_id"] == pid
+        assert result["method"] == "api"
+
+    async def test_move_session_unassign_sends_null_project_id(self):
+        """Passing project_id=None must serialize as JSON null (not omitted)."""
+        _RecordingHandler.canned_response = {
+            "ok": True, "session": {"session_id": "s1", "project_id": None}
+        }
+        result = await _call(self.mod, "move_session",
+                             session_id="s1", project_id=None)
+        assert len(_RecordingHandler.captured) == 1
+        req = _RecordingHandler.captured[0]
+        assert req["path"] == "/api/session/move"
+        assert req["body"] == {"session_id": "s1", "project_id": None}
+        assert result["ok"] is True
+
+    async def test_url_built_from_env_vars(self):
+        """HERMES_WEBUI_HOST / HERMES_WEBUI_PORT govern WEBUI_URL.
+
+        Locks the maintainer-suggested env-var contract from #1895 review:
+        the MCP must track the same env vars api/config.py:32-33 reads, so
+        a non-default WebUI port (e.g. 8788 when 8787 is held by another
+        service on the host) does not require a code edit."""
+        os.environ["HERMES_WEBUI_HOST"] = "10.0.0.42"
+        os.environ["HERMES_WEBUI_PORT"] = "9999"
+        try:
+            mod, _ = _reimport_mcp()
+            assert mod.WEBUI_HOST == "10.0.0.42"
+            assert mod.WEBUI_PORT == "9999"
+            assert mod.WEBUI_URL == "http://10.0.0.42:9999"
+        finally:
+            os.environ.pop("HERMES_WEBUI_HOST", None)
+            os.environ.pop("HERMES_WEBUI_PORT", None)
+
+    async def test_url_default_when_env_unset(self):
+        """Default upstream port is 8787, matching api/config.py:33."""
+        os.environ.pop("HERMES_WEBUI_HOST", None)
+        os.environ.pop("HERMES_WEBUI_PORT", None)
+        mod, _ = _reimport_mcp()
+        assert mod.WEBUI_HOST == "127.0.0.1"
+        assert mod.WEBUI_PORT == "8787"
+        assert mod.WEBUI_URL == "http://127.0.0.1:8787"
