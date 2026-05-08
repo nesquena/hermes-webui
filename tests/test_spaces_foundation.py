@@ -4248,6 +4248,67 @@ def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch,
     assert "renderer" not in serialized
 
 
+def test_recovery_snapshot_exposes_safe_admin_gate_summary(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Recovery Gate"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "bad-widget",
+        reason="renderer crashed with api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+    )
+    spaces.queue_widget_event(
+        created["space_id"],
+        "bad-widget",
+        "agent.repair",
+        {"source": "recovery-panel", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="Repair without leaking SECRET_VALUE_DO_NOT_LEAK or generated source body",
+    )
+    spaces.disable_space_for_recovery(
+        created["space_id"],
+        reason="Authorization Bearer SECRET_VALUE_DO_NOT_LEAK source <script>bad()</script>",
+    )
+
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery).lower()
+
+    assert recovery["safe_admin"] == {
+        "metadata_only": True,
+        "generated_widgets_rendered": False,
+        "recovery_route": "/api/spaces/recovery",
+        "restore_routes": ["/api/spaces/revision/restore", "/api/spaces/revision/restore-widget"],
+        "gate_labels": [
+            "metadata-only recovery",
+            "generated widgets not rendered",
+            "rollback controls available",
+            "disable and repair controls available",
+        ],
+    }
+    assert recovery["summary"] == {
+        "space_count": 1,
+        "widget_count": 1,
+        "disabled_space_count": 1,
+        "disabled_widget_count": 1,
+        "rollback_point_count": 4,
+        "queued_event_count": 1,
+    }
+    assert recovery["spaces"][0]["disabled_reason"] == "[REDACTED]"
+    assert recovery["spaces"][0]["widgets"][0]["disabled_reason"] == "[REDACTED]"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_recovery_snapshot_includes_safe_widget_event_status_without_prompt_or_payload(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Recovery Event Status"})

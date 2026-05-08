@@ -2280,6 +2280,32 @@
     return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
   }
 
+  function recoveryCountLabel(count, singular){
+    return Number(count || 0)+' '+singular+(Number(count || 0) === 1 ? '' : 's');
+  }
+
+  function renderRecoveryAdminGate(data){
+    const gate = data && data.safe_admin && typeof data.safe_admin === 'object' && !Array.isArray(data.safe_admin) ? data.safe_admin : {};
+    const summary = data && data.summary && typeof data.summary === 'object' && !Array.isArray(data.summary) ? data.summary : {};
+    const labels = Array.isArray(gate.gate_labels) ? gate.gate_labels.slice(0, 6).map(safeCreatorSummaryText).filter(Boolean) : [];
+    const route = safeCreatorSummaryText(gate.recovery_route || '');
+    const restoreRoutes = Array.isArray(gate.restore_routes) ? gate.restore_routes.slice(0, 4).map(safeCreatorSummaryText).filter(Boolean) : [];
+    const summaryText = [
+      recoveryCountLabel(summary.space_count, 'space'),
+      recoveryCountLabel(summary.widget_count, 'widget'),
+      recoveryCountLabel(summary.disabled_space_count, 'disabled space'),
+      recoveryCountLabel(summary.disabled_widget_count, 'disabled widget'),
+      recoveryCountLabel(summary.rollback_point_count, 'rollback point'),
+      recoveryCountLabel(summary.queued_event_count, 'queued event'),
+    ].join(' · ');
+    const gateText = labels.length ? labels.join(' · ') : 'metadata-only recovery · generated widgets not rendered';
+    return '<div class="capy-spaces-card"><h4>Recovery hard gate</h4>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(gateText)+'</div>' +
+      '<div class="capy-spaces-muted">Recovery summary: '+escapeHtml(summaryText)+'</div>' +
+      (route || restoreRoutes.length ? '<div class="capy-spaces-muted">Routes: '+escapeHtml([route].concat(restoreRoutes).filter(Boolean).join(' · '))+'</div>' : '') +
+      '</div>';
+  }
+
   function renderRecoverySnapshot(data){
     if (!data || !data.enabled) {
       return '<div class="capy-spaces-card"><h3>Capy Spaces recovery disabled</h3><div class="capy-spaces-muted">Capy Spaces recovery is disabled because Spaces are disabled.</div></div>';
@@ -2323,6 +2349,7 @@
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
+      renderRecoveryAdminGate(data || {}) +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 

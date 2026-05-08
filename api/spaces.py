@@ -278,6 +278,21 @@ def _write_manifest(space: dict[str, Any], event_type: str, details: dict[str, A
     return dict(space)
 
 
+def _recovery_reason_summary(value: Any, limit: int = 300) -> str:
+    text = _context_value(value, limit)
+    lowered = text.lower()
+    unsafe_marker_re = re.compile(
+        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|authorization|bearer|cookie|credential|credentials|password|secret|token|renderer|source|html|script|data)([^a-z0-9]|$)",
+        re.IGNORECASE,
+    )
+    if text and (
+        unsafe_marker_re.search(text)
+        or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
+    ):
+        return "[REDACTED]"
+    return text
+
+
 def _summary(space: dict[str, Any]) -> dict[str, Any]:
     widgets = space.get("widgets") or []
     recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
@@ -291,7 +306,7 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
         "revision_event_id": space.get("revision_event_id"),
         "widget_count": len(widgets) if isinstance(widgets, list) else 0,
         "disabled": bool(recovery.get("disabled")),
-        "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
+        "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
     }
 
 
@@ -822,7 +837,7 @@ def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
         "kind": clean_widget["kind"],
         "title": clean_widget["title"],
         "disabled": bool(recovery.get("disabled")),
-        "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
+        "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
     }
 
 
@@ -3628,7 +3643,7 @@ def _space_agent_widget_export_doc(widget: dict[str, Any]) -> dict[str, Any]:
     if recovery.get("disabled"):
         doc["recovery"] = {
             "disabled": True,
-            "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
+            "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
         }
     return doc
 
@@ -5089,12 +5104,42 @@ def queue_widget_event(
     }
 
 
+def _recovery_safe_admin_contract() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "generated_widgets_rendered": False,
+        "recovery_route": "/api/spaces/recovery",
+        "restore_routes": ["/api/spaces/revision/restore", "/api/spaces/revision/restore-widget"],
+        "gate_labels": [
+            "metadata-only recovery",
+            "generated widgets not rendered",
+            "rollback controls available",
+            "disable and repair controls available",
+        ],
+    }
+
+
 def recovery_snapshot() -> dict[str, Any]:
     """Return safe recovery metadata without rendering/returning widget code."""
+    empty_summary = {
+        "space_count": 0,
+        "widget_count": 0,
+        "disabled_space_count": 0,
+        "disabled_widget_count": 0,
+        "rollback_point_count": 0,
+        "queued_event_count": 0,
+    }
     if not spaces_enabled():
-        return {"enabled": False, "generated_widgets_rendered": False, "spaces": []}
+        return {
+            "enabled": False,
+            "generated_widgets_rendered": False,
+            "safe_admin": _recovery_safe_admin_contract(),
+            "summary": empty_summary,
+            "spaces": [],
+        }
     _ensure_dirs()
     spaces: list[dict[str, Any]] = []
+    counts = dict(empty_summary)
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))
@@ -5108,19 +5153,28 @@ def recovery_snapshot() -> dict[str, Any]:
                     continue
                 queued_events_by_widget.setdefault(wid, []).append(event)
             for widget_summary in widget_summaries:
+                if widget_summary.get("disabled"):
+                    counts["disabled_widget_count"] += 1
                 wid = _context_value(widget_summary.get("id"), 120)
                 widget_events = queued_events_by_widget.get(wid) or []
                 if not widget_events:
                     continue
                 latest = widget_events[0]
+                counts["queued_event_count"] += len(widget_events)
                 widget_summary["queued_event_count"] = len(widget_events)
                 widget_summary["latest_queued_event"] = {
                     "event_id": _context_value(latest.get("event_id"), 120),
                     "event_name": _context_value(latest.get("event_name"), 120),
                     "status": _context_value(latest.get("status") or "queued", 80),
                 }
+            revisions = list_revision_events(summary["space_id"], 5)
             summary["widgets"] = widget_summaries
-            summary["revisions"] = list_revision_events(summary["space_id"], 5)
+            summary["revisions"] = revisions
+            counts["space_count"] += 1
+            counts["widget_count"] += len(widget_summaries)
+            if summary.get("disabled"):
+                counts["disabled_space_count"] += 1
+            counts["rollback_point_count"] += len(revisions)
             spaces.append(summary)
         except Exception:
             continue
@@ -5129,5 +5183,7 @@ def recovery_snapshot() -> dict[str, Any]:
         "enabled": True,
         "schema_version": SCHEMA_VERSION,
         "generated_widgets_rendered": False,
+        "safe_admin": _recovery_safe_admin_contract(),
+        "summary": counts,
         "spaces": spaces,
     }

@@ -456,6 +456,25 @@ global.fetch = async function(path, opts = {}) {
     return response({
       enabled: true,
       generated_widgets_rendered: false,
+      safe_admin: {
+        metadata_only: true,
+        generated_widgets_rendered: false,
+        recovery_route: '/api/spaces/recovery',
+        restore_routes: ['/api/spaces/revision/restore', '/api/spaces/revision/restore-widget'],
+        gate_labels: ['metadata-only recovery', 'generated widgets not rendered', 'rollback controls available', 'disable and repair controls available'],
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      summary: {
+        space_count: 2,
+        widget_count: 3,
+        disabled_space_count: 1,
+        disabled_widget_count: 1,
+        rollback_point_count: 2,
+        queued_event_count: 1,
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       spaces: [
         {
           space_id: 'broken',
@@ -3259,6 +3278,11 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "reason: [REDACTED]" in out["recoveryHtml"]
     assert "Disabled: render failed" in out["recoveryHtml"]
     assert "Generated widgets rendered: false" in out["recoveryHtml"]
+    assert "Recovery hard gate" in out["recoveryHtml"]
+    assert "metadata-only recovery · generated widgets not rendered · rollback controls available · disable and repair controls available" in out["recoveryHtml"]
+    assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 2 rollback points · 1 queued event" in out["recoveryHtml"]
+    assert "/api/spaces/recovery" in out["recoveryHtml"]
+    assert "/api/spaces/revision/restore-widget" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
