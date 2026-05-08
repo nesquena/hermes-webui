@@ -197,6 +197,49 @@ class TestDeleteProject:
         result = await _call(self.mod, "delete_project", project_id=pid)
         assert "error" in result
 
+    async def test_delete_no_auth_refuses_unassign(self):
+        """Without HERMES_WEBUI_PASSWORD, delete_project must NOT touch
+        session JSONs. Direct FS writes would bypass _write_session_index()
+        and leave _index.json holding the stale project_id, causing a
+        running WebUI to keep grouping sessions under the deleted project.
+
+        The handler should: delete the project from projects.json, leave
+        every session JSON untouched, leave the index untouched, and
+        surface a `warning` field telling the operator to set the env var.
+        """
+        from api.config import SESSION_DIR, SESSION_INDEX_FILE
+        os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+
+        # Create project + a session JSON that points at it
+        created = await _call(self.mod, "create_project", name="ToDelete")
+        pid = created["project_id"]
+        sid = "test_sess_001"
+        session_path = SESSION_DIR / f"{sid}.json"
+        session_payload = {
+            "session_id": sid,
+            "title": "T",
+            "project_id": pid,
+            "messages": [],
+        }
+        session_path.write_text(json.dumps(session_payload), encoding="utf-8")
+        # Index references the session under the project
+        SESSION_INDEX_FILE.write_text(
+            json.dumps([{"session_id": sid, "project_id": pid, "title": "T"}]),
+            encoding="utf-8")
+        index_before = SESSION_INDEX_FILE.read_text(encoding="utf-8")
+        session_before = session_path.read_text(encoding="utf-8")
+
+        result = await _call(self.mod, "delete_project", project_id=pid)
+
+        assert result["ok"] is True
+        assert result["unassigned_sessions"] == 0
+        assert "warning" in result
+        assert "HERMES_WEBUI_PASSWORD" in result["warning"]
+        # Session JSON untouched
+        assert session_path.read_text(encoding="utf-8") == session_before
+        # Index untouched
+        assert SESSION_INDEX_FILE.read_text(encoding="utf-8") == index_before
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Profile Scoping

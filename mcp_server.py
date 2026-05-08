@@ -64,7 +64,12 @@ if _profile_arg is not None:
     _profiles._active_profile = _profile_arg
 
 # ── API auth state ─────────────────────────────────────────────────────────
-WEBUI_URL = "http://127.0.0.1:8788"
+# Mirror the env-var contract used by api/config.py:32-33 so a non-default
+# WebUI port/host (e.g. when 8787 is held by another service on the host)
+# Just Works without configuration drift between the WebUI process and MCP.
+WEBUI_HOST = os.environ.get("HERMES_WEBUI_HOST", "127.0.0.1")
+WEBUI_PORT = os.environ.get("HERMES_WEBUI_PORT", "8787")
+WEBUI_URL = f"http://{WEBUI_HOST}:{WEBUI_PORT}"
 _auth_cookie: str | None = None
 _auth_expires: float = 0  # unix timestamp after which we re-auth
 
@@ -353,9 +358,29 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
     projects = [p for p in projects if p["project_id"] != project_id]
     save_projects(projects)
 
-    # Unassign sessions — use API if auth available, filesystem otherwise
-    unassigned = 0
+    # Unassign sessions only when we can do it cache-safely via the HTTP API.
+    # The previous filesystem fallback wrote session_data directly with
+    # os.replace(), which bypassed _write_session_index() in api/models.py
+    # and left _index.json holding the stale project_id — a running WebUI
+    # would still group those sessions under the deleted project until a
+    # subsequent re-compact. Even calling Session.save() in-process would
+    # not help because the WebUI's SESSIONS dict cache (a separate process)
+    # still has the old project_id and overwrites our update on its next
+    # save. The HTTP API is the only cache-safe path; without auth we
+    # refuse and surface the limitation so the operator can act.
     has_auth = bool(_api_password())
+    if not has_auth:
+        return [TextContent(type="text", text=json.dumps({
+            "ok": True,
+            "deleted": proj["name"],
+            "unassigned_sessions": 0,
+            "warning": "Set HERMES_WEBUI_PASSWORD to unassign sessions; "
+                       "without auth the session index cannot be safely "
+                       "updated and direct filesystem writes would cause "
+                       "index drift in a running WebUI.",
+        }, ensure_ascii=False))]
+
+    unassigned = 0
     if SESSION_DIR.exists():
         for p in SESSION_DIR.glob("*.json"):
             if p.name.startswith("_"):
@@ -364,19 +389,9 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
                 session_data = json.loads(p.read_text(encoding="utf-8"))
                 if session_data.get("project_id") == project_id:
                     sid = p.stem
-                    if has_auth:
-                        result = _api_post("/api/session/move",
-                                           {"session_id": sid, "project_id": None})
-                        if "ok" in result or "session" in result:
-                            unassigned += 1
-                    else:
-                        # Filesystem fallback (may be overwritten by server cache)
-                        session_data["project_id"] = None
-                        tmp = p.with_suffix(".tmp")
-                        tmp.write_text(
-                            json.dumps(session_data, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-                        os.replace(tmp, p)
+                    result = _api_post("/api/session/move",
+                                       {"session_id": sid, "project_id": None})
+                    if "ok" in result or "session" in result:
                         unassigned += 1
             except Exception:
                 pass
