@@ -2296,6 +2296,29 @@ def _run_agent_streaming(
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
 
+            # CLI-parity max-iteration budget: read config.yaml's
+            # agent.max_turns and pass it to AIAgent when supported. Without
+            # this WebUI-created agents silently use AIAgent's constructor
+            # default (90), so long browser-originated tasks hit the
+            # "maximum number of tool-calling iterations" summary path even
+            # after the operator raises Hermes' global turn budget.
+            _max_iterations_cfg = None
+            try:
+                _raw_max_iterations = None
+                _agent_cfg_for_iterations = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
+                if isinstance(_agent_cfg_for_iterations, dict):
+                    _raw_max_iterations = _agent_cfg_for_iterations.get('max_turns')
+                if _raw_max_iterations is None and isinstance(_cfg, dict):
+                    # Back-compat for older Hermes config files that used a
+                    # root-level max_turns key.
+                    _raw_max_iterations = _cfg.get('max_turns')
+                if _raw_max_iterations is not None:
+                    _parsed_max_iterations = int(_raw_max_iterations)
+                    if _parsed_max_iterations > 0:
+                        _max_iterations_cfg = _parsed_max_iterations
+            except Exception:
+                _max_iterations_cfg = None
+
             # CLI-parity max output cap: read config.yaml's max_tokens and pass
             # it to AIAgent when supported. Without this WebUI-created agents use
             # provider-native output ceilings (e.g. Claude via OpenRouter can
@@ -2355,6 +2378,8 @@ def _run_agent_streaming(
                 _agent_kwargs['reasoning_config'] = _reasoning_config
             if 'status_callback' in _agent_params:
                 _agent_kwargs['status_callback'] = _agent_status_callback
+            if 'max_iterations' in _agent_params and _max_iterations_cfg is not None:
+                _agent_kwargs['max_iterations'] = _max_iterations_cfg
             if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
                 _agent_kwargs['max_tokens'] = _max_tokens_cfg
             # Params added in newer hermes-agent — skip if not supported
@@ -2388,6 +2413,7 @@ def _run_agent_streaming(
                     _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16],
                     resolved_base_url or '',
                     resolved_provider or '',
+                    _max_iterations_cfg or '',
                     _max_tokens_cfg or '',
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
