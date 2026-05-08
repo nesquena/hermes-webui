@@ -16,7 +16,8 @@ def test_workspace_display_prefix_helper_strips_leading_metadata_only():
     assert end != -1, "user fenced block renderer not found after prefix stripper"
     helper = src[start:end]
 
-    assert r"^\s*\[Workspace:[^\]]+\]\s*" in helper
+    assert r"^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*" in helper
+    assert "[Workspace:[^\\]]+" not in helper
     assert ".trim()" in helper
 
 

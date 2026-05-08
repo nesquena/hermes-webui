@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Tightened WebUI's model-facing workspace prefix to a versioned sentinel (`[Workspace::v1: ...]`) so user-typed `[Workspace: ...]` text is preserved while injected prefixes still dedupe compaction results. Closes #1913.
+
 ## [v0.51.26] — 2026-05-08 — 5-PR follow-on contributor batch (Release D: profile-isolation hardening across cache + skills + gateway-health, context-length config-override threading, sidebar segment count UI polish)
 
 ### Fixed (5 PRs + 1 absorbed test)

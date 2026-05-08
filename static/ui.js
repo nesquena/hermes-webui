@@ -70,7 +70,7 @@ function _isBacktickFenceClose(line,minLen){
  */
 
 function _stripWorkspaceDisplayPrefix(text){
-  return String(text||'').replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+  return String(text||'').replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'').trim();
 }
 function _renderUserFencedBlocks(text){
   const stash=[];
