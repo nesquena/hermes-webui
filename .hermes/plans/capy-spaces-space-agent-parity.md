@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-07 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: widget details now expose a metadata-only sandbox/runtime `postMessage` event bridge contract. Approved `capy:agent:prompt` messages queue safe widget events through the shared confirm dialog, raw/eval/data mutation messages are blocked without network calls, prompt/auth/source/data/generated-code markers are redacted, and runtime tokens rotate so stale shells fail closed. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the backend Spaces tool adapter now has a generic creator-loop preview gate (`space.creator.preview`) that turns an untrusted prompt plus proposed widget specs into a bounded, metadata-only, non-persisted space/widget draft. The response does not echo the prompt, quarantines generated bodies, omits raw renderer/html/script/source/data/auth fields, requires sandbox preview and visual QA before commit, and reserves revisioned commit/rollback for the next gate. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): add creator preview gate`
+  - Added RED/GREEN backend coverage proving `space.creator.preview` returns a bounded non-persisted creator-loop spec (`stored: false`, `executed: false`) from a hostile prompt + widget fixture while preserving safe space/widget metadata, quarantining generated bodies, and omitting prompt/auth/source/data/generated-body markers and secret-looking values from serialized responses.
+  - Added aliases for future source-style callers (`space.creator.spec.preview`, `space.spaces.previewCreatorSpec`) without creating Spaces or widgets; commit remains gated behind sandbox preview, visual QA, and revision checkpoints.
+  - Validation at completion: focused RED failed before implementation, follow-up REDs caught widget title/prompt/description fallback leaks plus unbounded nested/wide prompt metadata, then focused GREEN passed (`4 passed`); full Spaces foundation suite passed (`157 passed`); Spaces UI JS behavior + demo parity suites passed (`116 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` browser QA harness leak checks passed.
 
 - `feat(spaces): add sandbox postmessage event bridge`
   - Added RED/GREEN real-`static/spaces.js` coverage proving widget details show the safe runtime contract, approved sandbox prompts queue metadata-only `agent.prompt` events, cancelled/stale/old-token prompts do not queue, raw/eval/data mutation messages are blocked, and prompt/auth/source/data/generated-code/secret-looking values stay redacted.

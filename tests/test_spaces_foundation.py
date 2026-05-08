@@ -1469,6 +1469,206 @@ def test_space_tool_adapter_supports_source_preview_widget_record_metadata_only(
 
 
 
+def test_space_tool_adapter_supports_creator_loop_preview_metadata_only_without_persistence(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build a research dashboard with access_token=TOKEN_VALUE and html=<script>steal()</script>",
+            "spaceName": "Research Creator Lab",
+            "description": "Creator loop safe preview",
+            "widgets": [
+                {
+                    "widgetId": "summary-panel",
+                    "name": "Summary Panel",
+                    "type": "markdown",
+                    "size": {"cols": 8, "rows": 4},
+                    "metadata": {"summary": "safe plan", "api_key": "***"},
+                    "renderer": "async () => ({ html: '<script>steal()</script>' })",
+                    "html": "<img src=x onerror=steal()>",
+                    "script": "steal()",
+                    "data": {"token": "***"},
+                    "source": "SECRET_SOURCE",
+                },
+                {
+                    "widgetId": "progress-widget",
+                    "title": "Progress Widget",
+                    "kind": "status",
+                    "layout": {"x": 8, "y": 0, "w": 4, "h": 2},
+                    "status": {"phase": "draft"},
+                },
+            ],
+            "renderer": "<script>outer()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"preview": preview, "spaces": spaces.list_spaces()}).lower()
+
+    assert preview["ok"] is True
+    assert preview["action"] == "space.creator.preview"
+    assert preview["creator_loop"] == {
+        "stage": "bounded-spec-preview",
+        "mode": "metadata-only",
+        "stored": False,
+        "executed": False,
+        "requires_sandbox_preview": True,
+        "requires_visual_qa": True,
+        "commit_requires_revision": True,
+    }
+    assert preview["space"] == {
+        "space_id": "research-creator-lab",
+        "name": "Research Creator Lab",
+        "description": "Creator loop safe preview",
+    }
+    assert [widget["id"] for widget in preview["widgets"]] == ["summary-panel", "progress-widget"]
+    assert preview["widgets"][0]["metadata"]["content_status"] == {
+        "status": "quarantined",
+        "reason": "generated-code-disabled",
+        "omitted_field_count": "5",
+    }
+    assert preview["widgets"][1]["metadata"]["status"] == {"phase": "draft"}
+    assert preview["safety"] == {
+        "prompt_echoed": False,
+        "unsafe_prompt_redacted": True,
+        "generated_bodies_rendered": False,
+        "omitted_field_count": 6,
+    }
+    assert spaces.list_spaces() == []
+    assert "research dashboard" not in serialized
+    assert "access_token" not in serialized
+    assert "token_value" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"script":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+def test_creator_preview_redacts_widget_titles_prompts_and_description_fallback(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.spec.preview",
+        {
+            "description": "Build private roadmap dashboard from SECRET_SOURCE",
+            "widgets": [
+                {
+                    "widgetId": "TOKEN_VALUE",
+                    "name": "Do not leak access_token=TOKEN_VALUE <script>steal()</script>",
+                    "type": "javascript:bad()",
+                    "prompt": "Build dashboard from private roadmap",
+                    "status": {"phase": "SECRET_SOURCE", "note": "TOKEN_VALUE", "prompt": "Build private roadmap dashboard"},
+                    "interaction": {"agentPrompt": "Summarize private roadmap", "mode": "queued"},
+                },
+                {
+                    "widgetId": "TOKEN_VALUE",
+                    "title": "Safe Duplicate",
+                    "kind": "status",
+                },
+            ],
+        },
+    )
+    alias_preview = spaces.run_space_tool("space.spaces.previewCreatorSpec", {"prompt": "safe", "widgets": []})
+    serialized = json.dumps({"preview": preview, "alias_preview": alias_preview}).lower()
+
+    assert preview["ok"] is True
+    assert preview["action"] == "space.creator.spec.preview"
+    assert preview["space"] == {"space_id": "creator-preview", "name": "Creator Preview"}
+    assert [widget["id"] for widget in preview["widgets"]] == ["creator-widget-1", "safe-duplicate"]
+    assert preview["widgets"][0]["title"] == "Creator Widget 1"
+    assert preview["widgets"][0]["kind"] == "markdown"
+    assert "prompt" not in preview["widgets"][0].get("metadata", {})
+    assert preview["widgets"][0]["metadata"]["status"] == {"phase": "[REDACTED]", "note": "[REDACTED]"}
+    assert preview["widgets"][0]["metadata"]["interaction"] == {"mode": "queued"}
+    assert preview["safety"]["prompt_echoed"] is False
+    assert preview["safety"]["unsafe_prompt_redacted"] is True
+    assert preview["safety"]["omitted_field_count"] >= 5
+    assert alias_preview["ok"] is True
+    assert alias_preview["action"] == "space.spaces.previewcreatorspec"
+    assert "private roadmap" not in serialized
+    assert "secret_source" not in serialized
+    assert "token_value" not in serialized
+    assert "access_token" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "javascript:" not in serialized
+    assert '"prompt"' not in serialized
+    assert "secret" not in serialized
+    assert "token" not in serialized
+
+
+def test_creator_preview_bounds_nested_prompt_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    nested: dict[str, object] = {"prompt": "Build private roadmap"}
+    for _ in range(1200):
+        nested = {"child": nested}
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "safe creator request",
+            "widgets": [
+                {
+                    "widgetId": "deep-status",
+                    "title": "Deep Status",
+                    "kind": "status",
+                    "status": nested,
+                }
+            ],
+        },
+    )
+    serialized = json.dumps(preview).lower()
+
+    assert preview["ok"] is True
+    assert preview["widgets"][0]["id"] == "deep-status"
+    assert "maximum recursion" not in serialized
+    assert "private roadmap" not in serialized
+    assert '"prompt"' not in serialized
+    assert preview["safety"]["omitted_field_count"] >= 1
+
+
+def test_creator_preview_bounds_wide_metadata_without_full_iteration(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    seen = {"count": 0}
+
+    class CountingDict(dict):
+        def items(self):
+            for item in super().items():
+                seen["count"] += 1
+                yield item
+
+    wide_status = CountingDict((f"safe_{index}", index) for index in range(1000))
+    wide_status["prompt"] = "Build private roadmap"
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "safe creator request",
+            "widgets": [
+                {
+                    "widgetId": "wide-status",
+                    "title": "Wide Status",
+                    "kind": "status",
+                    "status": wide_status,
+                }
+            ],
+        },
+    )
+    serialized = json.dumps(preview).lower()
+
+    assert preview["ok"] is True
+    assert seen["count"] <= 60
+    assert "private roadmap" not in serialized
+    assert '"prompt"' not in serialized
+    assert preview["safety"]["omitted_field_count"] >= 950
+
+
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

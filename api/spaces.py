@@ -50,7 +50,7 @@ _OMITTED_PAYLOAD_KEYS = {
     "token",
 }
 _SECRET_LIKE_VALUE_RE = re.compile(
-    r"\b(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token)\b",
+    r"(^|[^a-z0-9])(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token)([^a-z0-9]|$)",
     re.IGNORECASE,
 )
 _EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
@@ -899,7 +899,9 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
         return "[omitted]"
     if isinstance(value, dict):
         summary: dict[str, Any] = {}
-        for key, child in list(value.items())[:50]:
+        for index, (key, child) in enumerate(value.items()):
+            if index >= 50:
+                break
             safe_key = _context_value(key, 80)
             if not _payload_key_is_safe(safe_key):
                 continue
@@ -2007,6 +2009,163 @@ def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
     return detail
 
 
+def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded, non-persisted creator-loop preview spec.
+
+    This is the first generic creator-loop gate: accept an untrusted prompt plus
+    optional proposed widgets, then produce a metadata-only draft contract for
+    sandbox preview / visual QA without creating a Space, executing generated
+    bodies, or echoing raw prompt/source/auth material.
+    """
+    explicit_prompt = any(key in payload for key in ("prompt", "request"))
+    prompt_text = str(payload.get("prompt") or payload.get("request") or payload.get("description") or "")
+    prompt_summary = _payload_text_summary(prompt_text, 500)
+    unsafe_prompt_redacted = prompt_summary == "[REDACTED]"
+
+    raw_space_name = payload.get("spaceName") or payload.get("space_name") or payload.get("name") or "Creator Preview"
+    safe_space_name = _payload_text_summary(raw_space_name, 120)
+    if not safe_space_name or safe_space_name == "[REDACTED]":
+        safe_space_name = "Creator Preview"
+    space_id = validate_space_id(_source_slugify_segment(safe_space_name, "creator-preview")[:64])
+    space: dict[str, Any] = {"space_id": space_id, "name": safe_space_name}
+    safe_description = _payload_text_summary(payload.get("description") or payload.get("summary") or "", 300)
+    if explicit_prompt and safe_description and safe_description != "[REDACTED]":
+        space["description"] = safe_description
+
+    raw_widgets = payload.get("widgets") if isinstance(payload.get("widgets"), list) else []
+    if not raw_widgets:
+        raw_widgets = [
+            {
+                "widgetId": "creator-preview",
+                "name": "Creator Preview",
+                "type": "markdown",
+                "metadata": {"summary": "Bounded creator preview; commit requires approval."},
+            }
+        ]
+
+    widgets: list[dict[str, Any]] = []
+    used_widget_ids: set[str] = set()
+    omitted_field_count = 1 if unsafe_prompt_redacted else 0
+    for index, raw_widget in enumerate(raw_widgets[:20], start=1):
+        if not isinstance(raw_widget, dict):
+            continue
+        safe_widget, creator_omitted = _space_creator_safe_widget_input(raw_widget, index, used_widget_ids)
+        widget_payload, omitted_count = _space_tool_render_widget_payload({"widget": safe_widget})
+        widgets.append(_space_tool_preview_widget_detail(widget_payload))
+        omitted_field_count += omitted_count + creator_omitted
+
+    return {
+        "ok": True,
+        "action": name,
+        "creator_loop": {
+            "stage": "bounded-spec-preview",
+            "mode": "metadata-only",
+            "stored": False,
+            "executed": False,
+            "requires_sandbox_preview": True,
+            "requires_visual_qa": True,
+            "commit_requires_revision": True,
+        },
+        "space": space,
+        "widgets": widgets,
+        "widget_count": len(widgets),
+        "safety": {
+            "prompt_echoed": False,
+            "unsafe_prompt_redacted": unsafe_prompt_redacted,
+            "generated_bodies_rendered": False,
+            "omitted_field_count": omitted_field_count,
+        },
+    }
+
+
+def _space_creator_safe_widget_input(raw_widget: dict[str, Any], index: int, used_widget_ids: set[str]) -> tuple[dict[str, Any], int]:
+    """Sanitize creator-preview widget identity fields before generic preview handling."""
+    omitted = 0
+    raw_title = raw_widget.get("title") or raw_widget.get("name") or ""
+    safe_title = _payload_text_summary(raw_title, 120)
+    title_is_safe = bool(safe_title and safe_title != "[REDACTED]")
+    if not title_is_safe:
+        safe_title = f"Creator Widget {index}"
+        if raw_title:
+            omitted += 1
+
+    raw_kind = raw_widget.get("kind") or raw_widget.get("type") or "markdown"
+    safe_kind_text = _payload_text_summary(raw_kind, 80)
+    if not safe_kind_text or safe_kind_text == "[REDACTED]":
+        safe_kind = "markdown"
+        omitted += 1
+    else:
+        safe_kind = _source_slugify_segment(safe_kind_text, "markdown")[:64] or "markdown"
+
+    raw_id = raw_widget.get("id") or raw_widget.get("widget_id") or raw_widget.get("widgetId") or ""
+    safe_id_text = _payload_text_summary(raw_id, 80)
+    if safe_id_text and safe_id_text != "[REDACTED]":
+        widget_id = _source_slugify_segment(safe_id_text, "creator-widget")[:64]
+    elif title_is_safe:
+        widget_id = _source_slugify_segment(safe_title, f"creator-widget-{index}")[:64]
+        if raw_id:
+            omitted += 1
+    else:
+        widget_id = f"creator-widget-{index}"
+        if raw_id:
+            omitted += 1
+    widget_id = validate_widget_id(widget_id or f"creator-widget-{index}")
+    base_widget_id = widget_id
+    suffix = 2
+    while widget_id in used_widget_ids:
+        trimmed = base_widget_id[: max(1, 64 - len(str(suffix)) - 1)]
+        widget_id = validate_widget_id(f"{trimmed}-{suffix}")
+        suffix += 1
+    used_widget_ids.add(widget_id)
+
+    safe_widget = dict(raw_widget)
+    for prompt_key in ("prompt", "agent_prompt", "agentPrompt"):
+        if prompt_key in safe_widget:
+            safe_widget.pop(prompt_key, None)
+            omitted += 1
+    for metadata_field in _WIDGET_DETAIL_METADATA_FIELDS:
+        if metadata_field in safe_widget:
+            safe_value, stripped_count = _space_creator_strip_prompt_metadata(safe_widget[metadata_field])
+            safe_widget[metadata_field] = safe_value
+            omitted += stripped_count
+    safe_widget["id"] = widget_id
+    safe_widget["widgetId"] = widget_id
+    safe_widget["widget_id"] = widget_id
+    safe_widget["title"] = safe_title
+    safe_widget["name"] = safe_title
+    safe_widget["kind"] = safe_kind
+    safe_widget["type"] = safe_kind
+    return safe_widget, omitted
+
+
+def _space_creator_strip_prompt_metadata(value: Any, depth: int = 0) -> tuple[Any, int]:
+    """Remove nested prompt-like keys from creator-preview metadata before summarizing."""
+    if depth > 12:
+        return "[omitted]", 1
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        omitted = max(0, len(value) - 50)
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 50:
+                break
+            if "prompt" in str(key).lower():
+                omitted += 1
+                continue
+            clean_item, nested_omitted = _space_creator_strip_prompt_metadata(item, depth + 1)
+            clean[str(key)] = clean_item
+            omitted += nested_omitted
+        return clean, omitted
+    if isinstance(value, list):
+        clean_items = []
+        omitted = max(0, len(value) - 20)
+        for item in value[:20]:
+            clean_item, nested_omitted = _space_creator_strip_prompt_metadata(item, depth + 1)
+            clean_items.append(clean_item)
+            omitted += nested_omitted
+        return clean_items, omitted
+    return value, 0
+
+
 def _space_tool_widget_patch_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return safe widget patch metadata from source-style helper payloads."""
     clean = _space_tool_widget_payload(payload)
@@ -2409,6 +2568,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, "space": space}
+    if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
+        return _space_creator_preview_payload(name, data)
     if name in {
         "space.get",
         "space.spaces.get",
