@@ -796,6 +796,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
+      _freshSegment=true;
+      _smdEndParser();
       _resetAssistantSegment();
       scrollIfPinned();
     });
