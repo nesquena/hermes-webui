@@ -4032,6 +4032,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
 
+    if parsed.path == "/api/goal":
+        return _handle_goal_command(handler, body)
+
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
 
@@ -6201,6 +6204,197 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
+def _start_chat_stream_for_session(
+    s,
+    *,
+    msg: str,
+    attachments=None,
+    workspace: str,
+    model: str,
+    model_provider=None,
+    normalized_model: bool = False,
+    diag=None,
+):
+    """Persist pending state, register an SSE channel, and start an agent turn."""
+    attachments = attachments or []
+    # Prevent duplicate runs in the same session while a stream is still active.
+    # This commonly happens after page refresh/reconnect races and can produce
+    # duplicated clarify cards for what appears to be a single user request.
+    diag.stage("active_stream_check") if diag else None
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        diag.stage("active_stream_lock_wait") if diag else None
+        with STREAMS_LOCK:
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            diag.stage("response_write") if diag else None
+            return {
+                "error": "session already has an active stream",
+                "active_stream_id": current_stream_id,
+                "_status": 409,
+            }
+        # Stale stream id from a previous run; clear and continue.
+        diag.stage("stale_stream_cleanup") if diag else None
+        _clear_stale_stream_state(s)
+    stream_id = uuid.uuid4().hex
+    session_lock = _get_session_agent_lock(s.session_id)
+    diag.stage("session_lock_wait") if diag else None
+    with session_lock:
+        diag.stage("save_pending_state") if diag else None
+        _prepare_chat_start_session_for_stream(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            stream_id=stream_id,
+        )
+    diag.stage("set_last_workspace") if diag else None
+    set_last_workspace(workspace)
+    diag.stage("stream_registration") if diag else None
+    stream = create_stream_channel()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+    diag.stage("worker_thread_start") if diag else None
+    thr = threading.Thread(
+        target=_run_agent_streaming,
+        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        kwargs={"model_provider": model_provider},
+        daemon=True,
+    )
+    thr.start()
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": s.pending_started_at,
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
+
+
+def _handle_goal_command(handler, body):
+    """Handle WebUI /goal command controls and optional kickoff stream."""
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+
+    requested_profile = str(body.get("profile") or "").strip()
+    if requested_profile:
+        try:
+            from api.profiles import _PROFILE_ID_RE
+
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile", 400)
+        except ImportError:
+            requested_profile = ""
+    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+        has_persisted_turns = bool(
+            getattr(s, "messages", None)
+            or getattr(s, "context_messages", None)
+            or getattr(s, "pending_user_message", None)
+        )
+        if not has_persisted_turns:
+            s.profile = requested_profile
+
+    current_stream_id = getattr(s, "active_stream_id", None)
+    stream_running = False
+    if current_stream_id:
+        with STREAMS_LOCK:
+            stream_running = current_stream_id in STREAMS
+        if not stream_running:
+            _clear_stale_stream_state(s)
+
+    try:
+        from api.profiles import get_hermes_home_for_profile
+
+        profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
+    except Exception:
+        profile_home = None
+
+    from api.goals import goal_command_payload, goal_state_snapshot, restore_goal_state
+
+    goal_args = str(body.get("args", "") or body.get("text", "") or "")
+    goal_action = goal_args.strip().lower()
+    will_kickoff = bool(
+        goal_args.strip()
+        and goal_action not in ("status", "pause", "resume", "clear", "stop", "done")
+        and not stream_running
+    )
+    workspace = model = model_provider = normalized_model = None
+    previous_goal_state = None
+    if will_kickoff:
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        except ValueError as e:
+            return bad(handler, str(e))
+        requested_model = body.get("model") or s.model
+        requested_provider = (
+            body.get("model_provider")
+            if "model_provider" in body
+            else getattr(s, "model_provider", None)
+        )
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+        )
+        previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
+
+    payload = goal_command_payload(
+        s.session_id,
+        goal_args,
+        stream_running=stream_running,
+        profile_home=profile_home,
+    )
+    if not payload.get("ok", True):
+        status = 409 if payload.get("error") == "agent_running" else 400
+        return j(handler, payload, status=status)
+
+    kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
+    if kickoff_prompt:
+        if workspace is None:
+            try:
+                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            except ValueError as e:
+                return bad(handler, str(e))
+        if model is None:
+            requested_model = body.get("model") or s.model
+            requested_provider = (
+                body.get("model_provider")
+                if "model_provider" in body
+                else getattr(s, "model_provider", None)
+            )
+            model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+                requested_model,
+                requested_provider,
+            )
+        stream_response = _start_chat_stream_for_session(
+            s,
+            msg=kickoff_prompt,
+            attachments=[],
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+        )
+        status = int(stream_response.pop("_status", 200) or 200)
+        payload.update(stream_response)
+        if status >= 400:
+            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+            payload["ok"] = False
+            return j(handler, payload, status=status)
+
+    return j(handler, payload)
+
+
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
@@ -6257,70 +6451,23 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
-        # Prevent duplicate runs in the same session while a stream is still active.
-        # This commonly happens after page refresh/reconnect races and can produce
-        # duplicated clarify cards for what appears to be a single user request.
-        diag.stage("active_stream_check") if diag else None
-        current_stream_id = getattr(s, "active_stream_id", None)
-        if current_stream_id:
-            diag.stage("active_stream_lock_wait") if diag else None
-            with STREAMS_LOCK:
-                current_active = current_stream_id in STREAMS
-            if current_active:
-                diag.stage("response_write") if diag else None
-                return j(
-                    handler,
-                    {
-                        "error": "session already has an active stream",
-                        "active_stream_id": current_stream_id,
-                    },
-                    status=409,
-                )
-            # Stale stream id from a previous run; clear and continue.
-            diag.stage("stale_stream_cleanup") if diag else None
-            _clear_stale_stream_state(s)
-        stream_id = uuid.uuid4().hex
-        session_lock = _get_session_agent_lock(s.session_id)
-        diag.stage("session_lock_wait") if diag else None
-        with session_lock:
-            diag.stage("save_pending_state") if diag else None
-            _prepare_chat_start_session_for_stream(
-                s,
-                msg=msg,
-                attachments=attachments,
-                workspace=workspace,
-                model=model,
-                model_provider=model_provider,
-                stream_id=stream_id,
-            )
-        diag.stage("set_last_workspace") if diag else None
-        set_last_workspace(workspace)
-        diag.stage("stream_registration") if diag else None
-        stream = create_stream_channel()
-        with STREAMS_LOCK:
-            STREAMS[stream_id] = stream
-        diag.stage("worker_thread_start") if diag else None
-        thr = threading.Thread(
-            target=_run_agent_streaming,
-            args=(s.session_id, msg, model, workspace, stream_id, attachments),
-            kwargs={"model_provider": model_provider},
-            daemon=True,
+        response = _start_chat_stream_for_session(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            diag=diag,
         )
-        thr.start()
-        response = {
-            "stream_id": stream_id,
-            "session_id": s.session_id,
-            "pending_started_at": s.pending_started_at,
-        }
-        if normalized_model:
-            response["effective_model"] = model
-        if model_provider:
-            response["effective_model_provider"] = model_provider
+        status = int(response.pop("_status", 200) or 200)
         diag.stage("response_write") if diag else None
-        return j(handler, response)
+        return j(handler, response, status=status)
     finally:
         if diag:
             diag.finish()
+
 
 
 def _normalize_chat_attachments(raw_attachments):

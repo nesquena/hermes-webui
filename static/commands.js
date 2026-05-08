@@ -18,6 +18,7 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
+  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
@@ -623,6 +624,53 @@ async function cmdStop(){
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
   if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
+}
+
+async function cmdGoal(args){
+  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
+      session_id:activeSid,
+      args:args||'',
+      workspace:S.session.workspace,
+      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
+      model_provider:S.session.model_provider||null,
+      profile:S.activeProfile||S.session.profile||'default',
+    })});
+    const msg=String((r&&r.message)||'').trim();
+    if(msg){
+      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
+      renderMessages({preserveScroll:true});
+      showToast(msg.split('\n')[0],2600);
+    }
+    if(!r||!r.stream_id)return;
+    S.toolCalls=[];
+    if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+    appendThinking();setBusy(true);
+    setComposerStatus('Working toward goal…');
+    S.activeStreamId=r.stream_id;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id=r.stream_id;
+      if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
+      if(r.effective_model)S.session.model=r.effective_model;
+      if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
+    }
+    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    startApprovalPolling(activeSid);
+    startClarifyPolling(activeSid);
+    if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
+    attachLiveStream(activeSid,r.stream_id,[]);
+    if(typeof renderSessionList==='function')void renderSessionList();
+  }catch(e){
+    const err=String((e&&e.message)||e||'Goal command failed');
+    S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
+    renderMessages({preserveScroll:true});
+    showToast(err,3000);
+  }
 }
 
 // ── Busy-input mode commands ──────────────────────────────────────────────

@@ -63,7 +63,7 @@ async function send(){
       // cmdSteer / cmdInterrupt say "No active task to stop."
       if(text.startsWith('/')){
         const _pc=typeof parseCommand==='function'&&parseCommand(text);
-        if(_pc&&['steer','interrupt','queue','terminal'].includes(_pc.name)){
+        if(_pc&&['steer','interrupt','queue','terminal','goal'].includes(_pc.name)){
           const _bc=COMMANDS.find(c=>c.name===_pc.name);
           if(_bc){
             $('msg').value='';autoResize();
@@ -336,6 +336,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   let liveReasoningText='';
+  let _latestGoalStatus=null;
+  let _pendingGoalContinuation=null;
   let assistantRow=null;
   let assistantBody=null;
   let segmentStart=0;      // char offset in assistantText where current segment begins
@@ -879,6 +881,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('goal',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if((d.session_id||activeSid)!==activeSid) return;
+        const msg=String(d.message||'').trim();
+        if(!msg)return;
+        _latestGoalStatus={message:msg,decision:d.decision||null};
+        setComposerStatus(msg);
+        showToast(msg.split('\n')[0],2600);
+      }catch(_){}
+    });
+
+    source.addEventListener('goal_continue',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
+        if(!continuation_prompt||sid!==activeSid)return;
+        _pendingGoalContinuation={
+          sid,
+          text:continuation_prompt,
+          model:S.session&&S.session.model||'',
+          model_provider:S.session&&S.session.model_provider||null,
+          profile:S.activeProfile||'default',
+        };
+        showToast('Continuing toward goal…',2200);
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -989,6 +1020,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
           if(lastUser)lastUser.attachments=uploaded;
         }
+        if(_latestGoalStatus&&_latestGoalStatus.message){
+          S.messages.push({
+            role:'assistant',
+            content:String(_latestGoalStatus.message),
+            _ts:Date.now()/1000,
+            _goalStatus:true,
+            _transient:true,
+          });
+        }
         clearLiveToolCards();
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
@@ -997,6 +1037,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         syncTopbar();renderMessages({preserveScroll:true});loadDir('.');
         // TTS auto-read: speak the last assistant response if enabled (#499)
         if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+      }
+      if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
+        const _goalNext=_pendingGoalContinuation;
+        _pendingGoalContinuation=null;
+        queueSessionMessage(_goalNext.sid,{
+          text:_goalNext.text,
+          files:[],
+          model:_goalNext.model,
+          model_provider:_goalNext.model_provider,
+          profile:_goalNext.profile,
+        });
+        if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
       }
       if(isActiveSession) _queueDrainSid=activeSid;
       renderSessionList();

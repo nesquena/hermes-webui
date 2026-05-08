@@ -168,7 +168,7 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 
 ### Slash commands
 - [x] Command registry + autocomplete dropdown
-- [x] Built-ins: `/help`, `/clear`, `/model`, `/workspace`, `/new`, `/usage`, `/theme`, `/compact`, `/queue`, `/interrupt`, `/steer`, `/btw`, `/reasoning`, `/skills`, `/toolsets`
+- [x] Built-ins: `/help`, `/clear`, `/model`, `/workspace`, `/new`, `/usage`, `/theme`, `/compact`, `/queue`, `/interrupt`, `/steer`, `/goal`, `/btw`, `/reasoning`, `/skills`, `/toolsets`
 - [x] Transparent pass-through for unrecognized commands
 
 ### Security

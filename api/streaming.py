@@ -3101,6 +3101,55 @@ def _run_agent_streaming(
                     })
             except Exception:
                 logger.debug("Failed to drain pending steer for session %s", session_id)
+            # /goal parity: after a successful assistant turn, run the Hermes
+            # GoalManager judge before terminal done/stream_end events. The
+            # frontend surfaces the status line and queues continuation_prompt as
+            # a normal next user message so /queue and user input keep priority.
+            try:
+                from api.goals import evaluate_goal_after_turn
+
+                _last_goal_response = ''
+                for _goal_msg in reversed(s.messages or []):
+                    if not isinstance(_goal_msg, dict) or _goal_msg.get('role') != 'assistant':
+                        continue
+                    _goal_content = _goal_msg.get('content', '')
+                    if isinstance(_goal_content, list):
+                        _goal_parts = []
+                        for _goal_part in _goal_content:
+                            if isinstance(_goal_part, dict):
+                                _goal_text = _goal_part.get('text') or _goal_part.get('content')
+                                if _goal_text:
+                                    _goal_parts.append(str(_goal_text))
+                        _last_goal_response = '\n'.join(_goal_parts)
+                    else:
+                        _last_goal_response = str(_goal_content or '')
+                    break
+                _goal_decision = evaluate_goal_after_turn(
+                    session_id,
+                    _last_goal_response,
+                    user_initiated=True,
+                    profile_home=_profile_home,
+                )
+                decision = _goal_decision or {}
+                _goal_message = str(decision.get('message') or '').strip()
+                if _goal_message:
+                    put('goal', {
+                        'session_id': session_id,
+                        'message': _goal_message,
+                        'decision': decision,
+                    })
+                if decision.get('should_continue'):
+                    continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
+                    if continuation_prompt:
+                        put('goal_continue', {
+                            'session_id': session_id,
+                            'continuation_prompt': continuation_prompt,
+                            'text': continuation_prompt,
+                            'message': _goal_message,
+                            'decision': decision,
+                        })
+            except Exception as _goal_exc:
+                logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
