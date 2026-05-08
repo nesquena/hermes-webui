@@ -10,10 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from api.config import (
@@ -33,7 +36,53 @@ logger = logging.getLogger(__name__)
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
+_ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
+_ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
+import json
+import sys
+
+from agent.account_usage import fetch_account_usage
+
+
+def _iso(value):
+    if value in (None, ""):
+        return None
+    if hasattr(value, "isoformat"):
+        text = value.isoformat()
+        return text.replace("+00:00", "Z")
+    text = str(value).strip()
+    return text or None
+
+
+def _snapshot_payload(snapshot):
+    if snapshot is None:
+        return None
+    windows = []
+    for window in getattr(snapshot, "windows", ()) or ():
+        windows.append({
+            "label": str(getattr(window, "label", "") or ""),
+            "used_percent": getattr(window, "used_percent", None),
+            "reset_at": _iso(getattr(window, "reset_at", None)),
+            "detail": getattr(window, "detail", None),
+        })
+    return {
+        "provider": str(getattr(snapshot, "provider", "") or ""),
+        "source": str(getattr(snapshot, "source", "") or ""),
+        "title": str(getattr(snapshot, "title", "") or ""),
+        "plan": getattr(snapshot, "plan", None),
+        "windows": windows,
+        "details": list(getattr(snapshot, "details", ()) or ()),
+        "available": bool(getattr(snapshot, "available", bool(windows))),
+        "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
+        "fetched_at": _iso(getattr(snapshot, "fetched_at", None)),
+    }
+
+
+provider = sys.argv[1]
+api_key = sys.argv[2] or None
+print(json.dumps(_snapshot_payload(fetch_account_usage(provider, api_key=api_key))))
+"""
 
 # SECTION: Provider ↔ env var mapping
 
@@ -420,19 +469,102 @@ def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, ap
     return fetch_account_usage(provider, base_url=base_url, api_key=api_key)
 
 
-def _fetch_account_usage_with_profile_context(provider: str) -> Any:
-    try:
-        from api.profiles import cron_profile_context_for_home
-    except ImportError:
-        cron_profile_context_for_home = None
+def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(Path(home))
 
+    # Profile .env values should affect only the child quota probe, not the
+    # WebUI process-global environment. This is especially important for
+    # Anthropic account usage, where the agent resolver reads OAuth/API tokens
+    # from environment variables.
+    for key, value in _load_env_file(Path(home) / ".env").items():
+        if value:
+            env[key] = value
+
+    env_var = _PROVIDER_ENV_VAR.get((provider or "").strip().lower())
+    if env_var and api_key:
+        env[env_var] = api_key
+
+    try:
+        from api.config import _AGENT_DIR
+    except Exception:
+        _AGENT_DIR = None
+    pythonpath_parts: list[str] = []
+    if _AGENT_DIR:
+        pythonpath_parts.append(str(_AGENT_DIR))
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    if pythonpath_parts:
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    return env
+
+
+def _account_usage_payload_to_snapshot(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    windows = tuple(
+        SimpleNamespace(
+            label=window.get("label"),
+            used_percent=window.get("used_percent"),
+            reset_at=window.get("reset_at"),
+            detail=window.get("detail"),
+        )
+        for window in (payload.get("windows") or ())
+        if isinstance(window, dict)
+    )
+    return SimpleNamespace(
+        provider=payload.get("provider"),
+        source=payload.get("source"),
+        title=payload.get("title"),
+        plan=payload.get("plan"),
+        windows=windows,
+        details=tuple(payload.get("details") or ()),
+        available=bool(payload.get("available")),
+        unavailable_reason=payload.get("unavailable_reason"),
+        fetched_at=payload.get("fetched_at"),
+    )
+
+
+def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
+    try:
+        from api.config import PYTHON_EXE
+    except Exception:
+        PYTHON_EXE = sys.executable or "python3"
+
+    try:
+        proc = subprocess.run(
+            [PYTHON_EXE, "-c", _ACCOUNT_USAGE_SUBPROCESS_CODE, provider, api_key or ""],
+            env=_account_usage_subprocess_env(home, provider, api_key),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.debug("Account usage probe for %s timed out", provider)
+        return None
+    except Exception:
+        logger.debug("Account usage probe for %s failed to launch", provider, exc_info=True)
+        return None
+
+    if proc.returncode != 0:
+        logger.debug("Account usage probe for %s exited with status %s", provider, proc.returncode)
+        return None
+    try:
+        payload = json.loads((proc.stdout or "").strip() or "null")
+    except json.JSONDecodeError:
+        logger.debug("Account usage probe for %s returned invalid JSON", provider)
+        return None
+    return _account_usage_payload_to_snapshot(payload)
+
+
+def _fetch_account_usage_with_profile_context(provider: str) -> Any:
     home = _get_hermes_home()
     api_key = _get_provider_api_key(provider)
     try:
-        if cron_profile_context_for_home is None:
-            return _agent_fetch_account_usage(provider, api_key=api_key)
-        with cron_profile_context_for_home(home):
-            return _agent_fetch_account_usage(provider, api_key=api_key)
+        return _agent_fetch_account_usage_for_home(provider, home, api_key=api_key)
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
         return None
