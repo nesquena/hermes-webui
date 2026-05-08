@@ -1020,6 +1020,7 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    const prevScrollTop = container ? container.scrollTop : 0;
     S.messages = [...olderMsgs, ...S.messages];
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
@@ -1046,12 +1047,11 @@ async function _loadOlderMessages() {
       // to scroll upward naturally reveals the end of the newly loaded older
       // page first. This is the same trick timelines use; flashy smooth jumps
       // are how you make a transcript feel haunted.
-      const oldTop = container.scrollTop;
       const newScrollH = container.scrollHeight;
       const addedHeight = Math.max(0, newScrollH - prevScrollH);
       if (typeof _cancelBottomSettle === 'function') _cancelBottomSettle();
       _programmaticScroll = true;
-      container.scrollTop = oldTop + addedHeight;
+      container.scrollTop = prevScrollTop + addedHeight;
       if (typeof _markSessionStartJumpAvailable === 'function') _markSessionStartJumpAvailable();
       requestAnimationFrame(()=>{ _programmaticScroll = false; });
     }

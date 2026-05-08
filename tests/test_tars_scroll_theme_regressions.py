@@ -64,9 +64,10 @@ def test_user_scroll_and_older_history_load_cancel_delayed_bottom_settling():
     assert "e.deltaY<0" in record
     assert "_scrollPinned=false" in record
 
-    restore_idx = load_older.index("container.scrollTop = oldTop + addedHeight")
+    restore_idx = load_older.index("container.scrollTop = prevScrollTop + addedHeight")
     cancel_idx = load_older.rindex("_cancelBottomSettle", 0, restore_idx)
     unpin_idx = load_older.rindex("_scrollPinned = false")
+    assert "const prevScrollTop = container ? container.scrollTop : 0" in load_older
     assert cancel_idx < restore_idx < unpin_idx
 
 
@@ -75,14 +76,30 @@ def test_older_history_scroll_prefetches_and_preserves_viewport_without_smooth_j
     listener_block = UI_JS[UI_JS.index("el.addEventListener('scroll'") : UI_JS.index("})();", UI_JS.index("el.addEventListener('scroll'"))]
 
     assert "renderMessages({ preserveScroll: true });" in load_older
-    assert "const oldTop = container.scrollTop" in load_older
+    assert "const prevScrollTop = container ? container.scrollTop : 0" in load_older
+    assert "const oldTop = container.scrollTop" not in load_older
     assert "const addedHeight = Math.max(0, newScrollH - prevScrollH)" in load_older
-    assert "container.scrollTop = oldTop + addedHeight" in load_older
+    assert "container.scrollTop = prevScrollTop + addedHeight" in load_older
     assert "scrollTo({ top:" not in load_older
     assert "behavior: reduceMotion ? 'auto' : 'smooth'" not in load_older
     assert "const olderPrefetchPx=Math.max(600,el.clientHeight*1.5)" in listener_block
     assert "_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx" in listener_block
     assert "else if(typeof _loadOlderMessages==='function') _loadOlderMessages();" in UI_JS
+
+
+def test_windowed_render_load_earlier_preserves_viewport_without_bottom_repin():
+    show_earlier = _function_body(UI_JS, "function _showEarlierRenderedMessages")
+
+    prev_scroll_idx = show_earlier.index("const prevScrollTop=container?container.scrollTop:0")
+    cancel_idx = show_earlier.index("_cancelBottomSettle")
+    unpin_idx = show_earlier.index("_scrollPinned=false")
+    programmatic_idx = show_earlier.index("_programmaticScroll=true")
+    render_idx = show_earlier.index("renderMessages({ preserveScroll:true })")
+    restore_idx = show_earlier.index("container.scrollTop=prevScrollTop+(newScrollH-prevScrollH)")
+    clear_idx = show_earlier.index("requestAnimationFrame(()=>{ _programmaticScroll=false; })")
+
+    assert prev_scroll_idx < cancel_idx < unpin_idx < programmatic_idx < render_idx < restore_idx < clear_idx
+    assert "renderMessages();" not in show_earlier
 
 
 def test_jump_to_session_start_button_loads_all_history_and_scrolls_top():

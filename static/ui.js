@@ -187,13 +187,16 @@ function _showEarlierRenderedMessages(){
   const container=$('messages');
   const prevScrollH=container?container.scrollHeight:0;
   const prevScrollTop=container?container.scrollTop:0;
+  if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
+  _scrollPinned=false;
+  _programmaticScroll=true;
   _messageRenderWindowSize=_currentMessageRenderWindowSize()+MESSAGE_RENDER_WINDOW_DEFAULT;
-  renderMessages();
+  renderMessages({ preserveScroll:true });
   if(container){
     const newScrollH=container.scrollHeight;
     container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
   }
-  _scrollPinned=false;
+  requestAnimationFrame(()=>{ _programmaticScroll=false; });
 }
 function _isSessionJumpButtonsEnabled(){
   return window._sessionJumpButtonsEnabled===true;

@@ -605,7 +605,13 @@ class TestScrollPositionPreservation:
         # prepending older messages. Older pages are prefetched before the hard
         # top, so continuing to scroll upward naturally reveals the end of the
         # newly loaded older content without a smooth-scroll teleport.
-        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
+        assert "const prevScrollTop = container ? container.scrollTop : 0" in fn_body, (
+            "Older-history paging must capture the viewport before prepending messages."
+        )
+        assert "const oldTop = container.scrollTop" not in fn_body, (
+            "Restoring from post-render scrollTop can compound jumps after renderMessages()."
+        )
+        target_idx = fn_body.find("container.scrollTop = prevScrollTop + addedHeight")
         scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
         pinned_idx = fn_body.rfind("_scrollPinned = false")
         assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
