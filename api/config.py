@@ -2933,24 +2933,31 @@ def get_available_models() -> dict:
         # 5. Build model groups
         if detected_providers:
             for pid in sorted(detected_providers):
-                if pid.startswith("custom:") and pid in _named_custom_groups:
-                    _nc_display, _nc_models = _named_custom_groups[pid]
-                    # If all named-group models were deduped (already auto-detected
-                    # from base_url /v1/models), fall back to auto-detected models
-                    # instead of silently dropping the group (issue #1619).
-                    #
-                    # Per Opus advisor on stage-295: the load-bearing fix for the
-                    # reporter's symptom is the api/routes.py:/api/models/live
-                    # broadening to handle custom:* slugs. This block is defensive
-                    # belt-and-braces — under current _named_custom_groups
-                    # population logic (atomic add+append inside the same dedup
-                    # guard at line ~2640), an empty list shouldn't reach here.
-                    # Kept for future-proofing in case the population logic
-                    # changes (e.g. supporting model-less custom_providers entries).
-                    if not _nc_models:
-                        _nc_models = auto_detected_models_by_provider.get(pid, [])
-                    if _nc_models:
-                        groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
+                # Custom-provider PIDs are populated above via the
+                # _named_custom_groups branch (or skipped intentionally).
+                # They MUST NOT fall through to the auto_detected_models
+                # fallback below, otherwise the active provider's models
+                # get copied into a phantom Custom group with mismatched
+                # provider prefixes (#1881).
+                if pid.startswith("custom:"):
+                    if pid in _named_custom_groups:
+                        _nc_display, _nc_models = _named_custom_groups[pid]
+                        # If all named-group models were deduped (already auto-detected
+                        # from base_url /v1/models), fall back to auto-detected models
+                        # instead of silently dropping the group (issue #1619).
+                        #
+                        # Per Opus advisor on stage-295: the load-bearing fix for the
+                        # reporter's symptom is the api/routes.py:/api/models/live
+                        # broadening to handle custom:* slugs. This block is defensive
+                        # belt-and-braces — under current _named_custom_groups
+                        # population logic (atomic add+append inside the same dedup
+                        # guard at line ~2640), an empty list shouldn't reach here.
+                        # Kept for future-proofing in case the population logic
+                        # changes (e.g. supporting model-less custom_providers entries).
+                        if not _nc_models:
+                            _nc_models = auto_detected_models_by_provider.get(pid, [])
+                        if _nc_models:
+                            groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
                     continue
                 provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
                 if pid == "openrouter":
@@ -3240,7 +3247,17 @@ def get_available_models() -> dict:
                     if detected_models:
                         models_for_group = copy.deepcopy(detected_models)
                     elif auto_detected_models:
-                        models_for_group = copy.deepcopy(auto_detected_models)
+                        # Don't fall back to the global auto_detected_models
+                        # list for the bare "custom" PID when the active
+                        # provider is something concrete (e.g. ai-gateway,
+                        # openrouter). Those auto-detected entries already
+                        # belong to the active provider's group — copying
+                        # them into a Custom group too produces phantom
+                        # duplicates with mismatched prefixes (#1881).
+                        if pid == "custom" and active_provider and active_provider != "custom":
+                            models_for_group = []
+                        else:
+                            models_for_group = copy.deepcopy(auto_detected_models)
                     else:
                         models_for_group = []
                     if models_for_group:
