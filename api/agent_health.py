@@ -10,8 +10,13 @@ heartbeat without shelling out or adding psutil as a hard dependency.
 from __future__ import annotations
 
 import importlib
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+_GATEWAY_PID_FILE = "gateway.pid"
+_GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
 
 
 def _checked_at() -> str:
@@ -21,6 +26,69 @@ def _checked_at() -> str:
 def _gateway_status_module():
     """Load gateway.status lazily so tests and WebUI-only installs stay isolated."""
     return importlib.import_module("gateway.status")
+
+
+def _gateway_root_pid_path() -> Path | None:
+    """Return the root Hermes gateway PID path.
+
+    Gateway runtime files are root-level singletons.  A profile-scoped WebUI
+    process may have HERMES_HOME=<root>/profiles/<name>, but gateway.pid,
+    gateway.lock, and gateway_state.json still live under <root>.
+    """
+    try:
+        from hermes_constants import get_default_hermes_root
+        return get_default_hermes_root() / _GATEWAY_PID_FILE
+    except Exception:
+        return None
+
+
+def _read_runtime_status_path(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _read_gateway_runtime_status(gateway_status: Any, pid_path: Path | None) -> dict[str, Any] | None:
+    read_runtime_status = gateway_status.read_runtime_status
+    if pid_path is not None:
+        try:
+            return read_runtime_status(pid_path=pid_path)
+        except TypeError:
+            try:
+                return read_runtime_status(pid_path)
+            except TypeError:
+                if getattr(gateway_status, "__name__", "") == "gateway.status" or hasattr(
+                    gateway_status,
+                    "_read_json_file",
+                ):
+                    runtime_status_file = str(
+                        getattr(gateway_status, "_RUNTIME_STATUS_FILE", _GATEWAY_RUNTIME_STATUS_FILE)
+                    )
+                    runtime_status = _read_runtime_status_path(pid_path.with_name(runtime_status_file))
+                    if runtime_status is not None:
+                        return runtime_status
+    return read_runtime_status()
+
+
+def _gateway_running_pid(gateway_status: Any, pid_path: Path | None) -> int | None:
+    get_running_pid = gateway_status.get_running_pid
+    if pid_path is not None:
+        try:
+            return get_running_pid(pid_path=pid_path, cleanup_stale=False)
+        except TypeError:
+            try:
+                return get_running_pid(pid_path, cleanup_stale=False)
+            except TypeError:
+                pass
+    try:
+        return get_running_pid(cleanup_stale=False)
+    except TypeError:
+        # Older agent versions may not expose cleanup_stale. Keep compatibility.
+        return get_running_pid()
 
 
 def _runtime_detail_subset(runtime_status: dict[str, Any] | None) -> dict[str, Any]:
@@ -86,17 +154,16 @@ def build_agent_health_payload() -> dict[str, Any]:
             },
         }
 
+    gateway_pid_path = _gateway_root_pid_path()
+
     runtime_status = None
     try:
-        runtime_status = gateway_status.read_runtime_status()
+        runtime_status = _read_gateway_runtime_status(gateway_status, gateway_pid_path)
     except Exception:
         runtime_status = None
 
     try:
-        running_pid = gateway_status.get_running_pid(cleanup_stale=False)
-    except TypeError:
-        # Older agent versions may not expose cleanup_stale. Keep compatibility.
-        running_pid = gateway_status.get_running_pid()
+        running_pid = _gateway_running_pid(gateway_status, gateway_pid_path)
     except Exception:
         running_pid = None
 
