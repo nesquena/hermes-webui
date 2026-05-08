@@ -1550,6 +1550,154 @@ def test_space_tool_adapter_supports_creator_loop_preview_metadata_only_without_
     assert '"source":' not in serialized
 
 
+def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build ops dashboard with SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
+            "spaceName": "Creator Contract Lab",
+            "widgets": [
+                {
+                    "widgetId": "safe-summary",
+                    "title": "Safe Summary",
+                    "kind": "markdown",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+    serialized = json.dumps(preview).lower()
+
+    assert preview["ok"] is True
+    assert isinstance(preview["preview_id"], str)
+    assert preview["preview_id"].startswith("creator-preview-")
+    assert preview["stage"] == "sandbox-preview-required"
+    assert preview["stored"] is False
+    assert preview["executed"] is False
+    assert preview["gates"] == {
+        "sandbox_preview_required": True,
+        "visual_qa_required": True,
+        "approve_commit_required": True,
+    }
+    assert preview["spec"]["space"]["space_id"] == "creator-contract-lab"
+    assert preview["spec"]["space"]["name"] == "Creator Contract Lab"
+    assert [widget["id"] for widget in preview["spec"]["widgets"]] == ["safe-summary"]
+    assert preview["spec"]["widgets"][0]["title"] == "Safe Summary"
+    assert preview["spec"]["widgets"][0]["kind"] == "markdown"
+    assert spaces.list_spaces() == []
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_creator_commit_with_preview_id_commits_exact_previewed_sanitized_spec(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build safe dashboard from SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
+            "spaceName": "Receipt Commit Lab",
+            "widgets": [
+                {"widgetId": "summary-panel", "title": "Summary Panel", "kind": "markdown"},
+                {
+                    "widgetId": "status-panel",
+                    "title": "Status Panel",
+                    "kind": "status",
+                    "renderer": "<script>bad()</script>",
+                    "source": "SECRET_SOURCE",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+            ],
+        },
+    )
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+    persisted = json.dumps(
+        {
+            "committed": committed,
+            "manifest": spaces.read_space("receipt-commit-lab"),
+            "event": json.loads((spaces.events_dir() / f"{committed['revision_event_id']}.json").read_text(encoding="utf-8")),
+        }
+    ).lower()
+
+    assert committed["ok"] is True
+    assert committed["space_id"] == "receipt-commit-lab"
+    assert committed["stage"] == "revisioned-commit"
+    assert committed["stored"] is True
+    assert committed["executed"] is False
+    assert committed["creator_loop"]["revision_created"] is True
+    assert [widget["id"] for widget in committed["widgets"]] == ["summary-panel", "status-panel"]
+    assert spaces.read_space("receipt-commit-lab")["revision_event_id"] == committed["revision_event_id"]
+    assert "secret_value_do_not_leak" not in persisted
+    assert "<script" not in persisted
+    assert "renderer" not in persisted
+    assert '"source":' not in persisted
+    assert "api_key" not in persisted
+    assert "secret_source" not in persisted
+
+
+def test_creator_commit_preview_receipt_is_not_mutated_by_preview_response_callers(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Immutable Receipt Lab",
+            "widgets": [{"widgetId": "safe-summary", "title": "Safe Summary", "kind": "markdown"}],
+        },
+    )
+    preview["spec"]["space"]["name"] = "Mutated Space Name"
+    preview["spec"]["space"]["space_id"] = "mutated-space-name"
+    preview["spec"]["widgets"][0]["id"] = "mutated-widget"
+    preview["space"]["name"] = "Also Mutated"
+    preview["widgets"][0]["title"] = "Mutated Widget"
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+
+    assert committed["space_id"] == "immutable-receipt-lab"
+    assert committed["space"]["name"] == "Immutable Receipt Lab"
+    assert [widget["id"] for widget in committed["widgets"]] == ["safe-summary"]
+    assert committed["widgets"][0]["title"] == "Safe Summary"
+
+
+def test_creator_commit_rejects_unknown_preview_id_without_creating_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    with pytest.raises(ValueError, match="Creator preview is unavailable or expired"):
+        spaces.run_space_tool(
+            "space.creator.commit",
+            {
+                "preview_id": "creator-preview-missing",
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "approve_commit": True,
+            },
+        )
+
+    assert spaces.list_spaces() == []
+
+
 def test_creator_preview_redacts_widget_titles_prompts_and_description_fallback(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

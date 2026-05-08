@@ -8,6 +8,7 @@ execution arrive later behind stricter permissions.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import io
 import ipaddress
@@ -16,6 +17,7 @@ import math
 import os
 import re
 import shutil
+import threading
 import time
 import unicodedata
 import uuid
@@ -78,6 +80,10 @@ _SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
 _SOURCE_SPACE_WIDGETS_DIR = "widgets/"
 _SOURCE_SPACE_WIDGET_FILE_EXTENSION = ".yaml"
 _SOURCE_SPACE_DATA_DIR = "data/"
+_CREATOR_PREVIEW_TTL_SECONDS = 30 * 60
+_CREATOR_PREVIEW_CACHE_MAX = 100
+_CREATOR_PREVIEW_RECEIPTS: dict[str, dict[str, Any]] = {}
+_CREATOR_PREVIEW_RECEIPTS_LOCK = threading.RLock()
 _SOURCE_SPACE_ASSETS_DIR = "assets/"
 _SOURCE_SPACE_SCRIPTS_DIR = "scripts/"
 _SPACE_DEMO_RUNS = [
@@ -2063,6 +2069,61 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _space_creator_preview_gates() -> dict[str, bool]:
+    return {
+        "sandbox_preview_required": True,
+        "visual_qa_required": True,
+        "approve_commit_required": True,
+    }
+
+
+def _space_creator_preview_spec(draft: dict[str, Any]) -> dict[str, Any]:
+    widgets = copy.deepcopy(draft["widget_details"])
+    return {"space": copy.deepcopy(draft["space"]), "widgets": widgets, "widget_count": len(widgets)}
+
+
+def _space_creator_prune_preview_receipts_locked(now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    expired = [
+        preview_id
+        for preview_id, receipt in _CREATOR_PREVIEW_RECEIPTS.items()
+        if current - float(receipt.get("created_at") or 0) > _CREATOR_PREVIEW_TTL_SECONDS
+    ]
+    for preview_id in expired:
+        _CREATOR_PREVIEW_RECEIPTS.pop(preview_id, None)
+    if len(_CREATOR_PREVIEW_RECEIPTS) <= _CREATOR_PREVIEW_CACHE_MAX:
+        return
+    ordered = sorted(_CREATOR_PREVIEW_RECEIPTS.items(), key=lambda item: float(item[1].get("created_at") or 0))
+    for preview_id, _receipt in ordered[: max(0, len(_CREATOR_PREVIEW_RECEIPTS) - _CREATOR_PREVIEW_CACHE_MAX)]:
+        _CREATOR_PREVIEW_RECEIPTS.pop(preview_id, None)
+
+
+def _space_creator_prune_preview_receipts(now: float | None = None) -> None:
+    with _CREATOR_PREVIEW_RECEIPTS_LOCK:
+        _space_creator_prune_preview_receipts_locked(now)
+
+
+def _space_creator_store_preview_receipt(draft: dict[str, Any]) -> str:
+    preview_id = f"creator-preview-{uuid.uuid4().hex}"
+    with _CREATOR_PREVIEW_RECEIPTS_LOCK:
+        _space_creator_prune_preview_receipts_locked()
+        _CREATOR_PREVIEW_RECEIPTS[preview_id] = {"created_at": time.time(), "draft": copy.deepcopy(draft)}
+        _space_creator_prune_preview_receipts_locked()
+    return preview_id
+
+
+def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    preview_id = str(payload.get("preview_id") or payload.get("previewId") or "").strip()
+    if not preview_id:
+        return _space_creator_sanitized_draft(payload), None
+    with _CREATOR_PREVIEW_RECEIPTS_LOCK:
+        _space_creator_prune_preview_receipts_locked()
+        receipt = _CREATOR_PREVIEW_RECEIPTS.pop(preview_id, None)
+    if not receipt or not isinstance(receipt.get("draft"), dict):
+        raise ValueError("Creator preview is unavailable or expired")
+    return copy.deepcopy(receipt["draft"]), preview_id
+
+
 def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Return a bounded, non-persisted creator-loop preview spec.
 
@@ -2073,9 +2134,16 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     """
     draft = _space_creator_sanitized_draft(payload)
     widgets = draft["widget_details"]
+    preview_id = _space_creator_store_preview_receipt(draft)
     return {
         "ok": True,
         "action": name,
+        "preview_id": preview_id,
+        "stage": "sandbox-preview-required",
+        "stored": False,
+        "executed": False,
+        "gates": _space_creator_preview_gates(),
+        "spec": _space_creator_preview_spec(draft),
         "creator_loop": {
             "stage": "bounded-spec-preview",
             "mode": "metadata-only",
@@ -2100,7 +2168,7 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
     if not (sandbox_previewed and visual_qa_passed and approve_commit):
         raise ValueError("Creator commit requires sandbox preview, visual QA, and explicit approval")
 
-    draft = _space_creator_sanitized_draft(payload)
+    draft, preview_id = _space_creator_draft_for_commit(payload)
     space = draft["space"]
     create_payload = {
         "space_id": space["space_id"],
@@ -2151,6 +2219,10 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
     return {
         "ok": True,
         "action": name,
+        "preview_id": preview_id,
+        "stage": "revisioned-commit",
+        "stored": True,
+        "executed": False,
         "creator_loop": {
             "stage": "revisioned-commit",
             "mode": "metadata-only",
