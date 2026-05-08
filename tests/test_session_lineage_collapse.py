@@ -208,3 +208,50 @@ console.log(JSON.stringify(rows));
     assert [row["session_id"] for row in rows] == ["telegram_parent", "webui_tip"]
     assert rows[1].get("_orphan_child_session") is True
     assert "_child_sessions" not in rows[0]
+
+
+def test_session_segment_count_prefers_visible_collapsed_backend_and_materialized_counts():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionSegmentCount'));
+const cases = [
+  _sessionSegmentCount({{_lineage_collapsed_count:3, _compression_segment_count:2, _lineage_segments:[{{session_id:'a'}}, {{session_id:'b'}}]}}),
+  _sessionSegmentCount({{_compression_segment_count:25}}),
+  _sessionSegmentCount({{_lineage_segments:[{{session_id:'tip'}}, {{session_id:'root'}}, {{session_id:'older'}}]}}),
+  _sessionSegmentCount({{_lineage_collapsed_count:1, _compression_segment_count:1}}),
+  _sessionSegmentCount(null),
+];
+console.log(JSON.stringify(cases));
+"""
+    assert json.loads(_run_node(source)) == [3, 25, 3, 0, 0]
+
+
+def test_sidebar_lineage_segment_badge_is_passive_and_localized():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert "session-lineage-count" in js
+    assert "const segmentCount=_sessionSegmentCount(s);" in js
+    assert "t('session_meta_segments', segmentCount)" in js
+    assert "titleRow.appendChild(segmentCountEl);" in js
+    assert ".session-lineage-count{" in css
+    assert "cursor:default" in css
+    assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" not in js
+
+
+def test_session_meta_segments_locale_key_is_defined_for_sidebar_locales():
+    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert i18n.count("session_meta_segments:") >= i18n.count("session_meta_messages:")
