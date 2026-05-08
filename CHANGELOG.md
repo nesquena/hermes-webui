@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- Prevent oversized browser uploads from starting a multipart request when they exceed the 20 MB server limit, showing a clear size-limit error instead of a browser-level network reset. Refs #1867.
+
 ## [v0.51.22] — 2026-05-07 — 3-PR batch (P0 markdown streaming hotfix + CSP source-map allowance + LaTeX delimiter rendering)
 
 ### Fixed (3 PRs)
