@@ -890,6 +890,11 @@ def _context_value(value: Any, limit: int = 500) -> str:
     return text
 
 
+def _active_context_value(value: Any, limit: int = 500) -> str:
+    """Return a compact active-space prompt value with unsafe markers redacted."""
+    return _recovery_reason_summary(value, limit)
+
+
 def _payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
     if not lowered:
@@ -1087,15 +1092,15 @@ def build_agent_context(space_id: str | None) -> str:
     lines = [
         "## Active Capy Space",
         f"id: {sid}",
-        f"name: {_context_value(space.get('name') or sid)}",
+        f"name: {_active_context_value(space.get('name') or sid)}",
     ]
-    description = _context_value(space.get("description"), 700)
+    description = _active_context_value(space.get("description"), 700)
     if description:
         lines.append(f"description: {description}")
-    template = _context_value(space.get("template"), 120)
+    template = _active_context_value(space.get("template"), 120)
     if template:
         lines.append(f"template: {template}")
-    instructions = _context_value(space.get("agent_instructions") or space.get("instructions"), 1500)
+    instructions = _active_context_value(space.get("agent_instructions") or space.get("instructions"), 1500)
     if instructions:
         lines.append("instructions:")
         lines.append(f"  {instructions}")
@@ -1113,9 +1118,9 @@ def build_agent_context(space_id: str | None) -> str:
         for widget in summaries[:25]:
             lines.append(
                 "- "
-                f"{_context_value(widget['id'], 80)}|"
-                f"{_context_value(widget['title'], 160)}|"
-                f"{_context_value(widget['kind'], 80)}"
+                f"{_active_context_value(widget['id'], 80)}|"
+                f"{_active_context_value(widget['title'], 160)}|"
+                f"{_active_context_value(widget['kind'], 80)}"
             )
         if len(summaries) > 25:
             lines.append(f"- … {len(summaries) - 25} more widget(s) omitted")
@@ -1125,7 +1130,7 @@ def build_agent_context(space_id: str | None) -> str:
     if shared_data:
         lines.append("shared data keys:")
         for item in shared_data[:25]:
-            lines.append(f"- {_context_value(item['key'], 80)}")
+            lines.append(f"- {_active_context_value(item['key'], 80)}")
         if len(shared_data) > 25:
             lines.append(f"- … {len(shared_data) - 25} more data slot(s) omitted")
     widget_events = list_widget_events(sid, limit=10)
@@ -1134,14 +1139,14 @@ def build_agent_context(space_id: str | None) -> str:
         for event in widget_events[:10]:
             lines.append(
                 "- "
-                f"{_context_value(event.get('event_id'), 120)}|"
-                f"{_context_value(event.get('widget_id'), 80)}|"
-                f"{_context_value(event.get('event_name'), 120)}|"
-                f"{_context_value(event.get('status'), 80)}"
+                f"{_active_context_value(event.get('event_id'), 120)}|"
+                f"{_active_context_value(event.get('widget_id'), 80)}|"
+                f"{_active_context_value(event.get('event_name'), 120)}|"
+                f"{_active_context_value(event.get('status'), 80)}"
             )
         if len(widget_events) > 10:
             lines.append(f"- … {len(widget_events) - 10} more queued widget event(s) omitted")
-    revision = _context_value(space.get("revision_event_id"), 120)
+    revision = _active_context_value(space.get("revision_event_id"), 120)
     if revision:
         lines.append(f"revision_event_id: {revision}")
     lines.append(

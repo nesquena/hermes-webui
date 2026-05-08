@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the safe recovery/admin surface now redacts unsafe space-level metadata labels and restore-preview names/descriptions before they reach recovery snapshots, keeping secret-looking/API-auth/source/script markers out of the fail-safe UI while preserving metadata-only widget summaries. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: active-space prompt context now redacts unsafe source-derived metadata labels before they enter `build_agent_context()` or streaming system prompts, keeping secret-looking/API-auth/renderer/script markers out while preserving safe Space ids, widget ids/kinds, queued event anchors, and revision ids. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): redact active context metadata`
+  - Added RED/GREEN backend coverage proving unsafe Space description/instructions, widget titles, shared-data keys, and queued event names are redacted from compact active-space prompt context while safe Space id/name, widget id/kind, event id/status, and mutation guidance remain visible.
+  - Hardened `build_agent_context()` so streaming prompt injection uses metadata-only redacted labels and never echoes hostile renderer/script/API-auth markers or secret-looking sentinels from source-derived metadata.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`1 passed`); focused active-context regression set passed (`4 passed`); full Spaces foundation suite passed (`171 passed`); Spaces UI JS behavior + demo parity suites passed (`122 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` browser QA harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_d74ed11c3d144865b66b82d75909f216.png`.
 
 - `fix(spaces): redact recovery space metadata`
   - Added RED/GREEN backend coverage proving unsafe Space `name` / `description` values and revision restore-preview labels are redacted in `recovery_snapshot()` while safe ids/widget summaries remain visible.
