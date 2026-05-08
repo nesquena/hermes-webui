@@ -299,8 +299,8 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": space.get("schema_version", SCHEMA_VERSION),
         "space_id": space.get("space_id"),
-        "name": _recovery_reason_summary(space.get("name") or space.get("space_id"), 160),
-        "description": _recovery_reason_summary(space.get("description", ""), 300),
+        "name": _public_display_text_summary(space.get("name") or space.get("space_id"), 160),
+        "description": _public_display_text_summary(space.get("description", ""), 300),
         "created_at": space.get("created_at"),
         "updated_at": space.get("updated_at"),
         "revision_event_id": space.get("revision_event_id"),
@@ -778,8 +778,8 @@ def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
     clean_widget = _normalize_widget(widget)
     summary = {
         "id": clean_widget["id"],
-        "kind": clean_widget["kind"],
-        "title": clean_widget["title"],
+        "kind": _public_display_text_summary(clean_widget["kind"], 80) or "custom",
+        "title": _public_display_text_summary(clean_widget["title"], 160) or clean_widget["id"],
         "layout": clean_widget["layout"],
     }
     system = widget.get("system") if isinstance(widget.get("system"), dict) else {}
@@ -909,6 +909,26 @@ def _payload_text_summary(value: Any, limit: int = 500) -> str:
         _SECRET_LIKE_VALUE_RE.search(text)
         or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
     ):
+        return "[REDACTED]"
+    return text
+
+
+def _public_display_text_summary(value: Any, limit: int = 300) -> str:
+    """Return safe UI/API display metadata without over-redacting benign labels.
+
+    This is intentionally narrower than recovery-preview redaction: ordinary
+    product labels such as "Source Space" or "Daily Data Dashboard" stay useful,
+    while executable/generated-code and credential/API-auth markers fail closed.
+    """
+    text = _context_value(value, limit)
+    lowered = text.lower()
+    unsafe_pattern = re.compile(
+        r"api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\s+[^\s,;]+|"
+        r"cookie\s*[:=]|credential|credentials|password|secret(?:[_-][a-z0-9_-]+|\b)|token\s*[:=]|"
+        r"<script|</script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt",
+        re.IGNORECASE,
+    )
+    if text and (unsafe_pattern.search(text) or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)):
         return "[REDACTED]"
     return text
 
@@ -1207,7 +1227,8 @@ def create_space(payload: dict[str, Any]) -> dict[str, Any]:
         "revision_events": [],
         "revision_event_id": None,
     }
-    return _write_manifest(space, "space.created", {"name": name})
+    saved = _write_manifest(space, "space.created", {"name": name})
+    return read_space_detail(saved["space_id"])
 
 
 def _safe_session_title_for_space(title: Any) -> str:
@@ -1303,9 +1324,9 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
     detail = {
         "schema_version": space.get("schema_version", SCHEMA_VERSION),
         "space_id": space.get("space_id"),
-        "name": space.get("name") or space.get("space_id"),
-        "description": space.get("description", ""),
-        "agent_instructions": space.get("agent_instructions", ""),
+        "name": _public_display_text_summary(space.get("name") or space.get("space_id"), 160) or space.get("space_id"),
+        "description": _public_display_text_summary(space.get("description", ""), 300),
+        "agent_instructions": _public_display_text_summary(space.get("agent_instructions", ""), 500),
         "template": space.get("template", "blank"),
         "created_at": space.get("created_at"),
         "updated_at": space.get("updated_at"),
@@ -3441,7 +3462,8 @@ def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
             if key == "agent_instructions":
                 value = str(value or "")
             space[key] = value
-    return _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
+    saved = _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
+    return read_space_detail(saved["space_id"])
 
 
 def delete_space(space_id: str) -> dict[str, Any]:

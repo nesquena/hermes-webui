@@ -103,6 +103,119 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_public_display_metadata_preserves_benign_source_and_data_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "source-data-labels",
+            "name": "Source Space",
+            "description": "Daily Data Dashboard metadata",
+            "agent_instructions": "Use source notes and data tables safely.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "source-notes",
+            "kind": "data-table",
+            "title": "Source Notes",
+            "layout": {"x": 0, "y": 0, "w": 6, "h": 4},
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "secretary-notes",
+            "kind": "tokenization-dashboard",
+            "title": "Secretary Cookie Recipes",
+        },
+    )
+
+    listed = spaces.list_spaces()[0]
+    detail = spaces.read_space_detail(created["space_id"])
+
+    assert listed["name"] == "Source Space"
+    assert listed["description"] == "Daily Data Dashboard metadata"
+    assert detail["name"] == "Source Space"
+    assert detail["description"] == "Daily Data Dashboard metadata"
+    assert detail["agent_instructions"] == "Use source notes and data tables safely."
+    assert detail["widgets"][0]["title"] == "Source Notes"
+    assert detail["widgets"][0]["kind"] == "data-table"
+    assert detail["widgets"][1]["title"] == "Secretary Cookie Recipes"
+    assert detail["widgets"][1]["kind"] == "tokenization-dashboard"
+
+
+def test_space_create_and_update_return_public_sanitized_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "unsafe-create-return",
+            "name": "renderer api_auth panel",
+            "description": "<script>bad()</script>",
+            "widgets": [
+                {"id": "w1", "kind": "api_auth", "title": "renderer card", "renderer": "<script>bad()</script>"}
+            ],
+        }
+    )
+    updated = spaces.update_space(
+        created["space_id"],
+        {"name": "raw prompt panel", "agent_instructions": "generated code body"},
+    )
+    serialized = json.dumps({"created": created, "updated": updated}).lower()
+
+    assert created["name"] == "[REDACTED]"
+    assert created["widgets"][0]["title"] == "[REDACTED]"
+    assert created["widgets"][0]["kind"] == "[REDACTED]"
+    assert updated["name"] == "[REDACTED]"
+    assert updated["agent_instructions"] == "[REDACTED]"
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "<script" not in serialized
+    assert "generated code" not in serialized
+    assert "raw prompt" not in serialized
+
+
+
+def test_space_public_detail_redacts_unsafe_display_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "unsafe-display-meta",
+            "name": "renderer source html data api_auth",
+            "description": "<script>bad()</script> SECRET_VALUE_DO_NOT_LEAK",
+            "agent_instructions": "Use bearer SECRET_VALUE_DO_NOT_LEAK raw prompt generated code",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "safe-widget",
+            "kind": "api_auth",
+            "title": "renderer panel api_auth",
+            "layout": {"x": 1, "y": 2, "w": 3, "h": 4},
+        },
+    )
+
+    listed = spaces.run_space_tool("space.list", {})
+    loaded = spaces.run_space_tool("space.get", {"space_id": created["space_id"]})
+    detail = spaces.read_space_detail(created["space_id"])
+    serialized = json.dumps({"listed": listed, "loaded": loaded, "detail": detail}).lower()
+
+    assert listed["spaces"][0]["name"] == "[REDACTED]"
+    assert loaded["space"]["name"] == "[REDACTED]"
+    assert loaded["space"]["description"] == "[REDACTED]"
+    assert loaded["space"]["agent_instructions"] == "[REDACTED]"
+    assert loaded["space"]["widgets"][0]["title"] == "[REDACTED]"
+    assert loaded["space"]["widgets"][0]["kind"] == "[REDACTED]"
+    assert detail["widgets"][0]["layout"] == {"x": 1, "y": 2, "w": 3, "h": 4, "minimized": False}
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '\"source\"' not in serialized
+
+
 def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created_by_alias = spaces.run_space_tool(

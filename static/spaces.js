@@ -390,6 +390,13 @@
     return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) ? text : '';
   }
 
+  function safeDisplayMetadataText(value, fallback){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!text) return fallback || '';
+    const unsafeDisplayPattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\s+[^\s,;]+|cookie\s*[:=]|credential|credentials|password|secret(?:[_-][a-z0-9_-]+|\b)|token\s*[:=]|<script|<\/script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt)/i;
+    return unsafeDisplayPattern.test(text) ? '[REDACTED]' : text;
+  }
+
   function renderCreatorSpecSummary(spec){
     const safeSpec = spec && typeof spec === 'object' && !Array.isArray(spec) ? spec : {};
     const space = safeSpec.space && typeof safeSpec.space === 'object' && !Array.isArray(safeSpec.space) ? safeSpec.space : {};
@@ -508,8 +515,10 @@
     const widgetRows = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
       const layout = widgetLayout(w);
-      return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(w.title||widgetId||'Untitled widget')+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div></div>';
+      const title = safeDisplayMetadataText(w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
+      const kind = safeDisplayMetadataText(w.kind, 'custom') || 'custom';
+      return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
     return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
       '<h3>'+escapeHtml(name)+'</h3>' +
@@ -812,8 +821,8 @@
   function renderWidgetManager(spaceId, widgets, events){
     const widgetCards = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
-      const title = w.title || widgetId || 'Untitled widget';
-      const kind = w.kind || 'custom';
+      const title = safeDisplayMetadataText(w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
+      const kind = safeDisplayMetadataText(w.kind, 'custom') || 'custom';
       const layout = widgetLayout(w);
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
         '<div><strong>'+escapeHtml(title)+'</strong>' +

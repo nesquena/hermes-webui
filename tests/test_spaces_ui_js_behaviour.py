@@ -531,7 +531,7 @@ global.fetch = async function(path, opts = {}) {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const isTimeTravelRestore = path.indexOf('demo-time-travel-restore') !== -1;
     const isRecovery = path.indexOf('demo-safe-admin-recovery') !== -1;
-    return response({ widgets: [{
+    const widgets = [{
       id: (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather',
       kind: 'weather',
       title: (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'Weather in Prague' : '<Weather>',
@@ -555,7 +555,34 @@ global.fetch = async function(path, opts = {}) {
         },
       },
       renderer: '<script>bad()</script>',
-    }] });
+    }];
+    if (scenario === 'list' && !isDemoWeather && !isTimeTravelRestore && !isRecovery) {
+      widgets.push({
+        id: 'safe-label',
+        kind: 'markdown',
+        title: 'renderer panel SECRET_VALUE_DO_NOT_LEAK api_key',
+        layout: { x: 0, y: 8, w: 4, h: 3, minimized: false },
+      });
+      widgets.push({
+        id: 'source-notes',
+        kind: 'data-table',
+        title: 'Source Notes',
+        layout: { x: 4, y: 8, w: 4, h: 3, minimized: false },
+      });
+      widgets.push({
+        id: 'secretary-notes',
+        kind: 'tokenization-dashboard',
+        title: 'Secretary Cookie Recipes',
+        layout: { x: 8, y: 8, w: 4, h: 3, minimized: false },
+      });
+      widgets.push({
+        id: 'generated-panel',
+        kind: 'markdown',
+        title: 'Generated code raw prompt panel',
+        layout: { x: 12, y: 8, w: 4, h: 3, minimized: false },
+      });
+    }
+    return response({ widgets });
   }
   if (path === 'api/spaces/widget/events?space_id=demo-notes-app') {
     return response({ events: [
@@ -1762,9 +1789,18 @@ def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
 
     assert "Weather" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "Source Notes" in out["rootHtml"]
+    assert "data-table · source-notes" in out["rootHtml"]
+    assert "Secretary Cookie Recipes" in out["rootHtml"]
+    assert "tokenization-dashboard · secretary-notes" in out["rootHtml"]
+    assert "[REDACTED]" in out["rootHtml"]
+    assert "generated code" not in out["rootHtml"].lower()
+    assert "raw prompt" not in out["rootHtml"].lower()
     assert "weather · weather · x12 y3 · 5×4" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
     assert {"path": "api/spaces/widgets?space_id=lab", "method": "GET", "body": ""} in out["calls"]
 
 
