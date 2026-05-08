@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Safe creator loop commit receipt now exposes metadata-only follow-up actions to open the committed Space/revision history and manage committed widgets after `space.creator.commit`, reusing existing safe `openSpace` / `loadWidgets` handlers without rendering generated widget bodies or leaking raw renderer/source/API-auth markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the safe recovery/admin surface now redacts unsafe space-level metadata labels and restore-preview names/descriptions before they reach recovery snapshots, keeping secret-looking/API-auth/source/script markers out of the fail-safe UI while preserving metadata-only widget summaries. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): redact recovery space metadata`
+  - Added RED/GREEN backend coverage proving unsafe Space `name` / `description` values and revision restore-preview labels are redacted in `recovery_snapshot()` while safe ids/widget summaries remain visible.
+  - The recovery/admin hard gate continues to expose metadata-only rollback and repair controls without returning generated renderer/source/API-auth markers or secret-looking sentinel values.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`2 passed`); full Spaces foundation suite passed (`170 passed`); Spaces UI JS behavior + demo parity suites passed (`122 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` browser QA harness panel-scoped leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-redaction-harness.png`.
 
 - `feat(spaces): link creator commits to recovery actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the `space.creator.commit` UI receipt keeps the revisioned metadata-only gate envelope and now shows `Open committed Space` plus `Manage committed widgets` actions wired to the sanitized committed `space_id`.

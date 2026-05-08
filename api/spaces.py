@@ -299,8 +299,8 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": space.get("schema_version", SCHEMA_VERSION),
         "space_id": space.get("space_id"),
-        "name": space.get("name") or space.get("space_id"),
-        "description": space.get("description", ""),
+        "name": _recovery_reason_summary(space.get("name") or space.get("space_id"), 160),
+        "description": _recovery_reason_summary(space.get("description", ""), 300),
         "created_at": space.get("created_at"),
         "updated_at": space.get("updated_at"),
         "revision_event_id": space.get("revision_event_id"),
@@ -835,7 +835,7 @@ def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": clean_widget["id"],
         "kind": clean_widget["kind"],
-        "title": clean_widget["title"],
+        "title": _recovery_reason_summary(clean_widget["title"], 160),
         "disabled": bool(recovery.get("disabled")),
         "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
     }
@@ -908,6 +908,34 @@ def _payload_text_summary(value: Any, limit: int = 500) -> str:
     return text
 
 
+def _recovery_payload_summary(value: Any, depth: int = 0) -> Any:
+    """Return a recovery/admin-safe metadata summary for event details."""
+    if depth > 3:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        count = 0
+        for key, item in value.items():
+            if count >= 20:
+                break
+            safe_key = _context_value(key, 80)
+            if not _payload_key_is_safe(safe_key):
+                continue
+            child = _recovery_payload_summary(item, depth + 1)
+            if child in ({}, [], ""):
+                continue
+            summary[safe_key] = child
+            count += 1
+        return summary
+    if isinstance(value, (list, tuple)):
+        return [_recovery_payload_summary(item, depth + 1) for item in value[:20]]
+    if isinstance(value, str):
+        return _recovery_reason_summary(value, 300)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _recovery_reason_summary(value, 300)
+
+
 def _payload_summary(value: Any, depth: int = 0) -> Any:
     """Return a bounded, metadata-safe widget event payload summary.
 
@@ -943,7 +971,7 @@ def _event_summary(event: dict[str, Any], sid: str, current_snapshot: dict[str, 
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
         return None
-    details = _payload_summary(event.get("details") or {})
+    details = _recovery_payload_summary(event.get("details") or {})
     if not isinstance(details, dict):
         details = {}
     summary = {
@@ -969,13 +997,15 @@ def _restore_preview_summary(snapshot: dict[str, Any], sid: str) -> dict[str, An
         if not isinstance(widget, dict):
             continue
         try:
-            widget_summaries.append(_widget_summary(widget))
+            widget_summary = _widget_summary(widget)
         except ValueError:
             continue
+        widget_summary["title"] = _recovery_reason_summary(widget_summary.get("title"), 160)
+        widget_summaries.append(widget_summary)
     return {
         "space_id": sid,
-        "name": _context_value(snapshot.get("name") or sid, 160),
-        "description": _payload_text_summary(snapshot.get("description") or "", 240),
+        "name": _recovery_reason_summary(snapshot.get("name") or sid, 160),
+        "description": _recovery_reason_summary(snapshot.get("description") or "", 240),
         "widget_count": len(widgets),
         "widgets": widget_summaries,
     }

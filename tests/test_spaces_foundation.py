@@ -4248,6 +4248,60 @@ def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch,
     assert "renderer" not in serialized
 
 
+def test_recovery_snapshot_redacts_unsafe_space_metadata_and_restore_previews(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "unsafe-recovery-meta",
+            "name": "renderer source html data api_auth",
+            "description": "Broken <script>boot()</script> SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+    spaces.update_space(
+        created["space_id"],
+        {
+            "description": "renderer source html data api_auth SECRET_VALUE_DO_NOT_LEAK",
+            "widgets": [
+                {
+                    "id": "safe-widget",
+                    "kind": "markdown",
+                    "title": "renderer source html data api_auth SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+
+    recovery = spaces.recovery_snapshot()
+    space = recovery["spaces"][0]
+    revision_previews = [
+        event.get("restore_preview")
+        for event in space.get("revisions", [])
+        if isinstance(event.get("restore_preview"), dict)
+    ]
+    serialized = json.dumps(recovery).lower()
+
+    assert recovery["generated_widgets_rendered"] is False
+    assert space["space_id"] == "unsafe-recovery-meta"
+    assert space["name"] == "[REDACTED]"
+    assert space["description"] == "[REDACTED]"
+    assert revision_previews
+    assert all(preview["name"] == "[REDACTED]" for preview in revision_previews)
+    assert all(preview["description"] == "[REDACTED]" for preview in revision_previews)
+    assert space["widgets"][0]["id"] == "safe-widget"
+    assert space["widgets"][0]["title"] == "[REDACTED]"
+    assert any(
+        widget.get("title") == "[REDACTED]"
+        for preview in revision_previews
+        for widget in preview.get("widgets", [])
+    )
+    assert "boot()" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_recovery_snapshot_exposes_safe_admin_gate_summary(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Recovery Gate"})
