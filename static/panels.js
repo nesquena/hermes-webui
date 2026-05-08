@@ -1096,10 +1096,9 @@ function _kanbanCardStalenessClass(task){
 function _kanbanCardQuickActions(task){
   const id = esc(task.id || '');
   const status = task.status || '';
-  const start = status !== 'running' && status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','running')">${esc(t('kanban_card_start'))}</button>` : '';
   const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
   const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
-  return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${start}${complete}${archive}</div>`;
+  return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${complete}${archive}</div>`;
 }
 
 async function quickKanbanCardAction(event, taskId, status){
@@ -1168,17 +1167,25 @@ function _kanbanRenderProfileLanes(columns){
   }).join('')}</div>`;
 }
 
+function _kanbanEmptyBoardHtml(){
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_no_data'))}</div><div class="main-view-empty-sub">${esc(t('kanban_work_queue_hint'))}</div></div>`;
+}
+
 function _kanbanRenderBoard(){
   const board = $('kanbanBoard');
   if (!board) return;
   if (!_kanbanBoard || !_kanbanBoard.columns) {
-    board.innerHTML = `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_no_data'))}</div></div>`;
+    board.innerHTML = _kanbanEmptyBoardHtml();
     return;
   }
   const columns = _kanbanVisibleTasks();
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
   _kanbanRenderSidebar(columns);
+  if (total === 0) {
+    board.innerHTML = _kanbanEmptyBoardHtml();
+    return;
+  }
   board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
 }
 
@@ -1219,6 +1226,7 @@ async function hardRefreshWebUIClient(){
 function _kanbanLooksLikeStaleClientError(err){
   const msg = String((err && err.message) || err || '').toLowerCase();
   return !!(err && err.status === 404 && (
+    msg === 'not found' ||
     msg.includes('unknown kanban endpoint') ||
     msg.includes('stale cached bundle')
   ));
