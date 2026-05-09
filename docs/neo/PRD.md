@@ -1,10 +1,18 @@
 # PRD — Neo WebUI
 
 > **Status:** rascunho aprovado para execução
-> **Versão:** 2.1
-> **Última atualização:** 2026-05-01
+> **Versão:** 2.2
+> **Última atualização:** 2026-05-09
 > **Owner:** Júnior Melo (`@melojrx`)
 > **Repositório:** este fork de `nesquena/hermes-webui`
+>
+> **Changelog v2.2 (2026-05-09)**
+> Painel Agentes (EP-AG) sai de "in-scope futuro genérico" e ganha **arquitetura
+> definida**: caminho **🅲 Híbrido** — front bundlado do `pixel-agents-standalone`
+> servido pelo `server.py` Neo + adaptador Python (`api/agents_activity.py`) que
+> traduz `state.db` + SSE Hermes para o protocolo `ServerMessage` que o front
+> já entende. Justificativa, RFs e RNFs atualizados; HUs detalhadas em
+> `BACKLOG.md` EP-AG; plano de execução em `TASKS.md` Sprint 7+.
 
 ---
 
@@ -57,9 +65,13 @@ subagentes futuro).
 3. **Operação de projeto.** Pedir ao Neo no chat para implementar algo em um
    projeto, acompanhar a tarefa no painel Projetos e, em sprint futura, criar
    ou sincronizar a KAN/issue no Jira correto.
-4. **Delegação visual (futuro).** Ver subagentes que o Neo está orquestrando
-   em paralelo, com domínio, profile, status — análogo à proposta do
-   `pixel-agents` (https://github.com/pablodelucca/pixel-agents).
+4. **Delegação visual (futuro próximo — EP-AG).** Abrir a aba **Agentes** e ver,
+   em tempo real, o Neo orquestrador e os subagentes (MGI / Projetos / Finanças
+   / Terapia / Pessoal) trabalhando em paralelo, com a tool ativa, o domínio,
+   o profile, o estado (ativo/aguardando/idle/permission). A visualização é
+   inspirada em [`pablodelucca/pixel-agents`](https://github.com/pablodelucca/pixel-agents)
+   (escritório pixel-art com personagens andando), reaproveitando o fork
+   `pixel-agents-standalone` por **embedding híbrido** (ver §6 RF-AG.1).
 5. **Operação rápida.** Salvar uma nota no vault Obsidian, abrir terminal,
    executar uma skill — tudo sem sair da WebUI.
 
@@ -109,9 +121,10 @@ Júnior, falta:
 - ❌ Substituir framework / introduzir build step / SPA / React/Svelte.
 - ❌ Reescrever backend ou alterar APIs públicas do Hermes.
 - ❌ Mobile-first redesign (manter responsividade existente; não reinventar).
-- ❌ Painel "Agentes" com mapeamento de delegação ao vivo → vai para
-  **backlog futuro** (EP-AG, ver `BACKLOG.md`); avaliar viabilidade na VPS
-  antes de comprometer.
+- ⏳ Painel "Agentes" com mapeamento de delegação ao vivo continua **fora do
+  MVP (Sprints 1–6)**, mas passa a ter arquitetura definida (caminho 🅲
+  Híbrido) e entra como sprint dedicada **pós-MVP** — ver EP-AG no `BACKLOG.md`
+  e Sprint 7+ no `TASKS.md`. Não pré-requisita reprodução 1:1 do `pixel-agents`.
 - ❌ Backend financeiro real (sincronização com bancos / OFX / FinanPy) —
   MVP entrega **shell visual** com dados de demonstração; integração real
   é pós-MVP.
@@ -147,9 +160,20 @@ Júnior, falta:
 
 ### In-scope (pós-MVP — Sprint 5+)
 
-10. **Painel Agentes (mapa de delegação)** — explorar opção leve para a VPS
-    atual, inspirado em `pablodelucca/pixel-agents`; entrega depende de
-    prova de conceito de custo de runtime.
+10. **Painel Agentes (mapa de delegação multi-agente — EP-AG)** —
+    visualização do Neo orquestrador + subagentes ativos no painel `agents`,
+    seguindo o **caminho 🅲 Híbrido** decidido em 2026-05-09:
+    - Front: bundle Vite/React/Canvas2D do `pixel-agents-standalone` servido
+      estaticamente pelo `server.py` Neo em `/static/agents-app/`.
+    - Backend: novo módulo Neo-only `api/agents_activity.py` que lê
+      `state.db` (relação parent/child de sessões) + assina o SSE existente
+      em `streaming.py` (eventos `tool_use`/`tool_result`/`delegate_task`) e
+      traduz para o protocolo `ServerMessage` (`agentCreated`,
+      `agentToolStart`, `agentToolDone`, `subagentToolStart`, …) que o front
+      do pixel-agents já consome — sem fork divergente, sem WebSocket extra,
+      sem build step na neo-webui.
+    - Entregável: a aba `agents` deixa de ser placeholder e mostra o Neo +
+      subagentes em tempo real. Ver `BACKLOG.md` EP-AG e `TASKS.md` Sprint 7+.
 11. **Backend financeiro real** — integração com FinanPy API, OFX import,
     sincronização de bancos.
 12. **Sincronização Jira / fontes externas** — múltiplos Jiras, criação de KAN
@@ -183,7 +207,7 @@ Júnior, falta:
 | RF-08 | Drag-and-drop entre colunas atualiza status da tarefa e persiste via `PATCH /api/project-tasks/{task_id}` com `{ status: "backlog|em_andamento|em_revisao|concluido" }` | P0 |
 | RF-09 | Criar/editar/arquivar projeto e tarefa via UI; projeto/tarefa pode ser vinculado a sessões existentes via `session.project_id` e refs locais | P1 |
 | RF-10 | Locale pt-BR cobre Dashboard, Kanban e Finanças (chaves novas) | P0 |
-| RF-11 | Painel Agentes (BACKLOG): rota `/api/agents/active` enumera subagentes ativos pelo runtime; UI lista cards animados estilo "pixel-agents" | P2 |
+| RF-11 | Painel Agentes (EP-AG, pós-MVP): aba `agents` deixa de ser placeholder e exibe o Neo orquestrador + subagentes em execução em tempo real, reusando o front do `pixel-agents-standalone` (embedding híbrido). Detalhamento em RF-AG.* | P1 (pós-MVP) |
 | RF-12 | Sidebar fixa (240px) com 9 itens de navegação (Dashboard, Projetos, Tarefas, Pessoal, Finanças, Agentes, Skills, Automação, Configurações), card de status do Neo com botão "Conversar agora", recursos VPS (CPU/RAM/Disco/Rede com barras de progresso, poll 30s via `GET /api/health/vps`), footer com links Documentação/Suporte | P0 |
 | RF-13 | Topbar contextual (56px) com VPS Status + pill ONLINE, Uptime, Região, Versão, botão Terminal SSH, ícones busca/notificações/help, admin dropdown. Dados via `GET /api/health/system` com poll 30s | P0 |
 | RF-14 | Página Finanças com: header + 4 KPI cards (Receitas/Despesas/Saldo Líquido/Investimentos), gráfico de linha SVG vanilla (receitas × despesas por mês), donut de gastos por categoria, coluna lateral (Orçamentos/Transações Recentes/Metas Financeiras), modal "+ Nova Finança" com tabs Receita/Despesa/Investimento | P0 |
@@ -191,6 +215,13 @@ Júnior, falta:
 | RF-16 | Barra de status (pills) na página Projetos com contadores clicáveis: Total, Backlog, Em Andamento, Revisão, Concluído | P0 |
 | RF-17 | Avatar humanoide Neo em SVG (wireframe holográfico cyan) com 3 variantes: hero (240×220), mark (40×40), mono (favicon). Animações CSS: hover-float 4s, pulse-glow 3s | P0 |
 | RF-18 | Tarefas de projeto persistem `external_ref` opcional (`type`, `source_id`, `key`, `url`, `status`, `synced_at`) sem chamar APIs externas na Sprint 5 | P0 |
+| RF-AG.1 | O front do `pixel-agents-standalone` é servido pelo `server.py` Neo em `/static/agents-app/` (bundle estático produzido por `npm run build` no fork e copiado em build-time). Nenhum processo Node novo roda em produção na VPS; a neo-webui continua sendo o único serviço Python/HTTP exposto pelo `hermes-webui.service`. | P0-AG |
+| RF-AG.2 | O front se conecta a um endpoint SSE Neo-only `GET /api/agents/stream` (em vez do WebSocket original do pixel-agents). O endpoint emite mensagens no mesmo formato `ServerMessage` esperado pelo front (`agentCreated`, `agentClosed`, `agentStatus`, `agentToolStart`, `agentToolDone`, `agentToolsClear`, `subagentToolStart`, `subagentToolDone`, `subagentClear`). | P0-AG |
+| RF-AG.3 | A fonte de dados do `/api/agents/stream` é o módulo `api/agents_activity.py`, que: (a) lê `state.db` para descobrir sessões ativas e suas relações pai/filho via `parent_session_id`; (b) assina os eventos SSE já existentes em `streaming.py` (tool_use/tool_result/delegate_task); (c) traduz tools Hermes (`delegate_task`, `memory`, `obsidian-mcp`, `web_search`, `execute_code`, `terminal_run`, …) para textos curtos pt-BR equivalentes ao `formatToolStatus()` do upstream pixel-agents. | P0-AG |
+| RF-AG.4 | A aba `agents` da sidebar Neo, hoje placeholder, passa a montar o app embarcado via `mountDashboardAgents()` (mesmo padrão de `mountDashboardSettings`/`mountDashboardSkills`): carrega o bundle de `/static/agents-app/` em um `<iframe sandbox="allow-scripts allow-same-origin">` ou em um container `<div>` com `<script type="module">` — decisão fechada na PoC (HU-AG.0). | P0-AG |
+| RF-AG.5 | A fonte (Neo orquestrador) e os subagentes do Neo (MGI / Projetos / Finanças / Terapia / Pessoal) são exibidos com nomes pt-BR e cor por domínio; o orquestrador aparece como o personagem central e cada `delegate_task` em vôo aparece como subagente vinculado (linha tênue ou ícone de "trabalhando para X"). | P1-AG |
+| RF-AG.6 | O painel só carrega o bundle (≈ XKB) quando a aba `agents` é aberta pela primeira vez (lazy-load); o SSE só abre quando o painel está visível e fecha quando o usuário sai da aba — para zero custo em runtime quando ninguém está olhando. | P0-AG |
+| RF-AG.7 | O painel exibe um estado vazio amigável (ilustração + copy pt-BR) quando não há sessões ativas: "Nenhum agente trabalhando agora. O Neo aparece aqui quando você ou um job iniciar uma conversa." | P0-AG |
 
 ### Não-funcionais (RNF)
 
@@ -203,10 +234,13 @@ Júnior, falta:
 | RNF-05 | Internacionalização | Toda string nova passa por `t(...)` ou `data-i18n` — proibido hardcode em pt-BR ou en no DOM |
 | RNF-06 | Manutenibilidade | Nenhum patch monkey-patch em arquivos upstream; novas features em arquivos Neo-only quando viável (ver `UPSTREAM-SYNC.md`) |
 | RNF-07 | Segurança | Reaproveitar middleware de auth existente; não introduzir novas rotas sem cookie de auth quando aplicável |
-| RNF-08 | Footprint na VPS | Painel Agentes (futuro) não pode adicionar mais de 50 MB de RAM nem requisição extra > 1/s |
+| RNF-08 | Footprint na VPS — Painel Agentes | Adicional ≤ **30 MB de RAM** com painel aberto (≤ 5 MB com painel fechado, pois o SSE só é aberto on-demand); CPU adicional ≤ **2 %** em idle e ≤ **5 %** durante atividade típica de 1 sessão; nenhum processo extra fora do `hermes-webui.service` (sem Node, sem WebSocket separado, sem novo systemd). Medido com `ps_mem` + `pidstat` em PoC de 24 h antes do release. |
 | RNF-09 | Gráficos SVG vanilla | Gráficos de linha e donut implementados em SVG inline sem libs externas; animações via CSS (`stroke-dashoffset`). Módulo: `static/finance.js` |
 | RNF-10 | Tipografia Inter | Fonte `Inter` (400/500/600/700) via Google Fonts; `--font-ui` no skin "neo" usa `'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif` |
 | RNF-11 | Baixa regressão no chat | O Dashboard não deve duplicar nem reimplementar lógica de chat/composer. Deve reaproveitar o fluxo upstream sempre que possível, para manter compatibilidade com seleção de modelo, workspace, profile, uploads, voz, reasoning e transporte SSE |
+| RNF-12 | Painel Agentes — sem build step na neo-webui | O bundle do `pixel-agents-standalone` é gerado **fora do runtime** (no fork dele, com `npm run build`) e versionado/copiado para `static/agents-app/` na neo-webui. A neo-webui em produção **não roda Node** e **não exige `npm install`**. RNF-01 (sem build step) permanece intacto para o repositório principal. |
+| RNF-13 | Painel Agentes — fork do `pixel-agents-standalone` mínimo e isolável | Toda customização Neo (cliente SSE em vez de WebSocket, paleta cyan, copy pt-BR) é feita em **arquivos próprios** no fork do `pixel-agents-standalone` (ex: `webview-ui/src/neo/sse-client.ts`, `webview-ui/src/neo/i18n.ts`), nunca por monkey-patch dos arquivos originais. Objetivo: poder dar `git pull` no upstream `pablodelucca/pixel-agents` (via base `pixel-agents-standalone`) sem conflito. |
+| RNF-14 | Painel Agentes — segurança e auth | O endpoint `/api/agents/stream` reusa **o mesmo middleware de auth do resto da WebUI** (cookie de sessão Neo). O bundle `/static/agents-app/` é servido como qualquer outro asset estático e respeita o `<base href>` dinâmico do `index.html` para subpath mount. Nenhuma porta nova é aberta na VPS. |
 
 ---
 
@@ -230,7 +264,10 @@ Júnior, falta:
 | Risco | Impacto | Mitigação |
 |---|---|---|
 | Conflito de merge ao puxar upstream | Médio | Estratégia "aditiva" + arquivos Neo-only documentada em `UPSTREAM-SYNC.md`; merge upstream antes de cada sprint |
-| Painel Agentes pesar na VPS | Médio | Manter como BACKLOG (P2); só ativar após PoC com métrica de custo de RAM/CPU |
+| Painel Agentes pesar na VPS | Médio | Caminho 🅲 Híbrido limita custo (RNF-08); PoC de 24 h obrigatória antes do release (HU-AG.0); SSE só aberto quando o painel está visível (RF-AG.6) |
+| Adapter `state.db` ↔ `ServerMessage` ficar acoplado a internals do Hermes | Médio | Isolar leitura em `api/agents_activity.py` (Neo-only, sem editar arquivos upstream); cobrir contratos com testes em `tests/test_neo_agents_*.py`; documentar em `UPSTREAM-SYNC.md` que mudanças de schema do `state.db` no Hermes podem exigir refatoração só desse módulo |
+| Fork divergente do `pixel-agents-standalone` | Médio | RNF-13 — customização Neo em arquivos novos (`webview-ui/src/neo/*`), nunca por edição dos originais; documento `pixel-agents-standalone/NEO-FORK.md` lista as 3 ou 4 alterações exatas |
+| Bundle do pixel-agents pesar muito (assets de tilesets) | Baixo | MVP do EP-AG usa apenas tileset default (sem o pacote pago de 452 peças); medir tamanho final do bundle e fazer code-splitting se passar de 500 KB gzipped |
 | Hardcodes residuais "Hermes" pelo código | Baixo | Lint próprio (`scripts/lint_neo_branding.sh`) na CI antes do release; aceita exceções em comentários e termos técnicos (`HERMES_HOME`, `~/.hermes/`) |
 | pt-BR ficar parcial / dessincronizado | Médio | Teste de paridade de chaves (já existe para `es` em `tests/`); replicar para `pt-BR` |
 | Drag-and-drop instável em mobile | Baixo | Aceitar fallback "mover para coluna X" via menu de contexto no mobile |
@@ -256,9 +293,16 @@ Como Júnior Melo
 Quero a UI vestida de Neo (paleta cyan, hero, logo)
 Para que a interface reflita a marca do meu segundo cérebro.
 
-Como Júnior Melo (futuro)
-Quero ver os subagentes que o Neo está orquestrando agora
-Para entender visualmente a delegação em paralelo (estilo pixel-agents).
+Como Júnior Melo
+Quero abrir a aba Agentes da WebUI Neo e ver, em pixel-art, o Neo
+orquestrador junto dos subagentes ativos (MGI, Projetos, Finanças, etc.)
+trabalhando — com a tool atual e o domínio de cada um
+Para entender visualmente a delegação em paralelo sem precisar abrir log.
+
+Como mantenedor do fork
+Quero que o Painel Agentes não introduza Node em produção, não consuma
+mais que ~30 MB de RAM e seja desligável
+Para não comprometer a VPS modesta nem a manutenibilidade do fork.
 ```
 
 ---
@@ -292,3 +336,6 @@ verdadeiros e marcados em `TASKS.md`:
 - Arquitetura WebUI: [`ARCHITECTURE.md`](../../ARCHITECTURE.md) (raiz do repo)
 - Sprints históricas upstream: [`SPRINTS.md`](../../SPRINTS.md), [`ROADMAP.md`](../../ROADMAP.md)
 - Inspiração para painel Agentes: https://github.com/pablodelucca/pixel-agents
+- Fork standalone (base do EP-AG): `/home/jrmelo/Projetos/pixel-agents-standalone`
+- Análise de viabilidade EP-AG (caminho 🅲 Híbrido): registrada em
+  `BACKLOG.md` § EP-AG → "Decisão arquitetural (2026-05-09)"

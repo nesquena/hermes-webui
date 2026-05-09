@@ -14,7 +14,7 @@
 > Sempre que houver dúvida entre o código atual e este spec, **vence o spec**.
 > Se o spec estiver errado, atualizar aqui antes de mexer no código.
 
-> **Versão:** 3.2 — 2026-05-01 (preserva composer completo Hermes no Dashboard)
+> **Versão:** 3.3 — 2026-05-09 (adiciona §7-bis Painel Agentes — EP-AG híbrido com pixel-agents)
 
 ---
 
@@ -266,14 +266,14 @@ texto em `--accent`. Hover: fundo `--accent-bg`, sem border-left.
 3. **Tarefas** (ícone: `check-square`) — agrega `tasks` (cron) + `todos` upstream
 4. **Pessoal** (ícone: `user`) — perfil, contatos próximos, notas pessoais (placeholder pós-MVP)
 5. **Finanças** (ícone: `dollar-sign` ou `wallet`) — página spec'd em §8
-6. **Agentes** (ícone: `cpu` ou `bot`) — mapa de subagentes ativos (BACKLOG futuro, ver PRD §5 RF-11)
+6. **Agentes** (ícone: `cpu` ou `bot`) — mapa pixel-art em tempo real do Neo orquestrador + subagentes (Sprint 7 / EP-AG, ver §7-bis abaixo e PRD RF-11 / RF-AG.*)
 7. **Skills** (ícone: `zap` / raio) — listagem de skills disponíveis no runtime
 8. **Automação** (ícone: `settings-2` ou `workflow`) — painel `tasks` (cron) na visão de automações
 9. **Configurações** (ícone: `settings` / engrenagem)
 
 > Itens parcialmente placeholders no MVP (Sprints 1–4):
 > - **Pessoal**: bloco mínimo com avatar, dados do usuário e link para Settings
-> - **Agentes**: estado vazio "Em breve" (pós-MVP, depende de RF-11)
+> - **Agentes**: estado vazio no MVP; entrega completa na **Sprint 7** com pixel-agents híbrido (EP-AG, ver §7-bis)
 >
 > **Finanças** ganha página dedicada (§8) — entrega no MVP é **shell visual**
 > (KPIs e listas vazios ou com dados de demonstração). Backend financeiro real
@@ -615,6 +615,209 @@ fica para o épico futuro de fontes externas.
 
 ---
 
+## 7-bis. Página **Agentes** (mapa pixel-art em tempo real)
+
+> **Status:** Sprint 7 / EP-AG — pós-MVP imediato.
+> **Caminho técnico:** 🅲 Híbrido — bundle do `pixel-agents-standalone` servido
+> estaticamente por `static/agents-app/` + adaptador Python
+> `api/agents_activity.py` que traduz `state.db` + SSE Hermes para o protocolo
+> `ServerMessage` que o front já consome.
+> **Decisão arquitetural completa:** [`BACKLOG.md` § EP-AG](./BACKLOG.md#ep-ag--painel-agentes-pixel-agents-híbrido).
+> **Contratos formais (RF/RNF):** [`PRD.md`](./PRD.md) RF-11, RF-AG.1–7,
+> RNF-08, RNF-12, RNF-13, RNF-14.
+
+### 7-bis.1. Objetivo
+
+Visualizar **em tempo real** o Neo orquestrador e os subagentes que ele
+despacha (MGI / Projetos / Finanças / Terapia / Pessoal) como personagens
+pixel-art trabalhando em um escritório virtual. Cada personagem reage ao que
+está sendo feito de fato pelo Hermes: lendo arquivo, rodando comando,
+delegando para subagente, salvando memória, aguardando permissão, etc.
+
+### 7-bis.2. Layout geral
+
+```
+┌────────────┬─────────────────────────────────────────────────────────────────┐
+│ SIDEBAR    │ TOPBAR — (mesma do Dashboard)                                   │
+│ (240px)    ├─────────────────────────────────────────────────────────────────┤
+│ fixed      │  AGENTES                              🟢 streaming   [filtros] │
+│            │  Mapa pixel-art em tempo real do Neo e subagentes ativos        │
+│            │  ┌───────────────────────────────────────────┬─────────────┐    │
+│            │  │  CANVAS PIXEL-ART                          │ HISTÓRICO   │    │
+│            │  │  (escritório com Neo + subagentes)         │ últimos 20  │    │
+│            │  │  ┌──────────────────────────────────────┐  │ subagentes  │    │
+│            │  │  │ Neo (cyan) — "Delegando para MGI"    │  │             │    │
+│            │  │  │   ╲                                  │  │ • MGI · 1m  │    │
+│            │  │  │    ╲                                 │  │ • Proj · 3m │    │
+│            │  │  │     MGI (laranja) — "Lendo arquivo"  │  │ • Fin · 7m  │    │
+│            │  │  │                                      │  │   …         │    │
+│            │  │  └──────────────────────────────────────┘  │             │    │
+│            │  └───────────────────────────────────────────┴─────────────┘    │
+└────────────┴─────────────────────────────────────────────────────────────────┘
+```
+
+Proporções desktop: grid `1fr 320px` com gap 16px (mesma proporção que o
+Dashboard e Finanças). Mobile: histórico colapsa abaixo do canvas.
+
+### 7-bis.3. Header da página
+
+Bloco de 80px de altura, padding bottom 16px, border-bottom `--border`
+(margin-bottom 16px).
+
+- **Título** "Agentes" 24px/700 `--strong`
+- **Subtítulo** "Mapa pixel-art em tempo real do Neo e subagentes ativos" 13px/400 `--muted`
+- À direita (alinhado verticalmente com o título, gap 12px):
+  - **Indicador de conexão SSE** — pill compacta:
+    - 🟢 `streaming` (`--success` + bullet pulsante 8x8)
+    - 🟡 `reconectando` (`--warning` + spinner)
+    - ⚫ `offline` (`--muted`)
+    - Texto 11px/600 uppercase letter-spacing 0.08em
+  - Botão **Filtros** (futuro / opcional) — outline `--border`, padding 8px 12px, ícone `sliders-horizontal` 14x14. Filtra histórico por domínio.
+
+### 7-bis.4. Canvas pixel-art (coluna esquerda)
+
+Container principal: `--surface`, border `--border`, border-radius 12px,
+padding 0 (o canvas ocupa 100%). Altura mínima 480px, máxima 70vh.
+
+**Conteúdo:** o bundle do `pixel-agents-standalone` (`static/agents-app/`)
+renderiza um Canvas 2D com:
+
+1. **Layout default** do escritório (paredes, piso, móveis básicos do upstream).
+   MVP usa apenas o tileset gratuito; **não** comprar o pacote pago de 452
+   peças do `donarg.itch.io`.
+2. **Personagem central "Neo"** — cor cyan `--accent`, sempre presente quando
+   há sessão ativa. Quando idle, fica sentado na mesa principal.
+3. **Subagentes** — entram no mapa quando o Neo executa `delegate_task` e
+   saem quando o `tool_result` correspondente chega. Cada um tem cor fixa
+   por domínio:
+
+   | Domínio | Cor base | CSS variable proposta |
+   |---|---|---|
+   | MGI | laranja | `--agent-mgi: #F59E0B` |
+   | Projetos | roxo | `--agent-projetos: #A78BFA` |
+   | Finanças | verde | `--agent-financas: #10B981` |
+   | Terapia | rosa | `--agent-terapia: #EC4899` |
+   | Pessoal | cinza-claro | `--agent-pessoal: #94A3B8` |
+
+4. **Linha de delegação** — traço fino tênue (`stroke 1px`, `opacity 0.4`,
+   cor do subagente) ligando Neo ao subagente enquanto a delegação está
+   ativa. Some no `subagentClear`.
+5. **Texto de status** sobre a cabeça do personagem — fonte mono 9px, fundo
+   `--surface-2` semi-transparente, padding 2px 6px, border-radius 4px.
+   Exemplos:
+   - `Lendo arquivo X.md`
+   - `Rodando: pytest tests/...`
+   - `Salvando memória`
+   - `Consultando vault`
+   - `Aguardando sua resposta`
+   - `Delegando para MGI`
+6. **Animações** — herdadas do `pixel-agents-standalone` upstream (sprite
+   walking, idle, typing, reading). Sem alterações no engine.
+
+### 7-bis.5. Histórico de subagentes (coluna direita, 320px)
+
+Container: `--surface`, border `--border`, border-radius 12px, padding 14px.
+
+- **Header:**
+  - Título "Histórico recente" 13px/600 `--text`
+  - Link "Ver todos →" 11px/500 `--accent` (futuro — abre painel completo).
+- **Lista de até 20 itens**, gap 10px, scroll-y interno se exceder:
+  - Bullet 8x8 com a cor do domínio
+  - Stack à direita do bullet:
+    - Linha 1: nome do domínio 12px/500 `--text` (ex: "MGI", "Projetos")
+    - Linha 2: "duração · N tools" 10px/400 `--muted` (ex: "1m 23s · 4 tools")
+  - Ícone à direita: ✓ `--success` (sucesso) ou ✗ `--danger` (falha)
+  - Hover do item: fundo `--surface-2`, cursor pointer (clica para expandir
+    timeline da sessão — HU-AG.11).
+
+### 7-bis.6. Estado vazio
+
+Quando não há sessão ativa do Neo:
+- Canvas mostra o escritório vazio com avatar Neo idle sentado.
+- Banner discreto sobre o canvas: "Nenhum agente trabalhando agora.
+  Comece uma conversa com o Neo no Dashboard." 12px `--muted`.
+- CTA centralizado (link, não botão sólido): "Ir para o Dashboard →"
+  `--accent`.
+- Histórico mostra os últimos 20 subagentes anteriores, mesmo sem atividade
+  ao vivo.
+
+### 7-bis.7. Mapa de tools Hermes → status pixel-agents
+
+Tradução implementada em `api/agents_activity.py::_format_tool_status()`,
+espelhando `formatToolStatus()` do upstream `pixel-agents-standalone`.
+
+| Tool Hermes | Activity (pixel-agents) | Texto pt-BR sobre o personagem |
+|---|---|---|
+| `delegate_task` | `typing` (Neo) + `agentCreated` do subagente | `Delegando para <domínio>` |
+| `memory` | `typing` | `Salvando memória` |
+| `obsidian-mcp` (escrita) | `typing` | `Atualizando vault` |
+| `obsidian-mcp` (leitura) | `reading` | `Consultando vault` |
+| `web_search` | `reading` | `Buscando na web` |
+| `web_fetch` | `reading` | `Lendo página` |
+| `execute_code` | `typing` | `Executando código` |
+| `terminal_run` / `bash` | `typing` | `Rodando: <cmd curto>` (truncado em 30 chars + `…`) |
+| `clarify` | `waiting` | `Aguardando sua resposta` |
+| `send_message` | `typing` | `Enviando para <canal>` |
+| `read` (arquivo) | `reading` | `Lendo <basename(path)>` |
+| `edit` / `write` | `typing` | `Editando <basename(path)>` / `Escrevendo <basename(path)>` |
+| Tool não mapeada | `typing` (fallback) | `Usando <tool_name>` |
+
+### 7-bis.8. Comportamento de conexão SSE
+
+- O `EventSource` para `/api/agents/stream` é **aberto somente quando o
+  painel Agentes está visível** (RNF-08 — sem SSE em background).
+- `mountDashboardAgents()` abre a conexão; `restoreDashboardAgents()` fecha.
+- Reconexão automática com backoff exponencial: 1s → 2s → 4s → 8s → 16s
+  (cap em 30s).
+- Toast em pt-BR após 5 falhas seguidas: "Não foi possível conectar ao
+  stream de agentes. Verifique sua conexão." (`--danger-bg`).
+- Heartbeat de 30s pelo servidor para manter a conexão viva atrás de
+  proxies/timeouts.
+
+### 7-bis.9. Integração com sidebar Neo
+
+- Item **Agentes** já reservado em `static/index.html` (l. 750–762,
+  `<div id="mainAgents">`) e em `static/panels.js`
+  (`NEO_SHELL_PANELS`, l. 24).
+- `mountDashboardAgents()` segue o mesmo padrão de `mountDashboardSettings()`
+  e `mountDashboardSkills()` (anchor pattern), mantendo
+  `body.dashboard-shell-mode` ativo para preservar sidebar e topbar.
+- Quando `HERMES_WEBUI_ENABLE_AGENTS_PANEL=false`, o item da sidebar fica
+  oculto e a rota `/api/agents/stream` retorna `404`.
+
+### 7-bis.10. Implementação dos sprites e canvas
+
+Diferente das demais páginas Neo (vanilla JS), o canvas de Agentes **reusa o
+front do `pixel-agents-standalone`** (Vite/React/Canvas2D). Isso é exceção
+explicitamente permitida pelo PRD RNF-12 porque:
+
+1. O bundle é gerado **fora do runtime** (`npm run build` no fork) e
+   versionado em `static/agents-app/`.
+2. A neo-webui em produção **continua sem Node, sem `npm install`, sem
+   build step**.
+3. O fork mantém arquivos originais intactos (`webview-ui/src/neo/*` é
+   adição) — RNF-13.
+
+> **Alternativa rejeitada:** reescrever o engine Canvas2D em vanilla JS
+> dentro de `static/agents.js`. Custo de ~1500–2000 linhas, perda de
+> mergeability com upstream `pablodelucca/pixel-agents`. Ver
+> `BACKLOG.md` § EP-AG → tabela de comparação dos 3 caminhos.
+
+### 7-bis.11. Restrições explícitas (fora do escopo da Sprint 7)
+
+- ❌ **Tileset pago** de 452 peças do `donarg.itch.io` ($2). MVP usa apenas
+  o layout default do `pixel-agents-standalone`.
+- ❌ **Editor de layout in-app** (recurso do upstream que não agrega no caso
+  Neo).
+- ❌ **Sons** (já vem desligado por padrão no `pixel-agents-standalone`).
+- ❌ **Visualização de outros canais** (WhatsApp / Telegram / Cron / API
+  como personagens separados). Fica para iteração seguinte; MVP foca em
+  sessões do Neo + subagentes.
+- ❌ **Customização de personagens** pelo usuário (escolher avatar/cor).
+  Cores fixas por domínio no MVP.
+
+---
+
 ## 8. Página **Finanças** (controle financeiro)
 
 Página dedicada acessada via sidebar → Finanças. Mostra resumo financeiro
@@ -858,7 +1061,7 @@ Manter `stroke-linecap=round`, `stroke-linejoin=round`.
 | Sidebar **Tarefas** | Consolida `tasks` (cron) + `todos` upstream em uma vista unificada | HU-03.7 |
 | Sidebar **Pessoal** | **NOVO** painel mínimo (perfil + preferências), reusa `settings` parcialmente | HU-03.10 |
 | Sidebar **Finanças** | **NOVO** painel `finance` com KPIs + gráfico + listas | EP-06 (NOVO) |
-| Sidebar **Agentes** | **placeholder** "Em breve" no MVP — RF-11 | BACKLOG futuro |
+| Sidebar **Agentes** | placeholder no MVP; **Sprint 7** entrega pixel-agents híbrido (EP-AG) | Sprint 7 · EP-AG |
 | Sidebar **Skills** | Painel `skills` upstream | já existe |
 | Sidebar **Automação** | Painel `tasks` (cron) na visão de automações | já existe |
 | Sidebar **Configurações** | Painel `settings` upstream | já existe |
@@ -887,6 +1090,12 @@ Manter `stroke-linecap=round`, `stroke-linejoin=round`.
 | Página Finanças — Orçamentos / Transações / Metas | **NOVO** componentes da coluna direita | HU-06.5 |
 | Página Finanças — modal + Nova Finança | **NOVO** modal com tabs Receita/Despesa/Investimento | HU-06.6 |
 | Página Finanças — persistência | `~/.hermes/webui/finance.json` (Neo-only); endpoints `GET/POST /api/finance/*` | HU-06.7 |
+| Página Agentes — canvas pixel-art | bundle do `pixel-agents-standalone` em `static/agents-app/` (caminho 🅲 Híbrido) | HU-AG.1, HU-AG.2 |
+| Página Agentes — stream de eventos | adaptador `api/agents_activity.py` + endpoint SSE `GET /api/agents/stream` | HU-AG.3, HU-AG.4 |
+| Página Agentes — mount/restore embutido | `mountDashboardAgents()` / `restoreDashboardAgents()` em `static/dashboard.js` | HU-AG.5 |
+| Página Agentes — cores por domínio + textos pt-BR | mapeamento de tools Hermes → status visual (§7-bis.7) | HU-AG.6, HU-AG.7 |
+| Página Agentes — histórico recente | `GET /api/agents/recent?limit=20` lendo `state.db` | HU-AG.10 |
+| Página Agentes — feature flag | env `HERMES_WEBUI_ENABLE_AGENTS_PANEL` lido em `api/config.py` | HU-AG.12 |
 
 ---
 
@@ -925,6 +1134,7 @@ Manter `stroke-linecap=round`, `stroke-linejoin=round`.
 
 | Versão | Data | Mudanças principais |
 |---|---|---|
+| 3.3 | 2026-05-09 | Adiciona §7-bis **Página Agentes (pixel-agents híbrido)** — mapa pixel-art em tempo real do Neo orquestrador + subagentes (MGI / Projetos / Finanças / Terapia / Pessoal). Caminho 🅲 Híbrido: bundle do `pixel-agents-standalone` servido por `static/agents-app/` + adaptador Python `api/agents_activity.py` que traduz Hermes → `ServerMessage` via SSE. Atualiza referências "placeholder Em breve" da §4.2, §6.3 e §12 para apontar para EP-AG / Sprint 7. |
 | 3.2 | 2026-05-01 | Registra que o chat do Dashboard deve preservar o composer/toolstrip completo do Hermes WebUI, incluindo anexos, microfone/voz, profile, workspace, seletor de modelo, reasoning/effort e handlers atuais, com skin visual Neo. |
 | 3.1 | 2026-05-01 | Adiciona página **Finanças** (§8) com header + 4 KPI cards (Receitas/Despesas/Saldo Líquido/Investimentos) + gráfico de linha (SVG vanilla) + Gastos por Categoria (donut) + coluna direita com Orçamentos / Transações Recentes / Metas Financeiras + modal "+ Nova Finança". Renumera §8–§14 antigas para §9–§15. Adiciona EP-06 e HU-06.* no mapeamento. Inclui pendências de Finanças no §13. |
 | 3.0 | 2026-05-01 | Consolida Dashboard refinado + nova página **Projetos**. Sidebar com 9 itens + status card + Recursos VPS + footer. Topbar com VPS Status/Uptime/Região/Versão + Terminal SSH + ícones + Admin. KPIs com deltas. Ações Rápidas em grid 2x3. Hero ganha "STATUS: OPERACIONAL". Kanban migra para página dedicada Projetos com 4 colunas, status pills e cards com chips/progresso. |

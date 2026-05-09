@@ -5,8 +5,9 @@
 > Este arquivo acompanha execução, evidências e Definition of Done; mudanças
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
-**Atualizado em:** 2026-05-05
+**Atualizado em:** 2026-05-09
 **Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 6
+**Versão alvo pós-MVP imediato:** `neo-webui-v0.2` ao final da Sprint 7 (Painel Agentes)
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
 
@@ -38,7 +39,7 @@
 | Sprint 5 | Projetos Command Center | 10 | 8 + 2 parciais | 8 | implementada; P1 mobile/refs parcial |
 | Sprint 6 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 5 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
-| Sprint 7+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
+| Sprint 7 | Painel Agentes (pixel-agents híbrido — EP-AG) | 15 | 0 | 0 | aguardando Sprint 6 + PoC HU-AG.0 |
 
 ### Estado atual do worktree
 
@@ -103,6 +104,7 @@ Estado registrado em 2026-05-05:
 | I-08 | A análise inicial indicava risco de `docs/neo/` ignorado no `.gitignore`. | Resolvido na Sprint 1: `docs/neo/` está versionado e `.gitignore` não ignora a documentação Neo. |
 | I-09 | UPSTREAM-SYNC lista `HERMES_WEBUI_DEFAULT_PANEL`, mas PRD RF-04 fala em `settings.default_panel="dashboard"` e `?panel=dashboard`. | Sprint 2 deve suportar ambos: setting persistido e env como default inicial quando não houver escolha local. |
 | I-10 | O checklist anterior citava `localStorage.hermes-locale`, mas o upstream usa `localStorage['hermes-lang']` em `static/i18n.js`, `static/boot.js` e `static/panels.js`. | Manter `hermes-lang` para preservar compatibilidade e preferências já salvas; documentação operacional passa a citar essa chave. |
+| I-11 | A versão anterior deste TASKS tratava Painel Agentes como bloco genérico P2 com 5 itens vagos. Em 2026-05-09 o BACKLOG (EP-AG) e o PRD (RF-11, RF-AG.*, RNF-08, RNF-12, RNF-13, RNF-14) fecharam o caminho 🅲 Híbrido com 15 HUs (HU-AG.0 a HU-AG.14). | Sprint 7 passa a ser **dedicada ao EP-AG** com plano completo abaixo. Painel Agentes deixa de ser "P2 sem caminho" e vira **P1 pós-MVP**. |
 
 ---
 
@@ -1025,26 +1027,278 @@ shell visual completo, SVG vanilla e persistência local.
 
 ---
 
-## Sprint 7+ — Painel Agentes (futuro / P2)
+## Sprint 7 — Painel Agentes (pixel-agents híbrido / EP-AG)
 
-> Não iniciar produção sem PoC de custo na VPS. Referência visual:
-> `pablodelucca/pixel-agents`, sem compromisso de reprodução 1:1.
+**Meta:** transformar a aba `agents` (hoje placeholder) em uma visualização
+pixel-art em tempo real do Neo orquestrador + subagentes (MGI / Projetos /
+Finanças / Terapia / Pessoal), reusando o front do
+[`pablodelucca/pixel-agents`](https://github.com/pablodelucca/pixel-agents) via
+fork local em `/home/jrmelo/Projetos/pixel-agents-standalone`, **sem rodar Node
+em produção** e **sem WebSocket extra**.
 
-### Pré-trabalho
+> Ver decisão arquitetural completa, mapeamento de tools Hermes → status pt-BR
+> e racional do caminho 🅲 Híbrido em [`BACKLOG.md` § EP-AG](./BACKLOG.md#ep-ag--painel-agentes-pixel-agents-híbrido).
+> Contratos formais (RF-11, RF-AG.1-7, RNF-08, RNF-12, RNF-13, RNF-14) em
+> [`PRD.md`](./PRD.md).
 
-- [ ] Identificar fonte de dados de subagentes ativos.
-- [ ] Avaliar logs `~/.hermes/logs/agent.log` e `~/.hermes/sessions/`.
-- [ ] Testar reaproveitamento de SSE existente.
-- [ ] Medir RAM/CPU 24h com painel ativo.
-- [ ] Definir versão leve default e modo pixel opt-in.
+**Pré-condições**
 
-### HUs futuras
+- [ ] Sprint 6 fechada por DoD (MVP `neo-webui-v0.1` taggeado).
+- [ ] Acesso de leitura ao `state.db` confirmado (já existe via `api/agent_sessions.py`).
+- [ ] Lista de tools Hermes do MVP do EP-AG validada com `Neo-Segundo-Cerebro-Documentacao.md` §7.
+- [ ] **HU-AG.0 (PoC) aprovada** — sem PoC verde, não seguir para HU-AG.1+.
+- [ ] Branch dedicada `neo/sprint-7-agents` criada a partir de `develop`.
 
-- [ ] HU-AG.1 — Cards de subagentes ativos.
-- [ ] HU-AG.2 — Histórico recente.
-- [ ] HU-AG.3 — Timeline de tool calls.
-- [ ] HU-AG.4 — Animação opt-in estilo pixel.
-- [ ] HU-AG.5 — Custo aceitável (< 50 MB RAM, ≤ 1 req/s).
+### HU-AG.0 — PoC do caminho 🅲 Híbrido (1–2 dias)
+
+**Status:** disponível
+**Prioridade:** P0-AG (gate da Sprint 7)
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Clonar/preparar `pixel-agents-standalone` localmente e rodar `npm run build` para validar bundle reproduzível.
+- [ ] Criar mock SSE em Python (script standalone) que emite sequência cravada: `existingAgents` → `layoutLoaded` → `agentCreated` (Neo) → `agentToolStart` (Task) → `subagentToolStart` (MGI) → `subagentToolDone` → `agentToolDone`.
+- [ ] Servir o bundle do pixel-agents em `localhost:5173/agents-app/` apontado para o mock SSE.
+- [ ] Substituir cliente WebSocket original por cliente SSE em arquivo novo (`webview-ui/src/neo/sse-client.ts`) sem editar arquivos originais.
+- [ ] Validar visualmente: 1 personagem central (Neo cyan) + 1 subagente (MGI) com linha de delegação e textos pt-BR.
+- [ ] Medir tamanho do bundle final (`du -sh dist/public/`) e comparar com orçamento (≤ 500 KB gzipped).
+- [ ] Registrar evidência em `docs/neo/evidencias/HU-AG.0/` (vídeo curto + métricas + comando exato de build).
+- [ ] **Decisão GO/NO-GO** documentada em `docs/neo/evidencias/HU-AG.0/DECISION.md`.
+
+**Critério de sucesso (gate):** vídeo de 30s mostrando o agente principal + subagente reagindo a eventos SSE, com bundle ≤ 500 KB gzipped e zero edição em arquivos originais do `pixel-agents-standalone`.
+
+### HU-AG.1 — Fork mínimo do pixel-agents-standalone (cliente SSE)
+
+**Status:** bloqueada por HU-AG.0
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Criar `webview-ui/src/neo/sse-client.ts` no fork do `pixel-agents-standalone`: cliente `EventSource` que emite os mesmos eventos `ServerMessage` que o WebSocket original.
+- [ ] Criar `webview-ui/src/neo/i18n.ts` com strings pt-BR para overrides de copy (estado vazio, indicador de conexão, fallback de status).
+- [ ] Criar `webview-ui/src/neo/index.ts` como ponto de entrada Neo: importa o app original e troca a fonte WebSocket pelo `sse-client`.
+- [ ] Ajustar `vite.config` (ou criar `vite.config.neo.ts`) para gerar bundle Neo em `dist-neo/`.
+- [ ] **Não editar** nenhum arquivo original do upstream `pablodelucca/pixel-agents` ou do base `pixel-agents-standalone`.
+- [ ] Listar exatamente os arquivos novos em `pixel-agents-standalone/NEO-FORK.md` (contrato de manutenção — RNF-13).
+
+### HU-AG.2 — Build e versionamento do bundle em `static/agents-app/`
+
+**Status:** bloqueada por HU-AG.1
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Definir comando de build no `pixel-agents-standalone/NEO-FORK.md`: `npm run build:neo` (gera `dist-neo/`).
+- [ ] Definir comando de cópia: `cp -r dist-neo/public/* /caminho/neo-webui/static/agents-app/`.
+- [ ] Validar que `static/agents-app/index.html` usa caminhos relativos (`./assets/...`) para funcionar sob qualquer `<base href>`.
+- [ ] Validar que `server.py` serve `static/agents-app/` automaticamente (não exige rota nova).
+- [ ] Adicionar `static/agents-app/` ao git (sem `.gitignore`); o bundle é artefato versionado.
+- [ ] Documentar em `docs/neo/RUNBOOK.md` como atualizar o bundle quando o fork mudar.
+- [ ] Verificar que `npm install` e `npm run build` **não** rodam no deploy da neo-webui (RNF-12).
+
+### HU-AG.3 — Módulo `api/agents_activity.py` (adaptador Hermes → ServerMessage)
+
+**Status:** bloqueada por HU-AG.0
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Criar `api/agents_activity.py` Neo-only.
+- [ ] Implementar leitura de sessões ativas em `state.db` reusando padrão de `api/agent_sessions.py` (`parent_session_id`).
+- [ ] Implementar assinatura interna do stream SSE de `streaming.py` (eventos `tool_use`, `tool_result`, `delegate_task`, `clarify`).
+- [ ] Implementar tradutor `_format_tool_status(tool_name, input) -> (activity, status_pt_br)` espelhando `formatToolStatus()` do upstream pixel-agents:
+  - `delegate_task` → `("typing", "Delegando para <domínio>")`
+  - `memory` → `("typing", "Salvando memória")`
+  - `obsidian-mcp` (escrita) → `("typing", "Atualizando vault")`
+  - `obsidian-mcp` (leitura) → `("reading", "Consultando vault")`
+  - `web_search` → `("reading", "Buscando na web")`
+  - `web_fetch` → `("reading", "Lendo página")`
+  - `execute_code` → `("typing", "Executando código")`
+  - `terminal_run` / `bash` → `("typing", "Rodando: <cmd curto>")`
+  - `clarify` → `("waiting", "Aguardando sua resposta")`
+  - `send_message` → `("typing", "Enviando para <canal>")`
+- [ ] Implementar mapper `_to_server_message()` que converte evento Hermes em `agentCreated` / `agentClosed` / `agentStatus` / `agentToolStart` / `agentToolDone` / `agentToolsClear` / `subagentToolStart` / `subagentToolDone` / `subagentClear`.
+- [ ] Garantir ordem de entrega: `existingAgents` → `layoutLoaded` (default) → eventos.
+- [ ] Heartbeat de 30 s para manter conexão SSE aberta.
+- [ ] Cleanup automático quando cliente desconecta.
+
+### HU-AG.4 — Rota `GET /api/agents/stream` (SSE protegido por auth)
+
+**Status:** bloqueada por HU-AG.3
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Adicionar handler em `api/routes.py` para `GET /api/agents/stream`.
+- [ ] Reusar middleware de auth Neo existente (cookie de sessão) — RNF-14.
+- [ ] Headers SSE corretos: `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
+- [ ] Quando `HERMES_WEBUI_ENABLE_AGENTS_PANEL=false`, retornar `404`.
+- [ ] Logging estruturado para abertura/fechamento de conexão.
+- [ ] Limite simultâneo de conexões por usuário (≤ 3) para evitar abuso.
+
+### HU-AG.5 — `mountDashboardAgents()` + lazy load do bundle
+
+**Status:** bloqueada por HU-AG.2 e HU-AG.4
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Adicionar `'agents'` a `NEO_SHELL_PANELS` em `static/panels.js`.
+- [ ] Implementar `mountDashboardAgents()` em `static/dashboard.js` (mesmo padrão de `mountDashboardSettings`/`mountDashboardSkills`): injeta o bundle de `/static/agents-app/` no slot `#mainAgents`.
+- [ ] Implementar `restoreDashboardAgents()`: desmonta o bundle e fecha o `EventSource`.
+- [ ] Lazy load: bundle só é injetado quando o usuário entra na aba `agents` pela primeira vez.
+- [ ] Cleanup obrigatório do SSE ao trocar de painel ou fechar a aba (RNF-08 — sem SSE em background).
+- [ ] Substituir conteúdo do slot `<div id="mainAgents">` (l. 750 de `index.html`) — remover textos de placeholder.
+
+### HU-AG.6 — Visual: Neo orquestrador + subagentes por domínio
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Personagem central "Neo" com cor cyan (paleta Neo `--accent`).
+- [ ] Cores fixas por domínio (paleta consistente com `Neo-Segundo-Cerebro-Documentacao.md` §7):
+  - MGI → laranja
+  - Projetos → roxo
+  - Finanças → verde
+  - Terapia → rosa
+  - Pessoal → cinza-claro
+- [ ] Quando Neo executa `delegate_task`, subagente entra com cor do domínio + linha tênue ligando ao Neo.
+- [ ] Quando subagente termina (`tool_result` do `delegate_task`), personagem sai com fade-out de 600 ms.
+- [ ] Nome do domínio visível sobre o subagente.
+- [ ] Layout default do `pixel-agents-standalone` é suficiente; **não** comprar tileset pago.
+
+### HU-AG.7 — Status pt-BR sobre os personagens
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Garantir que todos os textos de `formatToolStatus()` no front passem pelo i18n Neo (`webview-ui/src/neo/i18n.ts`).
+- [ ] Truncamento de comandos longos (≤ 30 caracteres + `…`).
+- [ ] Texto de fallback quando tool não está mapeada: `Usando <tool>`.
+- [ ] Validar com 3 sessões reais do Neo (uma local, duas reais via SSH na VPS) que todos os textos aparecem em pt-BR sem string em inglês vazada.
+
+### HU-AG.8 — Estado vazio + indicador de conexão SSE
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Estado vazio: "Nenhum agente trabalhando agora. Comece uma conversa com o Neo no Dashboard." + ilustração/avatar Neo idle.
+- [ ] Indicador discreto no canto superior do painel: 🟢 streaming / 🟡 reconectando / ⚫ offline.
+- [ ] Reconexão automática com backoff exponencial (1s → 2s → 4s → 8s → 16s → cap 30s).
+- [ ] Toast em pt-BR quando reconexão falha 5x: "Não foi possível conectar ao stream de agentes. Verifique sua conexão."
+
+### HU-AG.9 — Métricas de custo (PoC de 24h na VPS)
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Rodar `hermes-webui.service` na VPS por 24h com painel `agents` aberto em uma sessão.
+- [ ] Coletar `ps_mem` e `pidstat -r -u 60 1440` antes e durante.
+- [ ] Critério de aceite (RNF-08):
+  - Adicional ≤ **30 MB de RAM** com painel aberto.
+  - Adicional ≤ **5 MB de RAM** com painel fechado.
+  - CPU adicional ≤ **2 %** em idle, ≤ **5 %** durante atividade típica de 1 sessão.
+- [ ] Registrar baseline + medições em `docs/neo/evidencias/HU-AG.9/` (CSV + gráfico simples).
+- [ ] Se não passar, abrir issue de otimização e bloquear release.
+
+### HU-AG.10 — Histórico recente (últimos 20 subagentes)
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P1-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Adicionar `GET /api/agents/recent?limit=20` lendo de `state.db`.
+- [ ] Retornar: `{id, domain, started_at, ended_at, duration_ms, tool_calls_count, status}`.
+- [ ] UI: card lateral compacto no painel `agents` com lista dos últimos 20.
+- [ ] Filtro por domínio (MGI / Projetos / Finanças / Terapia / Pessoal).
+
+### HU-AG.11 — Timeline de tools por agente
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P1-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Clique no personagem abre painel lateral com timeline de tools executadas na sessão atual.
+- [ ] Reusar stream existente; nada de página nova.
+- [ ] Cada item: `<icone> <tool_name> · <texto pt-BR> · <duração>`.
+- [ ] Auto-scroll para o último evento; pausar se usuário scrollar manualmente.
+
+### HU-AG.12 — Feature flag `HERMES_WEBUI_ENABLE_AGENTS_PANEL`
+
+**Status:** bloqueada por HU-AG.5
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Adicionar leitura de `HERMES_WEBUI_ENABLE_AGENTS_PANEL` em `api/config.py` (default `false` até release).
+- [ ] Quando `false`: aba `Agentes` na sidebar fica oculta; rota SSE retorna `404`.
+- [ ] Quando `true`: aba aparece e rota responde.
+- [ ] Documentar em `docs/neo/PRODUCAO.md` como ligar/desligar sem deploy (`systemctl edit hermes-webui.service` + `systemctl restart`).
+
+### HU-AG.13 — Testes automatizados
+
+**Status:** transversal à Sprint 7
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Criar `tests/test_neo_agents_translation.py` — tradução de tools Hermes → `(activity, status_pt_br)` com cobertura de todas as tools mapeadas.
+- [ ] Criar `tests/test_neo_agents_state_db.py` — parsing de parent/child em `state.db` com fixtures sintéticas.
+- [ ] Criar `tests/test_neo_agents_sse_endpoint.py` — endpoint SSE protegido por auth, retorna 401 sem cookie, 404 quando flag desligada.
+- [ ] Criar `tests/test_neo_agents_mount.py` — `mountDashboardAgents`/`restoreDashboardAgents` definidos em `dashboard.js`, `'agents'` em `NEO_SHELL_PANELS`.
+- [ ] Criar `tests/test_neo_agents_bundle.py` — bundle `static/agents-app/index.html` existe, usa caminhos relativos, tem `<script type="module">`.
+- [ ] Cobertura mínima de 80 % em `api/agents_activity.py`.
+
+### HU-AG.14 — Documentar fork em `pixel-agents-standalone/NEO-FORK.md`
+
+**Status:** bloqueada por HU-AG.1
+**Prioridade:** P0-AG
+**Épico:** EP-AG
+
+**Tasks**
+
+- [ ] Criar `pixel-agents-standalone/NEO-FORK.md` listando:
+  - Lista exata de arquivos **novos** no fork (sem editar originais).
+  - Comando de build (`npm run build:neo`).
+  - Comando de cópia para `static/agents-app/`.
+  - Procedimento de `git pull` do upstream `pablodelucca/pixel-agents` sem conflito.
+  - Versão do upstream em que o fork está baseado (commit hash).
+- [ ] Replicar resumo do fork em `docs/neo/UPSTREAM-SYNC.md` para visibilidade no repo neo-webui.
+
+### Encerramento Sprint 7
+
+- [ ] HU-AG.0 a HU-AG.9 e HU-AG.12 a HU-AG.14 concluídas por DoD (P0-AG).
+- [ ] HU-AG.10 e HU-AG.11 concluídas ou explicitamente postergadas para Sprint 8.
+- [ ] `pytest tests/test_neo_agents_*.py -v` passa.
+- [ ] Suíte completa Neo passa sem regressão.
+- [ ] PoC de 24h aprovada (HU-AG.9).
+- [ ] Evidências em `docs/neo/evidencias/HU-AG.*`.
+- [ ] Bundle versionado em `static/agents-app/` com tamanho ≤ 500 KB gzipped.
+- [ ] Tag `neo-webui-v0.2`.
 
 ---
 
@@ -1073,3 +1327,7 @@ _A preencher._
 ### Retro Sprint 6
 
 _A preencher._
+
+### Retro Sprint 7
+
+_A preencher após DoD do Painel Agentes (EP-AG)._
