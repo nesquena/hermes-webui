@@ -309,7 +309,7 @@ def _recovery_reason_summary(value: Any, limit: int = 300) -> str:
     text = _context_value(value, limit)
     lowered = text.lower()
     unsafe_marker_re = re.compile(
-        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|authorization|bearer|cookie|credential|credentials|password|secret|token|renderer|source|html|script|data)([^a-z0-9]|$)",
+        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|auth|authorization|bearer|cookie|credential|credentials|password|secret|token|renderer|source|html|script|data)([^a-z0-9]|$)",
         re.IGNORECASE,
     )
     if text and (
@@ -3556,12 +3556,32 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if is_current:
             response["active_space_id"] = space_id
         return response
-    if name in {"space.recovery.disable_module", "space.module.recovery.disable", "module.recovery.disable"}:
-        module_id = validate_module_id(data.get("module_id") or data.get("id"))
+    if name in {
+        "space.recovery.disable_module",
+        "space.recovery.disablemodule",
+        "space.module.recovery.disable",
+        "module.recovery.disable",
+        "space.admin.disable_module",
+        "space.admin.disablemodule",
+        "space.admin.module.disable",
+        "space.admin.recovery.disable_module",
+        "space.admin.recovery.disablemodule",
+    }:
+        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
         result = disable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
         return {"ok": True, "action": name, **result}
-    if name in {"space.recovery.enable_module", "space.module.recovery.enable", "module.recovery.enable"}:
-        module_id = validate_module_id(data.get("module_id") or data.get("id"))
+    if name in {
+        "space.recovery.enable_module",
+        "space.recovery.enablemodule",
+        "space.module.recovery.enable",
+        "module.recovery.enable",
+        "space.admin.enable_module",
+        "space.admin.enablemodule",
+        "space.admin.module.enable",
+        "space.admin.recovery.enable_module",
+        "space.admin.recovery.enablemodule",
+    }:
+        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
         result = enable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         return {"ok": True, "action": name, **result}
     if name == "widget.list":

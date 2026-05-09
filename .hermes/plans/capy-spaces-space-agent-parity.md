@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: active-current Space repair now exposes metadata-only whole-Space repair and repair-event listing aliases through `run_space_tool(...)` (`space.current.repair_space`, `space.current.repair`, `space.current.repair_events`), using `activeSpaceId` while preserving the existing repair/recovery redaction model and omitting generated renderer/source/API-auth markers from tool responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: recovery/admin module quarantine controls now expose metadata-only admin aliases through `run_space_tool(...)` (`space.admin.recovery.disable_module`, `space.admin.enable_module`, plus compact/admin-module variants), accept camelCase `moduleId`, and redact standalone auth markers in public disabled reasons. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose admin module recovery aliases`
+  - Added RED/GREEN backend coverage proving `space.admin.recovery.disable_module` and `space.admin.enable_module` accept camelCase `moduleId`, toggle quarantined module disabled state through the existing recovery helpers, and keep responses/snapshots metadata-only.
+  - Hardened recovery disabled-reason redaction to treat standalone auth markers as unsafe public metadata, after spec review caught that plain auth text could otherwise appear in module quarantine summaries.
+  - Validation at completion: initial focused RED failed with `Unsupported Capy Spaces tool action`; follow-up RED failed because `auth failure` appeared in `disabled_reason`; focused GREEN passed (`1 passed`); targeted recovery/admin regressions passed (`3 passed`); full Spaces foundation suite passed (`201 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static admin-module harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_5a86e8ef058f4afaaa6cedabd5e6e356.png`.
 
 - `feat(spaces): expose current repair tool aliases`
   - Added RED/GREEN backend coverage proving `space.current.repair_space`, `space.current.repair`, and `space.current.repair_events` resolve `activeSpaceId`, queue/list metadata-only `agent.repair` events, return `active_space_id`, and omit generated renderer/source/API-auth markers plus secret-looking sentinels from serialized tool responses.

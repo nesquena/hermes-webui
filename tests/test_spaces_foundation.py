@@ -5479,6 +5479,53 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_admin_recovery_module_aliases_accept_camelcase_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "admin-module-tool",
+            "name": "Admin Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "user",
+            "source": "const generated = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.admin.recovery.disable_module",
+        {"moduleId": "admin-module-tool", "reason": "auth failure"},
+    )
+    snapshot = spaces.run_space_tool("space.admin.recovery.snapshot", {})
+    enabled = spaces.run_space_tool("space.admin.enable_module", {"moduleId": "admin-module-tool"})
+    serialized = json.dumps({"disabled": disabled, "snapshot": snapshot, "enabled": enabled}).lower()
+
+    assert disabled["ok"] is True
+    assert disabled["action"] == "space.admin.recovery.disable_module"
+    assert disabled["disabled"] is True
+    assert disabled["module_id"] == "admin-module-tool"
+    assert disabled["name"] == "Admin Module"
+    assert disabled["description"] == "Metadata-only module descriptor"
+    assert disabled["scope"] == "user"
+    assert disabled["disabled_reason"] == "[REDACTED]"
+    assert snapshot["ok"] is True
+    assert snapshot["recovery"]["summary"]["module_count"] == 1
+    assert snapshot["recovery"]["summary"]["disabled_module_count"] == 1
+    assert snapshot["recovery"]["modules"][0]["disabled"] is True
+    assert enabled["ok"] is True
+    assert enabled["action"] == "space.admin.enable_module"
+    assert enabled["disabled"] is False
+    assert enabled["disabled_reason"] == ""
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "auth failure" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_recovery_module_events_cannot_restore_user_space(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.create_space({"space_id": "recovery-modules", "name": "User Space"})
