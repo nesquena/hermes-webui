@@ -5720,7 +5720,7 @@ async function loadPluginsPanel(){
       list.appendChild(_buildPluginCard(plugin));
     }
   }catch(e){
-    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">'+t('plugins_load_failed')+esc(e.message||String(e))+'</div>';
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">'+esc(t('plugins_load_failed'))+esc(e.message||String(e))+'</div>';
   }
 }
 
@@ -5731,9 +5731,9 @@ function _buildPluginCard(plugin){
   const hooks=Array.isArray(plugin&&plugin.hooks)?plugin.hooks:[];
   const hookHtml=hooks.length
     ? hooks.map(h=>`<span class="plugin-hook-badge">${esc(h)}</span>`).join('')
-    : '<span class="plugin-hook-empty">'+t('plugins_no_hooks')+'</span>';
-  const version=(plugin&&plugin.version)?' · v'+esc(plugin.version):'';
-  const desc=(plugin&&plugin.description)?esc(plugin.description):t('plugins_no_description');
+    : `<span class="plugin-hook-empty">${esc(t('plugins_no_hooks'))}</span>`;
+  const version=(plugin&&plugin.version)?` · v${esc(plugin.version)}`:'';
+  const desc=(plugin&&plugin.description)?esc(plugin.description):esc(t('plugins_no_description'));
   const enabled=plugin&&plugin.enabled!==false;
   card.innerHTML=`
     <div class="provider-card-header plugin-card-header">
@@ -5741,11 +5741,11 @@ function _buildPluginCard(plugin){
         <div class="provider-card-name">${esc((plugin&&plugin.name)||t('plugins_unnamed'))}</div>
         <div class="provider-card-meta">${esc((plugin&&plugin.key)||'plugin')}${version}</div>
       </div>
-      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?t('plugins_enabled'):t('plugins_disabled')}</span>
+      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${esc(enabled?t('plugins_enabled'):t('plugins_disabled'))}</span>
     </div>
     <div class="provider-card-body plugin-card-body">
       <div class="provider-card-hint">${desc}</div>
-      <div class="provider-card-label">${t('plugins_registered_hooks')}</div>
+      <div class="provider-card-label">${esc(t('plugins_registered_hooks'))}</div>
       <div class="plugin-hook-list">${hookHtml}</div>
     </div>
   `;

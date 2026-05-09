@@ -25,6 +25,7 @@
 | P-007 | Providers 面板中文化（20 个 zh stub 翻译 + quota 卡片硬编码 i18n 化） | `static/i18n.js`（en 加 7 个 quota key，zh 翻译 20 个 providers stub + `settings_dropdown_providers` + 加 7 个 quota key 中文），`static/panels.js`（quota 卡片标题/兜底/状态徽标走 t()，加 `_quotaStateLabel` 辅助函数） |
 | P-008 | 设置页 settings_* 剩余 stub 翻译 | `static/i18n.js`（zh 翻译 15 个 settings_dropdown_* / settings_heading_* / settings_section_*_title|meta / settings_label_session_jump_buttons / settings_desc_session_jump_buttons） |
 | P-009 | zh 字典剩余英文 stub 全量翻译（121 处） | `static/i18n.js`（zh 翻译 mcp_* / kanban_* / session_* / status_* / insights_* / branch_* / fork_* / workspace_* / cmd_reasoning / tab_kanban / session_jump_* 等。意图保留英文：Hermes/Steer/Terminal/Token/Profile 等品牌或技术术语，以及 placeholder 示例文本） |
+| P-010 | "供应商" 改"大模型供应商" + Plugins 面板硬编码 i18n 化 | `static/i18n.js`（zh 7 处 "供应商" 加"大模型"前缀；en/zh 各加 10 个 plugins_* 与 settings_section_plugins_* 新 key），`static/index.html`（Plugins 标题/meta/empty 3 处 markup 加 data-i18n），`static/panels.js`（`_buildPluginCard` + 加载错误兜底 6 处硬编码改 `t()`） |
 
 新增补丁约定：
 - 单一关切（不要把多个无关改动塞进同一个 P）
