@@ -18,6 +18,8 @@
 |------|------|------|
 | P-001 | 默认 UI 语言改为中文 | `api/config.py`、`api/routes.py`、`static/i18n.js`、`static/boot.js`、`static/panels.js`、`static/index.html` |
 | P-002 | 中文 README，标题改为 hermes-webui-cn | `README.md`（新写）、`README.en.md`（原英文备份） |
+| P-003 | 增加上游同步工具链 | `scripts/sync-upstream.sh`、`.github/workflows/upstream-watch.yml`、`MAINTAINING.md` |
+| P-004 | 同步到 cnb.cool 镜像的 CI workflow | `.github/workflows/sync-to-cnb-mirror.yml` |
 
 新增补丁约定：
 - 单一关切（不要把多个无关改动塞进同一个 P）

@@ -1,0 +1,66 @@
+name: Sync to CNB.cool mirror
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 */6 * * *"
+
+concurrency:
+  group: sync-to-cnb-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_REPO_URL: https://github.com/Eynzof/hermes-webui-cn.git
+      CNB_MIRROR_REPO_URL: https://cnb.cool/hermesagent-cn/hermes-webui-cn-mirror.git
+      CNB_ACCESS_TOKEN: ${{ secrets.CNB_ACCESS_TOKEN }}
+    steps:
+      - name: Validate configured secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${CNB_ACCESS_TOKEN:-}" ]; then
+            echo "::error::缺少 GitHub Actions Secret: CNB_ACCESS_TOKEN"
+            echo "::error::请把它设置成具有 cnb.cool 仓库写权限的 Access Token。"
+            exit 1
+          fi
+
+      - name: Mirror branches and tags to CNB.cool
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
+
+          git clone --bare "$UPSTREAM_REPO_URL" "$workdir/hermes-webui-cn.git"
+          cd "$workdir/hermes-webui-cn.git"
+
+          git config remote.origin.fetch '+refs/heads/*:refs/heads/*'
+          git fetch origin --prune --tags
+
+          clean_repo_url="$(printf '%s' "$CNB_MIRROR_REPO_URL" | tr -d '\r\n')"
+          clean_token="$(printf '%s' "$CNB_ACCESS_TOKEN" | tr -d '\r\n')"
+
+          cnb_push_url="$(CLEAN_REPO_URL="$clean_repo_url" CLEAN_TOKEN="$clean_token" python3 -c "import os; from urllib.parse import quote, urlsplit, urlunsplit; repo = os.environ['CLEAN_REPO_URL']; token = os.environ['CLEAN_TOKEN']; parts = urlsplit(repo); assert parts.scheme and parts.netloc, 'CNB_MIRROR_REPO_URL 不是合法的 HTTPS URL'; netloc = 'cnb:' + quote(token, safe='') + '@' + parts.netloc; print(urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment)))")"
+
+          git remote add cnb "$cnb_push_url"
+
+          git push --prune cnb '+refs/heads/*:refs/heads/*'
+          git push --prune cnb '+refs/tags/*:refs/tags/*'
+
+      - name: Write workflow summary
+        shell: bash
+        run: |
+          {
+            echo "### hermes-webui-cn → CNB.cool"
+            echo ""
+            echo "- Upstream: \`${UPSTREAM_REPO_URL}\`"
+            echo "- Target: \`${CNB_MIRROR_REPO_URL}\`"
+            echo "- Synced refs: branches + tags"
+          } >> "$GITHUB_STEP_SUMMARY"
