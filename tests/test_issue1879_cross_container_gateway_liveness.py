@@ -17,6 +17,8 @@ These tests pin every behavior the fix promises:
   * fresh + running gateway_state, no PID  → alive (cross-container path)
   * stale updated_at + running              → down (no false positives)
   * fresh updated_at + non-running state    → down (crash-without-cleanup case)
+  * stale updated_at + stopped state        → unknown (old root gateway was
+    intentionally stopped; do not nag profile-gateway users)
   * malformed / missing / naive timestamp   → down (no parser-quirk false alive)
   * future timestamp within threshold       → alive (clock skew tolerance)
   * future timestamp beyond threshold       → down (broken clock rejected)
@@ -150,6 +152,52 @@ def test_fresh_updated_at_with_non_running_state_reports_down(monkeypatch):
 
     assert payload["alive"] is False
     assert payload["details"]["state"] == "down"
+
+
+def test_stale_stopped_runtime_status_reports_unknown_not_down(monkeypatch):
+    """#1944: a fossilized clean-stop root state should not trigger the alert.
+
+    Users can run profile-scoped gateways without a root gateway. If an old
+    root gateway_state.json says "stopped", treating it as down makes the
+    heartbeat banner fire forever even though no root gateway is configured.
+    """
+    from api import agent_health
+
+    stale_ts = _iso(datetime.now(timezone.utc) - timedelta(days=7))
+    runtime = _runtime_status(stale_ts, gateway_state="stopped", active_agents=0)
+
+    monkeypatch.setattr(
+        agent_health,
+        "_gateway_status_module",
+        lambda: _FakeGatewayStatus(runtime, running_pid=None),
+    )
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is None
+    assert payload["details"]["state"] == "unknown"
+    assert payload["details"]["reason"] == "gateway_stale_stopped_state"
+    assert payload["details"]["gateway_state"] == "stopped"
+
+
+def test_fresh_stopped_runtime_status_still_reports_down(monkeypatch):
+    """A recent stopped state still means the configured gateway is down."""
+    from api import agent_health
+
+    fresh_ts = _iso(datetime.now(timezone.utc) - timedelta(seconds=10))
+    runtime = _runtime_status(fresh_ts, gateway_state="stopped", active_agents=0)
+
+    monkeypatch.setattr(
+        agent_health,
+        "_gateway_status_module",
+        lambda: _FakeGatewayStatus(runtime, running_pid=None),
+    )
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is False
+    assert payload["details"]["state"] == "down"
+    assert payload["details"]["reason"] == "gateway_not_running"
 
 
 @pytest.mark.parametrize(

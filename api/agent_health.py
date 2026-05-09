@@ -91,6 +91,41 @@ def _runtime_status_is_fresh(
     return age_s <= threshold_s
 
 
+def _runtime_status_is_stale_stopped(
+    runtime_status: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    threshold_s: float = GATEWAY_FRESHNESS_THRESHOLD_S,
+) -> bool:
+    """Return ``True`` for an old clean-stop root gateway state.
+
+    A user may run only profile-scoped gateways while a root
+    ``gateway_state.json`` from an older, intentionally stopped gateway remains
+    on disk (#1944). Treat that stale stopped file like "no root gateway
+    configured" so the heartbeat banner does not keep warning about a service
+    the user is not running. Fresh stopped state still reports down.
+    """
+    if not isinstance(runtime_status, dict):
+        return False
+    if runtime_status.get("gateway_state") != "stopped":
+        return False
+
+    raw_updated_at = runtime_status.get("updated_at")
+    if not isinstance(raw_updated_at, str) or not raw_updated_at:
+        return False
+
+    try:
+        updated_at = datetime.fromisoformat(raw_updated_at)
+    except (TypeError, ValueError):
+        return False
+    if updated_at.tzinfo is None:
+        return False
+
+    reference = now if now is not None else datetime.now(timezone.utc)
+    age_s = (reference - updated_at).total_seconds()
+    return age_s > threshold_s
+
+
 def _gateway_status_module():
     """Load gateway.status lazily so tests and WebUI-only installs stay isolated."""
     return importlib.import_module("gateway.status")
@@ -259,6 +294,17 @@ def build_agent_health_payload() -> dict[str, Any]:
             "details": {
                 "state": "alive",
                 "reason": "cross_container_freshness",
+                **safe_details,
+            },
+        }
+
+    if _runtime_status_is_stale_stopped(runtime_status):
+        return {
+            "alive": None,
+            "checked_at": checked_at,
+            "details": {
+                "state": "unknown",
+                "reason": "gateway_stale_stopped_state",
                 **safe_details,
             },
         }

@@ -1,5 +1,15 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+- **Gateway heartbeat stale stopped state** — treat an old root
+  `gateway_state.json` with `gateway_state: "stopped"` as an unknown /
+  unconfigured root gateway instead of a live outage, so users running only
+  profile-scoped gateways do not get a persistent heartbeat-down alert from a
+  fossilized clean-stop file. Fresh stopped states still report down. Closes
+  #1944. (`api/agent_health.py`,
+  `tests/test_issue1879_cross_container_gateway_liveness.py`)
+
 ## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 
 ### Added (3 PRs, all from @ai-ag2026)
