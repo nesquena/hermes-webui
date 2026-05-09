@@ -166,6 +166,21 @@ async function send(){
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      if(_agentCmd&&_agentCmd.category==='Plugin'){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _pluginOutput='(no output)';
+        try{
+          _pluginOutput=typeof executeAgentPluginCommand==='function'
+            ? await executeAgentPluginCommand(text,_agentCmd)
+            : 'Plugin command runtime unavailable in WebUI.';
+        }catch(e){
+          _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
+        }
+        S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}

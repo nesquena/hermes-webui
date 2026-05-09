@@ -4538,6 +4538,22 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
 
+    # ── Commands (POST) ──
+    if parsed.path == "/api/commands/exec":
+        from api.commands import execute_plugin_command
+
+        command = str(body.get("command", "") or "").strip()
+        if not command:
+            return bad(handler, "command is required")
+        try:
+            return j(handler, {"output": execute_plugin_command(command)})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Plugin command not found", 404)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
+
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
