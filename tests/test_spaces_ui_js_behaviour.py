@@ -491,6 +491,8 @@ global.fetch = async function(path, opts = {}) {
           revision_event_id: 'rev-broken',
           disabled: false,
           disabled_reason: '',
+          queued_space_repair_count: 1,
+          latest_space_repair_event: { event_id: 'evt-space-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } },
           renderer: '<script>bad()</script>',
           revisions: [
             { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
@@ -1028,6 +1030,20 @@ global.fetch = async function(path, opts = {}) {
       revision_event_id: 'rev-widget-restore',
       renderer: '<script>bad()</script>',
       api_key: 'SECRET',
+    });
+  }
+  if (path === 'api/spaces/recovery/repair-space') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      queued: true,
+      status: 'queued',
+      space_id: body.space_id || 'broken',
+      event_name: 'agent.repair',
+      event_id: 'evt-space-repair',
+      prompt_preview: '[REDACTED]',
+      payload_summary: { action: 'repair-space', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
     });
   }
   if (path === 'api/spaces/update') {
@@ -1763,6 +1779,32 @@ async function dispatchWindowMessage(data, opts) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'repairRecoveryWidget', spaceId: 'broken', widgetId: 'bad-widget', widgetTitle: 'Bad <Widget>' } };
+        }
+      }
+    });
+  } else if (scenario === 'repairRecoverySpace') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Repair the Space shell without exposing renderer secrets'; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    beforeHtml = makeElement('capySpacesRecovery').innerHTML;
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'repairRecoverySpace', spaceId: 'broken' } };
+        }
+      }
+    });
+  } else if (scenario === 'repairRecoverySpaceNoPrompt') {
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'repairRecoverySpace', spaceId: 'broken' } };
         }
       }
     });
@@ -3414,6 +3456,9 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Space disabled: shell crash &lt;script&gt;ignored&lt;/script&gt;" in out["recoveryHtml"]
     assert "Disable space" in out["recoveryHtml"]
     assert "Enable space" in out["recoveryHtml"]
+    assert "Ask Capy to repair Space" in out["recoveryHtml"]
+    assert "Space repair queued: agent.repair · queued" in out["recoveryHtml"]
+    assert "evt-space-re" in out["recoveryHtml"]
     assert "Disable widget" in out["recoveryHtml"]
     assert "Enable widget" in out["recoveryHtml"]
     assert "Ask Capy to repair" in out["recoveryHtml"]
@@ -3550,6 +3595,34 @@ def test_spaces_ui_recovery_repair_widget_fails_closed_without_shared_prompt(dri
     out = _run_spaces_scenario(driver_path, "repairRecoveryWidgetNoPrompt")
 
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_repair_space_queues_metadata_only_event_from_safe_panel(driver_path):
+    out = _run_spaces_scenario(driver_path, "repairRecoverySpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/repair-space")
+    body = json.loads(post["body"])
+
+    assert "Ask Capy to repair Space" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Ask Capy to repair Space"
+    assert out["dialogs"][0]["confirmLabel"] == "Queue repair"
+    assert post["method"] == "POST"
+    assert body == {
+        "space_id": "broken",
+        "prompt": "Repair the Space shell without exposing renderer secrets",
+        "payload": {"source": "recovery-panel", "action": "repair-space"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_repair_space_fails_closed_without_shared_prompt(driver_path):
+    out = _run_spaces_scenario(driver_path, "repairRecoverySpaceNoPrompt")
+
+    assert not any(call["path"] == "api/spaces/recovery/repair-space" for call in out["calls"])
 
 
 def test_spaces_ui_recovery_restore_revision_uses_shared_confirm_and_refreshes(driver_path):

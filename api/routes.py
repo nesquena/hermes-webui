@@ -2022,6 +2022,29 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
 
+    if parsed.path == "/api/spaces/recovery/repair-space":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        payload = body["payload"] if "payload" in body else {}
+        try:
+            return j(
+                handler,
+                capy_spaces.queue_space_repair_event(
+                    space_id,
+                    payload,
+                    prompt=body.get("prompt") or "",
+                    session_id=body.get("session_id") or "",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/recovery/disable-widget":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

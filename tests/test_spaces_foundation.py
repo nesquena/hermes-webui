@@ -6785,6 +6785,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/recovery"' in routes_src
     assert '"/api/spaces/recovery/disable-space"' in routes_src
     assert '"/api/spaces/recovery/enable-space"' in routes_src
+    assert '"/api/spaces/recovery/repair-space"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/recovery/enable-widget"' in routes_src
     assert '"/api/spaces/recovery/disable-module"' in routes_src
@@ -7114,6 +7115,97 @@ def test_recovery_disable_enable_space_routes_return_metadata_only(monkeypatch, 
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
+
+
+def test_recovery_repair_space_route_queues_metadata_only_event(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "repair-route-space",
+            "name": "Repair Route Space",
+            "description": "Needs shell repair without exposing generated bodies",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakSpaceRepair()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/repair-space",
+        {
+            "space_id": created["space_id"],
+            "prompt": "Repair renderer html source data generated widget body shell",
+            "payload": {
+                "action": "repair-space",
+                "scope": "space-shell",
+                "note": "renderer html source data generated widget body",
+                "body": "<div>raw generated widget body</div>",
+                "source": "recovery-panel",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>bad()</script>",
+            },
+            "session_id": "SECRET_SESSION_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["status"] == "queued"
+    assert body["space_id"] == created["space_id"]
+    assert body["event_name"] == "agent.repair"
+    assert body["prompt_preview"] == "[REDACTED]"
+    assert body["payload_summary"] == {"action": "repair-space", "scope": "space-shell"}
+    serialized_body = json.dumps(body).lower()
+    assert "secret_value_do_not_leak" not in serialized_body
+    assert "secret_session_value_do_not_leak" not in serialized_body
+    assert "generated widget body" not in serialized_body
+    assert "renderer" not in serialized_body
+    assert "api_key" not in serialized_body
+    assert "<script" not in serialized_body
+
+    persisted_event = json.loads((spaces.events_dir() / f"{body['event_id']}.json").read_text(encoding="utf-8"))
+    persisted_events = json.dumps(persisted_event).lower()
+    assert "secret_session_value_do_not_leak" not in persisted_events
+    assert "generated widget body" not in persisted_events
+    assert "renderer" not in persisted_events
+    assert "api_key" not in persisted_events
+    assert "<script" not in persisted_events
+
+    recovery = spaces.recovery_snapshot()
+    repair_space = next(space for space in recovery["spaces"] if space["space_id"] == created["space_id"])
+    assert recovery["summary"]["queued_event_count"] == 1
+    assert repair_space["queued_space_repair_count"] == 1
+    assert repair_space["latest_space_repair_event"]["event_name"] == "agent.repair"
+    assert repair_space["latest_space_repair_event"]["status"] == "queued"
+    serialized_recovery = json.dumps(recovery).lower()
+    assert "breakspacerepair" not in serialized_recovery
+    assert "secret_value_do_not_leak" not in serialized_recovery
+    assert "renderer" not in serialized_recovery
+    assert "api_key" not in serialized_recovery
+    assert "<script" not in serialized_recovery
+
+
+def test_recovery_repair_space_route_rejects_non_object_payload(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "repair-bad-payload", "name": "Repair Bad Payload"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/repair-space",
+        {"space_id": created["space_id"], "payload": []},
+    )
+
+    assert handled is None
+    assert status == 400
+    assert "payload must be an object" in body["error"]
+    assert not spaces.list_space_repair_events(created["space_id"])
 
 
 def test_recovery_disable_enable_module_routes_return_metadata_only(monkeypatch, tmp_path):

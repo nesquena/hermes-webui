@@ -56,6 +56,11 @@ _SECRET_LIKE_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 _EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
+_SPACE_REPAIR_UNSAFE_TEXT_RE = re.compile(
+    r"(^|[^a-z0-9])(api[_-]?auth|api[_-]?key|apiauth|apikey|bearer|credential|credentials|data|generated[ _-]?(?:code|widget[ _-]?body)|html|raw[ _-]?prompt|renderer|script|source)([^a-z0-9]|$)",
+    re.IGNORECASE,
+)
+_SPACE_REPAIR_OMITTED_PAYLOAD_KEYS = _OMITTED_PAYLOAD_KEYS | {"body", "generated_body", "prompt", "raw_prompt"}
 _TRUSTED_SYSTEM_WIDGETS = {
     "chat": {"id": "system-chat", "title": "Chat"},
     "workspaces": {"id": "system-workspaces", "title": "Spaces"},
@@ -933,6 +938,61 @@ def _payload_text_summary(value: Any, limit: int = 500) -> str:
     ):
         return "[REDACTED]"
     return text
+
+
+def _space_repair_text_summary(value: Any, limit: int = 500) -> str:
+    """Return text safe for whole-Space repair receipts/events."""
+    text = _payload_text_summary(value, limit)
+    if text == "[REDACTED]":
+        return text
+    if text and _SPACE_REPAIR_UNSAFE_TEXT_RE.search(text):
+        return "[REDACTED]"
+    return text
+
+
+def _space_repair_payload_key_is_safe(key: str) -> bool:
+    lowered = str(key or "").strip().lower()
+    return bool(lowered) and lowered not in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS and not _SPACE_REPAIR_UNSAFE_TEXT_RE.search(lowered)
+
+
+def _space_repair_payload_summary(value: Any, depth: int = 0) -> dict[str, Any]:
+    """Summarize repair payload metadata without generated-body or unsafe marker leaks."""
+    if depth > 2 or not isinstance(value, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    count = 0
+    for raw_key, raw_value in value.items():
+        if count >= 20:
+            break
+        key = _context_value(raw_key, 80)
+        if not _space_repair_payload_key_is_safe(key):
+            continue
+        if isinstance(raw_value, dict):
+            child = _space_repair_payload_summary(raw_value, depth + 1)
+            if child:
+                summary[key] = child
+                count += 1
+            continue
+        if isinstance(raw_value, list):
+            items: list[Any] = []
+            for item in raw_value[:10]:
+                if isinstance(item, dict):
+                    child = _space_repair_payload_summary(item, depth + 1)
+                    if child:
+                        items.append(child)
+                else:
+                    text = _space_repair_text_summary(item, 200)
+                    if text and text != "[REDACTED]":
+                        items.append(text)
+            if items:
+                summary[key] = items
+                count += 1
+            continue
+        text = _space_repair_text_summary(raw_value, 500)
+        if text and text != "[REDACTED]":
+            summary[key] = text
+            count += 1
+    return summary
 
 
 def _public_display_text_summary(value: Any, limit: int = 300) -> str:
@@ -5414,6 +5474,53 @@ def list_widget_events(space_id: str, widget_id: str | None = None, limit: int =
     return summaries[:max_events]
 
 
+def _space_repair_event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
+    event_id = str(event.get("event_id") or "")
+    if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
+        return None
+    if _context_value(event.get("event_type"), 120) != "space.repair.queued":
+        return None
+    details = _payload_summary(event.get("details") or {})
+    if not isinstance(details, dict):
+        return None
+    payload_summary = details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}
+    return {
+        "schema_version": event.get("schema_version", SCHEMA_VERSION),
+        "event_id": event_id,
+        "space_id": sid,
+        "event_name": _context_value(details.get("event_name"), 120),
+        "status": _context_value(details.get("status") or "queued", 80),
+        "prompt_preview": _payload_text_summary(details.get("prompt_preview"), 1000),
+        "payload_summary": payload_summary,
+        "created_at": event.get("created_at"),
+    }
+
+
+def list_space_repair_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return newest-first metadata-only queued whole-Space repair events."""
+    if not spaces_enabled():
+        return []
+    sid = validate_space_id(space_id)
+    read_space(sid)
+    max_events = _clamped_int(limit, 20, 1, 100)
+    summaries: list[dict[str, Any]] = []
+    _ensure_dirs()
+    for event_path in sorted(events_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(summaries) >= max_events:
+            break
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        summary = _space_repair_event_summary(event, sid)
+        if summary is not None:
+            summaries.append(summary)
+    summaries.sort(key=lambda event: float(event.get("created_at") or 0), reverse=True)
+    return summaries[:max_events]
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,
@@ -5451,6 +5558,45 @@ def queue_widget_event(
         "status": "queued",
         "space_id": sid,
         "widget_id": wid,
+        "event_name": name,
+        "event_id": event_id,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+    }
+
+
+def queue_space_repair_event(
+    space_id: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    prompt: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Queue a metadata-only whole-Space repair request from recovery/admin UI."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    read_space(sid)
+    name = "agent.repair"
+    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    payload_summary = _space_repair_payload_summary(payload or {})
+    event_id = _record_event(
+        sid,
+        "space.repair.queued",
+        {
+            "event_name": name,
+            "prompt_preview": prompt_preview,
+            "payload_summary": payload_summary,
+            "session_id": _space_repair_text_summary(session_id, 120),
+            "status": "queued",
+        },
+    )
+    return {
+        "queued": True,
+        "status": "queued",
+        "space_id": sid,
         "event_name": name,
         "event_id": event_id,
         "prompt_preview": prompt_preview,
@@ -5507,6 +5653,16 @@ def recovery_snapshot() -> dict[str, Any]:
             summary = _summary(space)
             widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
             widget_summaries = [_widget_recovery_summary(widget) for widget in widgets if isinstance(widget, dict)]
+            space_repair_events = list_space_repair_events(summary["space_id"], limit=20)
+            if space_repair_events:
+                latest_space_repair = space_repair_events[0]
+                counts["queued_event_count"] += len(space_repair_events)
+                summary["queued_space_repair_count"] = len(space_repair_events)
+                summary["latest_space_repair_event"] = {
+                    "event_id": _context_value(latest_space_repair.get("event_id"), 120),
+                    "event_name": _context_value(latest_space_repair.get("event_name"), 120),
+                    "status": _context_value(latest_space_repair.get("status") or "queued", 80),
+                }
             queued_events_by_widget: dict[str, list[dict[str, Any]]] = {}
             for event in list_widget_events(summary["space_id"], limit=100):
                 wid = _context_value(event.get("widget_id"), 120)

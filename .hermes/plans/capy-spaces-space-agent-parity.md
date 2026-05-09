@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: recovery module upserts now preserve disabled/quarantined state until the explicit recovery enable control runs, so refreshed generated modules cannot silently re-enable themselves while raw module bodies remain confined to the backend repair store. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: safe recovery now has a whole-Space repair action that queues metadata-only `agent.repair` events from the recovery panel, redacts marker-only prompt/payload/session values, rejects non-object payloads, and surfaces only safe queued status in `recovery_snapshot()`. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): queue recovery space repairs`
+  - Added RED/GREEN backend coverage for `POST /api/spaces/recovery/repair-space`, including marker-only prompt/payload redaction, session-id redaction in persisted repair events, and rejection of non-object payloads before any durable queue write.
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the recovery panel renders `Ask Capy to repair Space`, fails closed without `showPromptDialog`, POSTs the metadata-only repair payload, refreshes recovery, and displays only safe queued status.
+  - Validation at completion: focused RED failed before implementation (`2 failed`) and focused GREEN passed (`5 passed`); full Spaces UI JS behavior + foundation suites passed (`312 passed`); demo parity suite passed (`10 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py tests/test_spaces_foundation.py api/spaces.py api/routes.py`, `git diff --check`, and `/tmp` real-static recovery harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_798e234044c540208f1aa254cc1e2b6c.png`.
 
 - `fix(spaces): preserve module quarantine on upsert`
   - Added RED/GREEN backend coverage proving `_upsert_recovery_module(...)` preserves an existing disabled recovery state even when an incoming module payload tries to reset `recovery.disabled` to false.

@@ -2312,6 +2312,19 @@
     return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
   }
 
+  function renderRecoverySpaceEventStatus(space){
+    const count = Number(space && space.queued_space_repair_count || 0);
+    if (!count) return '';
+    const latest = space && space.latest_space_repair_event && typeof space.latest_space_repair_event === 'object' ? space.latest_space_repair_event : {};
+    const parts = [];
+    const eventName = latest.event_name ? String(latest.event_name) : '';
+    const status = latest.status ? String(latest.status) : '';
+    const state = [eventName, status].filter(Boolean).join(' · ');
+    parts.push('Space repair queued:'+(state ? ' '+state : ' '+count));
+    if (latest.event_id) parts.push('Event: '+String(latest.event_id).slice(0, 12));
+    return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
+  }
+
   function recoveryCountLabel(count, singular){
     return Number(count || 0)+' '+singular+(Number(count || 0) === 1 ? '' : 's');
   }
@@ -2384,6 +2397,7 @@
       const spaceAction = spaceDisabled
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Enable space</button>'
         : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Disable space</button>';
+      const spaceRepairAction = '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Ask Capy to repair Space</button>';
       const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
         const widgetId = w && w.id ? String(w.id) : '';
         const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
@@ -2403,8 +2417,9 @@
       return '<div class="capy-spaces-card"><h3>'+escapeHtml(name)+'</h3>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         spaceStatus +
+        renderRecoverySpaceEventStatus(s || {}) +
         '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
-        '<div class="capy-spaces-actions">'+spaceAction+'</div>' +
+        '<div class="capy-spaces-actions">'+spaceAction+spaceRepairAction+'</div>' +
         widgetRows +
         '<div class="capy-spaces-card"><h4>Recovery rollback</h4><div class="capy-spaces-muted">Restore safe metadata snapshots without rendering generated widget bodies.</div><div class="capy-spaces-widget-list">'+recoveryRows+'</div></div>' +
         '</div></div>';
@@ -2420,7 +2435,7 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
     if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
       if (typeof showConfirmDialog !== 'function') return;
       const moduleId = button.dataset.moduleId || '';
@@ -2440,6 +2455,22 @@
     }
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
+    if (action === 'repairRecoverySpace') {
+      if (typeof showPromptDialog !== 'function') return;
+      const promptText = await showPromptDialog({
+        title: 'Ask Capy to repair Space',
+        placeholder: 'Describe what is broken in Space '+spaceId,
+        confirmLabel: 'Queue repair',
+      });
+      if (!promptText) return;
+      await postSpacesJson('api/spaces/recovery/repair-space', {
+        space_id: spaceId,
+        prompt: promptText,
+        payload: {source: 'recovery-panel', action: 'repair-space'},
+      });
+      await loadCapySpacesRecovery();
+      return;
+    }
     if (action === 'repairRecoveryWidget') {
       if (typeof showPromptDialog !== 'function') return;
       const widgetId = button.dataset.widgetId || '';
