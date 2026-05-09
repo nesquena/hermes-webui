@@ -21,6 +21,7 @@
 | P-003 | 增加上游同步工具链 | `scripts/sync-upstream.sh`、`.github/workflows/upstream-watch.yml`、`MAINTAINING.md` |
 | P-004 | 同步到 cnb.cool 镜像的 CI workflow | `.github/workflows/sync-to-cnb-mirror.yml` |
 | P-005 | 设置页 sidebar 6 个 tab 标签中文化 | `static/index.html`（5 处补 `data-i18n`），`static/i18n.js`（en 加 `settings_tab_plugins`，zh 翻译 5 个 tab key + `providers_tab_title`） |
+| P-006 | README 加"检查更新走哪"段落 | `README.md` |
 
 新增补丁约定：
 - 单一关切（不要把多个无关改动塞进同一个 P）

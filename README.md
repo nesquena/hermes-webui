@@ -29,6 +29,19 @@ python3 bootstrap.py
 
 更详细的部署、配置环境变量、对接 hermes-agent 等内容，请参考 [上游英文 README](./README.en.md)——本分支不修改部署逻辑，所有运行手册仍以上游为准。
 
+## 检查更新走哪？
+
+WebUI 内置的"检查更新"功能（`/api/updates/check`、`/api/updates/apply`、`/api/updates/force`）完全基于本地 `git remote origin` 工作，没有任何硬编码的远端地址：
+
+- 从 cnb.cool 克隆 → `origin` = cnb → 检查 / 拉取 / 强制更新都自动走 cnb，无需配置
+- 从 GitHub 克隆 → `origin` = GitHub → 想改走 cnb 一条命令即可：
+
+```bash
+git remote set-url origin https://cnb.cool/hermesagent-cn/hermes-webui-cn-mirror.git
+```
+
+切换后 `git fetch origin` 与 WebUI 设置面板里的"检查更新"按钮都会改走 cnb 镜像。cnb 镜像每 6 小时从 GitHub 自动同步一次，落后窗口最多 6h。
+
 ## 反馈
 
 - 上游 bug / 通用功能问题 → 直接给 [`nesquena/hermes-webui`](https://github.com/nesquena/hermes-webui/issues) 提
