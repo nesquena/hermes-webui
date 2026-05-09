@@ -32,7 +32,7 @@ SCHEMA_VERSION = 1
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$")
-_SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.(?:current|spaces)\.[a-zA-Z0-9_.:-]+")
+_SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.(?:current|spaces)\.[a-zA-Z0-9_.:/ @;-]+")
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 _OMITTED_PAYLOAD_KEYS = {
     "api_key",
@@ -3598,6 +3598,68 @@ def _space_agent_files_from_package(package: dict[str, Any]) -> tuple[str, str, 
     return "space-agent-yaml", space_yaml, widgets
 
 
+_SPACE_AGENT_TOKEN_BOUNDARY = r"[^A-Za-z0-9]"
+_SPACE_AGENT_UNSAFE_DISPLAY_TOKEN_RE = re.compile(
+    rf"(^|{_SPACE_AGENT_TOKEN_BOUNDARY})((api{_SPACE_AGENT_TOKEN_BOUNDARY}?(key|auth))|apikey|apiauth|authorization|bearer|credential|credentials|html|password|renderer|script|secret|token)({_SPACE_AGENT_TOKEN_BOUNDARY}|$)",
+    re.IGNORECASE,
+)
+_SPACE_AGENT_UNSAFE_PACKAGE_TOKEN_RE = re.compile(
+    rf"(^|{_SPACE_AGENT_TOKEN_BOUNDARY})((api{_SPACE_AGENT_TOKEN_BOUNDARY}?(key|auth))|apikey|apiauth|authorization|bearer|credential|credentials|data|html|password|renderer|script|secret|source|token)({_SPACE_AGENT_TOKEN_BOUNDARY}|$)",
+    re.IGNORECASE,
+)
+_SPACE_AGENT_BENIGN_PACKAGE_LABELS = {
+    "daily data dashboard",
+    "data table",
+    "secretary cookie recipes",
+    "source notes",
+    "source space",
+    "tokenization dashboard",
+}
+
+
+def _space_agent_benign_package_label(value: str) -> bool:
+    label = _safe_zip_entry_name(value).rsplit("/", 1)[-1]
+    if "." in label:
+        label = label.rsplit(".", 1)[0]
+    normalized = re.sub(r"[^a-zA-Z0-9]+", " ", label).strip().lower()
+    return normalized in _SPACE_AGENT_BENIGN_PACKAGE_LABELS
+
+
+def _space_agent_public_label(value: Any, limit: int = 300, *, package_tokens: bool = False) -> str:
+    """Return safe Space Agent import/export display metadata.
+
+    Space Agent package labels need the same false-positive discipline as public
+    Space metadata (for example, preserve benign Source/Data/Cookie/Tokenization
+    product labels), but package paths/API names also use token-like separators
+    where standalone executable/auth markers must fail closed.
+    """
+    text = _public_display_text_summary(value, limit)
+    if package_tokens and text and text != "[REDACTED]" and _space_agent_benign_package_label(text):
+        return text
+    unsafe_re = _SPACE_AGENT_UNSAFE_PACKAGE_TOKEN_RE if package_tokens else _SPACE_AGENT_UNSAFE_DISPLAY_TOKEN_RE
+    if text and text != "[REDACTED]" and unsafe_re.search(text):
+        return "[REDACTED]"
+    return text
+
+
+def _space_agent_export_identifier(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if not text or _space_agent_public_label(text, package_tokens=True) == "[REDACTED]":
+        return fallback
+    return text
+
+
+def _space_agent_unique_export_identifier(value: Any, fallback: str, used: set[str]) -> str:
+    base = _space_agent_export_identifier(value, fallback)
+    candidate = base
+    counter = 2
+    while candidate in used:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    used.add(candidate)
+    return candidate
+
+
 def _widget_id_from_path(path: str) -> str:
     tail = _safe_zip_entry_name(path).rsplit("/", 1)[-1]
     stem = tail.rsplit(".", 1)[0] if "." in tail else tail
@@ -3641,19 +3703,21 @@ def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) 
     seen: set[tuple[str, str]] = set()
 
     def add_from_text(label: str, text: str) -> None:
+        safe_label = _space_agent_public_label(label, 180, package_tokens=True)
         for match in _SPACE_AGENT_UNSUPPORTED_API_RE.findall(str(text or "")):
             api_name = match.rstrip(".,;:)]}'\"")
             if not api_name:
                 continue
-            key = (label, api_name)
+            safe_api_name = _space_agent_public_label(api_name, 180, package_tokens=True)
+            key = (safe_label, safe_api_name)
             if key in seen:
                 continue
             seen.add(key)
             warnings.append(
                 {
                     "type": "unsupported_space_agent_api",
-                    "file": label,
-                    "api": api_name,
+                    "file": safe_label,
+                    "api": safe_api_name,
                     "message": "Unsupported Space Agent API reference omitted during import.",
                 }
             )
@@ -3723,12 +3787,12 @@ def _dump_yaml_mapping(payload: dict[str, Any]) -> str:
     return _yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
-def _space_agent_widget_export_doc(widget: dict[str, Any]) -> dict[str, Any]:
+def _space_agent_widget_export_doc(widget: dict[str, Any], *, export_id: str | None = None) -> dict[str, Any]:
     clean = _normalize_widget(widget)
     doc: dict[str, Any] = {
-        "id": clean["id"],
-        "title": clean["title"],
-        "type": clean["kind"],
+        "id": export_id or clean["id"],
+        "title": _space_agent_public_label(clean["title"]),
+        "type": _space_agent_public_label(clean["kind"]),
         "layout": clean["layout"],
     }
     exportable_keys = {
@@ -3762,21 +3826,39 @@ def _space_agent_widget_export_doc(widget: dict[str, Any]) -> dict[str, Any]:
     return doc
 
 
-def _space_agent_yaml_export(space: dict[str, Any]) -> tuple[str, dict[str, str]]:
+def _space_agent_yaml_export(space: dict[str, Any]) -> tuple[str, dict[str, str], str]:
+    template = None if space.get("template") == "blank" else space.get("template")
+    export_space_id = _space_agent_export_identifier(space.get("space_id"), "redacted-space")
     space_doc = {
-        "id": space.get("space_id"),
-        "name": space.get("name") or space.get("space_id"),
-        "description": space.get("description") or "",
-        "instructions": space.get("agent_instructions") or "",
-        "template": None if space.get("template") == "blank" else space.get("template"),
+        "id": export_space_id,
+        "name": _space_agent_public_label(space.get("name") or space.get("space_id")),
+        "description": _space_agent_public_label(space.get("description") or ""),
+        "instructions": _space_agent_public_label(space.get("agent_instructions") or ""),
+        "template": None if template is None else _space_agent_public_label(template),
     }
     widgets: dict[str, str] = {}
-    for widget in space.get("widgets") or []:
-        if not isinstance(widget, dict):
-            continue
-        doc = _space_agent_widget_export_doc(widget)
+    raw_widgets = [widget for widget in (space.get("widgets") or []) if isinstance(widget, dict)]
+    reserved_safe_widget_ids: set[str] = set()
+    for widget in raw_widgets:
+        normalized = _normalize_widget(widget)
+        if _space_agent_export_identifier(normalized["id"], "") == normalized["id"]:
+            reserved_safe_widget_ids.add(normalized["id"])
+    used_widget_export_ids: set[str] = set()
+    for index, widget in enumerate(raw_widgets, 1):
+        normalized = _normalize_widget(widget)
+        if normalized["id"] in reserved_safe_widget_ids:
+            export_widget_id = _space_agent_unique_export_identifier(normalized["id"], normalized["id"], used_widget_export_ids)
+        else:
+            fallback = f"redacted-widget-{index}"
+            export_widget_id = fallback
+            counter = 2
+            while export_widget_id in used_widget_export_ids or export_widget_id in reserved_safe_widget_ids:
+                export_widget_id = f"{fallback}-{counter}"
+                counter += 1
+            used_widget_export_ids.add(export_widget_id)
+        doc = _space_agent_widget_export_doc(widget, export_id=export_widget_id)
         widgets[f"widgets/{doc['id']}.yaml"] = _dump_yaml_mapping(doc)
-    return _dump_yaml_mapping(space_doc), widgets
+    return _dump_yaml_mapping(space_doc), widgets, export_space_id
 
 
 def _space_agent_zip_b64(space_yaml: str, widgets: dict[str, str]) -> str:
@@ -3798,13 +3880,13 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
     space = read_space(sid)
-    space_yaml, widgets = _space_agent_yaml_export(space)
+    space_yaml, widgets, export_space_id = _space_agent_yaml_export(space)
     normalized_format = str(format or "yaml").strip().lower()
     if normalized_format in {"zip", "space-agent-zip"}:
         return {
             "source": "capy-space",
             "format": "space-agent-zip",
-            "space_id": sid,
+            "space_id": export_space_id,
             "archive_b64": _space_agent_zip_b64(space_yaml, widgets),
             "widget_count": len(widgets),
         }
@@ -3813,7 +3895,7 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
     return {
         "source": "capy-space",
         "format": "space-agent-yaml",
-        "space_id": sid,
+        "space_id": export_space_id,
         "space_yaml": space_yaml,
         "widgets": widgets,
         "widget_count": len(widgets),

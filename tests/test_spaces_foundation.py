@@ -5108,6 +5108,193 @@ layout:
     assert "untrusted_artifact" not in json.dumps(spaces.read_space_detail("unsafe-demo"))
 
 
+def test_import_space_agent_zip_warnings_redact_unsafe_labels_and_api_names(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr(
+            "space.yaml",
+            """
+id: warning-redaction-demo
+name: Warning Redaction Demo
+actions:
+  safe_space: space.current.widget.read
+  unsafe_space: space.current.renderer.source.html.script.data.api_auth.secret_value_do_not_leak
+  unsafe_source: space.current.source.read
+  unsafe_data: space.current.data.read
+  unsafe_token: space.current.widget.token
+  unsafe_api_auth_separator: space.current.api.auth
+  unsafe_api_key_slash: space.current.api/key.read
+  unsafe_api_auth_space: space.current.api auth.read
+  unsafe_api_auth_semicolon: space.current.api;auth.read
+  unsafe_api_key_at: space.current.api@key.read
+""",
+        )
+        zf.writestr(
+            "widgets/renderer-source-html-script-data-api_auth-secret-panel.yaml",
+            """
+id: unsafe-label-panel
+title: Unsafe Label Panel
+type: markdown
+actions:
+  safe_widget: space.current.widget.patch
+  unsafe_widget: space.spaces.api_auth.token
+""",
+        )
+        zf.writestr(
+            "widgets/safe-panel.yaml",
+            """
+id: safe-panel
+title: Safe Panel
+type: markdown
+actions:
+  safe_widget: space.spaces.list
+  unsafe_widget: space.current.script.data.secret_value_do_not_leak
+""",
+        )
+
+    imported = spaces.import_space_agent_package(
+        {"archive_b64": base64.b64encode(bundle.getvalue()).decode("ascii")}
+    )
+    warnings = imported["warnings"]
+    message = "Unsupported Space Agent API reference omitted during import."
+    serialized_warnings = json.dumps(warnings).lower()
+
+    assert imported["source"] == "space-agent-zip"
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "space.yaml",
+        "api": "space.current.widget.read",
+        "message": message,
+    } in warnings
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "space.yaml",
+        "api": "[REDACTED]",
+        "message": message,
+    } in warnings
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "[REDACTED]",
+        "api": "space.current.widget.patch",
+        "message": message,
+    } in warnings
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "[REDACTED]",
+        "api": "[REDACTED]",
+        "message": message,
+    } in warnings
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "widgets/safe-panel.yaml",
+        "api": "space.spaces.list",
+        "message": message,
+    } in warnings
+    assert {
+        "type": "unsupported_space_agent_api",
+        "file": "widgets/safe-panel.yaml",
+        "api": "[REDACTED]",
+        "message": message,
+    } in warnings
+    assert "widgets/safe-panel.yaml" in serialized_warnings
+    assert "space.current.widget.read" in serialized_warnings
+    assert "space.current.widget.patch" in serialized_warnings
+    assert "space.spaces.list" in serialized_warnings
+    assert "space.current.source.read" not in serialized_warnings
+    assert "space.current.data.read" not in serialized_warnings
+    assert "space.current.widget.token" not in serialized_warnings
+    assert "space.current.api.auth" not in serialized_warnings
+    assert "space.current.api/key" not in serialized_warnings
+    assert "space.current.api auth" not in serialized_warnings
+    assert "space.current.api;auth" not in serialized_warnings
+    assert "space.current.api@key" not in serialized_warnings
+    assert 'space.current.api"' not in serialized_warnings
+    assert "renderer" not in serialized_warnings
+    assert "source" not in serialized_warnings
+    assert "html" not in serialized_warnings
+    assert "script" not in serialized_warnings
+    assert "data" not in serialized_warnings
+    assert "api_auth" not in serialized_warnings
+    assert "api_key" not in serialized_warnings
+    assert "secret_value_do_not_leak" not in serialized_warnings
+    assert "token" not in serialized_warnings
+
+
+def test_import_space_agent_zip_warnings_redact_standalone_unsafe_file_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("space.yaml", "id: warning-file-redaction-demo\nname: Warning File Redaction Demo\n")
+        for unsafe_path in (
+            "widgets/source-panel.yaml",
+            "widgets/data-panel.yaml",
+            "widgets/token-panel.yaml",
+            "widgets/api;auth-panel.yaml",
+            "widgets/api@key-panel.yaml",
+        ):
+            zf.writestr(
+                unsafe_path,
+                """
+id: safe-panel
+title: Safe Panel
+type: markdown
+actions:
+  safe_widget: space.current.widget.patch
+""",
+            )
+
+    imported = spaces.import_space_agent_package(
+        {"archive_b64": base64.b64encode(bundle.getvalue()).decode("ascii")}
+    )
+    warnings = imported["warnings"]
+    serialized_warnings = json.dumps(warnings).lower()
+
+    assert len(warnings) == 1
+    assert warnings[0]["file"] == "[REDACTED]"
+    assert warnings[0]["api"] == "space.current.widget.patch"
+    assert "source-panel" not in serialized_warnings
+    assert "data-panel" not in serialized_warnings
+    assert "token-panel" not in serialized_warnings
+    assert "api;auth-panel" not in serialized_warnings
+    assert "api@key-panel" not in serialized_warnings
+
+
+def test_import_space_agent_zip_warnings_preserve_benign_file_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    bundle = io.BytesIO()
+    benign_paths = [
+        "widgets/Source Notes.yaml",
+        "widgets/Daily Data Dashboard.yaml",
+        "widgets/data-table.yaml",
+        "widgets/tokenization-dashboard.yaml",
+        "widgets/Secretary Cookie Recipes.yaml",
+    ]
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("space.yaml", "id: benign-warning-label-demo\nname: Benign Warning Label Demo\n")
+        for index, path in enumerate(benign_paths):
+            zf.writestr(
+                path,
+                f"""
+id: safe-panel-{index}
+title: Safe Panel {index}
+type: markdown
+actions:
+  safe_widget: space.current.widget.patch{index}
+""",
+            )
+
+    imported = spaces.import_space_agent_package(
+        {"archive_b64": base64.b64encode(bundle.getvalue()).decode("ascii")}
+    )
+    serialized_warnings = json.dumps(imported["warnings"])
+
+    assert len(imported["warnings"]) == len(benign_paths)
+    for path in benign_paths:
+        assert path in serialized_warnings
+    assert "[REDACTED]" not in serialized_warnings
+
+
 def test_import_space_agent_zip_b64_route_returns_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     bundle = io.BytesIO()
@@ -5192,6 +5379,173 @@ def test_export_space_agent_yaml_package_omits_generated_sources(monkeypatch, tm
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "secret_source" not in serialized
+
+
+def test_export_space_agent_yaml_package_redacts_unsafe_display_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "unsafe-export-demo",
+            "name": "renderer api_auth panel",
+            "description": "<script>bad()</script> SECRET_VALUE_DO_NOT_LEAK",
+            "agent_instructions": "generated code raw prompt bearer SECRET_VALUE_DO_NOT_LEAK",
+            "template": "source-script-template",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "api_auth",
+            "title": "renderer card",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
+            "source": "generated code raw prompt bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    import yaml
+    space_doc = yaml.safe_load(exported["space_yaml"])
+    widget_doc = yaml.safe_load(exported["widgets"]["widgets/unsafe-widget.yaml"])
+    export_text = (exported["space_yaml"] + exported["widgets"]["widgets/unsafe-widget.yaml"]).lower()
+    assert space_doc["name"] == "[REDACTED]"
+    assert space_doc["description"] == "[REDACTED]"
+    assert space_doc["instructions"] == "[REDACTED]"
+    assert space_doc["template"] == "[REDACTED]"
+    assert widget_doc["title"] == "[REDACTED]"
+    assert widget_doc["type"] == "[REDACTED]"
+    assert "renderer" not in export_text
+    assert "api_auth" not in export_text
+    assert "<script" not in export_text
+    assert "secret_value_do_not_leak" not in export_text
+    assert "generated code" not in export_text
+    assert "raw prompt" not in export_text
+    assert "bearer" not in export_text
+
+
+def test_export_space_agent_yaml_package_preserves_benign_display_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "benign-export-demo",
+            "name": "Source Space",
+            "description": "Daily Data Dashboard metadata",
+            "agent_instructions": "Use source notes and data tables safely.",
+            "template": "tokenization-dashboard",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "source-notes",
+            "kind": "data-table",
+            "title": "Source Notes",
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "cookie-recipes",
+            "kind": "tokenization-dashboard",
+            "title": "Secretary Cookie Recipes",
+        },
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    import yaml
+    space_doc = yaml.safe_load(exported["space_yaml"])
+    source_doc = yaml.safe_load(exported["widgets"]["widgets/source-notes.yaml"])
+    cookie_doc = yaml.safe_load(exported["widgets"]["widgets/cookie-recipes.yaml"])
+    assert space_doc["name"] == "Source Space"
+    assert space_doc["description"] == "Daily Data Dashboard metadata"
+    assert space_doc["instructions"] == "Use source notes and data tables safely."
+    assert space_doc["template"] == "tokenization-dashboard"
+    assert source_doc["title"] == "Source Notes"
+    assert source_doc["type"] == "data-table"
+    assert cookie_doc["title"] == "Secretary Cookie Recipes"
+    assert cookie_doc["type"] == "tokenization-dashboard"
+
+
+def test_export_space_agent_yaml_package_redacts_unsafe_ids_and_filenames(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "api_auth-secret-space",
+            "name": "Unsafe ID Export Demo",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "api_auth-secret-widget",
+            "kind": "markdown",
+            "title": "Safe Widget Title",
+        },
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    import yaml
+    space_doc = yaml.safe_load(exported["space_yaml"])
+    widget_paths = sorted(exported["widgets"])
+    widget_doc = yaml.safe_load(exported["widgets"][widget_paths[0]])
+    serialized = json.dumps(exported).lower()
+    assert exported["space_id"] == "redacted-space"
+    assert space_doc["id"] == "redacted-space"
+    assert widget_paths == ["widgets/redacted-widget-1.yaml"]
+    assert widget_doc["id"] == "redacted-widget-1"
+    assert widget_doc["title"] == "Safe Widget Title"
+    assert "api_auth" not in serialized
+    assert "secret" not in serialized
+
+
+def test_export_space_agent_yaml_package_redacts_standalone_unsafe_widget_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "standalone-id-export-demo", "name": "Standalone ID Export Demo"})
+    spaces.upsert_widget(created["space_id"], {"id": "source-panel", "kind": "markdown", "title": "Source Panel"})
+    spaces.upsert_widget(created["space_id"], {"id": "data-panel", "kind": "markdown", "title": "Data Panel"})
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    import yaml
+    widget_paths = sorted(exported["widgets"])
+    widget_docs = [yaml.safe_load(exported["widgets"][path]) for path in widget_paths]
+    serialized = json.dumps(exported).lower()
+    assert widget_paths == ["widgets/redacted-widget-1.yaml", "widgets/redacted-widget-2.yaml"]
+    assert [doc["id"] for doc in widget_docs] == ["redacted-widget-1", "redacted-widget-2"]
+    assert "source-panel" not in serialized
+    assert "data-panel" not in serialized
+
+
+def test_export_space_agent_yaml_package_keeps_redacted_widget_aliases_unique(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "alias-collision-demo", "name": "Alias Collision Demo"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "api_auth-secret-widget", "kind": "markdown", "title": "Unsafe ID Widget"},
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "redacted-widget-1", "kind": "markdown", "title": "Existing Alias Widget"},
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    import yaml
+    widget_paths = sorted(exported["widgets"])
+    widget_docs = [yaml.safe_load(exported["widgets"][path]) for path in widget_paths]
+    serialized = json.dumps(exported).lower()
+    assert exported["widget_count"] == 2
+    assert widget_paths == ["widgets/redacted-widget-1-2.yaml", "widgets/redacted-widget-1.yaml"]
+    assert [doc["id"] for doc in widget_docs] == ["redacted-widget-1-2", "redacted-widget-1"]
+    by_id = {doc["id"]: doc for doc in widget_docs}
+    assert by_id["redacted-widget-1"]["title"] == "Existing Alias Widget"
+    assert by_id["redacted-widget-1-2"]["title"] == "Unsafe ID Widget"
+    assert sorted(doc["title"] for doc in widget_docs) == ["Existing Alias Widget", "Unsafe ID Widget"]
+    assert "api_auth" not in serialized
+    assert "secret" not in serialized
 
 
 def test_export_space_agent_zip_b64_route_returns_safe_archive(monkeypatch, tmp_path):
