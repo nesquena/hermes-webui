@@ -3076,7 +3076,12 @@ def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkey
         "capy:resize",
         "capy:agent:prompt",
     ]
-    assert explicit["contract"]["blocked_messages"] == ["capy:raw:eval", "capy:data:put"]
+    assert explicit["contract"]["blocked_messages"] == [
+        "capy:raw:eval",
+        "capy:data:put",
+        "capy:data:get",
+        "capy:asset:url",
+    ]
     assert explicit["contract"]["network_policy"] == {
         "default": "deny",
         "allowed_schemes": ["https"],

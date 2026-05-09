@@ -842,7 +842,12 @@ def _widget_runtime_contract_summary(widget: dict[str, Any]) -> dict[str, Any]:
         "widget_id": clean_widget["id"],
         "execution": "generated-code-disabled",
         "allowed_messages": ["capy:ready", "capy:resize", "capy:agent:prompt"],
-        "blocked_messages": ["capy:raw:eval", "capy:data:put"],
+        "blocked_messages": [
+            "capy:raw:eval",
+            "capy:data:put",
+            "capy:data:get",
+            "capy:asset:url",
+        ],
         "network_policy": {
             "default": "deny",
             "allowed_schemes": ["https"],

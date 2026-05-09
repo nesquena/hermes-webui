@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: sandbox/postMessage blocked runtime messages now render a generic metadata-only blocked status instead of reflecting arbitrary blocked `type` / `message_type` values, so hostile blocked message types cannot leak generated/source/API-auth markers or secret-looking sentinels into the Spaces DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: sandbox runtime contracts now explicitly advertise read-style data/asset requests (`capy:data:get`, `capy:asset:url`) as blocked alongside raw/eval/data mutation messages, aligning the visible metadata-only contract with the postMessage bridge's fail-closed behavior. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): list blocked sandbox read messages`
+  - Added RED/GREEN backend coverage proving `space.widget.runtime_contract` exposes `capy:data:get` and `capy:asset:url` in the metadata-only blocked-message list, so safe widget details communicate that read-style data/assets bridges are not available yet.
+  - Updated real-`static/spaces.js` behavior coverage to render the expanded safe blocked-message list while preserving generic blocked runtime statuses and avoiding hostile payload/secret-looking sentinel leaks.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed` backend, `2 passed` UI/backend focused); full Spaces foundation suite passed (`208 passed`); Spaces UI behavior + demo parity suites passed (`132 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, and `/tmp` real-static runtime-contract harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_2a98df3582954a6daa00baad33b99ab5.png`.
 
 - `fix(spaces): avoid reflecting blocked sandbox message types`
   - Added RED/GREEN real-`static/spaces.js` coverage proving a hostile blocked runtime type such as `capy:raw:SECRET_VALUE_DO_NOT_LEAK` queues no widget event, opens no dialog, makes no data/asset backend call, and does not expose the hostile type, renderer/source/API-auth markers, script tags, or secret-looking sentinels in the DOM.
