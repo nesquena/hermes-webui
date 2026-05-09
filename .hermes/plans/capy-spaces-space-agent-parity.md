@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-08 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: full-space rollback now preserves the safe revision timeline when restoring older snapshots, so recovery/history UIs can discover newer revisions and restore back to the present without exposing generated widget bodies or secret-looking metadata. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: recovery module upserts now preserve disabled/quarantined state until the explicit recovery enable control runs, so refreshed generated modules cannot silently re-enable themselves while raw module bodies remain confined to the backend repair store. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): preserve module quarantine on upsert`
+  - Added RED/GREEN backend coverage proving `_upsert_recovery_module(...)` preserves an existing disabled recovery state even when an incoming module payload tries to reset `recovery.disabled` to false.
+  - Hardened `upsert_recovery_module(...)` to merge incoming generated module metadata/bodies while retaining the trusted recovery envelope from the existing quarantine record; explicit recovery enable controls remain the only way to re-enable a disabled module.
+  - Validation at completion: focused RED failed before implementation; focused GREEN passed (`1 passed`); focused module recovery regression set passed (`4 passed, 178 deselected`); full Spaces foundation suite passed (`182 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static recovery harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_adb78b19148345eb8c814461141c2407.png`.
 
 - `fix(spaces): preserve rollback return history`
   - Added RED/GREEN backend coverage proving a full-space restore to an older widget snapshot keeps newer revision IDs visible in `list_revision_events(...)`, then supports restoring back to that newer revision while public responses stay metadata-only.

@@ -4872,6 +4872,51 @@ def test_recovery_snapshot_includes_safe_module_quarantine_without_leaking_sourc
     assert "raw prompt" not in serialized
 
 
+def test_recovery_module_upsert_preserves_disabled_state_until_enable_control(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-bypass",
+            "name": "Unsafe Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+        }
+    )
+    spaces.disable_module_for_recovery("module-bypass", reason="manual recovery quarantine")
+
+    updated = spaces.upsert_recovery_module(
+        {
+            "module_id": "module-bypass",
+            "name": "Unsafe Module Updated",
+            "description": "Metadata-only updated descriptor",
+            "scope": "space",
+            "recovery": {"disabled": False, "disabled_reason": ""},
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK_2'",
+            "renderer": "<script>badAgain()</script>",
+        }
+    )
+
+    stored = spaces.read_recovery_module("module-bypass")
+    recovery = spaces.recovery_snapshot()
+    event = json.loads((spaces.events_dir() / f"{updated['revision_event_id']}.json").read_text(encoding="utf-8"))
+    serialized = json.dumps({"updated": updated, "recovery": recovery, "event": event}).lower()
+
+    assert updated["disabled"] is True
+    assert updated["disabled_reason"] == "manual recovery quarantine"
+    assert stored["recovery"] == {"disabled": True, "disabled_reason": "manual recovery quarantine"}
+    assert stored["source"] == "const token = 'SECRET_VALUE_DO_NOT_LEAK_2'"
+    assert recovery["summary"]["disabled_module_count"] == 1
+    assert recovery["modules"][0]["disabled"] is True
+    assert event["snapshot"]["disabled"] is True
+    assert event["snapshot"]["disabled_reason"] == "manual recovery quarantine"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_recovery_module_public_summaries_redact_unsafe_module_ids(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

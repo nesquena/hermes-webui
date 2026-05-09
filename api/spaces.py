@@ -5170,12 +5170,19 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             existing = {}
     now = time.time()
+    existing_recovery = (
+        copy.deepcopy(existing.get("recovery"))
+        if isinstance(existing.get("recovery"), dict)
+        else {"disabled": False, "disabled_reason": ""}
+    )
+    incoming = copy.deepcopy(module)
+    incoming.pop("recovery", None)
     stored = dict(existing)
-    stored.update(copy.deepcopy(module))
+    stored.update(incoming)
     stored["module_id"] = mid
     stored.setdefault("created_at", existing.get("created_at") or now)
     stored["updated_at"] = now
-    stored.setdefault("recovery", existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"disabled": False, "disabled_reason": ""})
+    stored["recovery"] = existing_recovery
     event_id = _record_module_event("module.quarantined", stored, {"module_id": mid})
     stored["revision_event_id"] = event_id
     _atomic_write_json(module_path, stored)
