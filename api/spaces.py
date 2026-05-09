@@ -57,7 +57,7 @@ _SECRET_LIKE_VALUE_RE = re.compile(
 )
 _EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
 _SPACE_REPAIR_UNSAFE_TEXT_RE = re.compile(
-    r"(^|[^a-z0-9])(api[_-]?auth|api[_-]?key|apiauth|apikey|bearer|credential|credentials|data|generated[ _-]?(?:code|widget[ _-]?body)|html|raw[ _-]?prompt|renderer|script|source)([^a-z0-9]|$)",
+    r"(^|[^a-z0-9])(api[\s_-]?auth|api[\s_-]?key|apiauth|apikey|auth(?:orization)?|bearer|body|cookie|credential|credentials|data|generated[ _-]?(?:code|widget[ _-]?body)|html|on[a-z]+|password|raw[ _-]?prompt|renderer|script|secret|source|token)([^a-z0-9]|$)",
     re.IGNORECASE,
 )
 _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS = _OMITTED_PAYLOAD_KEYS | {"body", "generated_body", "prompt", "raw_prompt"}
@@ -945,30 +945,65 @@ def _space_repair_text_summary(value: Any, limit: int = 500) -> str:
     text = _payload_text_summary(value, limit)
     if text == "[REDACTED]":
         return text
-    if text and _SPACE_REPAIR_UNSAFE_TEXT_RE.search(text):
+    if text and (_SPACE_REPAIR_UNSAFE_TEXT_RE.search(text) or re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE)):
         return "[REDACTED]"
     return text
 
 
+def _space_repair_marker_text(value: Any, limit: int = 200) -> str:
+    text = _context_value(value, limit)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    return re.sub(r"[^a-z0-9]+", " ", text.lower())
+
+
 def _space_repair_payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
-    return bool(lowered) and lowered not in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS and not _SPACE_REPAIR_UNSAFE_TEXT_RE.search(lowered)
+    raw_text = _context_value(key, 200)
+    raw_lowered = raw_text.lower()
+    marker_text = _space_repair_marker_text(key)
+    compact_marker = marker_text.replace(" ", "")
+    unsafe_compact_markers = (
+        "apikey",
+        "apiauth",
+        "authorization",
+        "bearer",
+        "body",
+        "cookie",
+        "credential",
+        "data",
+        "html",
+        "password",
+        "renderer",
+        "script",
+        "secret",
+        "source",
+        "token",
+    )
+    return (
+        bool(lowered)
+        and lowered not in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS
+        and not any(marker in raw_lowered for marker in _EXECUTABLE_VALUE_MARKERS)
+        and not re.search(r"<\s*/?\s*[a-z][^>]*>", raw_text, re.IGNORECASE)
+        and not _SPACE_REPAIR_UNSAFE_TEXT_RE.search(marker_text)
+        and not re.search(r"on(?:click|error|load|mouse|pointer|key|input|change|submit|focus|blur|drag|drop|touch)[a-z]*", compact_marker)
+        and not any(marker in compact_marker for marker in unsafe_compact_markers)
+    )
 
 
-def _space_repair_payload_summary(value: Any, depth: int = 0) -> dict[str, Any]:
+def _space_repair_payload_summary(value: Any, depth: int = 0, max_depth: int = 2) -> dict[str, Any]:
     """Summarize repair payload metadata without generated-body or unsafe marker leaks."""
-    if depth > 2 or not isinstance(value, dict):
+    if depth > max_depth or not isinstance(value, dict):
         return {}
     summary: dict[str, Any] = {}
     count = 0
     for raw_key, raw_value in value.items():
         if count >= 20:
             break
-        key = _context_value(raw_key, 80)
-        if not _space_repair_payload_key_is_safe(key):
+        if not _space_repair_payload_key_is_safe(raw_key):
             continue
+        key = _context_value(raw_key, 80)
         if isinstance(raw_value, dict):
-            child = _space_repair_payload_summary(raw_value, depth + 1)
+            child = _space_repair_payload_summary(raw_value, depth + 1, max_depth=max_depth)
             if child:
                 summary[key] = child
                 count += 1
@@ -977,7 +1012,7 @@ def _space_repair_payload_summary(value: Any, depth: int = 0) -> dict[str, Any]:
             items: list[Any] = []
             for item in raw_value[:10]:
                 if isinstance(item, dict):
-                    child = _space_repair_payload_summary(item, depth + 1)
+                    child = _space_repair_payload_summary(item, depth + 1, max_depth=max_depth)
                     if child:
                         items.append(child)
                 else:
@@ -3329,6 +3364,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"action": name, **result}
     if name in {"space.recovery", "space.recovery.snapshot", "space.safe_mode", "space.safe_mode.snapshot"}:
         return {"ok": True, "action": name, "recovery": recovery_snapshot()}
+    if name in {"space.recovery.repair_space", "space.recovery.repair", "space.safe_mode.repair_space"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = queue_space_repair_event(
+            space_id,
+            data.get("payload") if "payload" in data else {},
+            prompt=data.get("prompt") or "",
+            session_id=data.get("session_id") or "",
+        )
+        return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.space_repair_events", "space.recovery.repair_events", "space.safe_mode.repair_events"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "events": list_space_repair_events(space_id, data.get("limit", 20)),
+        }
     if name in {"space.recovery.disable", "space.recovery.disable_space", "space.safe_mode.disable"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
@@ -5474,25 +5526,33 @@ def list_widget_events(space_id: str, widget_id: str | None = None, limit: int =
     return summaries[:max_events]
 
 
+def _space_repair_created_at(value: Any) -> float:
+    try:
+        created_at = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return created_at if math.isfinite(created_at) else 0
+
+
 def _space_repair_event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
         return None
     if _context_value(event.get("event_type"), 120) != "space.repair.queued":
         return None
-    details = _payload_summary(event.get("details") or {})
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
     if not isinstance(details, dict):
         return None
-    payload_summary = details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}
+    payload_summary = _space_repair_payload_summary(details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {})
     return {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "space_id": sid,
-        "event_name": _context_value(details.get("event_name"), 120),
-        "status": _context_value(details.get("status") or "queued", 80),
-        "prompt_preview": _payload_text_summary(details.get("prompt_preview"), 1000),
+        "event_name": _space_repair_text_summary(details.get("event_name"), 120),
+        "status": _space_repair_text_summary(details.get("status") or "queued", 80),
+        "prompt_preview": _space_repair_text_summary(details.get("prompt_preview"), 1000),
         "payload_summary": payload_summary,
-        "created_at": event.get("created_at"),
+        "created_at": _space_repair_created_at(event.get("created_at")),
     }
 
 
@@ -5517,7 +5577,7 @@ def list_space_repair_events(space_id: str, limit: int = 20) -> list[dict[str, A
         summary = _space_repair_event_summary(event, sid)
         if summary is not None:
             summaries.append(summary)
-    summaries.sort(key=lambda event: float(event.get("created_at") or 0), reverse=True)
+    summaries.sort(key=lambda event: _space_repair_created_at(event.get("created_at")), reverse=True)
     return summaries[:max_events]
 
 
@@ -5581,7 +5641,7 @@ def queue_space_repair_event(
     read_space(sid)
     name = "agent.repair"
     prompt_preview = _space_repair_text_summary(prompt, 1000)
-    payload_summary = _space_repair_payload_summary(payload or {})
+    payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_id = _record_event(
         sid,
         "space.repair.queued",

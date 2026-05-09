@@ -4811,6 +4811,152 @@ def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, t
     assert "api_key" not in serialized
 
 
+def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-space-repair", "name": "Tool Space Repair"})
+    unsafe_long_key = ("x" * 90) + "onClick"
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "source": "generated code raw prompt should stay quarantined",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    queued = spaces.run_space_tool(
+        "space.recovery.repair_space",
+        {
+            "space_id": created["space_id"],
+            "prompt": "Repair renderer/source/data with SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "action": "repair-space",
+                "scope": "space-shell",
+                "safe_note": "layout repair",
+                "status_note": "contains API key placeholder",
+                "action_hint": "onclick=alert(1)",
+                "onClick": "alert(1)",
+                unsafe_long_key: "long unsafe key value",
+                "onclick": "alert(1)",
+                "<img src=x onerror=alert(1)>": "safe-looking value",
+                "htmlPreview": "<div>raw widget body</div>",
+                "apiKeyValue": "placeholder",
+                "nested": {"authorizationHeader": "placeholder", "safe_child": "kept"},
+                "source": "recovery-panel",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "body": "<div>generated body</div>",
+            },
+            "session_id": "SECRET_SESSION_VALUE_DO_NOT_LEAK",
+        },
+    )
+    listed = spaces.run_space_tool(
+        "space.recovery.space_repair_events",
+        {"space_id": created["space_id"], "limit": 5},
+    )
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps({"queued": queued, "listed": listed, "recovery": recovery}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.recovery.repair_space"
+    assert queued["queued"] is True
+    assert queued["event_name"] == "agent.repair"
+    assert queued["prompt_preview"] == "[REDACTED]"
+    assert queued["payload_summary"] == {
+        "action": "repair-space",
+        "scope": "space-shell",
+        "safe_note": "layout repair",
+    }
+    assert listed["ok"] is True
+    assert listed["action"] == "space.recovery.space_repair_events"
+    assert listed["space_id"] == created["space_id"]
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert recovery["summary"]["queued_event_count"] == 1
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_session_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "generated body" not in serialized
+    assert "raw widget body" not in serialized
+    assert "htmlpreview" not in serialized
+    assert "onerror" not in serialized
+    assert "onclick" not in serialized
+    assert "long unsafe key value" not in serialized
+    assert "<img" not in serialized
+    assert "api key placeholder" not in serialized
+    assert "apikeyvalue" not in serialized
+    assert "authorizationheader" not in serialized
+    assert "raw prompt" not in serialized
+
+
+def test_space_repair_event_listing_resanitizes_persisted_payload_summary(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "crafted-repair-event", "name": "Crafted Repair Event"})
+    unsafe_long_key = ("x" * 90) + "onClick"
+    queued = spaces.queue_space_repair_event(
+        created["space_id"],
+        {"action": "repair-space", "scope": "space-shell"},
+        prompt="safe repair request",
+    )
+    event_path = spaces.events_dir() / f"{queued['event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["details"]["event_name"] = "<script>agent.repair</script>"
+    event["details"]["status"] = "<img src=x onerror=alert(1)>"
+    event["created_at"] = "nan"
+    event["details"]["prompt_preview"] = "raw prompt should be redacted"
+    event["details"]["payload_summary"] = {
+        "action": "repair-space",
+        "scope": "space-shell",
+        "safe_note": "layout repair",
+        "status_note": "contains API key placeholder",
+        "action_hint": "onclick=alert(1)",
+        "onClick": "alert(1)",
+        unsafe_long_key: "long unsafe key value",
+        "onclick": "alert(1)",
+        "<img src=x onerror=alert(1)>": "safe-looking value",
+        "htmlPreview": "<div>raw widget body</div>",
+        "apiKeyValue": "placeholder",
+        "nested": {"authorizationHeader": "placeholder", "safe_child": "kept"},
+        "renderer": "<script>bad()</script>",
+    }
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    listed = spaces.run_space_tool(
+        "space.recovery.space_repair_events",
+        {"space_id": created["space_id"], "limit": 5},
+    )
+    serialized = json.dumps(listed).lower()
+
+    assert listed["ok"] is True
+    assert listed["events"][0]["event_name"] == "[REDACTED]"
+    assert listed["events"][0]["status"] == "[REDACTED]"
+    assert listed["events"][0]["created_at"] == 0
+    assert listed["events"][0]["prompt_preview"] == "[REDACTED]"
+    assert listed["events"][0]["payload_summary"] == {
+        "action": "repair-space",
+        "scope": "space-shell",
+        "safe_note": "layout repair",
+        "nested": {"safe_child": "kept"},
+    }
+    assert "raw prompt" not in serialized
+    assert "raw widget body" not in serialized
+    assert "htmlpreview" not in serialized
+    assert "onerror" not in serialized
+    assert "onclick" not in serialized
+    assert "long unsafe key value" not in serialized
+    assert "<img" not in serialized
+    assert "api key placeholder" not in serialized
+    assert "apikeyvalue" not in serialized
+    assert "authorizationheader" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+
+
 def test_recovery_snapshot_includes_safe_module_quarantine_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
