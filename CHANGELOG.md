@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **#1937 — Race: endless-scroll prefetch vs Start-jump's `_ensureAllMessagesLoaded` could duplicate messages.** With both `session_jump_buttons` AND `session_endless_scroll` enabled, an in-flight `_loadOlderMessages` prefetch racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could prepend a duplicate page if the prefetch resolved last. The naive fix suggested in the report (gate ensure-all on the existing `_loadingOlder` flag) does not actually close the race — by the time the prefetch reaches its post-await body, it has already cleared the entry-gate that reads `_loadingOlder`, so a same-flag check inside the resolved callback is a no-op. The actual fix is a generation-token + mutex pair: (1) `_loadOlderMessages` snapshots a new module-scoped `_messagesGeneration` counter BEFORE its `await api(...)` and re-checks it after, aborting the prepend if any wholesale-replace bumped the token mid-flight; (2) `_ensureAllMessagesLoaded` claims the `_loadingOlder` mutex around its body (so a NEW prefetch cannot start mid-replace, and concurrent ensure-all calls from rapid double-clicks on Start serialize cleanly), bumps the generation token before mutating `S.messages`, yields until any in-flight prefetch's `finally`-block releases the mutex, and resets `_oldestIdx` so a subsequent prefetch cannot send a stale `msg_before` index. Also adds the same-session and `_loadingSessionId` guards that the original ensure-all body was missing post-await. (`static/sessions.js`, `tests/test_issue1937_endless_scroll_jumpstart_race.py` — 12 new regression tests)
+
 ## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 
 ### Added (3 PRs, all from @ai-ag2026)
@@ -31,7 +37,7 @@
 
 ### Follow-up items filed (non-blocking)
 
-- **Race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded`** — with both opt-ins ON, an in-flight prefetch (started by 1.5x-viewport trigger) racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could produce duplicate messages if the prefetch resolves last. Narrow window, but the fix is to gate `_ensureAllMessagesLoaded` on the existing `_loadingOlder` flag.
+- **Race between endless-scroll prefetch and Start-jump's `_ensureAllMessagesLoaded`** — with both opt-ins ON, an in-flight prefetch (started by 1.5x-viewport trigger) racing with `jumpToSessionStart` → `_ensureAllMessagesLoaded` could produce duplicate messages if the prefetch resolves last. Narrow window, but the fix is to gate `_ensureAllMessagesLoaded` on the existing `_loadingOlder` flag. **Resolved in Unreleased — see #1937 entry above; final fix uses generation-token + mutex rather than the originally-suggested flag gate, which would not have closed the race.**
 - **#1928 locale parity** — `session_jump_*` and `settings_*_session_jump_buttons` keys are English literals in ja/ru/es/de/zh/zh-Hant/pt/ko. Default-OFF + English fallback works, but breaks the locale-parity standard set by #1929 and #1891 in the same release.
 
 
