@@ -1,5 +1,50 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.34] — 2026-05-09 — Release J (kanban edit/dispatch + zh-Hant kanban i18n)
+
+### Added
+
+- **PR #1981** by @nesquena-hermes — Three connected Kanban-UX fixes that were load-bearing for the actual work-queue lifecycle:
+
+  - **Edit task** — new `.kanban-edit-btn` on the detail-view header opens the existing `#kanbanTaskModal` pre-filled from a fresh server fetch. Submit branches POST→PATCH for edit mode. Backend already supported `_patch_task` at `api/kanban_bridge.py:338-424`; pure UI gap closed.
+  - **Run dispatcher** — new `runKanbanDispatcher()` posts `/api/kanban/dispatch` WITHOUT `dry_run=1` after a `showConfirmDialog`. Two UI surfaces: lightning-bolt button in the board header and primary "Run dispatcher" button in the sidebar bulk bar. `_kanbanFormatDispatchResult()` produces concrete summaries (`Dispatched: 1 spawned, 2 skipped (no assignee)`) instead of a generic OK toast. Existing `nudgeKanbanDispatcher()` preserved as the dry-run preview path.
+  - **Assignee dropdown** — `<input list>` → `<select>` populated from `/api/profiles` (Hermes profile names) + historical board assignees (under `<optgroup label="Other">`) + explicit "— Unassigned (won't auto-run) —" option. Helper text under the field explains the dispatcher claim contract. Soft warning if the user picks Ready + Unassigned (proceeds on second submit).
+
+  Side effect: default new-task status changed from `triage` → `ready` so the dispatcher actually picks up newly created tasks without an extra status change. Improvements to `.kanban-modal-error` styling benefit the existing create-board modal too.
+
+  **Stage-328 hotfix per nesquena's pre-merge review:** caught a destructive edit-mode regression — opening Edit on a `running`/`blocked`/`done`/`archived` task and saving without changing the status would silently demote the task to `triage` (because `_kanbanEditableStatusFor()` maps non-editable originals to `'triage'` for the dropdown display, and `submitKanbanTaskModal()` was unconditionally including the dropdown value in the PATCH payload). Fixed in commit `8e0eedd1` by introducing a module-scoped `_kanbanTaskModalInitialDisplayedStatus` tracker that records the dropdown value at modal open; the submit path only includes `status` when the user has actually changed it from the displayed value. Added `tests/test_kanban_ui_static.py::test_kanban_edit_mode_preserves_status_when_dropdown_untouched` pinning the invariant.
+
+  19 new i18n keys × 8 locales = 152 entries (zh-Hant added in stage augmentation, see below). 4 new regression tests.
+
+  Closes #1982.
+
+### Fixed
+
+- **PR #1979** by @Michaelyklam — Backfilled the previously-empty zh-Hant kanban locale block in `static/i18n.js`. The Traditional Chinese locale never had Kanban keys at all, so Traditional Chinese users saw English fallbacks for every Kanban label since the panel shipped. Now zh-Hant has 68 kanban keys at parity with the other 7 supported locales (en/ja/ru/es/de/zh/pt/ko). Closes #1972.
+
+  **Stage augmentation (`3fbecc48`):** when #1981 added 17 NEW kanban keys for the edit/run/assignee work, those went into the 8 existing kanban-supporting locales but missed zh-Hant again (since #1981 was authored before #1979 landed). Stage-328 added a maintainer commit backfilling the 17 new keys into zh-Hant with Traditional Chinese translations adapted from the Simplified Chinese (zh) versions. Result: every locale now has the same 85 kanban keys — zero gap.
+
+### Tests
+
+5043 → **5049 collected, 5049 passing, 0 regressions** (+6 net new from #1981's 4 + nesquena's status-preservation regression + the augmentation parity guard). Full suite ~145 s on Python 3.11 (HERMES_HOME isolated). One known-flake (`test_parallel_session_switch.py::TestGitInfoParallel::test_parallel_faster_than_serial` — timing benchmark that re-passes 3/3 in isolation, see existing flake history).
+
+### Pre-release verification
+
+- Full pytest under `HERMES_HOME` isolation: **5049 passed, 8 skipped, 1 xfailed, 2 xpassed** in 145.20 s; one timing-flake re-passes in isolation.
+- JS syntax check (`node -c`) clean on `static/i18n.js` + `static/panels.js` (the 2 modified static files).
+- Conflict-marker scan: clean.
+- Silent-revert check: per-file additions match between contributor branches and stage HEAD.
+- Independent reviews: nesquena APPROVED on #1981 with end-to-end audit; #1979 qualifies for self-review per project policy (i18n.js only, CI green on 3.11/3.12/3.13).
+- Opus advisor: SHIP-WITH-FIXES (all required code-correctness items pass; the "fixes" were CHANGELOG entries to add — applied here).
+
+### Follow-up items filed (non-blocking)
+
+Three nice-to-have polish items called out by Opus that don't block this release:
+
+- **`_kanbanIsDispatching` flag** to disable the Run/Preview buttons during in-flight POST (current double-click path is benign — atomic `claim_task` server-side prevents destructive double-spawn — but produces a "0 spawned" second toast).
+- **Profile-cache invalidation hook** for `_kanbanProfileNamesCache` so profile create/delete from elsewhere in the WebUI propagates without a reload. Current behavior is graceful degradation (orphaned-profile assignee → dispatcher logs `skipped_nonspawnable`, user can re-edit).
+- **Status-display hint** near the modal status `<select>` for non-editable original states (running/blocked/done/archived → mapped to `triage` in the dropdown). The tracker fix makes untouched-submit harmless, but a small visual hint like "(real status: running)" would reduce user confusion.
+
 ## [Unreleased]
 
 ### Fixed
