@@ -3930,6 +3930,90 @@ def test_space_tool_adapter_current_export_alias_uses_active_space_metadata_only
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_agent_export_redacts_package_display_metadata_and_preserves_safe_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "source",
+            "name": "Source Space",
+            "description": "source module raw prompt",
+            "agent_instructions": "generated code prompt",
+            "template": "data",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "redacted-widget-1",
+            "kind": "data-table",
+            "title": "Daily Data Dashboard",
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "api_key",
+            "kind": "data",
+            "title": "source panel",
+            "layout": {"x": 1, "y": 1, "w": 4, "h": 3},
+        },
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"], format="yaml")
+    unsafe_widget_yaml = exported["widgets"]["widgets/redacted-widget-1-2.yaml"]
+    safe_widget_yaml = exported["widgets"]["widgets/redacted-widget-1.yaml"]
+    serialized = json.dumps(exported).lower()
+
+    assert exported["space_id"] == "redacted-space"
+    assert sorted(exported["widgets"].keys()) == ["widgets/redacted-widget-1-2.yaml", "widgets/redacted-widget-1.yaml"]
+    assert "id: redacted-space" in exported["space_yaml"]
+    assert "name: Source Space" in exported["space_yaml"]
+    assert "title: Daily Data Dashboard" in safe_widget_yaml
+    assert "type: data-table" in safe_widget_yaml
+    assert "id: redacted-widget-1-2" in unsafe_widget_yaml
+    assert "title: '[REDACTED]'" in unsafe_widget_yaml or 'title: "[REDACTED]"' in unsafe_widget_yaml
+    assert "type: '[REDACTED]'" in unsafe_widget_yaml or 'type: "[REDACTED]"' in unsafe_widget_yaml
+    assert "source module" not in serialized
+    assert "raw prompt" not in serialized
+    assert "generated code" not in serialized
+    assert "api_key" not in serialized
+    assert "source panel" not in serialized
+    assert "type: data\n" not in serialized
+
+
+def test_space_agent_package_benign_labels_do_not_mask_unsafe_export_tokens(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    assert spaces._space_agent_public_label("Source Space", package_tokens=True) == "Source Space"
+    assert spaces._space_agent_public_label("Daily Data Dashboard", package_tokens=True) == "Daily Data Dashboard"
+    assert spaces._space_agent_public_label("data-table", package_tokens=True) == "data-table"
+    assert spaces._space_agent_public_label("Source Space api key", package_tokens=True) == "[REDACTED]"
+    assert spaces._space_agent_public_label("Daily Data Dashboard api_auth", package_tokens=True) == "[REDACTED]"
+    assert spaces._space_agent_public_label("data-table html", package_tokens=True) == "[REDACTED]"
+    assert spaces._space_agent_export_identifier("source-notes-source", "redacted-widget-1") == "redacted-widget-1"
+
+
+def test_space_agent_package_export_redacts_path_extension_and_camel_markers(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    unsafe_labels = [
+        "data-table.html",
+        "foo/data-table.html",
+        "source-notes.source",
+        "source/Source Space",
+        ".html",
+    ]
+    for label in unsafe_labels:
+        assert spaces._space_agent_public_label(label, package_tokens=True) == "[REDACTED]"
+    assert spaces._space_agent_public_label("../foo", package_tokens=True) == "[REDACTED]"
+    assert spaces._space_agent_export_identifier("sourceCode", "redacted-widget-1") == "redacted-widget-1"
+    assert spaces._space_agent_export_identifier("dataSource", "redacted-widget-1") == "redacted-widget-1"
+    assert spaces._space_agent_export_identifier("htmlPanel", "redacted-widget-1") == "redacted-widget-1"
+    assert spaces._space_agent_export_identifier("scriptWidget", "redacted-widget-1") == "redacted-widget-1"
+    assert spaces._space_agent_export_identifier("bearerToken", "redacted-widget-1") == "redacted-widget-1"
+    assert spaces._space_agent_export_identifier("generatedWidgetBody", "redacted-widget-1") == "redacted-widget-1"
+
+
 def test_space_tool_adapter_imports_and_exports_space_agent_packages_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

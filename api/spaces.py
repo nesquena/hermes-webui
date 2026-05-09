@@ -3899,19 +3899,95 @@ _SPACE_AGENT_UNSAFE_PACKAGE_TOKEN_RE = re.compile(
 _SPACE_AGENT_BENIGN_PACKAGE_LABELS = {
     "daily data dashboard",
     "data table",
+    "data tables",
     "secretary cookie recipes",
     "source notes",
     "source space",
     "tokenization dashboard",
 }
+_SPACE_AGENT_BENIGN_PACKAGE_CONTEXT_WORDS = {
+    "a",
+    "an",
+    "and",
+    "for",
+    "metadata",
+    "safe",
+    "safely",
+    "the",
+    "use",
+    "with",
+}
 
 
 def _space_agent_benign_package_label(value: str) -> bool:
-    label = _safe_zip_entry_name(value).rsplit("/", 1)[-1]
+    try:
+        safe_name = _safe_zip_entry_name(value)
+    except ValueError:
+        return False
+    parts = safe_name.split("/")
+    if len(parts) > 1 and any(_space_agent_package_compound_unsafe(part) for part in parts[:-1]):
+        return False
+    label = parts[-1]
     if "." in label:
-        label = label.rsplit(".", 1)[0]
+        stem, extension = label.rsplit(".", 1)
+        if _space_agent_package_compound_unsafe(extension):
+            return False
+        label = stem
     normalized = re.sub(r"[^a-zA-Z0-9]+", " ", label).strip().lower()
-    return normalized in _SPACE_AGENT_BENIGN_PACKAGE_LABELS
+    if normalized in _SPACE_AGENT_BENIGN_PACKAGE_LABELS:
+        return True
+    remaining = f" {normalized} "
+    for safe_label in sorted(_SPACE_AGENT_BENIGN_PACKAGE_LABELS, key=len, reverse=True):
+        remaining = re.sub(rf"(?<![a-zA-Z0-9]){re.escape(safe_label)}(?![a-zA-Z0-9])", " ", remaining)
+    remaining = re.sub(r"\s+", " ", remaining).strip()
+    if not remaining or _space_agent_package_compound_unsafe(remaining):
+        return not remaining
+    return all(word in _SPACE_AGENT_BENIGN_PACKAGE_CONTEXT_WORDS for word in remaining.split())
+
+
+def _space_agent_package_compound_unsafe(value: Any) -> bool:
+    text = str(value or "")
+    if ".." in text or "\\" in text:
+        return True
+    if _SPACE_AGENT_UNSAFE_PACKAGE_TOKEN_RE.search(text):
+        return True
+    split_text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    tokens = [token.lower() for token in re.split(r"[^A-Za-z0-9]+", split_text) if token]
+    unsafe_tokens = {
+        "authorization",
+        "bearer",
+        "credential",
+        "credentials",
+        "data",
+        "html",
+        "password",
+        "renderer",
+        "script",
+        "secret",
+        "source",
+        "token",
+    }
+    if any(token in unsafe_tokens for token in tokens):
+        return True
+    pairs = set(zip(tokens, tokens[1:]))
+    if {("api", "key"), ("api", "auth"), ("raw", "prompt")} & pairs:
+        return True
+    if any(first == "generated" and second in {"body", "code", "script", "source", "widget"} for first, second in pairs):
+        return True
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text).lower()
+    return any(
+        marker in compact
+        for marker in (
+            "apikey",
+            "apiauth",
+            "rawprompt",
+            "generatedbody",
+            "generatedcode",
+            "generatedscript",
+            "generatedsource",
+            "generatedwidget",
+        )
+    )
 
 
 def _space_agent_public_label(value: Any, limit: int = 300, *, package_tokens: bool = False) -> str:
@@ -3925,6 +4001,8 @@ def _space_agent_public_label(value: Any, limit: int = 300, *, package_tokens: b
     text = _public_display_text_summary(value, limit)
     if package_tokens and text and text != "[REDACTED]" and _space_agent_benign_package_label(text):
         return text
+    if package_tokens and text and text != "[REDACTED]" and _space_agent_package_compound_unsafe(text):
+        return "[REDACTED]"
     unsafe_re = _SPACE_AGENT_UNSAFE_PACKAGE_TOKEN_RE if package_tokens else _SPACE_AGENT_UNSAFE_DISPLAY_TOKEN_RE
     if text and text != "[REDACTED]" and unsafe_re.search(text):
         return "[REDACTED]"
@@ -4080,8 +4158,8 @@ def _space_agent_widget_export_doc(widget: dict[str, Any], *, export_id: str | N
     clean = _normalize_widget(widget)
     doc: dict[str, Any] = {
         "id": export_id or clean["id"],
-        "title": _space_agent_public_label(clean["title"]),
-        "type": _space_agent_public_label(clean["kind"]),
+        "title": _space_agent_public_label(clean["title"], package_tokens=True),
+        "type": _space_agent_public_label(clean["kind"], package_tokens=True),
         "layout": clean["layout"],
     }
     exportable_keys = {
@@ -4120,10 +4198,10 @@ def _space_agent_yaml_export(space: dict[str, Any]) -> tuple[str, dict[str, str]
     export_space_id = _space_agent_export_identifier(space.get("space_id"), "redacted-space")
     space_doc = {
         "id": export_space_id,
-        "name": _space_agent_public_label(space.get("name") or space.get("space_id")),
-        "description": _space_agent_public_label(space.get("description") or ""),
-        "instructions": _space_agent_public_label(space.get("agent_instructions") or ""),
-        "template": None if template is None else _space_agent_public_label(template),
+        "name": _space_agent_public_label(space.get("name") or space.get("space_id"), package_tokens=True),
+        "description": _space_agent_public_label(space.get("description") or "", package_tokens=True),
+        "instructions": _space_agent_public_label(space.get("agent_instructions") or "", package_tokens=True),
+        "template": None if template is None else _space_agent_public_label(template, package_tokens=True),
     }
     widgets: dict[str, str] = {}
     raw_widgets = [widget for widget in (space.get("widgets") or []) if isinstance(widget, dict)]
@@ -4133,12 +4211,14 @@ def _space_agent_yaml_export(space: dict[str, Any]) -> tuple[str, dict[str, str]
         if _space_agent_export_identifier(normalized["id"], "") == normalized["id"]:
             reserved_safe_widget_ids.add(normalized["id"])
     used_widget_export_ids: set[str] = set()
-    for index, widget in enumerate(raw_widgets, 1):
+    unsafe_widget_index = 0
+    for widget in raw_widgets:
         normalized = _normalize_widget(widget)
         if normalized["id"] in reserved_safe_widget_ids:
             export_widget_id = _space_agent_unique_export_identifier(normalized["id"], normalized["id"], used_widget_export_ids)
         else:
-            fallback = f"redacted-widget-{index}"
+            unsafe_widget_index += 1
+            fallback = f"redacted-widget-{unsafe_widget_index}"
             export_widget_id = fallback
             counter = 2
             while export_widget_id in used_widget_export_ids or export_widget_id in reserved_safe_widget_ids:
