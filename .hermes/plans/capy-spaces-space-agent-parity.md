@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: recovery/admin whole-Space repair aliases now expose metadata-only admin repair queue/list actions through `run_space_tool(...)` (`space.admin.repair_space`, `space.admin.repair`, `space.admin.recovery.repair_space`, `space.admin.recovery.repair`, `space.admin.repair_events`, `space.admin.recovery.repair_events`, and `space.admin.recovery.space_repair_events`), accept `spaceId`, reuse the existing recovery repair sanitizer path, and avoid `active_space_id` on admin responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: sandbox/postMessage blocked runtime messages now render a generic metadata-only blocked status instead of reflecting arbitrary blocked `type` / `message_type` values, so hostile blocked message types cannot leak generated/source/API-auth markers or secret-looking sentinels into the Spaces DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): avoid reflecting blocked sandbox message types`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving a hostile blocked runtime type such as `capy:raw:SECRET_VALUE_DO_NOT_LEAK` queues no widget event, opens no dialog, makes no data/asset backend call, and does not expose the hostile type, renderer/source/API-auth markers, script tags, or secret-looking sentinels in the DOM.
+  - Hardened the sandbox/postMessage bridge to render a generic `Sandbox message blocked` status for all blocked runtime messages while preserving the existing fail-closed blocked-event contract.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`3 passed`); Spaces UI behavior + demo parity suites passed (`132 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, and `/tmp` real-static sandbox/postMessage harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_daac5b3e79ba400ba8d2881ae49d5d0d.png`.
 
 - `feat(spaces): expose admin repair tool aliases`
   - Added RED/GREEN backend coverage proving `space.admin.recovery.repair_space` queues a metadata-only `agent.repair` event, `space.admin.recovery.repair_events` lists the same safe repair event, and compact `space.admin.repair_space` routes through the same repair queue without returning `active_space_id`.

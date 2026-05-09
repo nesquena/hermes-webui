@@ -936,10 +936,10 @@
     const hasMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'message_type');
     const type = runtimeMessageTypeValue(data && data.type);
     const messageType = runtimeMessageTypeValue(data && data.message_type);
-    if ((hasType && !type) || (hasMessageType && !messageType)) return { type: '', blocked: true, reflectedType: '' };
-    if (type && messageType && type.toLowerCase() !== messageType.toLowerCase()) return { type: '', blocked: true, reflectedType: '' };
+    if ((hasType && !type) || (hasMessageType && !messageType)) return { type: '', blocked: true };
+    if (type && messageType && type.toLowerCase() !== messageType.toLowerCase()) return { type: '', blocked: true };
     const selected = type || messageType;
-    return { type: selected, blocked: isBlockedRuntimeMessageType(selected), reflectedType: selected };
+    return { type: selected, blocked: isBlockedRuntimeMessageType(selected) };
   }
 
   function runtimeMessageType(data){
@@ -976,8 +976,7 @@
     if (data.space_id && runtimeTokenPart(data.space_id, '') !== session.spaceId) return;
     if (data.widget_id && runtimeTokenPart(data.widget_id, '') !== session.widgetId) return;
     if (typeInfo.blocked) {
-      const title = typeInfo.reflectedType ? 'Sandbox message blocked: '+typeInfo.reflectedType : 'Sandbox message blocked';
-      prependRuntimeStatus(renderSandboxRuntimeStatus(title, 'Blocked by Capy runtime contract; no widget event was queued.'));
+      prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked', 'Blocked by Capy runtime contract; no widget event was queued.'));
       return;
     }
     const type = typeInfo.type;
