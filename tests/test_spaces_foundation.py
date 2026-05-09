@@ -4940,6 +4940,130 @@ def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, t
     assert "api_key" not in serialized
 
 
+def test_space_tool_adapter_current_recovery_quarantine_aliases_use_active_space_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-quarantine", "name": "Current Quarantine"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "source": "generated source should stay quarantined",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled_widget = spaces.run_space_tool(
+        "space.current.recovery.disable_widget",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "bad-widget",
+            "reason": "renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        },
+    )
+    enabled_widget = spaces.run_space_tool(
+        "space.current.enable_widget",
+        {"activeSpaceId": created["space_id"], "widgetId": "bad-widget"},
+    )
+    disabled_space = spaces.run_space_tool(
+        "space.current.recovery.disable_space",
+        {
+            "activeSpaceId": created["space_id"],
+            "reason": "source renderer bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    enabled_space = spaces.run_space_tool(
+        "space.current.enable_space",
+        {"activeSpaceId": created["space_id"]},
+    )
+    serialized = json.dumps(
+        {
+            "disabled_widget": disabled_widget,
+            "enabled_widget": enabled_widget,
+            "disabled_space": disabled_space,
+            "enabled_space": enabled_space,
+        }
+    ).lower()
+
+    assert disabled_widget["ok"] is True
+    assert disabled_widget["action"] == "space.current.recovery.disable_widget"
+    assert disabled_widget["active_space_id"] == created["space_id"]
+    assert disabled_widget["disabled"] is True
+    assert disabled_widget["widget_id"] == "bad-widget"
+    assert enabled_widget["ok"] is True
+    assert enabled_widget["action"] == "space.current.enable_widget"
+    assert enabled_widget["active_space_id"] == created["space_id"]
+    assert enabled_widget["disabled"] is False
+    assert disabled_space["ok"] is True
+    assert disabled_space["action"] == "space.current.recovery.disable_space"
+    assert disabled_space["active_space_id"] == created["space_id"]
+    assert disabled_space["disabled"] is True
+    assert enabled_space["ok"] is True
+    assert enabled_space["action"] == "space.current.enable_space"
+    assert enabled_space["active_space_id"] == created["space_id"]
+    assert enabled_space["disabled"] is False
+    assert "generated source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "bearer" not in serialized
+
+
+def test_space_tool_adapter_admin_recovery_aliases_return_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "admin-quarantine", "name": "Admin Quarantine"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled_widget = spaces.run_space_tool(
+        "space.admin.disable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "bad-widget",
+            "reason": "renderer crashed with bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    snapshot = spaces.run_space_tool("space.admin.recovery.snapshot", {"renderer": "<script>ignore()</script>"})
+    enabled_widget = spaces.run_space_tool(
+        "space.admin.enable_widget",
+        {"spaceId": created["space_id"], "widgetId": "bad-widget"},
+    )
+    serialized = json.dumps({"disabled_widget": disabled_widget, "snapshot": snapshot, "enabled_widget": enabled_widget}).lower()
+
+    assert disabled_widget["ok"] is True
+    assert disabled_widget["action"] == "space.admin.disable_widget"
+    assert disabled_widget["disabled"] is True
+    assert disabled_widget["space_id"] == created["space_id"]
+    assert disabled_widget["widget_id"] == "bad-widget"
+    assert snapshot["ok"] is True
+    assert snapshot["action"] == "space.admin.recovery.snapshot"
+    assert snapshot["recovery"]["safe_admin"]["metadata_only"] is True
+    assert snapshot["recovery"]["generated_widgets_rendered"] is False
+    assert snapshot["recovery"]["spaces"][0]["widgets"][0]["disabled"] is True
+    assert enabled_widget["ok"] is True
+    assert enabled_widget["action"] == "space.admin.enable_widget"
+    assert enabled_widget["disabled"] is False
+    assert "stealsecret" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+
+
 def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-space-repair", "name": "Tool Space Repair"})

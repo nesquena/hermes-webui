@@ -3415,7 +3415,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if is_current:
             result["active_space_id"] = space_id
         return {"action": name, **result}
-    if name in {"space.recovery", "space.recovery.snapshot", "space.safe_mode", "space.safe_mode.snapshot"}:
+    if name in {
+        "space.recovery",
+        "space.recovery.snapshot",
+        "space.safe_mode",
+        "space.safe_mode.snapshot",
+        "space.admin",
+        "space.admin.snapshot",
+        "space.admin.recovery",
+        "space.admin.recovery.snapshot",
+    }:
         return {"ok": True, "action": name, "recovery": recovery_snapshot()}
     if name in {
         "space.recovery.repair_space",
@@ -3453,24 +3462,100 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if is_current:
             response["active_space_id"] = space_id
         return response
-    if name in {"space.recovery.disable", "space.recovery.disable_space", "space.safe_mode.disable"}:
+    if name in {
+        "space.recovery.disable",
+        "space.recovery.disable_space",
+        "space.safe_mode.disable",
+        "space.current.disable",
+        "space.current.disable_space",
+        "space.current.disablespace",
+        "space.current.recovery.disable",
+        "space.current.recovery.disable_space",
+        "space.current.recovery.disablespace",
+        "space.admin.disable",
+        "space.admin.disable_space",
+        "space.admin.disablespace",
+        "space.admin.recovery.disable",
+        "space.admin.recovery.disable_space",
+        "space.admin.recovery.disablespace",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
         result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
-        return {"ok": True, "action": name, **result}
-    if name in {"space.recovery.enable", "space.recovery.enable_space", "space.safe_mode.enable"}:
+        response = {"ok": True, "action": name, **result}
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
+    if name in {
+        "space.recovery.enable",
+        "space.recovery.enable_space",
+        "space.safe_mode.enable",
+        "space.current.enable",
+        "space.current.enable_space",
+        "space.current.enablespace",
+        "space.current.recovery.enable",
+        "space.current.recovery.enable_space",
+        "space.current.recovery.enablespace",
+        "space.admin.enable",
+        "space.admin.enable_space",
+        "space.admin.enablespace",
+        "space.admin.recovery.enable",
+        "space.admin.recovery.enable_space",
+        "space.admin.recovery.enablespace",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
         result = enable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
-        return {"ok": True, "action": name, **result}
-    if name in {"space.recovery.disable_widget", "space.widget.recovery.disable", "widget.recovery.disable"}:
+        response = {"ok": True, "action": name, **result}
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
+    if name in {
+        "space.recovery.disable_widget",
+        "space.recovery.disablewidget",
+        "space.widget.recovery.disable",
+        "widget.recovery.disable",
+        "space.current.disable_widget",
+        "space.current.disablewidget",
+        "space.current.recovery.disable_widget",
+        "space.current.recovery.disablewidget",
+        "space.admin.disable_widget",
+        "space.admin.disablewidget",
+        "space.admin.widget.disable",
+        "space.admin.recovery.disable_widget",
+        "space.admin.recovery.disablewidget",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = disable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
-        return {"ok": True, "action": name, **result}
-    if name in {"space.recovery.enable_widget", "space.widget.recovery.enable", "widget.recovery.enable"}:
+        response = {"ok": True, "action": name, **result}
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
+    if name in {
+        "space.recovery.enable_widget",
+        "space.recovery.enablewidget",
+        "space.widget.recovery.enable",
+        "widget.recovery.enable",
+        "space.current.enable_widget",
+        "space.current.enablewidget",
+        "space.current.recovery.enable_widget",
+        "space.current.recovery.enablewidget",
+        "space.admin.enable_widget",
+        "space.admin.enablewidget",
+        "space.admin.widget.enable",
+        "space.admin.recovery.enable_widget",
+        "space.admin.recovery.enablewidget",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
-        return {"ok": True, "action": name, **result}
+        response = {"ok": True, "action": name, **result}
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
     if name in {"space.recovery.disable_module", "space.module.recovery.disable", "module.recovery.disable"}:
         module_id = validate_module_id(data.get("module_id") or data.get("id"))
         result = disable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
