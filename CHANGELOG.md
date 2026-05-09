@@ -1,5 +1,15 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Session jump/endless-scroll race** — the opt-in Start jump now serializes
+  its full-history load with in-flight endless-scroll prefetches before either
+  path rewrites `S.messages`, preventing duplicate transcript pages when both
+  features are enabled and the user jumps while a prefetch is still resolving.
+  (`static/sessions.js`, `tests/test_session_endless_scroll.py`) Closes #1937.
+
 ## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 
 ### Added (3 PRs, all from @ai-ag2026)

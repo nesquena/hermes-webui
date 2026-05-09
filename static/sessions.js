@@ -991,14 +991,29 @@ async function _ensureMessagesLoaded(sid) {
   }
 }
 
-// Load older messages when the user scrolls to the top of the conversation.
-// Prepends them to S.messages and re-renders, preserving scroll position.
+// Shared lock for history fetches that rewrite S.messages. Endless-scroll
+// prefetch and full-history loads must not race each other.
 let _loadingOlder = false;
 // _oldestIdx tracks the index (in the server's full message array) of the
 // oldest message currently loaded in S.messages. Starts at 0 when all
 // messages are loaded, or > 0 when truncated by msg_limit.
 let _oldestIdx = 0;
 
+function _waitForHistoryLoadIdle(sid) {
+  return new Promise(resolve => {
+    const tick = () => {
+      if (!_loadingOlder || !S.session || S.session.session_id !== sid) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+// Load older messages when the user scrolls to the top of the conversation.
+// Prepends them to S.messages and re-renders, preserving scroll position.
 async function _loadOlderMessages() {
   if (_loadingOlder || !_messagesTruncated) return;
   const sid = S.session ? S.session.session_id : null;
@@ -1066,14 +1081,24 @@ async function _loadOlderMessages() {
 async function _ensureAllMessagesLoaded() {
   if (!_messagesTruncated || !S.session) return;
   const sid = S.session.session_id;
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
-  // Guard: api() may have redirected (401) and returned undefined.
-  if (!data || !data.session) return;
-  const msgs = (data.session.messages || []).filter(m => m && m.role);
-  S.messages = msgs;
-  _messagesTruncated = false;
-  if(S.session && S.session.session_id === sid){
-    S.session.message_count = Number(data.session.message_count || msgs.length);
+  if (_loadingOlder) await _waitForHistoryLoadIdle(sid);
+  if (!_messagesTruncated || !S.session || S.session.session_id !== sid) return;
+  _loadingOlder = true;
+  try {
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+    // Guard: api() may have redirected (401) and returned undefined.
+    if (!data || !data.session) return;
+    if (!S.session || S.session.session_id !== sid) return;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const msgs = (data.session.messages || []).filter(m => m && m.role);
+    S.messages = msgs;
+    _messagesTruncated = false;
+    _oldestIdx = data.session._messages_offset || 0;
+    if(S.session && S.session.session_id === sid){
+      S.session.message_count = Number(data.session.message_count || msgs.length);
+    }
+  } finally {
+    _loadingOlder = false;
   }
 }
 
