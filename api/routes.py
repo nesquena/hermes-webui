@@ -779,6 +779,8 @@ from api.config import (
     set_reasoning_effort,
     create_stream_channel,
     get_webui_session_save_mode,
+    STREAM_GOAL_RELATED,
+    PENDING_GOAL_CONTINUATION,
 )
 from api.helpers import (
     require,
@@ -6451,6 +6453,7 @@ def _start_chat_stream_for_session(
     model_provider=None,
     normalized_model: bool = False,
     diag=None,
+    goal_related: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -6473,6 +6476,14 @@ def _start_chat_stream_for_session(
         # Stale stream id from a previous run; clear and continue.
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
+
+    # #1932: check if this session has a pending goal continuation flag.
+    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
+    # so the next chat/start for this session is automatically treated as goal-related.
+    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+        goal_related = True
+        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -6493,11 +6504,14 @@ def _start_chat_stream_for_session(
     stream = create_stream_channel()
     with STREAMS_LOCK:
         STREAMS[stream_id] = stream
+    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+    if goal_related:
+        STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs={"model_provider": model_provider},
+        kwargs={"model_provider": model_provider, "goal_related": goal_related},
         daemon=True,
     )
     thr.start()
@@ -6621,6 +6635,7 @@ def _handle_goal_command(handler, body):
             model=model,
             model_provider=model_provider,
             normalized_model=normalized_model,
+            goal_related=True,
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)

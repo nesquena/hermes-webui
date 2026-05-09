@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
@@ -1900,6 +1901,7 @@ def _run_agent_streaming(
     *,
     ephemeral=False,
     model_provider=None,
+    goal_related=False,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -3274,10 +3276,12 @@ def _run_agent_streaming(
             # GoalManager judge before terminal done/stream_end events. The
             # frontend surfaces the status line and queues continuation_prompt as
             # a normal next user message so /queue and user input keep priority.
+            # #1932: only evaluate when the turn was goal-related (set via
+            # STREAM_GOAL_RELATED or goal_related parameter).
             try:
                 from api.goals import evaluate_goal_after_turn, has_active_goal
 
-                if not has_active_goal(session_id, profile_home=_profile_home):
+                if not goal_related or not has_active_goal(session_id, profile_home=_profile_home):
                     _goal_decision = {}
                 else:
                     _last_goal_response = ''
@@ -3319,6 +3323,9 @@ def _run_agent_streaming(
                 if decision.get('should_continue'):
                     continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
                     if continuation_prompt:
+                        # #1932: mark this session as pending a goal continuation
+                        # so the next /chat/start creates a goal-related stream.
+                        PENDING_GOAL_CONTINUATION.add(session_id)
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,
@@ -3542,6 +3549,8 @@ def _run_agent_streaming(
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
+            STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
+            PENDING_GOAL_CONTINUATION.discard(session_id)  # Clean up pending continuation (#1932)
 
 # ============================================================
 # SECTION: HTTP Request Handler
