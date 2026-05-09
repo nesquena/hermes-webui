@@ -313,8 +313,13 @@
       const kanbanSummary = demo === 'demo_kanban_board' && kanbanSuiteBoard
         ? '<div class="capy-spaces-muted"><strong>Kanban board checklist</strong></div><div class="capy-spaces-muted">Kanban flow: columns '+Number(kanbanSuiteBoard.column_count || kanbanSuiteColumns.length || 0)+' · cards '+kanbanCardCount+' · drag/drop '+(kanbanDragPlanned ? 'planned' : 'not ready')+' · card edits '+(kanbanEditsMetadataOnly ? 'metadata-only' : 'not ready')+'</div>'
         : '';
+      const researchRollback = item && item.research_rollback_check && typeof item.research_rollback_check === 'object' && !Array.isArray(item.research_rollback_check) ? item.research_rollback_check : null;
+      const researchQueued = Number(item && item.queued_event_count || 0) > 0;
+      const researchSummary = demo === 'demo_research_harness_pdf_export' && researchRollback
+        ? '<div class="capy-spaces-muted"><strong>Research harness checklist</strong></div><div class="capy-spaces-muted">Research flow: PDF export '+(researchQueued ? 'queued' : 'not queued')+' · rollback '+(researchRollback.verified === true ? 'verified' : 'not verified')+' · '+(researchRollback.replayed_after_restore === true ? 'replayed after restore' : 'not replayed after restore')+' · restored widgets '+Number(researchRollback.restored_widget_count || 0)+'</div>'
+        : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + notesSummary + kanbanSummary + '</div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div>' + flowSummary + weatherObservationSummary + notesSummary + kanbanSummary + researchSummary + '</div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +

@@ -261,8 +261,8 @@ global.fetch = async function(path, opts = {}) {
     return response({
       ok: true,
       action: 'space.demo.run_all',
-      total: 4,
-      passed: 4,
+      total: 5,
+      passed: 5,
       failed: 0,
       mode: 'metadata-only-smoke',
       results: [
@@ -273,6 +273,7 @@ global.fetch = async function(path, opts = {}) {
           { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'amber', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
           { id: 'kanban-done', kind: 'kanban-column', title: 'Done', metadata: { kanban: { status: 'board-ready', column: 'Done', color: 'green', cards: [{ id: 'card-install', title: 'Install board template', status: 'done' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
         ], renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
+        { ok: true, demo: 'demo_research_harness_pdf_export', template: 'research', mode: 'metadata-only-smoke', space: { space_id: 'demo-research-harness-pdf-export', name: 'Research Harness', source: 'UNTRUSTED_SOURCE' }, widget_count: 5, persisted_widget_count: 5, rollback_point: true, persistence_checked: true, queued_event_count: 1, research_rollback_check: { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true },
       ],
       renderer: '<script>bad()</script>',
@@ -3461,10 +3462,11 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
         for call in out["calls"]
     )
     assert "Demo parity smoke suite passed" in out["rootHtml"]
-    assert "4 / 4 metadata-only smokes passed" in out["rootHtml"]
+    assert "5 / 5 metadata-only smokes passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]
     assert "demo_notes_app" in out["rootHtml"]
     assert "demo_kanban_board" in out["rootHtml"]
+    assert "demo_research_harness_pdf_export" in out["rootHtml"]
     assert "demo_time_travel_restore" in out["rootHtml"]
     assert "persistence: checked" in out["rootHtml"]
     assert "Weather demo checklist" in out["rootHtml"]
@@ -3474,6 +3476,8 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Notes flow: folders 2 · active Demo Project · editor saved · markdown saved · attachments agent-mediated" in out["rootHtml"]
     assert "Kanban board checklist" in out["rootHtml"]
     assert "Kanban flow: columns 3 · cards 3 · drag/drop planned · card edits metadata-only" in out["rootHtml"]
+    assert "Research harness checklist" in out["rootHtml"]
+    assert "Research flow: PDF export queued · rollback verified · replayed after restore · restored widgets 5" in out["rootHtml"]
     assert "Observation summary" not in out["rootHtml"]
     assert "What is the weather in Prague?" not in out["rootHtml"]
     assert "Prague is partly cloudy at 18 °C" not in out["rootHtml"]
