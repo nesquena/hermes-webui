@@ -2378,7 +2378,7 @@ function _renderLlmWikiStatus(d) {
       <div class="wiki-status-head">
         <div>
           <div class="insights-card-title">LLM Wiki</div>
-          <div class="wiki-status-sub">Knowledge-base observability</div>
+          <div class="wiki-status-sub">External Memory-base observability</div>
         </div>
         <span class="wiki-status-badge ${badgeClass}">${esc(badgeText)}</span>
       </div>
@@ -2862,12 +2862,14 @@ async function deleteCurrentSkill() {
 
 // ── Memory (main view) ──
 let _memoryData = null;
-let _currentMemorySection = null; // 'memory' | 'user'
+let _externalMemoryData = {providers:[], activeProvider:'', candidate:{candidates:[], total:0}, approved:{candidates:[], total:0}, search:{q:'', results:[]}};
+let _currentMemorySection = null; // 'memory' | 'user' | 'external_memory'
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
+  { key: 'external_memory', labelKey: 'External Memory', emptyKey: 'No external memory providers', iconKey: 'book-open' },
 ];
 
 function _memorySectionMeta(key) {
@@ -2901,7 +2903,11 @@ function _renderMemoryDetail(section) {
   const body = $('memoryDetailBody');
   const empty = $('memoryDetailEmpty');
   if (!title || !body) return;
-  title.textContent = t(meta.labelKey);
+  title.textContent = section === 'external_memory' ? 'External Memory' : t(meta.labelKey);
+  if (section === 'external_memory') {
+    _renderExternalMemoryDetail();
+    return;
+  }
   const content = _memorySectionContent(section);
   const mtime = _memorySectionMtime(section);
   const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
@@ -2947,6 +2953,7 @@ function openMemorySection(section, el) {
   document.querySelectorAll('#memoryPanel .side-menu-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
   _renderMemoryDetail(section);
+  if (section === 'external_memory') loadExternalMemoryReview(true);
 }
 
 function editCurrentMemory() {
@@ -4185,6 +4192,178 @@ async function deleteProfile(name) {
   } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
+// ── External Memory review inside Memory panel ──
+function _activeExternalMemoryProvider() {
+  return _externalMemoryData.activeProvider || ((_externalMemoryData.providers[0] || {}).id) || '';
+}
+
+function _externalMemoryProviderOptionsHtml() {
+  const active = _activeExternalMemoryProvider();
+  return (_externalMemoryData.providers || []).map(p => `<option value="${esc(p.id)}" ${p.id===active?'selected':''}>${esc(p.label || p.id)}</option>`).join('');
+}
+
+function _externalMemoryMetaHtml(item) {
+  const meta = item && item.metadata ? item.metadata : {};
+  const bits = [];
+  if (item.state) bits.push(item.state);
+  if (meta.type) bits.push(meta.type);
+  if (meta.confidence != null) bits.push('confidence ' + meta.confidence);
+  if (item.source) bits.push(item.source);
+  if (meta.qdrant_point_id) bits.push('qdrant ' + meta.qdrant_point_id);
+  return bits.map(esc).join(' · ');
+}
+
+function _externalMemoryCardHtml(item) {
+  const meta = item && item.metadata ? item.metadata : {};
+  const isCandidate = item.state === 'candidate';
+  const rationale = meta.rationale ? `<div class="memory-detail-mtime">${esc(meta.rationale)}</div>` : '';
+  const actions = isCandidate ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn secondary" onclick="editExternalMemoryCandidate('${esc(item.id)}')">Edit</button>
+      <button class="btn" onclick="approveExternalMemoryCandidate('${esc(item.id)}')">Approve</button>
+      <button class="btn secondary" onclick="rejectExternalMemoryCandidate('${esc(item.id)}')">Reject</button>
+      <button class="btn secondary" onclick="deleteExternalMemoryCandidate('${esc(item.id)}')">Delete</button>
+    </div>` : `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn secondary" onclick="deleteExternalMemoryCandidate('${esc(item.id)}')">Delete</button></div>`;
+  return `
+    <div class="memory-content" style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;background:rgba(255,255,255,.03)">
+      <div style="font-size:13px;line-height:1.45">${esc(item.text || '')}</div>
+      <div class="memory-detail-mtime">${esc(_externalMemoryMetaHtml(item))}</div>
+      ${rationale}
+      ${actions}
+    </div>`;
+}
+
+function _renderExternalMemoryDetail() {
+  const body = $('memoryDetailBody');
+  const empty = $('memoryDetailEmpty');
+  if (!body) return;
+  _memoryMode = 'read';
+  _setMemoryHeaderButtons('empty');
+  const candidates = (_externalMemoryData.candidate && _externalMemoryData.candidate.candidates) || [];
+  const approved = (_externalMemoryData.approved && _externalMemoryData.approved.candidates) || [];
+  const candidateTotal = (_externalMemoryData.candidate && Number.isFinite(_externalMemoryData.candidate.total)) ? _externalMemoryData.candidate.total : candidates.length;
+  const approvedTotal = (_externalMemoryData.approved && Number.isFinite(_externalMemoryData.approved.total)) ? _externalMemoryData.approved.total : approved.length;
+  const searchResults = (_externalMemoryData.search && _externalMemoryData.search.results) || [];
+  const hasProviders = !!((_externalMemoryData.providers || []).length);
+  const noProvidersHtml = `
+    <div class="memory-empty" style="margin-bottom:12px">
+      No external memory providers configured yet. Register one in <code>external_memory_providers.json</code> in the active Hermes home.
+    </div>`;
+  body.innerHTML = `
+    <div class="main-view-content" id="externalMemoryReviewPanel">
+      <div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;background:rgba(255,255,255,.025)">
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px">Semantic format</div>
+        <div class="memory-detail-mtime">Use one standalone sentence: <code>&lt;Scope/Subject&gt; &lt;durable relation&gt; &lt;object/behavior&gt; &lt;condition/scope if needed&gt; &lt;purpose/rationale if useful&gt;.</code></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+        <select id="externalMemoryProviderSelect" onchange="switchExternalMemoryProvider(this.value)" style="background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+          ${_externalMemoryProviderOptionsHtml() || '<option value="">No providers configured</option>'}
+        </select>
+        <input id="externalMemorySearchInput" ${hasProviders?'':'disabled'} placeholder="Search External Memory..." value="${esc((_externalMemoryData.search&&_externalMemoryData.search.q)||'')}" onkeydown="if(event.key==='Enter')searchExternalMemoryReview()" style="flex:1;min-width:220px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+        <button class="btn secondary" onclick="loadExternalMemoryReview(true)">Refresh</button>
+        <button class="btn secondary" ${hasProviders?'':'disabled'} onclick="searchExternalMemoryReview()">Search</button>
+      </div>
+      ${hasProviders ? '' : noProvidersHtml}
+      <section style="margin-bottom:18px">
+        <h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">Candidates (${candidateTotal})</h3>
+        <div class="memory-detail-mtime" style="margin-bottom:8px">Showing ${candidates.length} of ${candidateTotal} pending candidates.</div>
+        <div id="externalMemoryCandidateList" style="max-height:55vh;overflow-y:auto;padding-right:4px;border-radius:10px">
+          ${candidates.length ? candidates.map(_externalMemoryCardHtml).join('') : '<div class="memory-empty">No pending candidates.</div>'}
+        </div>
+      </section>
+      <section style="margin-bottom:18px">
+        <h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">Approved (${approvedTotal})</h3>
+        <div class="memory-detail-mtime" style="margin-bottom:8px">Showing ${approved.length} of ${approvedTotal} approved rows.</div>
+        <div id="externalMemoryApprovedList" style="max-height:45vh;overflow-y:auto;padding-right:4px;border-radius:10px">
+          ${approved.length ? approved.map(_externalMemoryCardHtml).join('') : '<div class="memory-empty">No approved external memory.</div>'}
+        </div>
+      </section>
+      <section>
+        <h3 style="font-size:13px;margin:0 0 8px;color:var(--muted)">Search results (${searchResults.length})</h3>
+        ${searchResults.length ? searchResults.map(_externalMemoryCardHtml).join('') : '<div class="memory-empty">Search results appear here.</div>'}
+      </section>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+}
+
+async function loadExternalMemoryReview(force) {
+  try {
+    const providers = await api('/api/external-memory/providers');
+    _externalMemoryData.providers = providers.providers || [];
+    if (!_externalMemoryData.activeProvider) _externalMemoryData.activeProvider = providers.active || ((_externalMemoryData.providers[0]||{}).id) || '';
+    const provider = _activeExternalMemoryProvider();
+    if (!provider) {
+      _externalMemoryData.candidate = {candidates:[]};
+      _externalMemoryData.approved = {candidates:[]};
+      _externalMemoryData.search = _externalMemoryData.search || {q:'', results:[]};
+      _renderExternalMemoryDetail();
+      return;
+    }
+    const qs = 'provider=' + encodeURIComponent(provider);
+    const [candidate, approved] = await Promise.all([
+      api('/api/external-memory/candidates?' + qs + '&state=candidate&limit=500'),
+      api('/api/external-memory/candidates?' + qs + '&state=approved&limit=500'),
+    ]);
+    _externalMemoryData.candidate = candidate;
+    _externalMemoryData.approved = approved;
+    _renderExternalMemoryDetail();
+  } catch (e) {
+    const body = $('memoryDetailBody');
+    if (body) body.innerHTML = `<div class="main-view-content"><div class="detail-form-error">${esc(t('error_prefix'))}${esc(e.message)}</div></div>`;
+  }
+}
+
+async function switchExternalMemoryProvider(provider) {
+  _externalMemoryData.activeProvider = provider || '';
+  _externalMemoryData.search = {q:'', results:[]};
+  await loadExternalMemoryReview(true);
+}
+
+async function searchExternalMemoryReview() {
+  const q = (($('externalMemorySearchInput') || {}).value || '').trim();
+  if (!q) return;
+  const provider = _activeExternalMemoryProvider();
+  const data = await api('/api/external-memory/search?provider=' + encodeURIComponent(provider) + '&q=' + encodeURIComponent(q) + '&limit=20');
+  _externalMemoryData.search = {q, results: data.results || []};
+  _renderExternalMemoryDetail();
+}
+
+async function editExternalMemoryCandidate(id) {
+  const all = [...((_externalMemoryData.candidate||{}).candidates||[]), ...((_externalMemoryData.approved||{}).candidates||[])];
+  const item = all.find(x => x.id === id);
+  const next = prompt('Edit semantic statement before approval:', item ? item.text : '');
+  if (next == null) return;
+  const provider = _activeExternalMemoryProvider();
+  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/edit`, {method:'POST', body:JSON.stringify({provider,text:next})});
+  showToast('External Memory candidate updated');
+  await loadExternalMemoryReview(true);
+}
+
+async function approveExternalMemoryCandidate(id) {
+  const provider = _activeExternalMemoryProvider();
+  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/approve`, {method:'POST', body:JSON.stringify({provider})});
+  showToast('External Memory approved and indexed');
+  await loadExternalMemoryReview(true);
+}
+
+async function rejectExternalMemoryCandidate(id) {
+  const reason = prompt('Reject reason:', 'not durable external memory') || '';
+  const provider = _activeExternalMemoryProvider();
+  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/reject`, {method:'POST', body:JSON.stringify({provider,reason})});
+  showToast('External Memory candidate rejected');
+  await loadExternalMemoryReview(true);
+}
+
+async function deleteExternalMemoryCandidate(id) {
+  const ok = await showConfirmDialog({title:'Delete external memory row?',message:'This removes the local External Memory row. Approved Qdrant payloads are not modified in this minimal UI.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if (!ok) return;
+  const provider = _activeExternalMemoryProvider();
+  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}?provider=${encodeURIComponent(provider)}`, {method:'DELETE'});
+  showToast('External Memory row deleted');
+  await loadExternalMemoryReview(true);
+}
+
 // ── Memory panel ──
 async function loadMemory(force) {
   const panel = $('memoryPanel');
@@ -4198,7 +4377,8 @@ async function loadMemory(force) {
         el.type = 'button';
         el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
-        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(t(s.labelKey))}</span>`;
+        const label = s.labelKey && s.labelKey.startsWith('external memory ') ? s.labelKey : t(s.labelKey);
+        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(label)}</span>`;
         el.onclick = () => openMemorySection(s.key, el);
         panel.appendChild(el);
       }

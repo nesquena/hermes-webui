@@ -2868,7 +2868,7 @@ def handle_get(handler, parsed) -> bool:
             handler.end_headers()
         return True
 
-    # ── Insights / knowledge status ──
+    # ── Insights / external_memory status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
 
@@ -3580,6 +3580,16 @@ def handle_get(handler, parsed) -> bool:
     # ── Memory API (GET) ──
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler)
+
+    # ── External Memory API (GET) ──
+    if parsed.path == "/api/external-memory/providers":
+        return _handle_external_memory_providers(handler)
+
+    if parsed.path == "/api/external-memory/candidates":
+        return _handle_external_memory_candidates(handler, parsed)
+
+    if parsed.path == "/api/external-memory/search":
+        return _handle_external_memory_search(handler, parsed)
 
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
@@ -4440,6 +4450,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/memory/write":
         return _handle_memory_write(handler, body)
 
+    # ── External Memory API (POST) ──
+    if parsed.path.startswith("/api/external-memory/candidates/"):
+        return _handle_external_memory_candidate_action(handler, parsed.path, body)
+
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
         name = body.get("name", "").strip()
@@ -4985,6 +4999,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/external-memory/candidates/"):
+        _handle_external_memory_candidate_delete(handler, parsed)
+        return True
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
@@ -6257,6 +6274,121 @@ def _handle_memory_read(handler):
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
         },
     )
+
+
+def _active_hermes_home_for_external_memory() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home
+
+        return Path(get_active_hermes_home())
+    except Exception:
+        return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+
+
+def _handle_external_memory_providers(handler):
+    from api import external_memory
+
+    try:
+        return j(handler, external_memory.list_providers(_active_hermes_home_for_external_memory()))
+    except Exception as e:
+        logger.exception("External memory providers list failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_external_memory_candidates(handler, parsed):
+    from api import external_memory
+
+    qs = parse_qs(parsed.query)
+    provider = (qs.get("provider", [""])[0] or "").strip() or None
+    state = (qs.get("state", [""])[0] or "").strip() or None
+    try:
+        limit = int(qs.get("limit", [100])[0] or 100)
+        offset = int(qs.get("offset", [0])[0] or 0)
+        return j(
+            handler,
+            external_memory.list_candidates(
+                _active_hermes_home_for_external_memory(),
+                provider=provider,
+                state=state,
+                limit=limit,
+                offset=offset,
+            ),
+        )
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except external_memory.ExternalMemoryNotFound as e:
+        return bad(handler, str(e), 404)
+    except Exception as e:
+        logger.exception("External memory candidates list failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_external_memory_search(handler, parsed):
+    from api import external_memory
+
+    qs = parse_qs(parsed.query)
+    provider = (qs.get("provider", [""])[0] or "").strip() or None
+    query = (qs.get("q", [""])[0] or qs.get("query", [""])[0] or "").strip()
+    if not query:
+        return bad(handler, "q is required", 400)
+    try:
+        limit = int(qs.get("limit", [5])[0] or 5)
+        return j(handler, external_memory.search_external_memory(_active_hermes_home_for_external_memory(), query, provider=provider, limit=limit))
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except external_memory.ExternalMemoryNotFound as e:
+        return bad(handler, str(e), 404)
+    except Exception as e:
+        logger.exception("External memory search failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_external_memory_candidate_action(handler, path: str, body: dict):
+    from api import external_memory
+
+    # Shape: /api/external-memory/candidates/{id}/{approve|reject}
+    parts = [p for p in path.split("/") if p]
+    if len(parts) != 5 or parts[:3] != ["api", "external-memory", "candidates"]:
+        return bad(handler, "invalid external memory candidate endpoint", 404)
+    provider = str(body.get("provider") or "").strip() or None
+    candidate_id = parts[3]
+    action = parts[4]
+    try:
+        home = _active_hermes_home_for_external_memory()
+        if action == "approve":
+            return j(handler, external_memory.approve_candidate(home, candidate_id, provider=provider))
+        if action == "reject":
+            return j(handler, external_memory.reject_candidate(home, candidate_id, provider=provider, reason=str(body.get("reason") or "")))
+        if action == "edit":
+            return j(handler, external_memory.update_candidate_text(home, candidate_id, str(body.get("text") or ""), provider=provider))
+        return bad(handler, "unknown external memory candidate action", 404)
+    except external_memory.ExternalMemoryNotConfigured as e:
+        return bad(handler, str(e), 400)
+    except external_memory.ExternalMemoryNotFound as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        logger.exception("External memory candidate action failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_external_memory_candidate_delete(handler, parsed):
+    from api import external_memory
+
+    # Shape: DELETE /api/external-memory/candidates/{id}?provider=...
+    parts = [p for p in parsed.path.split("/") if p]
+    if len(parts) != 4 or parts[:3] != ["api", "external-memory", "candidates"]:
+        return bad(handler, "invalid external memory candidate endpoint", 404)
+    qs = parse_qs(parsed.query)
+    provider = (qs.get("provider", [""])[0] or "").strip() or None
+    try:
+        return j(handler, external_memory.delete_candidate(_active_hermes_home_for_external_memory(), parts[3], provider=provider))
+    except external_memory.ExternalMemoryNotFound as e:
+        return bad(handler, str(e), 404)
+    except Exception as e:
+        logger.exception("External memory candidate delete failed")
+        return bad(handler, _sanitize_error(e), 500)
 
 
 # ── POST route helpers ────────────────────────────────────────────────────────
