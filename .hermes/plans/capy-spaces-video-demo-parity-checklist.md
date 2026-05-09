@@ -25,6 +25,7 @@ Recently landed:
 - Metadata shared data slots exist, show safe details, and can be deleted safely.
 - Queued widget events show safe event anchors and UTC timestamps in the UI.
 - Model/provider setup now appears in the metadata-only demo smoke catalog as `demo_provider_setup`, backed by the safe Model Provider Setup template, and the Spaces shell now exposes a direct `Run provider setup walkthrough` action that opens the safe widget manager/event inbox without exposing generated renderer/source/API-auth markers.
+- Active-space repair tool aliases now include metadata-only `space.current.repair_space`, `space.current.repair`, and `space.current.repair_events`, accepting `activeSpaceId` payloads while queueing/listing safe whole-Space repair events without exposing generated/source/API-auth markers.
 - Active-space revision and rollback tool aliases now support `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` for metadata-only time-travel operations against the active Capy Space.
 - The Research Harness demo smoke now drives the preferred vertical path through safe metadata only: live progress widgets, export-ready markdown artifact metadata, a queued `widget.export.pdf` event, and visible smoke-result status.
 - Widget details now surface the safe runtime sandbox/postMessage contract from the `space.widget.runtime_contract` tool route without displaying generated widget bodies or secret-like fields.

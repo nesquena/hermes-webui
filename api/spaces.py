@@ -3417,7 +3417,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"action": name, **result}
     if name in {"space.recovery", "space.recovery.snapshot", "space.safe_mode", "space.safe_mode.snapshot"}:
         return {"ok": True, "action": name, "recovery": recovery_snapshot()}
-    if name in {"space.recovery.repair_space", "space.recovery.repair", "space.safe_mode.repair_space"}:
+    if name in {
+        "space.recovery.repair_space",
+        "space.recovery.repair",
+        "space.safe_mode.repair_space",
+        "space.current.repair_space",
+        "space.current.repair",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
         result = queue_space_repair_event(
             space_id,
@@ -3425,15 +3432,27 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
         )
-        return {"ok": True, "action": name, **result}
-    if name in {"space.recovery.space_repair_events", "space.recovery.repair_events", "space.safe_mode.repair_events"}:
+        response = {"ok": True, "action": name, **result}
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
+    if name in {
+        "space.recovery.space_repair_events",
+        "space.recovery.repair_events",
+        "space.safe_mode.repair_events",
+        "space.current.repair_events",
+    }:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {
+        response = {
             "ok": True,
             "action": name,
             "space_id": space_id,
             "events": list_space_repair_events(space_id, data.get("limit", 20)),
         }
+        if is_current:
+            response["active_space_id"] = space_id
+        return response
     if name in {"space.recovery.disable", "space.recovery.disable_space", "space.safe_mode.disable"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))

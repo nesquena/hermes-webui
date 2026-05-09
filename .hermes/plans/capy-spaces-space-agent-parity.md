@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: safe recovery/tool rollback now exposes metadata-only full-Space and per-widget restore aliases through `run_space_tool(...)`, including Space Agent-style camelCase `spaceId`/`eventId`/`widgetId` payloads, while preserving the existing recovery/rollback safety model and omitting generated renderer/source/API-auth markers from tool responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: active-current Space repair now exposes metadata-only whole-Space repair and repair-event listing aliases through `run_space_tool(...)` (`space.current.repair_space`, `space.current.repair`, `space.current.repair_events`), using `activeSpaceId` while preserving the existing repair/recovery redaction model and omitting generated renderer/source/API-auth markers from tool responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose current repair tool aliases`
+  - Added RED/GREEN backend coverage proving `space.current.repair_space`, `space.current.repair`, and `space.current.repair_events` resolve `activeSpaceId`, queue/list metadata-only `agent.repair` events, return `active_space_id`, and omit generated renderer/source/API-auth markers plus secret-looking sentinels from serialized tool responses.
+  - Hardened `run_space_tool(...)` so current-space repair aliases share the existing safe recovery repair queue/list implementation instead of requiring callers to switch from active-space context to explicit recovery namespace calls.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); full Spaces foundation suite passed (`198 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static recovery harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_988e88bb8260491fab22af7d2f91e318.png`.
 
 - `feat(spaces): expose recovery rollback tool aliases`
   - Added RED/GREEN backend coverage proving `space.recovery.rollback` restores a safe full-Space revision from `spaceId`/`eventId` payloads without returning generated renderer/API-auth markers or secret-looking sentinels.
