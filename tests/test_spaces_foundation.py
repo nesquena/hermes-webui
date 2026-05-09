@@ -4270,7 +4270,7 @@ def test_revision_events_include_safe_restore_preview_without_leaking_sources(mo
         "widgets": [
             {
                 "id": "weather",
-                "kind": "html",
+                "kind": "[REDACTED]",
                 "title": "Weather original",
                 "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False},
             }
@@ -4284,6 +4284,45 @@ def test_revision_events_include_safe_restore_preview_without_leaking_sources(mo
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "source" not in serialized
+
+
+
+def test_revision_restore_preview_redacts_unsafe_widget_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Unsafe Widget Preview Labels"})
+    unsafe = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "api_key",
+            "kind": "source-panel",
+            "title": "SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"token": "TOKEN_VALUE"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "api_key", {"title": "Safe replacement"})
+
+    revisions = spaces.list_revision_events(created["space_id"])
+    unsafe_revision = next(rev for rev in revisions if rev["event_id"] == unsafe["revision_event_id"])
+    preview = unsafe_revision["restore_preview"]
+    serialized = json.dumps(preview).lower()
+
+    assert preview["widget_count"] == 1
+    assert preview["widgets"] == [
+        {
+            "id": "[REDACTED]",
+            "kind": "[REDACTED]",
+            "title": "[REDACTED]",
+            "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False},
+        }
+    ]
+    assert "api_key" not in serialized
+    assert "renderer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "token_value" not in serialized
+    assert "<script" not in serialized
 
 
 

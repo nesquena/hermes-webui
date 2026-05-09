@@ -1157,6 +1157,8 @@ def _restore_preview_summary(snapshot: dict[str, Any], sid: str) -> dict[str, An
             widget_summary = _widget_summary(widget)
         except ValueError:
             continue
+        widget_summary["id"] = _recovery_reason_summary(widget_summary.get("id"), 160)
+        widget_summary["kind"] = _recovery_reason_summary(widget_summary.get("kind"), 80)
         widget_summary["title"] = _recovery_reason_summary(widget_summary.get("title"), 160)
         widget_summaries.append(widget_summary)
     return {
