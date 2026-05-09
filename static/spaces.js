@@ -949,9 +949,10 @@
   function isBlockedRuntimeMessageType(type){
     const text = String(type || '').toLowerCase();
     return text === 'capy:raw:eval' ||
+      text === 'capy:asset:url' ||
       /^capy:raw:/.test(text) ||
       /^capy:eval(?::|$)/.test(text) ||
-      /^capy:data:(put|patch|post|set|delete|remove|merge|write|mutate)$/i.test(text);
+      /^capy:data:(get|put|patch|post|set|delete|remove|merge|write|mutate)$/i.test(text);
   }
 
   function runtimeMessageOriginAllowed(event){

@@ -1292,6 +1292,36 @@ async function dispatchWindowMessage(data, opts) {
     await dispatchWindowMessage({ type: 'capy:data:put', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', data: { cookie: 'session abc def' } });
     await dispatchWindowMessage({ type: 'capy:eval:run', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', source: 'eval(SECRET_VALUE_DO_NOT_LEAK)' });
     await dispatchWindowMessage({ type: 'capy:raw:source', runtime_token: match[1], space_id: 'lab', widget_id: 'weather', renderer: '<script>bad()</script>' });
+  } else if (scenario === 'runtimeBlockedReadMessages') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:data:get',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      key: 'shared_data.private_weather_token',
+      path: 'spaces/lab/widgets/weather/data.json',
+      payload: { authorization: 'Bearer SECRET_VALUE_DO_NOT_LEAK', cookie: 'session abc def' },
+      renderer: '<script>bad()</script>',
+      source: 'SECRET_SOURCE',
+    });
+    await dispatchWindowMessage({
+      message_type: 'capy:asset:url',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      asset_id: 'weather-map',
+      path: 'assets/private/weather-map.png?token=SECRET_VALUE_DO_NOT_LEAK',
+      url: 'https://asset.example/private/weather-map.png?authorization=Bearer SECRET_VALUE_DO_NOT_LEAK',
+      html: '<img src=x onerror=alert(1)>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   } else if (scenario === 'runtimeTokenRotates') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2353,6 +2383,38 @@ def test_spaces_ui_sandbox_postmessage_blocks_data_and_raw_eval_mutations_withou
     assert "SECRET" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_blocks_data_get_and_asset_url_reads_without_backend_or_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeBlockedReadMessages")
+    root_html = out["rootHtml"]
+    root_lower = root_html.lower()
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert "Sandbox message blocked: capy:data:get" in root_html
+    assert "Sandbox message blocked: capy:asset:url" in root_html
+    assert root_html.count("Blocked by Capy runtime contract; no widget event was queued.") >= 2
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert not any("api/spaces/asset" in call["path"].lower() for call in out["calls"])
+    assert not any("api/spaces/data" in call["path"].lower() for call in out["calls"])
+    assert "Sandbox prompt queued" not in root_html
+    assert "Widget event queued" not in root_html
+    assert "shared_data.private_weather_token" not in root_lower
+    assert "spaces/lab/widgets/weather/data.json" not in root_lower
+    assert "weather-map" not in root_lower
+    assert "asset.example" not in root_lower
+    assert "session abc" not in root_lower
+    assert "bearer" not in root_lower
+    assert "authorization" not in root_lower
+    assert "cookie" not in root_lower
+    assert "api_key" not in root_lower
+    assert "SECRET" not in root_html
+    assert "SECRET_SOURCE" not in root_html
+    assert "<script>" not in root_html
+    assert "onerror" not in root_lower
+    assert "renderer" not in root_lower
+    assert "source" not in root_lower
 
 
 def test_spaces_ui_sandbox_runtime_tokens_rotate_and_invalidate_old_token(driver_path):
