@@ -3434,6 +3434,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.safe_mode.repair_space",
         "space.current.repair_space",
         "space.current.repair",
+        "space.admin.repair_space",
+        "space.admin.repair",
+        "space.admin.recovery.repair_space",
+        "space.admin.recovery.repair",
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -3452,6 +3456,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.recovery.repair_events",
         "space.safe_mode.repair_events",
         "space.current.repair_events",
+        "space.admin.repair_events",
+        "space.admin.recovery.repair_events",
+        "space.admin.recovery.space_repair_events",
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))

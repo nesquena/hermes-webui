@@ -5339,6 +5339,75 @@ def test_space_tool_adapter_current_repair_aliases_use_active_space_metadata_onl
     assert "generated body" not in serialized
 
 
+def test_space_tool_adapter_admin_recovery_repair_aliases_queue_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "admin-space-repair", "name": "Admin Space Repair"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "source": "generated code raw prompt should stay quarantined",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    queued = spaces.run_space_tool(
+        "space.admin.recovery.repair_space",
+        {
+            "spaceId": created["space_id"],
+            "prompt": "Repair renderer/source/data with SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "action": "repair-space",
+                "scope": "space-shell",
+                "safe_note": "layout repair",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "body": "<div>generated body</div>",
+            },
+            "session_id": "SECRET_SESSION_VALUE_DO_NOT_LEAK",
+        },
+    )
+    listed = spaces.run_space_tool(
+        "space.admin.recovery.repair_events",
+        {"spaceId": created["space_id"], "limit": 5},
+    )
+    alias = spaces.run_space_tool(
+        "space.admin.repair_space",
+        {"spaceId": created["space_id"], "payload": {"action": "repair-space"}},
+    )
+    serialized = json.dumps({"queued": queued, "listed": listed, "alias": alias}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.admin.recovery.repair_space"
+    assert queued["queued"] is True
+    assert queued["event_name"] == "agent.repair"
+    assert queued["prompt_preview"] == "[REDACTED]"
+    assert queued["payload_summary"] == {
+        "action": "repair-space",
+        "scope": "space-shell",
+        "safe_note": "layout repair",
+    }
+    assert "active_space_id" not in queued
+    assert listed["ok"] is True
+    assert listed["action"] == "space.admin.recovery.repair_events"
+    assert listed["space_id"] == created["space_id"]
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert alias["ok"] is True
+    assert alias["action"] == "space.admin.repair_space"
+    assert alias["space_id"] == created["space_id"]
+    assert "active_space_id" not in alias
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_session_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "generated body" not in serialized
+
+
 def test_space_repair_event_listing_resanitizes_persisted_payload_summary(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "crafted-repair-event", "name": "Crafted Repair Event"})

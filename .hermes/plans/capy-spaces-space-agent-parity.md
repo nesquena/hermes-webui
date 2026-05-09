@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: recovery/admin module quarantine controls now expose metadata-only admin aliases through `run_space_tool(...)` (`space.admin.recovery.disable_module`, `space.admin.enable_module`, plus compact/admin-module variants), accept camelCase `moduleId`, and redact standalone auth markers in public disabled reasons. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: recovery/admin whole-Space repair aliases now expose metadata-only admin repair queue/list actions through `run_space_tool(...)` (`space.admin.repair_space`, `space.admin.repair`, `space.admin.recovery.repair_space`, `space.admin.recovery.repair`, `space.admin.repair_events`, `space.admin.recovery.repair_events`, and `space.admin.recovery.space_repair_events`), accept `spaceId`, reuse the existing recovery repair sanitizer path, and avoid `active_space_id` on admin responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose admin repair tool aliases`
+  - Added RED/GREEN backend coverage proving `space.admin.recovery.repair_space` queues a metadata-only `agent.repair` event, `space.admin.recovery.repair_events` lists the same safe repair event, and compact `space.admin.repair_space` routes through the same repair queue without returning `active_space_id`.
+  - Hardened `run_space_tool(...)` by extending the existing whole-Space repair queue/list allowlists for admin aliases instead of introducing a parallel sanitizer path; responses continue to omit generated renderer/source/API-auth markers, synthetic secret-looking sentinels, session sentinel values, script tags, and generated bodies.
+  - Validation at completion: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`); targeted recovery/admin repair regressions passed (`4 passed`); full Spaces foundation suite passed (`206 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static admin repair harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_3482bc63b43a4b5996d3e9bd5aa57125.png`.
 
 - `feat(spaces): expose admin module recovery aliases`
   - Added RED/GREEN backend coverage proving `space.admin.recovery.disable_module` and `space.admin.enable_module` accept camelCase `moduleId`, toggle quarantined module disabled state through the existing recovery helpers, and keep responses/snapshots metadata-only.
