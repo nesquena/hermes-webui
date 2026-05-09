@@ -229,7 +229,7 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
                     "id": "ignored-generated-widget",
                     "title": "Ignored Generated Widget",
                     "renderer": "<script>steal()</script>",
-                    "api_key": "SECRET...LEAK",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
                 }
             ],
         },
@@ -454,7 +454,7 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
             "title": "Unsafe Widget",
             "renderer": "<script>stored()</script>",
             "source": "SECRET_SOURCE",
-            "data": {"api_key": "SECRET...LEAK", "token": "SECRET_TOKEN"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "SECRET_TOKEN"},
         },
     )
 
@@ -551,7 +551,7 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
             "notes": {"body": "safe metadata note", "format": "markdown"},
             "renderer": "<script>stored()</script>",
             "html": "<img src=x onerror=steal()>",
-            "data": {"api_key": "SECRET...LEAK", "token": "SECRET_TOKEN"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "SECRET_TOKEN"},
         },
     )
 
@@ -763,7 +763,7 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
             "kind": "weather",
             "title": "Weather Card",
             "renderer": "<script>stored()</script>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -775,7 +775,7 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
             "description": "Safe description",
             "agentInstructions": "Prefer metadata-only widget patches.",
             "renderer": "<script>steal()</script>",
-            "api_key": "SECRET...LEAK",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
     )
     saved_layout = spaces.run_space_tool(
@@ -787,7 +787,7 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
                 "weather-card": {"x": 4, "y": 2, "renderer": "<script>steal()</script>"},
             },
             "widgetSizes": {
-                "weather-card": {"w": 8, "h": 5, "api_key": "SECRET...LEAK"},
+                "weather-card": {"w": 8, "h": 5, "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
             },
             "minimizedWidgetIds": ["weather-card"],
             "source": "SECRET_SOURCE",
@@ -2267,7 +2267,7 @@ def test_creator_commit_revises_existing_space_with_new_safe_manifest(monkeypatc
                     "title": "Latest Panel",
                     "kind": "status",
                     "renderer": "<script>badcall()</script>",
-                    "token": "SECRET...LEAK",
+                    "token": "SECRET_VALUE_DO_NOT_LEAK",
                 }
             ],
         },
@@ -2562,11 +2562,11 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
                 "type": "weather",
                 "title": "Weather <Prague>",
                 "layout": {"x": 3, "y": 2, "w": 7, "h": 4},
-                "weather": {"location": "Prague", "api_key": "SECRET...LEAK"},
+                "weather": {"location": "Prague", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
                 "renderer": "<script>steal()</script>",
                 "html": "<img src=x onerror=steal()>",
                 "script": "steal()",
-                "data": {"token": "SECRET...LEAK"},
+                "data": {"token": "SECRET_VALUE_DO_NOT_LEAK"},
                 "source": "SECRET_SOURCE",
             },
         },
@@ -2580,7 +2580,7 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
                     "id": "research-notes",
                     "kind": "markdown",
                     "name": "Research Notes",
-                    "notes": {"body": "Safe summary", "token": "SECRET...LEAK"},
+                    "notes": {"body": "Safe summary", "token": "SECRET_VALUE_DO_NOT_LEAK"},
                     "renderer": "<script>ignore()</script>",
                 }
             ],
@@ -3109,7 +3109,7 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
             "layout": {"x": 2, "y": 3, "w": 6, "h": 4},
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -3229,11 +3229,11 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
             "id": "weather-card",
             "kind": "weather",
             "title": "Weather <Card>",
-            "weather": {"location": "Prague", "api_key": "SECRET...LEAK"},
+            "weather": {"location": "Prague", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
             "runtime_contract": {"allowed_messages": ["capy:raw:eval"], "renderer": "<script>bad()</script>"},
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -3243,7 +3243,7 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     )
     current_seen = spaces.run_space_tool(
         "space.current.widget.see",
-        {"active_space_id": created["space_id"], "widget_id": "weather-card", "api_key": "SECRET...LEAK"},
+        {"active_space_id": created["space_id"], "widget_id": "weather-card", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
     )
     reloaded = spaces.run_space_tool(
         "space.current.widget.reload",
@@ -3326,7 +3326,7 @@ def test_widget_detail_exposes_typed_template_metadata_without_generated_or_secr
             "event_bridge": {
                 "event_name": "agent.prompt",
                 "status": "ready-for-user-confirmation",
-                "api_key": "SECRET...LEAK",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
             },
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
@@ -3464,7 +3464,7 @@ def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_
             "title": "Safe research findings",
             "notes": ["ready for widget cooperation"],
             "renderer": "<script>steal()</script>",
-            "api_key": "SECRET...LEAK",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
         {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
     )
@@ -3650,7 +3650,7 @@ def test_spaces_research_progress_route_updates_harness_widgets_metadata_only(mo
             ],
             "notes": ["Keep citation list bounded", "<script>bad()</script> api_key=SECRET_VALUE_DO_NOT_LEAK"],
             "renderer": "<script>steal()</script>",
-            "api_key": "SECRET...LEAK",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
     )
     serialized = json.dumps(body).lower()
@@ -3687,7 +3687,7 @@ def test_spaces_research_artifact_route_marks_summary_export_ready_metadata_only
             "title": "Exportable public brief",
             "markdown": "# Brief\nPublic facts only.\npassword=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
             "renderer": "<script>steal()</script>",
-            "api_key": "SECRET...LEAK",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
     )
     detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-summary")
@@ -3718,7 +3718,7 @@ def test_space_tool_adapter_deletes_shared_data_slots_metadata_only(monkeypatch,
     spaces.set_shared_data_slot(
         created["space_id"],
         "research-summary",
-        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET...LEAK"},
+        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
     )
 
@@ -3750,13 +3750,13 @@ def test_spaces_data_delete_route_removes_slot_without_echoing_raw_payload(monke
     spaces.set_shared_data_slot(
         created["space_id"],
         "research-summary",
-        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET...LEAK"},
+        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
     )
 
     handled, status, body = _route_post(
         "/api/spaces/data/delete",
-        {"space_id": created["space_id"], "key": "research-summary", "api_key": "SECRET...LEAK"},
+        {"space_id": created["space_id"], "key": "research-summary", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
     )
     serialized = json.dumps(body).lower()
 
@@ -4190,7 +4190,7 @@ def test_list_revision_events_returns_safe_metadata_newest_first(monkeypatch, tm
             "kind": "markdown",
             "title": "Weather",
             "renderer": "<script>doNotExpose()</script>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
     updated = spaces.update_space(created["space_id"], {"description": "Ready for rollback UI"})
@@ -4386,7 +4386,7 @@ def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monke
             "kind": "html",
             "title": "Weather original",
             "renderer": "<script>keptButNeverReturned()</script>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
     spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched"})
@@ -4739,7 +4739,7 @@ def test_recovery_disable_widget_marks_safe_metadata_without_deleting_or_leaking
             "title": "Bad Widget",
             "renderer": "<script>breakNormalRoute()</script>",
             "html": "<img src=x onerror=stealSecret()>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -4923,6 +4923,57 @@ def test_space_tool_adapter_recovery_rollback_aliases_restore_metadata_only(monk
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_admin_rollback_aliases_restore_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    aliases = (
+        "space.admin.rollback",
+        "space.admin.restore",
+        "space.admin.revision.restore",
+        "space.admin.recovery.rollback",
+        "space.admin.recovery.restore",
+    )
+
+    for index, alias in enumerate(aliases):
+        created = spaces.create_space({"space_id": f"tool-admin-rollback-{index}", "name": "Admin Rollback"})
+        original_event_id = created["revision_event_id"]
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": "bad-widget",
+                "kind": "html",
+                "title": "Broken Widget",
+                "renderer": "<script>breakAdminRecovery()</script>",
+                "source": "raw generated source should stay private",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+        )
+        spaces.disable_space_for_recovery(created["space_id"], reason="generated shell failed")
+
+        restored = spaces.run_space_tool(
+            alias,
+            {
+                "spaceId": created["space_id"],
+                "eventId": original_event_id,
+                "renderer": "<script>ignore()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+        serialized = json.dumps(restored).lower()
+
+        assert restored["ok"] is True
+        assert restored["action"] == alias
+        assert restored["space"]["space_id"] == created["space_id"]
+        assert restored["restored_event_id"] == original_event_id
+        assert restored["revision_event_id"]
+        assert restored["space"]["widgets"] == []
+        assert "active_space_id" not in restored
+        assert "renderer" not in serialized
+        assert "source" not in serialized
+        assert "api_key" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+
+
 def test_space_tool_adapter_widget_revision_restore_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-widget-restore", "name": "Tool Widget Restore"})
@@ -5013,6 +5064,69 @@ def test_space_tool_adapter_widget_restore_current_and_positional_aliases(monkey
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_admin_widget_restore_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    aliases = (
+        "space.admin.restore_widget",
+        "space.admin.restorewidget",
+        "space.admin.revision.restore_widget",
+        "space.admin.revision.restorewidget",
+        "space.admin.widget.rollback",
+        "space.admin.widget.restore_revision",
+        "space.admin.recovery.restore_widget",
+        "space.admin.recovery.restorewidget",
+    )
+
+    for index, alias in enumerate(aliases):
+        created = spaces.create_space({"space_id": f"tool-admin-widget-restore-{index}", "name": "Admin Widget Restore"})
+        original = spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": "panel",
+                "kind": "html",
+                "title": "Panel original",
+                "layout": {"x": 1, "y": 2, "w": 4, "h": 3},
+                "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+                "source": "raw generated source should never return",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+        )
+        spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes current"})
+        spaces.patch_widget(created["space_id"], "panel", {"title": "Panel broken"})
+        spaces.patch_widget(created["space_id"], "notes", {"title": "Notes still current"})
+
+        restored = spaces.run_space_tool(
+            alias,
+            {
+                "spaceId": created["space_id"],
+                "eventId": original["revision_event_id"],
+                "widgetId": "panel",
+                "renderer": "<script>ignore()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+        detail = spaces.read_space_detail(created["space_id"])
+        serialized = json.dumps({"restored": restored, "detail": detail}).lower()
+        widgets = {widget["id"]: widget for widget in detail["widgets"]}
+
+        assert restored["ok"] is True
+        assert restored["action"] == alias
+        assert restored["space_id"] == created["space_id"]
+        assert restored["widget"]["id"] == "panel"
+        assert restored["widget"]["title"] == "Panel original"
+        assert restored["widget"]["layout"] == {"x": 1, "y": 2, "w": 4, "h": 3, "minimized": False}
+        assert restored["restored_event_id"] == original["revision_event_id"]
+        assert restored["revision_event_id"]
+        assert widgets["panel"]["title"] == "Panel original"
+        assert widgets["notes"]["title"] == "Notes still current"
+        assert "active_space_id" not in restored
+        assert "renderer" not in serialized
+        assert "source" not in serialized
+        assert "api_key" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+
+
 def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-recovery", "name": "Tool Recovery"})
@@ -5024,7 +5138,7 @@ def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, t
             "title": "Bad Widget",
             "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
             "html": "<img src=x onerror=stealSecret()>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -7983,7 +8097,7 @@ def test_current_space_helper_and_route_return_metadata_only_active_space(monkey
             "kind": "html",
             "title": "Unsafe Card",
             "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
 
@@ -8292,7 +8406,7 @@ def test_widget_detail_includes_allowlisted_declarative_metadata_only(monkeypatc
             "status": "draft",
             "export": {"pdf": "planned", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
             "interaction": {"refresh": "agent-mediated", "dangerous_html": "<script>bad()</script>"},
-            "permissions": {"network": "agent-mediated", "token": "SECRET...LEAK", "credential": "SECRET...LEAK"},
+            "permissions": {"network": "agent-mediated", "token": "SECRET_VALUE_DO_NOT_LEAK", "credential": "SECRET_VALUE_DO_NOT_LEAK"},
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
             "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
@@ -8362,7 +8476,7 @@ def test_widget_patch_updates_fields_preserves_source_and_returns_metadata_only(
             "title": "Weather",
             "layout": {"x": 1, "y": 2, "w": 7, "h": 3},
             "renderer": "<script>keepButDoNotExpose()</script>",
-            "data": {"api_key": "SECRET...LEAK", "status": "draft"},
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "status": "draft"},
         },
     )
 
@@ -8387,7 +8501,7 @@ def test_widget_patch_updates_fields_preserves_source_and_returns_metadata_only(
     assert patched["revision_event_id"]
     stored = spaces.read_widget(created["space_id"], "weather")
     assert stored["renderer"] == "<script>keepButDoNotExpose()</script>"
-    assert stored["data"] == {"api_key": "SECRET...LEAK", "status": "draft"}
+    assert stored["data"] == {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "status": "draft"}
     assert stored["title"] == "Weather patched"
     assert stored["kind"] == "markdown"
     serialized = json.dumps(patched).lower()

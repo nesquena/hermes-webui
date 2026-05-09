@@ -3381,6 +3381,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.recovery.restore",
         "space.safe_mode.rollback",
         "space.safe_mode.restore",
+        "space.admin.rollback",
+        "space.admin.restore",
+        "space.admin.revision.restore",
+        "space.admin.recovery.rollback",
+        "space.admin.recovery.restore",
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_current_id(data) or data.get("space_id"))
@@ -3404,6 +3409,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.recovery.restorewidget",
         "space.safe_mode.restore_widget",
         "space.safe_mode.restorewidget",
+        "space.admin.restore_widget",
+        "space.admin.restorewidget",
+        "space.admin.revision.restore_widget",
+        "space.admin.revision.restorewidget",
+        "space.admin.widget.rollback",
+        "space.admin.widget.restore_revision",
+        "space.admin.recovery.restore_widget",
+        "space.admin.recovery.restorewidget",
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
