@@ -309,6 +309,17 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "send.goal_related=next.goal_related===true" in UI_JS
 
 
+def test_frontend_queued_goal_continuation_preserves_goal_related_marker():
+    stash_idx = MESSAGES_JS.find("const _goalNext=_pendingGoalContinuation;")
+    assert stash_idx != -1
+    queue_idx = MESSAGES_JS.find("queueSessionMessage(_goalNext.sid,{", stash_idx)
+    assert queue_idx != -1
+    badge_idx = MESSAGES_JS.find("updateQueueBadge(_goalNext.sid)", queue_idx)
+    assert badge_idx != -1
+    queued_payload = MESSAGES_JS[queue_idx:badge_idx]
+    assert "goal_related:true" in queued_payload
+
+
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
     assert "const goalState=String(d.state||'').trim();" in MESSAGES_JS
     assert "const goalEvaluatingMessage='Evaluating goal progress…';" in MESSAGES_JS

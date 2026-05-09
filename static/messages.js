@@ -1075,6 +1075,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           model:_goalNext.model,
           model_provider:_goalNext.model_provider,
           profile:_goalNext.profile,
+          goal_related:true,
         });
         if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
       }
