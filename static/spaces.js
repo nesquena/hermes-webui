@@ -2352,9 +2352,10 @@
       const disabled = !!(module && module.disabled);
       const disabledReason = safeCreatorSummaryText(module && module.disabled_reason || '');
       const revision = safeCreatorSummaryText(module && module.revision_event_id || '');
-      const moduleAction = disabled
-        ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryModule" data-module-id="'+escapeHtml(rawModuleId)+'">Enable module</button>'
-        : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryModule" data-module-id="'+escapeHtml(rawModuleId)+'">Disable module</button>';
+      const actionModuleId = safeCreatorIdText(rawModuleId);
+      const moduleAction = actionModuleId ? (disabled
+        ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'">Enable module</button>'
+        : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'">Disable module</button>') : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(name || moduleId || 'Untitled module')+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml([scope, moduleId].filter(Boolean).join(' · '))+'</div>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +

@@ -4872,6 +4872,51 @@ def test_recovery_snapshot_includes_safe_module_quarantine_without_leaking_sourc
     assert "raw prompt" not in serialized
 
 
+def test_recovery_module_public_summaries_redact_unsafe_module_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    unsafe_module_ids = ["api_key", "source-module", "script", "html", "data", "token", "bearer"]
+    returned = []
+    for module_id in unsafe_module_ids:
+        module = spaces.upsert_recovery_module(
+            {
+                "module_id": module_id,
+                "name": "Safe module descriptor",
+                "description": "Metadata-only module descriptor",
+                "scope": "space",
+                "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+                "renderer": "<script>bad()</script>",
+            }
+        )
+        disabled = spaces.disable_module_for_recovery(module_id, reason="renderer api_auth bearer placeholder")
+        stored = spaces.read_recovery_module(module_id)
+        assert stored["module_id"] == module_id
+        assert module["module_id"] == "[REDACTED]"
+        assert disabled["module_id"] == "[REDACTED]"
+        returned.extend([module, disabled])
+        for event_id in (module["revision_event_id"], disabled["revision_event_id"]):
+            event = json.loads((spaces.events_dir() / f"{event_id}.json").read_text(encoding="utf-8"))
+            event_serialized = json.dumps(event).lower()
+            assert event["details"]["module_id"] == "[REDACTED]"
+            assert event["snapshot"]["module_id"] == "[REDACTED]"
+            assert "renderer" not in event_serialized
+            assert "bearer" not in event_serialized
+            assert "secret_value_do_not_leak" not in event_serialized
+
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps({"returned": returned, "recovery": recovery}).lower()
+
+    assert recovery["summary"]["module_count"] == len(unsafe_module_ids)
+    assert recovery["summary"]["disabled_module_count"] == len(unsafe_module_ids)
+    assert {module["module_id"] for module in recovery["modules"]} == {"[REDACTED]"}
+    for module_id in ("api_key", "source-module", "token", "bearer"):
+        assert module_id.lower() not in serialized
+    assert "renderer" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(

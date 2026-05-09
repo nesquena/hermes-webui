@@ -955,6 +955,21 @@ def _public_display_text_summary(value: Any, limit: int = 300) -> str:
     return text
 
 
+def _public_module_id_summary(value: Any) -> str:
+    """Return a recovery/API safe module id label without exposing unsafe ids."""
+    try:
+        module_id = validate_module_id(value)
+    except ValueError:
+        return "[REDACTED]"
+    unsafe_id_pattern = re.compile(
+        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|authorization|bearer|cookie|credential|credentials|data|html|password|renderer|script|secret|source|token)([^a-z0-9]|$)",
+        re.IGNORECASE,
+    )
+    if unsafe_id_pattern.search(module_id) or _public_display_text_summary(module_id, 80) == "[REDACTED]":
+        return "[REDACTED]"
+    return module_id
+
+
 def _recovery_payload_summary(value: Any, depth: int = 0) -> Any:
     """Return a recovery/admin-safe metadata summary for event details."""
     if depth > 3:
@@ -5107,9 +5122,10 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
 
 def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
+    raw_module_id = module.get("module_id") or module.get("id")
     summary = {
-        "module_id": validate_module_id(module.get("module_id") or module.get("id")),
-        "name": _public_display_text_summary(module.get("name") or module.get("module_id") or module.get("id"), 160),
+        "module_id": _public_module_id_summary(raw_module_id),
+        "name": _public_display_text_summary(module.get("name") or raw_module_id, 160),
         "description": _public_display_text_summary(module.get("description", ""), 300),
         "scope": _public_display_text_summary(module.get("scope") or "global", 80),
         "disabled": bool(recovery.get("disabled")),
@@ -5121,10 +5137,14 @@ def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
 
 def _record_module_event(event_type: str, module: dict[str, Any], details: dict[str, Any] | None = None) -> str:
     """Record module recovery metadata without copying raw quarantined bodies."""
+    raw_module_id = module.get("module_id") or module.get("id")
+    safe_details = _recovery_payload_summary(details or {"module_id": _public_module_id_summary(raw_module_id)})
+    if not isinstance(safe_details, dict):
+        safe_details = {"module_id": _public_module_id_summary(raw_module_id)}
     return _record_event(
         _RECOVERY_MODULE_EVENT_SPACE_ID,
         event_type,
-        details or {"module_id": validate_module_id(module.get("module_id") or module.get("id"))},
+        safe_details,
         snapshot=_module_summary(module),
     )
 
