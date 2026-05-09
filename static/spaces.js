@@ -2344,19 +2344,23 @@
     const modules = Array.isArray(data && data.modules) ? data.modules.slice(0, 20) : [];
     if (!modules.length) return '';
     const rows = modules.map(function(module){
-      const moduleId = safeCreatorSummaryText(module && (module.module_id || module.id) || '');
+      const rawModuleId = module && (module.module_id || module.id) ? String(module.module_id || module.id) : '';
+      const moduleId = safeCreatorSummaryText(rawModuleId);
       const name = safeCreatorSummaryText(module && module.name || moduleId || 'Untitled module');
       const description = safeCreatorSummaryText(module && module.description || '');
       const scope = safeCreatorSummaryText(module && module.scope || 'global');
       const disabled = !!(module && module.disabled);
       const disabledReason = safeCreatorSummaryText(module && module.disabled_reason || '');
       const revision = safeCreatorSummaryText(module && module.revision_event_id || '');
+      const moduleAction = disabled
+        ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryModule" data-module-id="'+escapeHtml(rawModuleId)+'">Enable module</button>'
+        : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryModule" data-module-id="'+escapeHtml(rawModuleId)+'">Disable module</button>';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(name || moduleId || 'Untitled module')+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml([scope, moduleId].filter(Boolean).join(' · '))+'</div>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         (disabled ? '<div class="capy-spaces-muted">Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '')+'</div>' : '') +
         (revision ? '<div class="capy-spaces-muted">Revision: '+escapeHtml(revision.slice(0, 12))+'</div>' : '') +
-        '</div><div class="capy-spaces-actions"><span class="capy-spaces-muted">metadata-only</span></div></div>';
+        '</div><div class="capy-spaces-actions"><span class="capy-spaces-muted">metadata-only</span>'+moduleAction+'</div></div>';
     }).join('');
     return '<div class="capy-spaces-card"><h4>Quarantined modules</h4>' +
       '<div class="capy-spaces-muted">Generated module bodies stay quarantined for repair/rollback; this panel shows safe metadata only.</div>' +
@@ -2415,7 +2419,24 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
+      if (typeof showConfirmDialog !== 'function') return;
+      const moduleId = button.dataset.moduleId || '';
+      if (!moduleId) return;
+      if (action === 'disableRecoveryModule') {
+        const ok = await showConfirmDialog({title: 'Disable module?', message: 'Disable quarantined module "'+moduleId+'" from safe recovery? The raw body is preserved only for repair/rollback.', confirmLabel: 'Disable module', danger: true, focusCancel: true});
+        if (!ok) return;
+        await postSpacesJson('api/spaces/recovery/disable-module', {module_id: moduleId, reason: 'disabled from recovery panel'});
+        await loadCapySpacesRecovery();
+        return;
+      }
+      const ok = await showConfirmDialog({title: 'Enable module?', message: 'Re-enable quarantined module "'+moduleId+'" in safe recovery? Generated module bodies are still not rendered.', confirmLabel: 'Enable module', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/recovery/enable-module', {module_id: moduleId, reason: 'enabled from recovery panel'});
+      await loadCapySpacesRecovery();
+      return;
+    }
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
     if (action === 'repairRecoveryWidget') {

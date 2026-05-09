@@ -6343,6 +6343,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/recovery/enable-space"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/recovery/enable-widget"' in routes_src
+    assert '"/api/spaces/recovery/disable-module"' in routes_src
+    assert '"/api/spaces/recovery/enable-module"' in routes_src
     assert '"/api/spaces/import"' in routes_src
     assert '"/api/spaces/export"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
@@ -6668,6 +6670,57 @@ def test_recovery_disable_enable_space_routes_return_metadata_only(monkeypatch, 
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
+
+
+def test_recovery_disable_enable_module_routes_return_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "route-module",
+            "name": "Route Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "global",
+            "source": "export default function rawModule(){ return '<script>leak()</script>'; }",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/disable-module",
+        {"module_id": "route-module", "reason": "script crashed with bearer placeholder"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["disabled"] is True
+    assert body["module_id"] == "route-module"
+    assert body["disabled_reason"] == "[REDACTED]"
+    stored = spaces.read_recovery_module("route-module")
+    assert stored["recovery"]["disabled"] is True
+    assert stored["source"].startswith("export default function rawModule")
+    serialized = json.dumps(body).lower()
+    assert "rawmodule" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/enable-module",
+        {"module_id": "route-module"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["disabled"] is False
+    assert body["module_id"] == "route-module"
+    assert spaces.read_recovery_module("route-module")["recovery"]["disabled"] is False
+    recovery_serialized = json.dumps(spaces.recovery_snapshot()).lower()
+    assert "rawmodule" not in recovery_serialized
+    assert "<script" not in recovery_serialized
+    assert "source" not in recovery_serialized
+    assert "api_key" not in recovery_serialized
+    assert "secret_value_do_not_leak" not in recovery_serialized
 
 
 def test_current_space_helper_and_route_return_metadata_only_active_space(monkeypatch, tmp_path):

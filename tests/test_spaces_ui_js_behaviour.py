@@ -837,6 +837,12 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/recovery/enable-space') {
     return response({ disabled: false, space_id: 'disabled-space', revision_event_id: 'rev-enable-space', renderer: '<script>bad()</script>', api_key: 'SECRET' });
   }
+  if (path === 'api/spaces/recovery/disable-module') {
+    return response({ disabled: true, module_id: 'safe-module', revision_event_id: 'rev-disable-module', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
+  if (path === 'api/spaces/recovery/enable-module') {
+    return response({ disabled: false, module_id: 'unsafe-module', revision_event_id: 'rev-enable-module', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
@@ -1665,6 +1671,58 @@ async function dispatchWindowMessage(data, opts) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'enableRecoverySpace', spaceId: 'disabled-space' } };
+        }
+      }
+    });
+  } else if (scenario === 'disableRecoveryModule') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    beforeHtml = makeElement('capySpacesRecovery').innerHTML;
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'disableRecoveryModule', moduleId: 'safe-module' } };
+        }
+      }
+    });
+  } else if (scenario === 'disableRecoveryModuleNoDialog') {
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'disableRecoveryModule', moduleId: 'safe-module' } };
+        }
+      }
+    });
+  } else if (scenario === 'enableRecoveryModule') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'enableRecoveryModule', moduleId: 'unsafe-module' } };
+        }
+      }
+    });
+  } else if (scenario === 'enableRecoveryModuleCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'enableRecoveryModule', moduleId: 'unsafe-module' } };
         }
       }
     });
@@ -3394,6 +3452,53 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_module_controls_use_shared_confirm_and_refresh(driver_path):
+    out = _run_spaces_scenario(driver_path, "disableRecoveryModule")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/disable-module")
+
+    assert "Disable module" in out["beforeHtml"]
+    assert "Enable module" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert out["dialogs"][0]["confirmLabel"] == "Disable module"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"module_id": "safe-module", "reason": "disabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_disable_module_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "disableRecoveryModuleNoDialog")
+
+    assert not any(call["path"] == "api/spaces/recovery/disable-module" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_enable_module_uses_shared_confirm_and_refresh(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoveryModule")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-module")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert out["dialogs"][0]["confirmLabel"] == "Enable module"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"module_id": "unsafe-module", "reason": "enabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_enable_module_cancel_does_not_post(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoveryModuleCancelled")
+
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/recovery/enable-module" for call in out["calls"])
 
 
 def test_spaces_ui_recovery_disable_widget_uses_shared_confirm_and_refreshes(driver_path):
