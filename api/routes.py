@@ -6451,6 +6451,7 @@ def _start_chat_stream_for_session(
     model_provider=None,
     normalized_model: bool = False,
     diag=None,
+    goal_related: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -6497,7 +6498,7 @@ def _start_chat_stream_for_session(
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs={"model_provider": model_provider},
+        kwargs={"model_provider": model_provider, "goal_related": bool(goal_related)},
         daemon=True,
     )
     thr.start()
@@ -6621,6 +6622,7 @@ def _handle_goal_command(handler, body):
             model=model,
             model_provider=model_provider,
             normalized_model=normalized_model,
+            goal_related=True,
         )
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
@@ -6688,6 +6690,7 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
+        goal_related = body.get("goal_related") is True
         response = _start_chat_stream_for_session(
             s,
             msg=msg,
@@ -6697,6 +6700,7 @@ def _handle_chat_start(handler, body, diag=None):
             model_provider=model_provider,
             normalized_model=normalized_model,
             diag=diag,
+            goal_related=goal_related,
         )
         status = int(response.pop("_status", 200) or 200)
         diag.stage("response_write") if diag else None

@@ -1,5 +1,16 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Goal continuation turn gating** — only run the `/goal` progress judge and
+  budget counter after goal-owned turns (`/goal` kickoff or queued continuation
+  prompts), so unrelated user messages in a session with an active goal no
+  longer spend goal budget or trigger continuation toasts. (`api/goals.py`,
+  `api/routes.py`, `api/streaming.py`, `static/messages.js`, `static/ui.js`,
+  `tests/test_goal_command_webui.py`) Closes #1932.
+
 ## [v0.51.30] — 2026-05-08 — 3-PR contributor batch (Release G: offline recovery + PWA hardening + opt-in session jump buttons + opt-in endless-scroll)
 
 ### Added (3 PRs, all from @ai-ag2026)

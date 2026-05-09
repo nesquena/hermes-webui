@@ -2899,6 +2899,7 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
+        send.goal_related=next.goal_related===true;
         send();
       },120);
     }

@@ -12,6 +12,7 @@ COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def test_goal_command_payload_matches_gateway_controls(monkeypatch):
@@ -143,11 +144,49 @@ def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypa
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
 
-    decision = webui_goals.evaluate_goal_after_turn("sid-123", "not done yet", user_initiated=False)
+    decision = webui_goals.evaluate_goal_after_turn("sid-123", "not done yet", goal_related=True)
 
     assert decision["message"].startswith("↻ Continuing toward goal")
     assert decision["should_continue"] is True
     assert decision["continuation_prompt"].startswith("[Continuing toward your standing goal]")
+
+
+def test_goal_evaluation_skips_unrelated_user_turns_without_budget_tick(monkeypatch):
+    """Active goals should not judge or spend budget on turns not marked goal-related."""
+    from api import goals as webui_goals
+
+    calls = []
+
+    class FakeState:
+        status = "active"
+
+    class FakeGoalManager:
+        state = FakeState()
+
+        def __init__(self, session_id, default_max_turns=20):
+            self.session_id = session_id
+
+        def is_active(self):
+            return True
+
+        def evaluate_after_turn(self, last_response, user_initiated=True):
+            calls.append((last_response, user_initiated))
+            raise AssertionError("unrelated turns must not reach the goal judge")
+
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
+
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-123",
+        "Here is the weather.",
+        goal_related=False,
+    )
+
+    assert calls == []
+    assert decision["should_continue"] is False
+    assert decision["verdict"] == "skipped"
+    assert decision["reason"] == "turn not marked goal-related"
+    assert decision["message"] == ""
 
 
 def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path):
@@ -218,6 +257,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     assert result["payload"]["stream_id"] == "goal-stream"
     assert started and started[0]["msg"] == "ship the feature"
     assert started[0]["model_provider"] == "openai-codex"
+    assert started[0]["goal_related"] is True
 
 
 def test_routes_register_goal_endpoint_and_kickoff_stream():
@@ -230,6 +270,8 @@ def test_routes_register_goal_endpoint_and_kickoff_stream():
 
 def test_streaming_post_turn_goal_hook_surfaces_and_continues():
     assert "evaluate_goal_after_turn" in STREAMING_PY
+    assert "goal_related=False" in STREAMING_PY
+    assert "if not _goal_related or not has_active_goal" in STREAMING_PY
     assert "put('goal'" in STREAMING_PY
     assert "decision.get('should_continue')" in STREAMING_PY
     assert "continuation_prompt" in STREAMING_PY
@@ -262,6 +304,9 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
     assert "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)" in MESSAGES_JS
     assert "queueSessionMessage" in MESSAGES_JS
+    assert "goal_related:true" in MESSAGES_JS
+    assert "goal_related:goalRelated||undefined" in MESSAGES_JS
+    assert "send.goal_related=next.goal_related===true" in UI_JS
 
 
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():

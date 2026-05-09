@@ -1857,6 +1857,7 @@ def _run_agent_streaming(
     *,
     ephemeral=False,
     model_provider=None,
+    goal_related=False,
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -3234,7 +3235,8 @@ def _run_agent_streaming(
             try:
                 from api.goals import evaluate_goal_after_turn, has_active_goal
 
-                if not has_active_goal(session_id, profile_home=_profile_home):
+                _goal_related = bool(goal_related)
+                if not _goal_related or not has_active_goal(session_id, profile_home=_profile_home):
                     _goal_decision = {}
                 else:
                     _last_goal_response = ''
@@ -3262,6 +3264,7 @@ def _run_agent_streaming(
                         session_id,
                         _last_goal_response,
                         user_initiated=True,
+                        goal_related=True,
                         profile_home=_profile_home,
                     )
                 decision = _goal_decision or {}

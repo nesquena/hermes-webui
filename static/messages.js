@@ -170,6 +170,8 @@ async function send(){
   }
   if(!S.session){await newSession();await renderSessionList();}
 
+  const goalRelated=send.goal_related===true;
+  send.goal_related=false;
   const activeSid=S.session.session_id;
 
   setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
@@ -239,7 +241,8 @@ async function send(){
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
       model_provider:S.session.model_provider||null,
       profile:S.activeProfile||S.session.profile||'default',
-      attachments:uploaded.length?uploaded:undefined
+      attachments:uploaded.length?uploaded:undefined,
+      goal_related:goalRelated||undefined
     })});
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
@@ -286,7 +289,7 @@ async function send(){
       stopApprovalPolling();
       stopClarifyPolling();
       // Keep the user's attempted turn by queueing it for after the current run.
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default',goal_related:goalRelated||undefined});
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
@@ -924,6 +927,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           model:S.session&&S.session.model||'',
           model_provider:S.session&&S.session.model_provider||null,
           profile:S.activeProfile||'default',
+          goal_related:true,
         };
         showToast('Continuing toward goal…',2200);
       }catch(_){}

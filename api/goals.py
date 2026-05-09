@@ -437,6 +437,7 @@ def evaluate_goal_after_turn(
     last_response: str,
     *,
     user_initiated: bool = True,
+    goal_related: bool = True,
     profile_home: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Evaluate a completed turn against the standing goal, if any."""
@@ -468,6 +469,15 @@ def evaluate_goal_after_turn(
                 "continuation_prompt": None,
                 "verdict": "inactive",
                 "reason": "no active goal",
+                "message": "",
+            }
+        if not goal_related:
+            return {
+                "status": getattr(getattr(mgr, "state", None), "status", None),
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "skipped",
+                "reason": "turn not marked goal-related",
                 "message": "",
             }
         decision = mgr.evaluate_after_turn(str(last_response or ""), user_initiated=user_initiated)
