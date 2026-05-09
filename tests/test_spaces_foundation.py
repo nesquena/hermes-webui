@@ -4761,6 +4761,135 @@ def test_recovery_enable_space_restores_safe_metadata_without_rendering_widgets(
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_recovery_rollback_aliases_restore_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-recovery-rollback", "name": "Recovery Rollback"})
+    original_event_id = created["revision_event_id"]
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Broken Widget",
+            "renderer": "<script>breakRecovery()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.disable_space_for_recovery(created["space_id"], reason="generated shell failed")
+
+    restored = spaces.run_space_tool(
+        "space.recovery.rollback",
+        {
+            "spaceId": created["space_id"],
+            "eventId": original_event_id,
+            "renderer": "<script>ignore()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(restored).lower()
+
+    assert restored["ok"] is True
+    assert restored["action"] == "space.recovery.rollback"
+    assert restored["space"]["space_id"] == created["space_id"]
+    assert restored["restored_event_id"] == original_event_id
+    assert restored["revision_event_id"]
+    assert restored["space"]["widgets"] == []
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_widget_revision_restore_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-widget-restore", "name": "Tool Widget Restore"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "layout": {"x": 1, "y": 2, "w": 4, "h": 3},
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "source": "raw generated source should never return",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes current"})
+    spaces.patch_widget(created["space_id"], "weather", {"title": "Weather broken"})
+    spaces.patch_widget(created["space_id"], "notes", {"title": "Notes still current"})
+
+    restored = spaces.run_space_tool(
+        "space.revision.restoreWidget",
+        {
+            "spaceId": created["space_id"],
+            "eventId": original["revision_event_id"],
+            "widgetId": "weather",
+            "renderer": "<script>ignore()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    detail = spaces.read_space_detail(created["space_id"])
+    serialized = json.dumps({"restored": restored, "detail": detail}).lower()
+
+    assert restored["ok"] is True
+    assert restored["action"] == "space.revision.restorewidget"
+    assert restored["space_id"] == created["space_id"]
+    assert restored["widget"]["id"] == "weather"
+    assert restored["widget"]["title"] == "Weather original"
+    assert restored["widget"]["layout"] == {"x": 1, "y": 2, "w": 4, "h": 3, "minimized": False}
+    assert restored["restored_event_id"] == original["revision_event_id"]
+    assert restored["revision_event_id"]
+    widgets = {widget["id"]: widget for widget in detail["widgets"]}
+    assert widgets["weather"]["title"] == "Weather original"
+    assert widgets["notes"]["title"] == "Notes still current"
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_widget_restore_current_and_positional_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    current = spaces.create_space({"space_id": "tool-current-widget-restore", "name": "Current Widget Restore"})
+    current_original = spaces.upsert_widget(
+        current["space_id"],
+        {"id": "panel", "kind": "html", "title": "Panel original", "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>"},
+    )
+    spaces.patch_widget(current["space_id"], "panel", {"title": "Panel broken"})
+
+    current_restored = spaces.run_space_tool(
+        "space.current.revision.restoreWidget",
+        {"activeSpaceId": current["space_id"], "eventId": current_original["revision_event_id"], "widgetId": "panel"},
+    )
+
+    positional = spaces.create_space({"space_id": "tool-positional-widget-restore", "name": "Positional Widget Restore"})
+    positional_original = spaces.upsert_widget(
+        positional["space_id"],
+        {"id": "panel", "kind": "html", "title": "Positional original", "source": "SECRET_SOURCE_DO_NOT_LEAK"},
+    )
+    spaces.patch_widget(positional["space_id"], "panel", {"title": "Positional broken"})
+
+    positional_restored = spaces.run_space_tool(
+        "space.recovery.restore_widget",
+        {"args": [positional["space_id"], positional_original["revision_event_id"], "panel"]},
+    )
+    serialized = json.dumps({"current": current_restored, "positional": positional_restored}).lower()
+
+    assert current_restored["ok"] is True
+    assert current_restored["action"] == "space.current.revision.restorewidget"
+    assert current_restored["active_space_id"] == current["space_id"]
+    assert current_restored["widget"]["title"] == "Panel original"
+    assert positional_restored["ok"] is True
+    assert positional_restored["action"] == "space.recovery.restore_widget"
+    assert positional_restored["widget"]["title"] == "Positional original"
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-recovery", "name": "Tool Recovery"})

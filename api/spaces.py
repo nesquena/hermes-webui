@@ -2646,6 +2646,20 @@ def _space_tool_widget_id(payload: dict[str, Any]) -> str:
     return str(raw or "").strip()
 
 
+def _space_tool_event_id(payload: dict[str, Any]) -> str:
+    """Return a revision event id from Hermes or Space Agent-style payloads."""
+    raw = (
+        payload.get("event_id")
+        or payload.get("eventId")
+        or payload.get("revision_event_id")
+        or payload.get("revisionEventId")
+        or _space_tool_arg(payload, 2)
+        or _space_tool_arg(payload, 1)
+        or ""
+    )
+    return str(raw or "").strip()
+
+
 def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
     """Return widget ids from Hermes or Space Agent-style bulk payloads."""
     raw = payload.get("widget_ids") or payload.get("widgetIds") or []
@@ -3354,11 +3368,50 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         else:
             result["space_id"] = space_id
         return result
-    if name in {"space.revision.restore", "space.rollback", "space.restore", "space.current.revision.restore", "space.current.rollback", "space.current.restore"}:
+    if name in {
+        "space.revision.restore",
+        "space.rollback",
+        "space.restore",
+        "space.current.revision.restore",
+        "space.current.rollback",
+        "space.current.restore",
+        "space.recovery.rollback",
+        "space.recovery.restore",
+        "space.safe_mode.rollback",
+        "space.safe_mode.restore",
+    }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
-        event_id = str(data.get("event_id") or data.get("revision_event_id") or "")
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_current_id(data) or data.get("space_id"))
+        event_id = _space_tool_event_id(data)
         result = restore_revision(space_id, event_id)
+        if is_current:
+            result["active_space_id"] = space_id
+        return {"action": name, **result}
+    if name in {
+        "space.revision.restore_widget",
+        "space.revision.restorewidget",
+        "space.widget.restore_revision",
+        "space.widget.rollback",
+        "space.current.restore_widget",
+        "space.current.restorewidget",
+        "space.current.revision.restore_widget",
+        "space.current.revision.restorewidget",
+        "space.current.widget.rollback",
+        "space.current.widget.restore_revision",
+        "space.recovery.restore_widget",
+        "space.recovery.restorewidget",
+        "space.safe_mode.restore_widget",
+        "space.safe_mode.restorewidget",
+    }:
+        is_current = name.startswith("space.current.")
+        space_id = validate_space_id(_space_tool_current_id(data))
+        if _space_tool_arg(data, 2) and not any(data.get(key) for key in ("event_id", "eventId", "revision_event_id", "revisionEventId", "widget_id", "widgetId")):
+            event_id = str(_space_tool_arg(data, 1) or "").strip()
+            widget_id = validate_widget_id(_space_tool_arg(data, 2))
+        else:
+            event_id = _space_tool_event_id(data)
+            widget_id = validate_widget_id(_space_tool_widget_id(data))
+        result = restore_widget_revision(space_id, event_id, widget_id)
         if is_current:
             result["active_space_id"] = space_id
         return {"action": name, **result}

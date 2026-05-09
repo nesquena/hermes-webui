@@ -11,9 +11,16 @@ Research targets:
 
 Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: safe recovery now has a whole-Space repair action that queues metadata-only `agent.repair` events from the recovery panel, redacts marker-only prompt/payload/session values, rejects non-object payloads, and surfaces only safe queued status in `recovery_snapshot()`. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: safe recovery/tool rollback now exposes metadata-only full-Space and per-widget restore aliases through `run_space_tool(...)`, including Space Agent-style camelCase `spaceId`/`eventId`/`widgetId` payloads, while preserving the existing recovery/rollback safety model and omitting generated renderer/source/API-auth markers from tool responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose recovery rollback tool aliases`
+  - Added RED/GREEN backend coverage proving `space.recovery.rollback` restores a safe full-Space revision from `spaceId`/`eventId` payloads without returning generated renderer/API-auth markers or secret-looking sentinels.
+  - Added RED/GREEN backend coverage proving `space.revision.restoreWidget` restores only the requested widget from a revision snapshot while sibling widgets remain current and tool responses stay metadata-only.
+  - Added follow-up RED/GREEN coverage for current-space revision widget aliases and positional restore args (`[spaceId, eventId, widgetId]`).
+  - Hardened `run_space_tool(...)` with a shared event-id resolver and safe-mode/recovery rollback aliases for full-Space and widget-level restores.
+  - Validation at completion: focused RED failed as expected (`2 failed`, then `1 failed` for the review-found alias gap); focused GREEN passed (`3 passed`); full Spaces foundation suite passed (`197 passed`); Spaces UI JS behavior + demo parity suites passed (`130 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static recovery harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_de5059dadd5742a7960d23089c6ccb97.png`.
 
 - `feat(spaces): queue recovery space repairs`
   - Added RED/GREEN backend coverage for `POST /api/spaces/recovery/repair-space`, including marker-only prompt/payload redaction, session-id redaction in persisted repair events, and rejection of non-object payloads before any durable queue write.
