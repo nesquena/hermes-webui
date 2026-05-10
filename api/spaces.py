@@ -2375,10 +2375,10 @@ def _space_creator_store_preview_receipt(draft: dict[str, Any]) -> str:
     return preview_id
 
 
-def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
     preview_id = str(payload.get("preview_id") or payload.get("previewId") or "").strip()
     if not preview_id:
-        return _space_creator_sanitized_draft(payload), None
+        raise ValueError("Creator commit requires a preview receipt")
     with _CREATOR_PREVIEW_RECEIPTS_LOCK:
         _space_creator_prune_preview_receipts_locked()
         receipt = _CREATOR_PREVIEW_RECEIPTS.pop(preview_id, None)

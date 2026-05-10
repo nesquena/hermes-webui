@@ -2041,6 +2041,25 @@ def test_creator_commit_rejects_unknown_preview_id_without_creating_space(monkey
     assert spaces.list_spaces() == []
 
 
+def test_creator_commit_requires_preview_receipt_even_when_gates_pass(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    with pytest.raises(ValueError, match="Creator commit requires a preview receipt"):
+        spaces.run_space_tool(
+            "space.spaces.commitCreatorSpec",
+            {
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "approve_commit": True,
+                "prompt": "Bypass preview with SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
+                "spaceName": "Bypass Creator Lab",
+                "widgets": [{"widgetId": "renderer-panel", "title": "Unsafe", "renderer": "<script>steal()</script>"}],
+            },
+        )
+
+    assert spaces.list_spaces() == []
+
+
 def test_creator_preview_redacts_widget_titles_prompts_and_description_fallback(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -2185,12 +2204,9 @@ def test_creator_commit_requires_preview_visual_qa_and_explicit_commit_gate(monk
 def test_creator_commit_persists_metadata_only_revisioned_space_after_gates(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
-    committed = spaces.run_space_tool(
-        "space.spaces.commitCreatorSpec",
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
         {
-            "sandbox_previewed": True,
-            "visual_qa_passed": True,
-            "approve_commit": True,
             "prompt": "Build a research dashboard using access_token=TOKEN_VALUE and <script>steal()</script>",
             "spaceName": "Research Creator Lab",
             "description": "Safe creator commit",
@@ -2207,6 +2223,15 @@ def test_creator_commit_persists_metadata_only_revisioned_space_after_gates(monk
                 },
                 {"widgetId": "summary-panel", "title": "Duplicate Safe", "kind": "status"},
             ],
+        },
+    )
+    committed = spaces.run_space_tool(
+        "space.spaces.commitCreatorSpec",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
         },
     )
     serialized = json.dumps({"committed": committed, "spaces": spaces.list_spaces(), "detail": spaces.read_space("research-creator-lab")}).lower()
@@ -2243,22 +2268,25 @@ def test_creator_commit_persists_metadata_only_revisioned_space_after_gates(monk
 def test_creator_commit_revises_existing_space_with_new_safe_manifest(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
-    first = spaces.run_space_tool(
-        "space.creator.commit",
+    first_preview = spaces.run_space_tool(
+        "space.creator.preview",
         {
-            "sandbox_previewed": True,
-            "visual_qa_passed": True,
-            "approve_commit": True,
             "spaceName": "Revisioned Creator Lab",
             "widgets": [{"widgetId": "summary-panel", "title": "Summary Panel", "kind": "markdown"}],
         },
     )
-    second = spaces.run_space_tool(
+    first = spaces.run_space_tool(
         "space.creator.commit",
         {
+            "preview_id": first_preview["preview_id"],
             "sandbox_previewed": True,
             "visual_qa_passed": True,
             "approve_commit": True,
+        },
+    )
+    second_preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
             "spaceName": "Revisioned Creator Lab",
             "description": "Safe revised creator commit",
             "widgets": [
@@ -2270,6 +2298,15 @@ def test_creator_commit_revises_existing_space_with_new_safe_manifest(monkeypatc
                     "token": "SECRET_VALUE_DO_NOT_LEAK",
                 }
             ],
+        },
+    )
+    second = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": second_preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
         },
     )
     detail = spaces.read_space("revisioned-creator-lab")
@@ -2290,12 +2327,9 @@ def test_creator_commit_revises_existing_space_with_new_safe_manifest(monkeypatc
 def test_creator_commit_strips_nested_generic_metadata_prompts_from_persisted_revisions(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
-    committed = spaces.run_space_tool(
-        "space.creator.commit",
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
         {
-            "sandbox_previewed": True,
-            "visual_qa_passed": True,
-            "approve_commit": True,
             "spaceName": "Nested Metadata Creator Lab",
             "widgets": [
                 {
@@ -2311,6 +2345,15 @@ def test_creator_commit_strips_nested_generic_metadata_prompts_from_persisted_re
                     },
                 }
             ],
+        },
+    )
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
         },
     )
     manifest = spaces.read_space("nested-metadata-creator-lab")
