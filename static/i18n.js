@@ -5027,7 +5027,7 @@ const LOCALES = {
     profile_gateway_stopped: 'Gateway gestoppt',
     profile_active: 'Aktiv',
     profile_no_configuration: 'Keine Konfiguration',
-    profile_skill_count: '{count} Fähigkeiten',
+    profile_skill_count: (count) => `${count} Fähigkeit${count === 1 ? '' : 'en'}`,
     profile_use: 'Verwenden',
     profile_switch_title: 'Profil wechseln',
     profile_delete_title: 'Profil löschen',
