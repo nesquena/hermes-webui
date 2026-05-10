@@ -39,7 +39,9 @@ def test_cron_api_serializes_legacy_profile_as_explicit_server_default():
     payload = _cron_job_for_api(legacy)
 
     assert payload["profile"] is None
-    assert "profile" not in legacy, "API serialization must not mutate stored legacy jobs"
+    assert "profile" not in legacy, (
+        "API serialization must not mutate stored legacy jobs"
+    )
 
 
 def test_cron_profile_value_validates_against_existing_profiles(monkeypatch):
@@ -78,8 +80,12 @@ def test_cron_create_api_persists_profile_and_returns_it(monkeypatch):
     cron_pkg = types.ModuleType("cron")
     cron_pkg.__path__ = []
     cron_jobs = types.ModuleType("cron.jobs")
-    cron_jobs.create_job = lambda **kwargs: calls.append(("create", kwargs)) or dict(created)
-    cron_jobs.update_job = lambda job_id, updates: calls.append(("update", job_id, updates)) or dict(updated)
+    cron_jobs.create_job = lambda **kwargs: (
+        calls.append(("create", kwargs)) or dict(created)
+    )
+    cron_jobs.update_job = lambda job_id, updates: (
+        calls.append(("update", job_id, updates)) or dict(updated)
+    )
 
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "research"}])
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
@@ -112,8 +118,12 @@ def test_cron_create_api_rejects_unknown_profile_before_persisting(monkeypatch):
     cron_pkg = types.ModuleType("cron")
     cron_pkg.__path__ = []
     cron_jobs = types.ModuleType("cron.jobs")
-    cron_jobs.create_job = lambda **kwargs: pytest.fail("invalid profiles must not create jobs")
-    cron_jobs.update_job = lambda *args, **kwargs: pytest.fail("invalid profiles must not update jobs")
+    cron_jobs.create_job = lambda **kwargs: pytest.fail(
+        "invalid profiles must not create jobs"
+    )
+    cron_jobs.update_job = lambda *args, **kwargs: pytest.fail(
+        "invalid profiles must not update jobs"
+    )
 
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "research"}])
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
@@ -160,7 +170,9 @@ def test_cron_update_api_accepts_profile_clear_and_rejects_unknown(monkeypatch):
     assert calls == [("job617", {"profile": None})]
 
 
-def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(monkeypatch):
+def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(
+    monkeypatch,
+):
     import api.profiles as profiles
     import api.routes as routes
 
@@ -179,17 +191,25 @@ def test_manual_cron_run_uses_execution_profile_but_persists_to_owning_store(mon
     cron_pkg = types.ModuleType("cron")
     cron_pkg.__path__ = []
     cron_jobs = types.ModuleType("cron.jobs")
-    cron_jobs.save_job_output = lambda job_id, output: events.append(("save", job_id, output))
-    cron_jobs.mark_job_run = lambda job_id, success, error=None: events.append(("mark", job_id, success, error))
+    cron_jobs.save_job_output = lambda job_id, output: events.append(
+        ("save", job_id, output)
+    )
+    cron_jobs.mark_job_run = lambda job_id, success, error=None: events.append(
+        ("mark", job_id, success, error)
+    )
     cron_scheduler = types.ModuleType("cron.scheduler")
-    cron_scheduler.run_job = lambda job: events.append(("run", job["id"])) or (True, "output", "final", None)
+    cron_scheduler.run_job = lambda job: (
+        events.append(("run", job["id"])) or (True, "output", "final", None)
+    )
 
     def fake_subprocess_run(job, execution_profile_home):
         events.append(("run", job["id"], str(execution_profile_home)))
         return True, "output", "final", None
 
     monkeypatch.setattr(profiles, "cron_profile_context_for_home", Ctx)
-    monkeypatch.setattr(routes, "_run_cron_job_in_profile_subprocess", fake_subprocess_run)
+    monkeypatch.setattr(
+        routes, "_run_cron_job_in_profile_subprocess", fake_subprocess_run
+    )
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
@@ -218,7 +238,7 @@ def test_cron_profile_selector_source_hooks_present():
 
     assert "async function loadCronProfiles()" in panels
     assert "api('/api/profiles')" in panels
-    assert "id=\"cronFormProfile\"" in panels
+    assert 'id="cronFormProfile"' in panels
     assert "profile: profile" in panels
     assert "job.profile" in panels
     assert "cron-profile-badge" in panels

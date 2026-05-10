@@ -4,7 +4,9 @@ from unittest.mock import patch
 import bootstrap
 
 
-def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monkeypatch, tmp_path):
+def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(
+    monkeypatch, tmp_path
+):
     """Avoid starting WebUI with a local venv that later cannot import AIAgent."""
     local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
     agent_python = tmp_path / "agent" / "venv" / "bin" / "python"
@@ -19,13 +21,17 @@ def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monk
 
     monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", fake_can_run)
 
-    selected = bootstrap.ensure_python_has_webui_deps(str(local_python), tmp_path / "agent")
+    selected = bootstrap.ensure_python_has_webui_deps(
+        str(local_python), tmp_path / "agent"
+    )
 
     assert selected == str(agent_python)
     assert probes == [local_python, agent_python]
 
 
-def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeypatch, tmp_path):
+def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(
+    monkeypatch, tmp_path
+):
     """Do not report health OK when chat would fail with missing AIAgent."""
     local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
     agent_python = tmp_path / "agent" / "venv" / "bin" / "python"
@@ -50,7 +56,9 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
     if (tmp_path / ".venv").exists():  # platform-independent guard
         pass
 
-    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+    monkeypatch.setattr(
+        bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False
+    )
     # Cover both subprocess.run (used for pip install) and any other subprocess
     # entry points the venv module might invoke. Returning None is fine because
     # we never inspect the result on this code path.
@@ -75,7 +83,9 @@ def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
     """
     local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
     monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+    monkeypatch.setattr(
+        bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False
+    )
     monkeypatch.setattr(bootstrap.subprocess, "run", lambda *a, **k: None)
 
     with patch.object(bootstrap.venv, "EnvBuilder") as mock_builder:

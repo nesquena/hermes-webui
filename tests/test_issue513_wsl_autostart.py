@@ -41,12 +41,14 @@ def test_wsl_autostart_launcher_has_safe_duplicate_prevention_and_exports_runtim
     assert "HERMES_WEBUI_LOCK_FILE" in script
     assert "HERMES_WEBUI_PID_FILE" in script
     assert "curl -fsS --max-time 3" in script
-    assert "bash \"${HERMES_WEBUI_REPO}/start.sh\" --foreground" in script
+    assert 'bash "${HERMES_WEBUI_REPO}/start.sh" --foreground' in script
     assert "nohup" in script
 
     # The launcher documents HERMES_WEBUI_HOST/PORT as runtime knobs; they must
     # be exported so bootstrap.py/server.py receive the selected WSL values.
-    assert re.search(r"^export HERMES_WEBUI_HOST HERMES_WEBUI_PORT$", script, re.MULTILINE)
+    assert re.search(
+        r"^export HERMES_WEBUI_HOST HERMES_WEBUI_PORT$", script, re.MULTILINE
+    )
 
     assert "/root" not in script
     assert "/home/michael" not in script
@@ -76,7 +78,9 @@ def test_windows_task_scheduler_helper_is_idempotent_and_validates_wsl_script_pa
 def test_powershell_helper_passes_parser_when_pwsh_is_available():
     pwsh = None
     for candidate in ("pwsh", "powershell"):
-        result = subprocess.run(["bash", "-lc", f"command -v {candidate}"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["bash", "-lc", f"command -v {candidate}"], capture_output=True, text=True
+        )
         if result.returncode == 0:
             pwsh = result.stdout.strip()
             break
@@ -86,7 +90,12 @@ def test_powershell_helper_passes_parser_when_pwsh_is_available():
         return
 
     subprocess.run(
-        [pwsh, "-NoProfile", "-Command", f"$null = [scriptblock]::Create((Get-Content -Raw '{POWERSHELL_SCRIPT.as_posix()}'))"],
+        [
+            pwsh,
+            "-NoProfile",
+            "-Command",
+            f"$null = [scriptblock]::Create((Get-Content -Raw '{POWERSHELL_SCRIPT.as_posix()}'))",
+        ],
         check=True,
         cwd=REPO_ROOT,
     )

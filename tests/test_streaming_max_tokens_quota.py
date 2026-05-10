@@ -6,6 +6,7 @@ native 64k output ceiling and failed with HTTP 402 "more credits / fewer
 max_tokens". The stream then looked like a stuck Thinking card instead of a
 clear quota error.
 """
+
 from pathlib import Path
 
 

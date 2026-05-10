@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -66,15 +65,22 @@ def _isolate_onboarding_writes(monkeypatch, tmp_path):
     ``~/.hermes`` and clobber the developer's actual config.
     """
     from api import onboarding as ob
+
     monkeypatch.setattr(ob, "_get_active_hermes_home", lambda: tmp_path)
     cfg_path = tmp_path / "config.yaml"
     monkeypatch.setattr(ob, "_get_config_path", lambda: cfg_path)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_WEBUI_SKIP_ONBOARDING", raising=False)
     for var in (
-        "LM_API_KEY", "LMSTUDIO_API_KEY", "OLLAMA_API_KEY", "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY",
-        "GH_TOKEN", "GITHUB_TOKEN",
+        "LM_API_KEY",
+        "LMSTUDIO_API_KEY",
+        "OLLAMA_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
     return cfg_path
@@ -85,6 +91,7 @@ class TestKeyOptionalProviderSchema:
 
     def test_lmstudio_is_key_optional(self):
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         assert _SUPPORTED_PROVIDER_SETUPS["lmstudio"].get("key_optional") is True, (
             "lmstudio must declare key_optional=True so onboarding accepts an "
             "empty api_key.  Pre-fix the wizard required users to type "
@@ -93,6 +100,7 @@ class TestKeyOptionalProviderSchema:
 
     def test_ollama_is_key_optional(self):
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         assert _SUPPORTED_PROVIDER_SETUPS["ollama"].get("key_optional") is True, (
             "ollama must declare key_optional=True — local Ollama runs keyless "
             "by default."
@@ -100,6 +108,7 @@ class TestKeyOptionalProviderSchema:
 
     def test_custom_is_key_optional(self):
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         assert _SUPPORTED_PROVIDER_SETUPS["custom"].get("key_optional") is True, (
             "custom must declare key_optional=True — many self-hosted "
             "OpenAI-compatible servers (vLLM, llama-server, TabbyAPI) run "
@@ -109,6 +118,7 @@ class TestKeyOptionalProviderSchema:
     def test_cloud_providers_are_not_key_optional(self):
         """Regression-defense: openrouter/anthropic/openai must STILL require a key."""
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         for pid in ("openrouter", "anthropic", "openai"):
             assert not _SUPPORTED_PROVIDER_SETUPS[pid].get("key_optional"), (
                 f"{pid} must NOT be key_optional — cloud providers always need "
@@ -118,6 +128,7 @@ class TestKeyOptionalProviderSchema:
     def test_setup_catalog_exposes_key_optional_flag(self):
         """Frontend reads `provider.key_optional` from the catalog."""
         from api.onboarding import _build_setup_catalog
+
         catalog = _build_setup_catalog({"model": {"provider": "lmstudio"}})
         by_id = {p["id"]: p for p in catalog["providers"]}
         assert by_id["lmstudio"]["key_optional"] is True
@@ -138,13 +149,16 @@ class TestKeylessOnboarding:
         cfg_path = _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         # Empty api_key — should NOT raise.
-        ob.apply_onboarding_setup({
-            "provider": "lmstudio",
-            "model": "qwen3-27b",
-            "base_url": "http://example.local:1234/v1",
-            "api_key": "",
-        })
+        ob.apply_onboarding_setup(
+            {
+                "provider": "lmstudio",
+                "model": "qwen3-27b",
+                "base_url": "http://example.local:1234/v1",
+                "api_key": "",
+            }
+        )
 
         # config.yaml gets written with provider/model/base_url
         assert cfg_path.exists()
@@ -168,12 +182,15 @@ class TestKeylessOnboarding:
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
-        ob.apply_onboarding_setup({
-            "provider": "ollama",
-            "model": "qwen3:32b",
-            "base_url": "http://localhost:11434/v1",
-            "api_key": "",
-        })
+
+        ob.apply_onboarding_setup(
+            {
+                "provider": "ollama",
+                "model": "qwen3:32b",
+                "base_url": "http://localhost:11434/v1",
+                "api_key": "",
+            }
+        )
         env_path = tmp_path / ".env"
         if env_path.exists():
             assert "OLLAMA_API_KEY=" not in env_path.read_text(encoding="utf-8")
@@ -183,12 +200,15 @@ class TestKeylessOnboarding:
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
-        ob.apply_onboarding_setup({
-            "provider": "custom",
-            "model": "gpt-4o-mini",
-            "base_url": "http://my-vllm.local/v1",
-            "api_key": "",
-        })
+
+        ob.apply_onboarding_setup(
+            {
+                "provider": "custom",
+                "model": "gpt-4o-mini",
+                "base_url": "http://my-vllm.local/v1",
+                "api_key": "",
+            }
+        )
         env_path = tmp_path / ".env"
         if env_path.exists():
             assert "OPENAI_API_KEY=" not in env_path.read_text(encoding="utf-8")
@@ -199,27 +219,35 @@ class TestKeylessOnboarding:
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         with pytest.raises(ValueError, match="OPENROUTER_API_KEY is required"):
-            ob.apply_onboarding_setup({
-                "provider": "openrouter",
-                "model": "anthropic/claude-sonnet-4.6",
-                "base_url": "",
-                "api_key": "",
-            })
+            ob.apply_onboarding_setup(
+                {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "base_url": "",
+                    "api_key": "",
+                }
+            )
 
     def test_anthropic_empty_api_key_still_rejected(self, monkeypatch, tmp_path):
         _install_fake_hermes_cli(monkeypatch)
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
-        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is required"):
-            ob.apply_onboarding_setup({
-                "provider": "anthropic",
-                "model": "claude-sonnet-4.6",
-                "api_key": "",
-            })
 
-    def test_lmstudio_with_explicit_api_key_still_writes_env(self, monkeypatch, tmp_path):
+        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY is required"):
+            ob.apply_onboarding_setup(
+                {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4.6",
+                    "api_key": "",
+                }
+            )
+
+    def test_lmstudio_with_explicit_api_key_still_writes_env(
+        self, monkeypatch, tmp_path
+    ):
         """Auth-enabled LM Studio: user supplies a key, .env still gets written.
 
         Regression-defense for the keyless path: when the user DOES supply a
@@ -229,12 +257,15 @@ class TestKeylessOnboarding:
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
-        ob.apply_onboarding_setup({
-            "provider": "lmstudio",
-            "model": "qwen3-27b",
-            "base_url": "http://example.local:1234/v1",
-            "api_key": "real-secret-token",
-        })
+
+        ob.apply_onboarding_setup(
+            {
+                "provider": "lmstudio",
+                "model": "qwen3-27b",
+                "base_url": "http://example.local:1234/v1",
+                "api_key": "real-secret-token",
+            }
+        )
         env_text = (tmp_path / ".env").read_text(encoding="utf-8")
         assert "LM_API_KEY=" in env_text, (
             f"Auth-enabled lmstudio user supplied an api_key but .env doesn't "
@@ -246,13 +277,16 @@ class TestKeylessChatReady:
     """``provider_ready`` and ``chat_ready`` are True for key_optional providers."""
 
     def test_lmstudio_keyless_provider_ready_via_status_runtime(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """``_status_from_runtime`` returns provider_ready=True with no api_key."""
         _install_fake_hermes_cli(monkeypatch)
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         cfg = {
             "model": {
                 "provider": "lmstudio",
@@ -268,12 +302,15 @@ class TestKeylessChatReady:
         )
 
     def test_ollama_keyless_provider_ready_via_status_runtime(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         _install_fake_hermes_cli(monkeypatch)
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         cfg = {
             "model": {
                 "provider": "ollama",
@@ -285,13 +322,16 @@ class TestKeylessChatReady:
         assert status.get("provider_ready") is True
 
     def test_custom_keyless_provider_ready_requires_base_url(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """custom is key_optional but still requires base_url."""
         _install_fake_hermes_cli(monkeypatch)
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         # With base_url → ready
         cfg_with = {
             "model": {
@@ -300,7 +340,10 @@ class TestKeylessChatReady:
                 "base_url": "http://my-vllm.local/v1",
             },
         }
-        assert ob._status_from_runtime(cfg_with, imports_ok=True).get("provider_ready") is True
+        assert (
+            ob._status_from_runtime(cfg_with, imports_ok=True).get("provider_ready")
+            is True
+        )
 
         # Without base_url → NOT ready (custom still requires it)
         cfg_without = {
@@ -309,7 +352,10 @@ class TestKeylessChatReady:
                 "default": "gpt-4o-mini",
             },
         }
-        assert ob._status_from_runtime(cfg_without, imports_ok=True).get("provider_ready") is False, (
+        assert (
+            ob._status_from_runtime(cfg_without, imports_ok=True).get("provider_ready")
+            is False
+        ), (
             "custom is key_optional but still requires base_url — this test "
             "catches a regression where the requires_base_url check is "
             "accidentally dropped for key_optional providers."
@@ -321,13 +367,16 @@ class TestKeylessChatReady:
         _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
+
         cfg = {
             "model": {
                 "provider": "openrouter",
                 "default": "anthropic/claude-sonnet-4.6",
             },
         }
-        assert ob._status_from_runtime(cfg, imports_ok=True).get("provider_ready") is False, (
+        assert (
+            ob._status_from_runtime(cfg, imports_ok=True).get("provider_ready") is False
+        ), (
             "openrouter with no api_key must NOT be provider_ready — that "
             "would silently let the wizard finish without the user actually "
             "entering a key."
@@ -339,12 +388,15 @@ class TestKeylessChatReady:
         cfg_path = _isolate_onboarding_writes(monkeypatch, tmp_path)
 
         from api import onboarding as ob
-        ob.apply_onboarding_setup({
-            "provider": "lmstudio",
-            "model": "qwen3-27b",
-            "base_url": "http://example.local:1234/v1",
-            "api_key": "",
-        })
+
+        ob.apply_onboarding_setup(
+            {
+                "provider": "lmstudio",
+                "model": "qwen3-27b",
+                "base_url": "http://example.local:1234/v1",
+                "api_key": "",
+            }
+        )
 
         # Reload config so get_onboarding_status sees the just-written values.
         # _swap_in_test_config-style — replicate just enough of that pattern.
@@ -353,7 +405,10 @@ class TestKeylessChatReady:
         config.cfg.clear()
         try:
             import yaml
-            config.cfg.update(yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {})
+
+            config.cfg.update(
+                yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            )
         except Exception:
             pass
         try:

@@ -87,8 +87,7 @@ def test_session_rename_uses_windowed_helper():
     # The session rename block: `inp.onkeydown=e2=>{ if(e2.key==='Enter'){ <guard> ...
     pattern = re.compile(
         r"inp\.onkeydown\s*=\s*e2\s*=>\s*\{\s*"
-        r"if\s*\(\s*e2\.key\s*===\s*'Enter'\s*\)\s*\{\s*"
-        + _windowed_guard("e2"),
+        r"if\s*\(\s*e2\.key\s*===\s*'Enter'\s*\)\s*\{\s*" + _windowed_guard("e2"),
         re.DOTALL,
     )
     assert pattern.search(SESSIONS_JS), (
@@ -102,8 +101,7 @@ def test_project_create_and_rename_use_windowed_helper():
     # Both project blocks share the shape `inp.onkeydown=(e)=>{...}` (note the parens).
     pattern = re.compile(
         r"inp\.onkeydown\s*=\s*\(\s*e\s*\)\s*=>\s*\{\s*"
-        r"if\s*\(\s*e\.key\s*===\s*'Enter'\s*\)\s*\{\s*"
-        + _windowed_guard("e"),
+        r"if\s*\(\s*e\.key\s*===\s*'Enter'\s*\)\s*\{\s*" + _windowed_guard("e"),
         re.DOTALL,
     )
     matches = pattern.findall(SESSIONS_JS)
@@ -120,8 +118,7 @@ def test_app_dialog_uses_windowed_helper():
     #   if(window._isImeEnter && window._isImeEnter(e)) return;`
     pattern = re.compile(
         r"document\.addEventListener\(\s*'keydown'\s*,\s*e\s*=>\s*\{[\s\S]*?"
-        r"if\s*\(\s*e\.key\s*===\s*'Enter'\s*\)\s*\{\s*"
-        + _windowed_guard("e"),
+        r"if\s*\(\s*e\.key\s*===\s*'Enter'\s*\)\s*\{\s*" + _windowed_guard("e"),
         re.DOTALL,
     )
     assert pattern.search(UI_JS), (
@@ -151,8 +148,7 @@ def test_workspace_rename_uses_windowed_helper():
     # Pattern: `inp.onkeydown=(e2)=>{ if(e2.key==='Enter'){ if(window._isImeEnter && ...
     pattern = re.compile(
         r"inp\.onkeydown\s*=\s*\(\s*e2\s*\)\s*=>\s*\{\s*"
-        r"if\s*\(\s*e2\.key\s*===\s*'Enter'\s*\)\s*\{\s*"
-        + _windowed_guard("e2"),
+        r"if\s*\(\s*e2\.key\s*===\s*'Enter'\s*\)\s*\{\s*" + _windowed_guard("e2"),
         re.DOTALL,
     )
     assert pattern.search(UI_JS), (

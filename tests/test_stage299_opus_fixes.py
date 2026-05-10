@@ -12,6 +12,7 @@ These tests pin the defenses applied per Opus advisor on stage-299:
 - Bounded behavior: if WIKI_PATH points at a forbidden root, both
   functions return 0/empty without iterating
 """
+
 from pathlib import Path
 
 ROUTES_PY = Path(__file__).parent.parent / "api" / "routes.py"
@@ -37,7 +38,10 @@ def test_count_files_has_iteration_cap():
     body = src[start:end]
     assert "_LLM_WIKI_MAX_FILES" in body
     assert "_LLM_WIKI_FORBIDDEN_ROOTS" in body
-    assert "iterated > _LLM_WIKI_MAX_FILES" in body or "iterated >= _LLM_WIKI_MAX_FILES" in body
+    assert (
+        "iterated > _LLM_WIKI_MAX_FILES" in body
+        or "iterated >= _LLM_WIKI_MAX_FILES" in body
+    )
 
 
 def test_page_files_has_iteration_cap():
@@ -54,16 +58,19 @@ def test_forbidden_roots_includes_system_paths():
     # Find the constant definition
     start = src.find("_LLM_WIKI_FORBIDDEN_ROOTS = ")
     end = src.find(")\n", start) + 1
-    decl = src[start:end + 1]
+    decl = src[start : end + 1]
     for forbidden in ("/", "/etc", "/usr", "/var"):
-        assert f'"{forbidden}"' in decl, f"Forbidden root {forbidden!r} not in _LLM_WIKI_FORBIDDEN_ROOTS"
+        assert f'"{forbidden}"' in decl, (
+            f"Forbidden root {forbidden!r} not in _LLM_WIKI_FORBIDDEN_ROOTS"
+        )
 
 
 def test_count_files_returns_zero_for_forbidden_root(tmp_path, monkeypatch):
     """Behavioral test: walking a forbidden root returns 0 without iterating."""
     import importlib
+
     routes = importlib.import_module("api.routes")
-    
+
     forbidden_root = Path("/etc")
     if forbidden_root.exists():  # skip on systems without /etc (Windows)
         result = routes._llm_wiki_count_files(forbidden_root)
@@ -78,7 +85,9 @@ def test_render_llm_wiki_status_uses_url_scheme_guard():
     end = panels_js.find("\nfunction ", start + 1)
     body = panels_js[start:end]
     # Must use a scheme-guarded form, not raw esc()
-    assert "/^https?:" in body or "test(rawDocsUrl)" in body or "test(docsUrl)" in body, (
+    assert (
+        "/^https?:" in body or "test(rawDocsUrl)" in body or "test(docsUrl)" in body
+    ), (
         "Expected URL scheme guard (e.g. /^https?:\\/\\//.test(...)) before "
         "interpolating docsUrl into href to prevent javascript: scheme XSS "
         "if docs_url ever becomes config-driven."

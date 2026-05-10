@@ -1,4 +1,5 @@
 """Regression coverage for issue #1458 persistent-host hardening."""
+
 import json
 import urllib.request
 

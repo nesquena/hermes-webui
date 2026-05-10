@@ -13,11 +13,8 @@ output, because #1358's frontend `_sessionLineageKey` falls through to
 group orphans by a key no other session shares (cosmetic dead state).
 """
 
-import os
 import sqlite3
 import time
-
-import pytest
 
 
 def _make_db(path):
@@ -72,15 +69,20 @@ def test_does_not_full_scan_sessions_table(tmp_path, monkeypatch):
     class _TrackingConn:
         def __init__(self, *args, **kw):
             self._real = real_connect(*args, **kw)
+
         def cursor(self):
             return _TrackingCursor(self._real.cursor())
+
         def __enter__(self):
             return self
+
         def __exit__(self, *a):
             return self._real.__exit__(*a)
+
         @property
         def row_factory(self):
             return self._real.row_factory
+
         @row_factory.setter
         def row_factory(self, v):
             self._real.row_factory = v
@@ -88,11 +90,14 @@ def test_does_not_full_scan_sessions_table(tmp_path, monkeypatch):
     class _TrackingCursor:
         def __init__(self, real):
             self._real = real
+
         def execute(self, sql, *args):
             queries.append(sql)
             return self._real.execute(sql, *args)
+
         def fetchall(self):
             return self._real.fetchall()
+
         def fetchone(self):
             return self._real.fetchone()
 
@@ -100,10 +105,13 @@ def test_does_not_full_scan_sessions_table(tmp_path, monkeypatch):
     agent_sessions.read_session_lineage_metadata(db, ["wanted_1", "wanted_2"])
 
     # No query may select from sessions without a WHERE clause
-    bad = [q for q in queries
-           if "from sessions" in q.lower()
-           and "where" not in q.lower()
-           and "pragma" not in q.lower()]
+    bad = [
+        q
+        for q in queries
+        if "from sessions" in q.lower()
+        and "where" not in q.lower()
+        and "pragma" not in q.lower()
+    ]
     assert not bad, (
         f"read_session_lineage_metadata must scope its SELECTs to specific "
         f"session ids (PR #1370 originally did a full scan). Found unscoped "
@@ -143,6 +151,7 @@ def test_cycle_in_parent_chain_terminates(tmp_path):
     conn.close()
 
     import threading
+
     done = threading.Event()
     result_box = []
 
@@ -204,23 +213,38 @@ def test_in_clause_chunked_for_large_session_set(tmp_path, monkeypatch):
     class _TrackingConn:
         def __init__(self, *args, **kw):
             self._real = real_connect(*args, **kw)
+
         def cursor(self):
             return _TrackingCursor(self._real.cursor())
-        def __enter__(self): return self
-        def __exit__(self, *a): return self._real.__exit__(*a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return self._real.__exit__(*a)
+
         @property
-        def row_factory(self): return self._real.row_factory
+        def row_factory(self):
+            return self._real.row_factory
+
         @row_factory.setter
-        def row_factory(self, v): self._real.row_factory = v
+        def row_factory(self, v):
+            self._real.row_factory = v
 
     class _TrackingCursor:
-        def __init__(self, real): self._real = real
+        def __init__(self, real):
+            self._real = real
+
         def execute(self, sql, *args):
             if "IN (" in sql:
                 in_counts.append(sql.count("?"))
             return self._real.execute(sql, *args)
-        def fetchall(self): return self._real.fetchall()
-        def fetchone(self): return self._real.fetchone()
+
+        def fetchall(self):
+            return self._real.fetchall()
+
+        def fetchone(self):
+            return self._real.fetchone()
 
     monkeypatch.setattr(sqlite3, "connect", _TrackingConn)
 

@@ -19,7 +19,9 @@ def _patch_live_models_basics(monkeypatch, routes, profile="default"):
     import api.profiles as profiles
 
     routes._clear_live_models_cache()
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
     monkeypatch.setattr(config, "get_config", lambda: {"model": {"provider": "openai"}})
     monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: profile)

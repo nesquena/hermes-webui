@@ -52,12 +52,24 @@ def mock_models_server():
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    "data": [
-                        {"id": "qwen3-27b", "object": "model", "owned_by": "user"},
-                        {"id": "llama-3.3-70b", "object": "model", "owned_by": "user"},
-                    ]
-                }).encode())
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "data": [
+                                {
+                                    "id": "qwen3-27b",
+                                    "object": "model",
+                                    "owned_by": "user",
+                                },
+                                {
+                                    "id": "llama-3.3-70b",
+                                    "object": "model",
+                                    "owned_by": "user",
+                                },
+                            ]
+                        }
+                    ).encode()
+                )
                 return
 
             # /barelist/models — bare list shape some self-hosted servers return
@@ -65,9 +77,14 @@ def mock_models_server():
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps([
-                    {"id": "alpha"}, {"id": "beta"},
-                ]).encode())
+                self.wfile.write(
+                    json.dumps(
+                        [
+                            {"id": "alpha"},
+                            {"id": "beta"},
+                        ]
+                    ).encode()
+                )
                 return
 
             # /v1bad/models — 404 (wrong path)
@@ -138,18 +155,21 @@ class TestIssue1499OnboardingProbe:
 
     def test_invalid_url_empty(self):
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint("lmstudio", "")
         assert r["ok"] is False
         assert r["error"] == "invalid_url"
 
     def test_invalid_url_bad_scheme(self):
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint("lmstudio", "ftp://example.com:1234/v1")
         assert r["ok"] is False
         assert r["error"] == "invalid_url"
 
     def test_invalid_url_no_host(self):
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint("lmstudio", "http:///models")
         assert r["ok"] is False
         assert r["error"] == "invalid_url"
@@ -157,6 +177,7 @@ class TestIssue1499OnboardingProbe:
     def test_dns_resolution_failure(self):
         """Unresolvable hostname → error='dns'."""
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint(
             "lmstudio",
             "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
@@ -168,6 +189,7 @@ class TestIssue1499OnboardingProbe:
     def test_connect_refused(self):
         """Connecting to a port nobody's listening on → error='connect_refused'."""
         from api.onboarding import probe_provider_endpoint
+
         # Port 1 is reserved tcpmux and on Linux/macOS dev boxes is universally
         # not listening. If a future CI environment binds something there this
         # will need updating, but no realistic CI binds port 1.
@@ -177,6 +199,7 @@ class TestIssue1499OnboardingProbe:
 
     def test_success_openai_shape(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1")
         assert r["ok"] is True, f"Expected success, got {r}"
         assert len(r["models"]) == 2
@@ -189,13 +212,17 @@ class TestIssue1499OnboardingProbe:
     def test_success_bare_list_shape(self, mock_models_server):
         """Some self-hosted servers return a bare list, not an OpenAI envelope."""
         from api.onboarding import probe_provider_endpoint
-        r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/barelist")
+
+        r = probe_provider_endpoint(
+            "lmstudio", f"{mock_models_server['base']}/barelist"
+        )
         assert r["ok"] is True, f"Expected success, got {r}"
         ids = [m["id"] for m in r["models"]]
         assert ids == ["alpha", "beta"]
 
     def test_http_4xx(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint
+
         r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1bad")
         assert r["ok"] is False
         assert r["error"] == "http_4xx"
@@ -203,14 +230,20 @@ class TestIssue1499OnboardingProbe:
 
     def test_http_5xx(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint
-        r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1explode")
+
+        r = probe_provider_endpoint(
+            "lmstudio", f"{mock_models_server['base']}/v1explode"
+        )
         assert r["ok"] is False
         assert r["error"] == "http_5xx"
         assert r.get("status") == 500
 
     def test_parse_non_json(self, mock_models_server):
         from api.onboarding import probe_provider_endpoint
-        r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1/parse")
+
+        r = probe_provider_endpoint(
+            "lmstudio", f"{mock_models_server['base']}/v1/parse"
+        )
         assert r["ok"] is False
         assert r["error"] == "parse"
         assert "JSON" in r["detail"] or "json" in r["detail"]
@@ -218,7 +251,10 @@ class TestIssue1499OnboardingProbe:
     def test_parse_wrong_shape(self, mock_models_server):
         """JSON body but not OpenAI /models shape → error='parse'."""
         from api.onboarding import probe_provider_endpoint
-        r = probe_provider_endpoint("lmstudio", f"{mock_models_server['base']}/v1/wrongshape")
+
+        r = probe_provider_endpoint(
+            "lmstudio", f"{mock_models_server['base']}/v1/wrongshape"
+        )
         assert r["ok"] is False
         assert r["error"] == "parse"
         assert "OpenAI" in r["detail"] or "shape" in r["detail"]
@@ -248,7 +284,9 @@ class TestIssue1499OnboardingProbe:
         assert r["ok"] is True
         assert [m["id"] for m in r["models"]] == ["auth-only"]
 
-    def test_probe_does_not_persist_to_config(self, mock_models_server, tmp_path, monkeypatch):
+    def test_probe_does_not_persist_to_config(
+        self, mock_models_server, tmp_path, monkeypatch
+    ):
         """Probe is read-only — must NOT touch config.yaml or .env.
 
         Pre-fix the wizard would have happily auto-written the probed model
@@ -311,7 +349,9 @@ class TestIssue1499OnboardingProbe:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"data": [{"id": "should-not-see"}]}).encode())
+                self.wfile.write(
+                    json.dumps({"data": [{"id": "should-not-see"}]}).encode()
+                )
 
             def log_message(self, *args, **kwargs):  # noqa: N802
                 pass
@@ -348,12 +388,19 @@ class TestIssue1499OnboardingProbe:
         so frontend localization keys can mechanically derive from it.
         """
         from api.onboarding import PROBE_ERROR_CODES
+
         # If you add a new error code, also add an i18n key
         # `onboarding_probe_error_<code>` to all 9 locale blocks in
         # static/i18n.js (search for `onboarding_probe_error_`).
         expected = {
-            "invalid_url", "dns", "connect_refused", "timeout",
-            "http_4xx", "http_5xx", "parse", "unreachable",
+            "invalid_url",
+            "dns",
+            "connect_refused",
+            "timeout",
+            "http_4xx",
+            "http_5xx",
+            "parse",
+            "unreachable",
         }
         assert set(PROBE_ERROR_CODES) == expected, (
             f"PROBE_ERROR_CODES drift: got {set(PROBE_ERROR_CODES)}, "
@@ -390,20 +437,24 @@ class TestIssue1499ProbeRouteEndToEnd:
         assert body["error"] == "invalid_url"
 
     def test_route_returns_success_against_mock(self, mock_models_server):
-        body, status = self._post({
-            "provider": "lmstudio",
-            "base_url": f"{mock_models_server['base']}/v1",
-        })
+        body, status = self._post(
+            {
+                "provider": "lmstudio",
+                "base_url": f"{mock_models_server['base']}/v1",
+            }
+        )
         assert status == 200, f"unexpected status {status}: {body}"
         assert body["ok"] is True
         assert isinstance(body["models"], list)
         assert any(m["id"] == "qwen3-27b" for m in body["models"])
 
     def test_route_returns_dns_error_for_bad_host(self):
-        body, status = self._post({
-            "provider": "lmstudio",
-            "base_url": "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
-        })
+        body, status = self._post(
+            {
+                "provider": "lmstudio",
+                "base_url": "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
+            }
+        )
         assert status == 200
         assert body["ok"] is False
         assert body["error"] == "dns"

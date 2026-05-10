@@ -35,7 +35,9 @@ def test_user_render_uses_stripped_display_content_without_preempting_context_ca
     assert loop_end != -1, "assistant render branch not found after user branch"
     render_prefix = src[loop_start:loop_end]
 
-    display_idx = render_prefix.find("const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;")
+    display_idx = render_prefix.find(
+        "const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;"
+    )
     context_idx = render_prefix.find("if(_isContextCompactionMessage(m))")
     user_idx = render_prefix.find("if(isUser)")
     assert display_idx != -1, "display content stripper not used in render loop"

@@ -56,7 +56,8 @@ class ContextMenuHoverBackgroundTests(unittest.TestCase):
         # Negative lookahead handles the `-` case; we also bar `_` and word chars.
         bad = re.findall(r"var\(--hover\)(?![\w-])", src)
         self.assertEqual(
-            bad, [],
+            bad,
+            [],
             f"Found {len(bad)} `var(--hover)` reference(s) in static/ui.js. "
             "The variable `--hover` is undefined; this resolves to `transparent` "
             "and breaks visible hover state. Use `var(--hover-bg)` instead.",
@@ -66,7 +67,8 @@ class ContextMenuHoverBackgroundTests(unittest.TestCase):
         src = _read(SESSIONS_JS)
         bad = re.findall(r"var\(--hover\)(?![\w-])", src)
         self.assertEqual(
-            bad, [],
+            bad,
+            [],
             f"Found {len(bad)} `var(--hover)` reference(s) in static/sessions.js. "
             "Use `var(--hover-bg)` (the defined variable).",
         )
@@ -95,9 +97,12 @@ class ContextMenuHoverBackgroundTests(unittest.TestCase):
                     break
         body = src[start:end]
         # Expect at least 4 hover assignments (one per menu item).
-        hits = re.findall(r"\.style\.background\s*=\s*['\"]var\(--hover-bg\)['\"]", body)
+        hits = re.findall(
+            r"\.style\.background\s*=\s*['\"]var\(--hover-bg\)['\"]", body
+        )
         self.assertGreaterEqual(
-            len(hits), 4,
+            len(hits),
+            4,
             f"Expected ≥4 menu items to set background to var(--hover-bg) "
             f"(Rename, Reveal, Copy path, Delete). Found {len(hits)}.",
         )
@@ -122,9 +127,12 @@ class ContextMenuHoverBackgroundTests(unittest.TestCase):
                     end = i + 1
                     break
         body = src[start:end]
-        hits = re.findall(r"\.style\.background\s*=\s*['\"]var\(--hover-bg\)['\"]", body)
+        hits = re.findall(
+            r"\.style\.background\s*=\s*['\"]var\(--hover-bg\)['\"]", body
+        )
         self.assertGreaterEqual(
-            len(hits), 2,
+            len(hits),
+            2,
             f"Expected ≥2 menu items to set background to var(--hover-bg) "
             f"in _showProjectContextMenu. Found {len(hits)}.",
         )
@@ -189,7 +197,8 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
         # Must reference `opts.defaultValue` somewhere — the alias was the
         # backward-compatibility fix so future typos don't cause silent drops.
         self.assertIn(
-            "opts.defaultValue", body,
+            "opts.defaultValue",
+            body,
             "showPromptDialog must accept `defaultValue` as an alias for "
             "`value` so callers using the standard HTMLInputElement.defaultValue "
             "param name pre-fill correctly (regression protection).",
@@ -205,7 +214,8 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
         time."""
         body = self._slice_show_prompt_dialog()
         self.assertIn(
-            "selectStem", body,
+            "selectStem",
+            body,
             "showPromptDialog should support `selectStem:true` to select the "
             "filename portion before the last '.' on focus (Finder-style "
             "rename UX).",
@@ -213,11 +223,13 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
         # Pin the actual stem-selection mechanic — must use lastIndexOf('.')
         # and setSelectionRange. Anything else is the wrong selection rule.
         self.assertRegex(
-            body, r"lastIndexOf\(\s*['\"]\.['\"]\s*\)",
+            body,
+            r"lastIndexOf\(\s*['\"]\.['\"]\s*\)",
             "selectStem must use lastIndexOf('.') so 'a.b.c.d' selects 'a.b.c'.",
         )
         self.assertRegex(
-            body, r"setSelectionRange\s*\(\s*0\s*,",
+            body,
+            r"setSelectionRange\s*\(\s*0\s*,",
             "selectStem must use setSelectionRange(0, dot) to select the stem.",
         )
 
@@ -252,7 +264,8 @@ class ShowPromptDialogPrefillTests(unittest.TestCase):
         )
         # Must opt into selectStem for files (not directories).
         self.assertIn(
-            "selectStem", body,
+            "selectStem",
+            body,
             "_inlineRenameFileItem must pass selectStem:... so renaming "
             "'report.txt' selects 'report' and the user can immediately type "
             "the new basename while preserving the extension.",

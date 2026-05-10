@@ -4,6 +4,7 @@ PR #920 added static/manifest.json for PWA support. Without an explicit
 manifest-src directive the browser falls back to default-src and emits
 a noisy console warning. This test locks the explicit directive in place.
 """
+
 import sys
 from pathlib import Path
 
@@ -19,7 +20,7 @@ class TestManifestSrcCSP:
         start = text.find("Content-Security-Policy")
         assert start != -1, "Content-Security-Policy not found in helpers.py"
         # Grab the full CSP string (up to the closing paren of send_header)
-        chunk = text[start:start + 600]
+        chunk = text[start : start + 600]
         return chunk
 
     def test_manifest_src_self_present(self):
@@ -38,6 +39,13 @@ class TestManifestSrcCSP:
     def test_existing_directives_unchanged(self):
         """Existing CSP directives must still be present after the manifest-src addition."""
         csp = self._csp()
-        for directive in ("default-src 'self'", "script-src", "style-src",
-                          "font-src", "connect-src", "base-uri 'self'", "form-action 'self'"):
+        for directive in (
+            "default-src 'self'",
+            "script-src",
+            "style-src",
+            "font-src",
+            "connect-src",
+            "base-uri 'self'",
+            "form-action 'self'",
+        ):
             assert directive in csp, f"Expected CSP directive missing: {directive}"

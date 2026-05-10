@@ -11,10 +11,9 @@ Covers:
 - Logging: at least 5 modules add a module-level logger (B110 remediation)
 - routes.py: session titles redacted in /api/sessions list response
 """
-import ast
+
 import pathlib
 import re
-import sys
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -32,6 +31,7 @@ STATE_SYNC_PY = (REPO_ROOT / "api" / "state_sync.py").read_text()
 
 # ── B324: MD5 usedforsecurity=False ─────────────────────────────────────────
 
+
 class TestMD5SecurityFix(unittest.TestCase):
     """B324: hashlib.md5 must use usedforsecurity=False for non-crypto hashes."""
 
@@ -46,14 +46,18 @@ class TestMD5SecurityFix(unittest.TestCase):
     def test_gateway_watcher_md5_pattern(self):
         """Exact pattern: hashlib.md5(..., usedforsecurity=False)."""
         # Use re.search with DOTALL since the arg may span parens internally
-        import re
         self.assertIsNotNone(
-            re.search(r"hashlib\.md5\(.*?usedforsecurity=False\)", GATEWAY_WATCHER_PY, re.DOTALL),
+            re.search(
+                r"hashlib\.md5\(.*?usedforsecurity=False\)",
+                GATEWAY_WATCHER_PY,
+                re.DOTALL,
+            ),
             "MD5 call must include usedforsecurity=False kwarg",
         )
 
 
 # ── B310: URL scheme validation ──────────────────────────────────────────────
+
 
 class TestUrlSchemeValidation(unittest.TestCase):
     """B310: urllib.request.urlopen must not be called with arbitrary schemes."""
@@ -68,7 +72,7 @@ class TestUrlSchemeValidation(unittest.TestCase):
         # Must check against allowed schemes
         self.assertRegex(
             CONFIG_PY,
-            r'parsed_url\.scheme\s+not\s+in\s+\(',
+            r"parsed_url\.scheme\s+not\s+in\s+\(",
             "config.py: scheme check must use 'not in (...)' pattern",
         )
 
@@ -89,7 +93,7 @@ class TestUrlSchemeValidation(unittest.TestCase):
         )
         self.assertRegex(
             BOOTSTRAP_PY,
-            r'url\.startswith\([^)]+http',
+            r"url\.startswith\([^)]+http",
             "bootstrap.py: must check url starts with http:// or https://",
         )
 
@@ -104,10 +108,13 @@ class TestUrlSchemeValidation(unittest.TestCase):
     def test_config_allows_http_and_https(self):
         """config.py scheme check must permit both http and https."""
         self.assertIn('"http"', CONFIG_PY, "config.py: http must be in allowed schemes")
-        self.assertIn('"https"', CONFIG_PY, "config.py: https must be in allowed schemes")
+        self.assertIn(
+            '"https"', CONFIG_PY, "config.py: https must be in allowed schemes"
+        )
 
 
 # ── B110: Bare except/pass → logger.debug() ─────────────────────────────────
+
 
 class TestBareExceptLogging(unittest.TestCase):
     """B110: bare except/pass blocks must be replaced with logger.debug()."""
@@ -159,6 +166,7 @@ class TestBareExceptLogging(unittest.TestCase):
 
 # ── QuietHTTPServer ──────────────────────────────────────────────────────────
 
+
 class TestQuietHTTPServer(unittest.TestCase):
     """server.py: QuietHTTPServer suppresses client disconnect noise."""
 
@@ -181,7 +189,7 @@ class TestQuietHTTPServer(unittest.TestCase):
     def test_quiet_http_server_used_as_server(self):
         """main() must instantiate QuietHTTPServer not raw ThreadingHTTPServer."""
         # After the class is defined, the server creation should use QuietHTTPServer
-        after_class = SERVER_PY[SERVER_PY.find("class QuietHTTPServer"):]
+        after_class = SERVER_PY[SERVER_PY.find("class QuietHTTPServer") :]
         self.assertIn(
             "QuietHTTPServer(",
             after_class,
@@ -216,7 +224,6 @@ class TestQuietHTTPServer(unittest.TestCase):
 
     def test_sys_imported_in_server(self):
         """server.py must import sys (needed for sys.exc_info)."""
-        import re
         self.assertIsNotNone(
             re.search(r"^import sys", SERVER_PY, re.MULTILINE),
             "server.py: sys must be imported",
@@ -233,6 +240,7 @@ class TestQuietHTTPServer(unittest.TestCase):
 
 # ── Session title redaction in /api/sessions ────────────────────────────────
 
+
 class TestSessionTitleRedaction(unittest.TestCase):
     """routes.py: session titles must be redacted in the sessions list endpoint."""
 
@@ -240,7 +248,7 @@ class TestSessionTitleRedaction(unittest.TestCase):
         """routes.py must call _redact_text on session titles in /api/sessions."""
         self.assertRegex(
             ROUTES_PY,
-            r'_redact_text\([^)]*\btitle\b[^)]*\)',
+            r"_redact_text\([^)]*\btitle\b[^)]*\)",
             "routes.py: session titles must be redacted via _redact_text in /api/sessions",
         )
 

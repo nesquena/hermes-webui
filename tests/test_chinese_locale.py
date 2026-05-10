@@ -134,4 +134,6 @@ def test_traditional_chinese_mcp_and_tree_labels_are_not_cyrillic():
     for entry in expected:
         assert entry in block
 
-    assert not re.search(r"[\u0400-\u04FF]", block), "zh-Hant locale contains Cyrillic text"
+    assert not re.search(r"[\u0400-\u04FF]", block), (
+        "zh-Hant locale contains Cyrillic text"
+    )

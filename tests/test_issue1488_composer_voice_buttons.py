@@ -16,6 +16,7 @@ share the same tooltip ("Voice input") in master. This module pins the fix:
 6. The legacy `voice_toggle` i18n key MUST be removed everywhere — its
    string was identical to the dictation tooltip and caused the bug.
 """
+
 import re
 
 
@@ -38,14 +39,16 @@ class TestComposerVoiceButtonHTML:
         )
         assert m, "btnMic <button> tag must exist"
         tag = m.group(0)
-        assert 'data-i18n-title="voice_dictate"' in tag, \
-            "btnMic must have data-i18n-title=\"voice_dictate\" — without " \
+        assert 'data-i18n-title="voice_dictate"' in tag, (
+            'btnMic must have data-i18n-title="voice_dictate" — without '
             "it the tooltip stays as the static fallback and ignores locale."
+        )
         # Static fallback should also match (read by users with stale i18n).
         # Accept either the legacy `title="Dictate"` or the custom-tooltip
         # variant `data-tooltip="Dictate"` introduced in #1775.
-        assert 'title="Dictate"' in tag or 'data-tooltip="Dictate"' in tag, \
+        assert 'title="Dictate"' in tag or 'data-tooltip="Dictate"' in tag, (
             "btnMic static tooltip fallback must say 'Dictate' (not 'Voice input')."
+        )
 
     def test_voice_mode_button_has_voice_mode_i18n_key(self):
         """btnVoiceMode must bind data-i18n-title="voice_mode_toggle"."""
@@ -57,12 +60,14 @@ class TestComposerVoiceButtonHTML:
         )
         assert m, "btnVoiceMode <button> tag must exist"
         tag = m.group(0)
-        assert 'data-i18n-title="voice_mode_toggle"' in tag, \
-            "btnVoiceMode must use data-i18n-title=\"voice_mode_toggle\". " \
-            "The legacy key 'voice_toggle' resolved to 'Voice input' and " \
+        assert 'data-i18n-title="voice_mode_toggle"' in tag, (
+            'btnVoiceMode must use data-i18n-title="voice_mode_toggle". '
+            "The legacy key 'voice_toggle' resolved to 'Voice input' and "
             "made btnMic and btnVoiceMode appear identical."
-        assert 'voice_toggle"' not in tag, \
+        )
+        assert 'voice_toggle"' not in tag, (
             "Stale voice_toggle reference still on btnVoiceMode — must be voice_mode_toggle."
+        )
 
     def test_buttons_have_distinct_static_titles(self):
         """The static title/tooltip attributes must differ as a fallback for
@@ -71,21 +76,27 @@ class TestComposerVoiceButtonHTML:
         mic = re.search(r'<button[^>]*\bid="btnMic"[^>]*>', html, re.DOTALL)
         vm = re.search(r'<button[^>]*\bid="btnVoiceMode"[^>]*>', html, re.DOTALL)
         assert mic and vm
+
         # Accept either `title=` (legacy) or `data-tooltip=` (custom tooltip
         # introduced in #1775) as the static fallback string.
         def _static_tooltip(tag: str) -> str:
-            m = re.search(r'\bdata-tooltip="([^"]+)"', tag) \
-                or re.search(r'\btitle="([^"]+)"', tag)
+            m = re.search(r'\bdata-tooltip="([^"]+)"', tag) or re.search(
+                r'\btitle="([^"]+)"', tag
+            )
             assert m, f"no static tooltip on {tag[:120]}"
             return m.group(1)
+
         mic_title = _static_tooltip(mic.group(0))
         vm_title = _static_tooltip(vm.group(0))
-        assert mic_title != vm_title, \
+        assert mic_title != vm_title, (
             f"Static tooltips must differ; both say {mic_title!r}"
-        assert "voice input" not in mic_title.lower(), \
+        )
+        assert "voice input" not in mic_title.lower(), (
             f"btnMic static tooltip still says 'Voice input': {mic_title!r}"
-        assert "voice input" not in vm_title.lower(), \
+        )
+        assert "voice input" not in vm_title.lower(), (
             f"btnVoiceMode static tooltip still says 'Voice input': {vm_title!r}"
+        )
 
     def test_voice_mode_uses_audio_lines_glyph(self):
         """btnVoiceMode SVG must use the audio-lines (waveform) shape.
@@ -109,8 +120,9 @@ class TestComposerVoiceButtonHTML:
         )
         # Must NOT contain the old mic-shaped rect (rx="3" capsule) — that's
         # the dictation glyph and using it again recreates #1488.
-        assert 'rect x="9" y="1" width="6" height="12" rx="3"' not in body, \
+        assert 'rect x="9" y="1" width="6" height="12" rx="3"' not in body, (
             "btnVoiceMode regressed to mic shape — the visual confusion bug returns."
+        )
 
 
 class TestComposerVoiceButtonI18n:
@@ -130,7 +142,7 @@ class TestComposerVoiceButtonI18n:
         tooltip bug. It must no longer appear in i18n.js."""
         src = _src("i18n.js")
         # Match the property name only (not strings that happen to mention it).
-        leftover = re.findall(r'\bvoice_toggle\s*:', src)
+        leftover = re.findall(r"\bvoice_toggle\s*:", src)
         assert not leftover, (
             f"Stale voice_toggle: key still in i18n.js ({len(leftover)} "
             f"occurrences). Replace with voice_mode_toggle / voice_dictate."
@@ -140,7 +152,7 @@ class TestComposerVoiceButtonI18n:
         """Every locale block must define all 4 new composer voice-button keys."""
         src = _src("i18n.js")
         for key in self.REQUIRED_KEYS:
-            count = len(re.findall(rf'\b{re.escape(key)}\s*:', src))
+            count = len(re.findall(rf"\b{re.escape(key)}\s*:", src))
             assert count == len(self.LOCALES), (
                 f"i18n key {key!r} appears {count} times — expected one per "
                 f"locale ({len(self.LOCALES)} locales: {self.LOCALES}). "
@@ -153,8 +165,9 @@ class TestComposerVoiceButtonI18n:
         # Find the en block (first occurrence of voice_dictate is in en)
         m = re.search(r"\bvoice_dictate\s*:\s*'([^']+)'", src)
         assert m, "voice_dictate key not found"
-        assert m.group(1) == "Dictate", \
+        assert m.group(1) == "Dictate", (
             f"English voice_dictate should be 'Dictate'; got {m.group(1)!r}"
+        )
 
     def test_english_voice_mode_label_is_voice_mode(self):
         """English voice_mode_toggle must read 'Voice mode' — matches
@@ -164,8 +177,9 @@ class TestComposerVoiceButtonI18n:
         # _active suffix variant — use a lookahead to assert no _active.
         m = re.search(r"\bvoice_mode_toggle\s*:\s*'([^']+)'", src)
         assert m, "voice_mode_toggle key not found"
-        assert m.group(1) == "Voice mode", \
+        assert m.group(1) == "Voice mode", (
             f"English voice_mode_toggle should be 'Voice mode'; got {m.group(1)!r}"
+        )
 
 
 class TestVoiceModePreferenceGate:
@@ -186,10 +200,12 @@ class TestVoiceModePreferenceGate:
         # Find the voice-mode pref helper. Must NOT contain an
         # unconditional `modeBtn.style.display='';` (the master bug).
         # Instead, the function _applyVoiceModePref must be the source of truth.
-        assert "_applyVoiceModePref" in src, \
+        assert "_applyVoiceModePref" in src, (
             "boot.js must expose _applyVoiceModePref so settings toggle re-applies live."
-        assert "_voiceModePrefEnabled" in src, \
+        )
+        assert "_voiceModePrefEnabled" in src, (
             "boot.js must define _voiceModePrefEnabled to read the pref."
+        )
         # The pre-existing `modeBtn.style.display='';` line must be gone.
         # We allow `style.display = _voiceModePrefEnabled() ? '' : 'none'`.
         assert "modeBtn.style.display='';" not in src, (
@@ -200,18 +216,21 @@ class TestVoiceModePreferenceGate:
     def test_settings_pane_has_voice_mode_checkbox(self):
         """index.html Preferences pane must include the toggle checkbox."""
         html = _src("index.html")
-        assert 'id="settingsVoiceModeEnabled"' in html, \
+        assert 'id="settingsVoiceModeEnabled"' in html, (
             "Preferences pane must include #settingsVoiceModeEnabled checkbox."
-        assert 'data-i18n="settings_label_voice_mode"' in html, \
+        )
+        assert 'data-i18n="settings_label_voice_mode"' in html, (
             "Voice-mode pref label must use data-i18n='settings_label_voice_mode'."
-        assert 'data-i18n="settings_desc_voice_mode"' in html, \
+        )
+        assert 'data-i18n="settings_desc_voice_mode"' in html, (
             "Voice-mode pref description must use data-i18n='settings_desc_voice_mode'."
+        )
 
     def test_settings_pane_has_voice_mode_i18n_keys(self):
         """The two new pref-label i18n keys must exist in every locale."""
         src = _src("i18n.js")
         for key in ("settings_label_voice_mode", "settings_desc_voice_mode"):
-            count = len(re.findall(rf'\b{re.escape(key)}\s*:', src))
+            count = len(re.findall(rf"\b{re.escape(key)}\s*:", src))
             assert count == 9, (
                 f"Preferences i18n key {key!r} appears {count} times — "
                 f"expected 9 (one per locale)."
@@ -221,13 +240,16 @@ class TestVoiceModePreferenceGate:
         """panels.js must read the checkbox state, persist to localStorage,
         and call _applyVoiceModePref so the change is live without reload."""
         src = _src("panels.js")
-        assert "settingsVoiceModeEnabled" in src, \
+        assert "settingsVoiceModeEnabled" in src, (
             "panels.js must reference the #settingsVoiceModeEnabled checkbox."
-        assert "'hermes-voice-mode-button'" in src, \
+        )
+        assert "'hermes-voice-mode-button'" in src, (
             "panels.js must persist the pref to localStorage key 'hermes-voice-mode-button'."
-        assert "_applyVoiceModePref" in src, \
-            "panels.js onchange handler must call window._applyVoiceModePref() " \
+        )
+        assert "_applyVoiceModePref" in src, (
+            "panels.js onchange handler must call window._applyVoiceModePref() "
             "so the button appears/disappears immediately."
+        )
 
 
 class TestActiveStateTooltips:
@@ -244,8 +266,9 @@ class TestActiveStateTooltips:
             "_setRecording must flip the tooltip to voice_dictate_active when "
             "recording starts so the user knows pressing it now stops dictation."
         )
-        assert "voice_dictate'" in body or "voice_dictate\"" in body, \
+        assert "voice_dictate'" in body or 'voice_dictate"' in body, (
             "_setRecording must restore voice_dictate when recording stops."
+        )
 
     def test_voice_mode_active_tooltip(self):
         """_activate() should set modeBtn.title to voice_mode_toggle_active."""
@@ -275,5 +298,6 @@ class TestAudioLinesIconRegistered:
 
     def test_audio_lines_in_li_paths(self):
         src = _src("icons.js")
-        assert "'audio-lines'" in src, \
+        assert "'audio-lines'" in src, (
             "audio-lines must be registered in LI_PATHS for li('audio-lines') reuse."
+        )

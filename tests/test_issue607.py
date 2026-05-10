@@ -1,7 +1,6 @@
 """Tests for PR #648 — Gemma 4 thinking token stripping (closes #607)."""
-import re
+
 import pathlib
-import pytest
 
 
 # ---------------------------------------------------------------------------

@@ -12,8 +12,6 @@ provider/model path as the canonical name at their inference endpoint.
 Stripping the prefix to a bare name is exactly Bug 1, so the fix for Bug 2
 must not reintroduce it.
 """
-import sys
-import types
 
 
 def _models_with_provider(provider, monkeypatch):
@@ -29,6 +27,7 @@ def _models_with_provider(provider, monkeypatch):
         config._cfg_mtime = 0.0
     try:
         from api.config import resolve_model_provider
+
         return resolve_model_provider
     finally:
         config.cfg.clear()
@@ -46,6 +45,7 @@ class TestNousModelIds:
         than relying on the slash-only portal provider guard.
         """
         from api.config import _PROVIDER_MODELS
+
         nous_models = _PROVIDER_MODELS.get("nous", [])
         assert nous_models, "Nous must have at least one static model"
         for m in nous_models:
@@ -59,6 +59,7 @@ class TestNousModelIds:
     def test_nous_known_models_present(self):
         """Key Nous models must be present with correct @nous:-prefixed IDs."""
         from api.config import _PROVIDER_MODELS
+
         nous_ids = {m["id"] for m in _PROVIDER_MODELS.get("nous", [])}
         assert "@nous:anthropic/claude-opus-4.6" in nous_ids, (
             "@nous:anthropic/claude-opus-4.6 must be in Nous model list"
@@ -73,11 +74,16 @@ class TestNousModelIds:
     def test_nous_models_no_bare_or_slash_only(self):
         """No Nous static model should be bare or slash-only without @nous: prefix."""
         from api.config import _PROVIDER_MODELS
+
         bad_ids = {
-            "claude-opus-4.6", "claude-sonnet-4.6", "gpt-5.4-mini",
+            "claude-opus-4.6",
+            "claude-sonnet-4.6",
+            "gpt-5.4-mini",
             "gemini-3.1-pro-preview",
-            "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6",
-            "openai/gpt-5.4-mini", "google/gemini-3.1-pro-preview",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-sonnet-4.6",
+            "openai/gpt-5.4-mini",
+            "google/gemini-3.1-pro-preview",
         }
         nous_ids = {m["id"] for m in _PROVIDER_MODELS.get("nous", [])}
         for bad in bad_ids:
@@ -93,6 +99,7 @@ class TestPortalProviderRouting:
 
     def _resolve(self, model_id, provider):
         import api.config as config
+
         old = dict(config.cfg)
         old_mtime = config._cfg_mtime
         config.cfg.clear()
@@ -103,6 +110,7 @@ class TestPortalProviderRouting:
             config._cfg_mtime = 0.0
         try:
             from api.config import resolve_model_provider
+
             return resolve_model_provider(model_id)
         finally:
             config.cfg.clear()
@@ -141,8 +149,12 @@ class TestPortalProviderRouting:
     def test_opencode_zen_routes_cross_namespace(self):
         """opencode-zen is also a portal — cross-namespace models must route through it
         with the slash-prefixed ID preserved."""
-        model, provider, _ = self._resolve("anthropic/claude-sonnet-4.6", "opencode-zen")
-        assert provider == "opencode-zen", f"Expected provider='opencode-zen', got '{provider}'."
+        model, provider, _ = self._resolve(
+            "anthropic/claude-sonnet-4.6", "opencode-zen"
+        )
+        assert provider == "opencode-zen", (
+            f"Expected provider='opencode-zen', got '{provider}'."
+        )
         assert model == "anthropic/claude-sonnet-4.6", (
             f"Expected 'anthropic/claude-sonnet-4.6', got '{model}'."
         )

@@ -8,12 +8,17 @@ STYLE_CSS = (ROOT / "static" / "style.css").read_text()
 def test_error_toast_default_duration_is_substantially_longer_than_info_toasts():
     assert "const TOAST_DEFAULT_MS=2800" in UI_JS
     assert "const TOAST_ERROR_DEFAULT_MS=20000" in UI_JS
-    assert "const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms" in UI_JS
+    assert (
+        "const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms"
+        in UI_JS
+    )
     assert "ms||2800" not in UI_JS
 
 
 def test_error_toast_keeps_explicit_duration_override():
-    show_toast = UI_JS[UI_JS.index("function showToast"):UI_JS.index("// ── Shared app dialogs")]
+    show_toast = UI_JS[
+        UI_JS.index("function showToast") : UI_JS.index("// ── Shared app dialogs")
+    ]
     assert "ms==null" in show_toast
     assert "?TOAST_ERROR_DEFAULT_MS" in show_toast
     assert ":TOAST_DEFAULT_MS" in show_toast
@@ -21,7 +26,9 @@ def test_error_toast_keeps_explicit_duration_override():
 
 
 def test_error_toast_has_copy_button_for_exact_error_text():
-    show_toast = UI_JS[UI_JS.index("function showToast"):UI_JS.index("// ── Shared app dialogs")]
+    show_toast = UI_JS[
+        UI_JS.index("function showToast") : UI_JS.index("// ── Shared app dialogs")
+    ]
     assert "toast-copy" in show_toast
     assert "data-toast-copy" in show_toast
     assert "copyToastText" in show_toast

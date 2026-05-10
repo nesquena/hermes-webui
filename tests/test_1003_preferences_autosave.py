@@ -10,19 +10,28 @@ preferences-panel autosave pattern is wired correctly:
 - Status div exists in static/index.html
 - _autosavePreferencesSettings clears the dirty flag and hides the unsaved bar
 """
+
 import re
 from pathlib import Path
 
-PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
-INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
+    encoding="utf-8"
+)
+INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(
+    encoding="utf-8"
+)
+I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(
+    encoding="utf-8"
+)
 
 
 def _function_block(src: str, name: str) -> str:
     marker = re.search(rf"(^|\n)(?:async\s+)?function\s+{re.escape(name)}\(", src)
     assert marker is not None, f"{name}() not found"
     start = marker.start()
-    next_marker = re.search(r"\n(?:function\s+\w+\(|async\s+function\s+\w+\()", src[start + 1:])
+    next_marker = re.search(
+        r"\n(?:function\s+\w+\(|async\s+function\s+\w+\()", src[start + 1 :]
+    )
     end = start + 1 + next_marker.start() if next_marker else len(src)
     return src[start:end]
 
@@ -56,10 +65,12 @@ def test_all_14_preference_fields_have_autosave_payload_entries():
     """_preferencesPayloadFromUi must include all 14 preference fields."""
     block = _function_block(PANELS_JS, "_preferencesPayloadFromUi")
     for dom_id, field in PREFERENCE_FIELDS_AUTOSAVE:
-        assert f"$('{dom_id}')" in block, \
+        assert f"$('{dom_id}')" in block, (
             f"_preferencesPayloadFromUi missing reference to {dom_id}"
-        assert f"payload.{field}=" in block, \
+        )
+        assert f"payload.{field}=" in block, (
             f"_preferencesPayloadFromUi missing payload assignment for {field}"
+        )
 
 
 def test_preference_fields_use_schedule_autosave_not_mark_dirty():
@@ -74,8 +85,9 @@ def test_preference_fields_use_schedule_autosave_not_mark_dirty():
         if dom_id == "settingsBotName":
             # Bot name uses a 500ms wrapper that calls _schedulePreferencesAutosave
             # via setTimeout. The wrapper itself is in the loadSettingsPanel block.
-            assert "_schedulePreferencesAutosave" in panel, \
+            assert "_schedulePreferencesAutosave" in panel, (
                 "_schedulePreferencesAutosave must be referenced for bot_name flow"
+            )
             continue
         # For other fields: search the field's block for the addEventListener call
         # and verify it points to _schedulePreferencesAutosave.
@@ -83,12 +95,14 @@ def test_preference_fields_use_schedule_autosave_not_mark_dirty():
         idx = panel.find(f"$('{dom_id}')")
         assert idx != -1, f"{dom_id} not loaded in loadSettingsPanel"
         # Window of next ~600 chars covers the .addEventListener call
-        window = panel[idx:idx + 600]
+        window = panel[idx : idx + 600]
         assert "addEventListener" in window, f"{dom_id} has no addEventListener"
-        assert "_schedulePreferencesAutosave" in window, \
+        assert "_schedulePreferencesAutosave" in window, (
             f"{dom_id} listener should call _schedulePreferencesAutosave (Phase 2 #1003)"
-        assert "_markSettingsDirty" not in window, \
+        )
+        assert "_markSettingsDirty" not in window, (
             f"{dom_id} should not call _markSettingsDirty (Phase 2 autosaves it)"
+        )
 
 
 def test_password_still_uses_mark_dirty():
@@ -97,11 +111,13 @@ def test_password_still_uses_mark_dirty():
     panel = _load_settings_panel_block()
     idx = panel.find("$('settingsPassword')")
     assert idx != -1, "settingsPassword field not loaded"
-    window = panel[idx:idx + 400]
-    assert "_markSettingsDirty" in window, \
+    window = panel[idx : idx + 400]
+    assert "_markSettingsDirty" in window, (
         "Password field MUST call _markSettingsDirty (security: never autosave passwords)"
-    assert "_schedulePreferencesAutosave" not in window, \
+    )
+    assert "_schedulePreferencesAutosave" not in window, (
         "Password field MUST NOT call _schedulePreferencesAutosave (security)"
+    )
 
 
 def test_autosave_clears_dirty_flag_and_hides_unsaved_bar():
@@ -125,7 +141,9 @@ def test_autosave_clears_dirty_flag_and_hides_unsaved_bar():
     )
     # The clear-and-hide block must be conditional, not unconditional
     compact = block.replace(" ", "").replace("\n", "")
-    assert "if(!pwDirty&&!modelDirty)" in compact or "if(pwDirty||modelDirty)" in compact, (
+    assert (
+        "if(!pwDirty&&!modelDirty)" in compact or "if(pwDirty||modelDirty)" in compact
+    ), (
         "_autosavePreferencesSettings must guard the dirty-clear and bar-hide "
         "with a condition that defers when a manual field has pending edits"
     )
@@ -152,22 +170,27 @@ def test_retry_function_exists_and_falls_back_gracefully():
     """_retryPreferencesAutosave must exist and use the saved retry payload (or
     rebuild from UI if unavailable)."""
     block = _function_block(PANELS_JS, "_retryPreferencesAutosave")
-    assert "_settingsPreferencesAutosaveRetryPayload" in block, \
+    assert "_settingsPreferencesAutosaveRetryPayload" in block, (
         "Retry must reference the stored payload"
-    assert "_preferencesPayloadFromUi" in block, \
+    )
+    assert "_preferencesPayloadFromUi" in block, (
         "Retry must fall back to rebuilding from UI when no stored payload"
-    assert "_autosavePreferencesSettings" in block, \
+    )
+    assert "_autosavePreferencesSettings" in block, (
         "Retry must invoke _autosavePreferencesSettings"
+    )
 
 
 def test_debounce_cancels_pending_timer_on_rapid_input():
     """_schedulePreferencesAutosave must clear any in-flight timer before
     setting a new one — otherwise rapid changes queue up multiple POSTs."""
     block = _function_block(PANELS_JS, "_schedulePreferencesAutosave")
-    assert "clearTimeout(_settingsPreferencesAutosaveTimer)" in block, \
+    assert "clearTimeout(_settingsPreferencesAutosaveTimer)" in block, (
         "_schedulePreferencesAutosave must clearTimeout the prior timer"
-    assert "350" in block, \
+    )
+    assert "350" in block, (
         "_schedulePreferencesAutosave must use 350ms debounce (matching Phase 1)"
+    )
 
 
 def test_phase1_appearance_autosave_still_passes():

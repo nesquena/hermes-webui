@@ -8,9 +8,9 @@ Covers:
 - streaming.py: SessionDB init failure prints a WARNING (not silently swallowed)
 - streaming.py: SessionDB init is placed before AIAgent construction
 """
+
 import ast
 import pathlib
-import re
 import queue
 import sys
 import types
@@ -24,15 +24,18 @@ STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
 # ── Shared helpers for sprint-42 additional tests ────────────────────────────
 
 REPO = REPO_ROOT  # alias used by #427 tests
-_SESSIONS_JS = REPO_ROOT / 'static' / 'sessions.js'
-_STREAMING_PY = REPO_ROOT / 'api' / 'streaming.py'
-_MESSAGES_JS = REPO_ROOT / 'static' / 'messages.js'
-_UI_JS = REPO_ROOT / 'static' / 'ui.js'
+_SESSIONS_JS = REPO_ROOT / "static" / "sessions.js"
+_STREAMING_PY = REPO_ROOT / "api" / "streaming.py"
+_MESSAGES_JS = REPO_ROOT / "static" / "messages.js"
+_UI_JS = REPO_ROOT / "static" / "ui.js"
+
 
 def _read_sessions_js():
-    return _SESSIONS_JS.read_text(encoding='utf-8')
+    return _SESSIONS_JS.read_text(encoding="utf-8")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSessionDBInjection(unittest.TestCase):
     """Verify SessionDB is initialized and passed to AIAgent in streaming.py."""
@@ -170,20 +173,43 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 }
 
         class CapturingAgent:
-            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
-                         api_mode=None, acp_command=None, acp_args=None,
-                         credential_pool=None, platform=None, quiet_mode=False,
-                         enabled_toolsets=None, fallback_model=None, session_id=None,
-                         session_db=None, stream_delta_callback=None,
-                         reasoning_callback=None, tool_progress_callback=None,
-                         clarify_callback=None, **kwargs):
+            def __init__(
+                self,
+                model=None,
+                provider=None,
+                base_url=None,
+                api_key=None,
+                api_mode=None,
+                acp_command=None,
+                acp_args=None,
+                credential_pool=None,
+                platform=None,
+                quiet_mode=False,
+                enabled_toolsets=None,
+                fallback_model=None,
+                session_id=None,
+                session_db=None,
+                stream_delta_callback=None,
+                reasoning_callback=None,
+                tool_progress_callback=None,
+                clarify_callback=None,
+                **kwargs,
+            ):
                 captured["init_kwargs"] = dict(
-                    model=model, provider=provider, base_url=base_url,
-                    api_key=api_key, api_mode=api_mode, acp_command=acp_command,
-                    acp_args=acp_args, credential_pool=credential_pool,
-                    platform=platform, quiet_mode=quiet_mode,
-                    enabled_toolsets=enabled_toolsets, fallback_model=fallback_model,
-                    session_id=session_id, session_db=session_db,
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_mode=api_mode,
+                    acp_command=acp_command,
+                    acp_args=acp_args,
+                    credential_pool=credential_pool,
+                    platform=platform,
+                    quiet_mode=quiet_mode,
+                    enabled_toolsets=enabled_toolsets,
+                    fallback_model=fallback_model,
+                    session_id=session_id,
+                    session_db=session_db,
                     stream_delta_callback=stream_delta_callback,
                     reasoning_callback=reasoning_callback,
                     tool_progress_callback=tool_progress_callback,
@@ -220,19 +246,25 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=fake_session_db)
 
-        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
-             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
-             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
-             mock.patch("api.config.get_config", return_value={}), \
-             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
-             mock.patch.dict(
-                 sys.modules,
-                 {
-                     "hermes_cli": fake_hermes_cli,
-                     "hermes_cli.runtime_provider": fake_runtime_module,
-                     "hermes_state": fake_hermes_state,
-                 },
-             ):
+        with (
+            mock.patch.object(streaming, "get_session", return_value=fake_session),
+            mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent),
+            mock.patch.object(
+                streaming,
+                "resolve_model_provider",
+                return_value=("gpt-5.4", "openai-codex", None),
+            ),
+            mock.patch("api.config.get_config", return_value={}),
+            mock.patch("api.config._resolve_cli_toolsets", return_value=[]),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "hermes_cli": fake_hermes_cli,
+                    "hermes_cli.runtime_provider": fake_runtime_module,
+                    "hermes_state": fake_hermes_state,
+                },
+            ),
+        ):
             streaming.STREAMS[fake_stream_id] = fake_queue
             streaming._run_agent_streaming(
                 session_id=fake_session.session_id,
@@ -278,10 +310,16 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 **kwargs,
             ):
                 captured["init_kwargs"] = dict(
-                    model=model, provider=provider, base_url=base_url, api_key=api_key,
-                    platform=platform, quiet_mode=quiet_mode,
-                    enabled_toolsets=enabled_toolsets, fallback_model=fallback_model,
-                    session_id=session_id, session_db=session_db,
+                    model=model,
+                    provider=provider,
+                    base_url=base_url,
+                    api_key=api_key,
+                    platform=platform,
+                    quiet_mode=quiet_mode,
+                    enabled_toolsets=enabled_toolsets,
+                    fallback_model=fallback_model,
+                    session_id=session_id,
+                    session_db=session_db,
                     stream_delta_callback=stream_delta_callback,
                     reasoning_callback=reasoning_callback,
                     tool_progress_callback=tool_progress_callback,
@@ -300,10 +338,15 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
             def run_conversation(self, **kwargs):
                 if self.interim_assistant_callback:
-                    self.interim_assistant_callback("Inspecting repo structure.", already_streamed=False)
+                    self.interim_assistant_callback(
+                        "Inspecting repo structure.", already_streamed=False
+                    )
                 return {
                     "messages": [
-                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {
+                            "role": "user",
+                            "content": kwargs.get("persist_user_message", ""),
+                        },
                         {"role": "assistant", "content": "ok"},
                     ]
                 }
@@ -332,12 +375,20 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
             def compact(self):
                 return {
-                    "session_id": self.session_id, "title": self.title,
-                    "workspace": self.workspace, "model": self.model,
-                    "created_at": 0, "updated_at": 0, "pinned": False,
-                    "archived": False, "project_id": None, "profile": None,
-                    "input_tokens": 0, "output_tokens": 0,
-                    "estimated_cost": None, "personality": None,
+                    "session_id": self.session_id,
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "pinned": False,
+                    "archived": False,
+                    "project_id": None,
+                    "profile": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "estimated_cost": None,
+                    "personality": None,
                 }
 
             @property
@@ -347,30 +398,41 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_stream_id = "stream-interim-callback"
         fake_queue = queue.Queue()
         fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
-        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
-            "provider": "openai-codex",
-            "base_url": "https://api.openai.com/v1",
-            "api_key": "rt-key",
-            "api_mode": "codex_responses",
-            "command": "codex",
-            "args": ["exec", "--json"],
-            "credential_pool": object(),
-        })
+        fake_rt_module.resolve_runtime_provider = mock.Mock(
+            return_value={
+                "provider": "openai-codex",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "rt-key",
+                "api_mode": "codex_responses",
+                "command": "codex",
+                "args": ["exec", "--json"],
+                "credential_pool": object(),
+            }
+        )
         fake_hermes_cli = types.ModuleType("hermes_cli")
         fake_hermes_cli.runtime_provider = fake_rt_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=object())
 
-        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
-             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
-             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai-codex", None)), \
-             mock.patch("api.config.get_config", return_value={}), \
-             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
-             mock.patch.dict(sys.modules, {
-                 "hermes_cli": fake_hermes_cli,
-                 "hermes_cli.runtime_provider": fake_rt_module,
-                 "hermes_state": fake_hermes_state,
-             }):
+        with (
+            mock.patch.object(streaming, "get_session", return_value=FakeSession()),
+            mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent),
+            mock.patch.object(
+                streaming,
+                "resolve_model_provider",
+                return_value=("gpt-4o", "openai-codex", None),
+            ),
+            mock.patch("api.config.get_config", return_value={}),
+            mock.patch("api.config._resolve_cli_toolsets", return_value=[]),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "hermes_cli": fake_hermes_cli,
+                    "hermes_cli.runtime_provider": fake_rt_module,
+                    "hermes_state": fake_hermes_state,
+                },
+            ),
+        ):
             streaming.STREAMS[fake_stream_id] = fake_queue
             streaming._run_agent_streaming(
                 session_id="sess-interim-test",
@@ -396,10 +458,11 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                event == "interim_assistant" and event_data.get("text") == "Inspecting repo structure."
+                event == "interim_assistant"
+                and event_data.get("text") == "Inspecting repo structure."
                 for event, event_data in interim_events
             ),
-            "interim_assistant event should carry the assistant commentary text"
+            "interim_assistant event should carry the assistant commentary text",
         )
 
 
@@ -438,168 +501,199 @@ class TestSessionDBAST(unittest.TestCase):
 class TestModelCustomInput(unittest.TestCase):
     """Tests for issue #444 — custom model ID input in model dropdown."""
 
-    STATIC = pathlib.Path(__file__).parent.parent / 'static'
+    STATIC = pathlib.Path(__file__).parent.parent / "static"
 
     def _read(self, filename):
         path = self.STATIC / filename
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read()
 
     def _renderModelDropdown_body(self):
-        src = self._read('ui.js')
-        start = src.find('function renderModelDropdown()')
-        end = src.find('\nasync function selectModelFromDropdown', start)
+        src = self._read("ui.js")
+        start = src.find("function renderModelDropdown()")
+        end = src.find("\nasync function selectModelFromDropdown", start)
         return src[start:end]
 
     def test_model_custom_input_in_dropdown(self):
         body = self._renderModelDropdown_body()
-        self.assertIn('model-custom-input', body,
-                      'model-custom-input class must be in renderModelDropdown')
+        self.assertIn(
+            "model-custom-input",
+            body,
+            "model-custom-input class must be in renderModelDropdown",
+        )
 
     def test_model_custom_enter_handler(self):
         body = self._renderModelDropdown_body()
-        self.assertIn('_applyCustom', body,
-                      '_applyCustom function must be defined in renderModelDropdown')
+        self.assertIn(
+            "_applyCustom",
+            body,
+            "_applyCustom function must be defined in renderModelDropdown",
+        )
 
     def test_model_custom_css_defined(self):
-        css = self._read('style.css')
-        self.assertIn('.model-custom-row', css,
-                      '.model-custom-row must be defined in style.css')
-        self.assertIn('.model-custom-input', css,
-                      '.model-custom-input must be defined in style.css')
+        css = self._read("style.css")
+        self.assertIn(
+            ".model-custom-row", css, ".model-custom-row must be defined in style.css"
+        )
+        self.assertIn(
+            ".model-custom-input",
+            css,
+            ".model-custom-input must be defined in style.css",
+        )
 
     def test_model_custom_i18n_keys(self):
-        i18n = self._read('i18n.js')
+        i18n = self._read("i18n.js")
         # Find en locale block (appears first before es)
         en_block_start = i18n.find("'en'")
         es_block_start = i18n.find("'es'")
         en_block = i18n[en_block_start:es_block_start]
-        self.assertIn('model_custom_label', en_block,
-                      'model_custom_label must be in en locale')
-        self.assertIn('model_custom_placeholder', en_block,
-                      'model_custom_placeholder must be in en locale')
+        self.assertIn(
+            "model_custom_label", en_block, "model_custom_label must be in en locale"
+        )
+        self.assertIn(
+            "model_custom_placeholder",
+            en_block,
+            "model_custom_placeholder must be in en locale",
+        )
 
 
 # ── Sprint 42 additional tests: context indicator (#437) ─────────────────
 def test_context_indicator_uses_pick_helper():
     """The _pick helper must be present in sessions.js to prefer latest over stale values."""
     content = _read_sessions_js()
-    assert '_pick' in content, "_pick helper not found in static/sessions.js"
+    assert "_pick" in content, "_pick helper not found in static/sessions.js"
 
 
 def test_context_indicator_old_pattern_removed():
     """The old || pattern that preferred stale session data must be gone."""
     content = _read_sessions_js()
-    assert '_s.input_tokens||u.input_tokens' not in content, \
+    assert "_s.input_tokens||u.input_tokens" not in content, (
         "Old stale-data-first pattern '_s.input_tokens||u.input_tokens' still present in static/sessions.js"
+    )
 
 
 def test_context_indicator_all_six_fields():
     """All six token/cost fields must appear in the _syncCtxIndicator call."""
     content = _read_sessions_js()
     fields = [
-        'input_tokens',
-        'output_tokens',
-        'estimated_cost',
-        'context_length',
-        'last_prompt_tokens',
-        'threshold_tokens',
+        "input_tokens",
+        "output_tokens",
+        "estimated_cost",
+        "context_length",
+        "last_prompt_tokens",
+        "threshold_tokens",
     ]
     for field in fields:
-        assert field in content, \
+        assert field in content, (
             f"Field '{field}' not found in static/sessions.js _syncCtxIndicator call"
+        )
 
 
 # ── Sprint 42 additional tests: system prompt title (#441) ──────────────
 def test_system_prompt_title_guard_exists():
     """The guard that detects [SYSTEM: prefixes must be present in sessions.js."""
     content = _read_sessions_js()
-    assert '[SYSTEM:' in content, \
+    assert "[SYSTEM:" in content, (
         "sessions.js must contain the [SYSTEM: guard to intercept system-prompt titles"
+    )
     # Make sure it appears in an if-condition context, not just a comment
-    assert "cleanTitle.startsWith('[SYSTEM:')" in content, \
+    assert "cleanTitle.startsWith('[SYSTEM:')" in content, (
         "sessions.js must have: cleanTitle.startsWith('[SYSTEM:') guard expression"
+    )
 
 
 def test_cleanTitle_is_let_not_const():
     """cleanTitle must be declared with let (not const) to allow reassignment in the guard."""
     content = _read_sessions_js()
-    assert 'let cleanTitle' in content, \
+    assert "let cleanTitle" in content, (
         "cleanTitle must be declared with 'let' (not 'const') to allow reassignment"
+    )
     # Make sure the old const form is gone in this context
     # (check the specific assignment line pattern)
-    assert "const cleanTitle=tags.length" not in content, \
+    assert "const cleanTitle=tags.length" not in content, (
         "Old 'const cleanTitle=tags.length...' must be replaced by 'let cleanTitle=...'"
+    )
 
 
 # ── Sprint 42 additional tests: thinking panel persistence (#427) ────────
 def test_streaming_persists_reasoning_in_session():
     """streaming.py must accumulate reasoning_text and patch last assistant message."""
-    src = (REPO / 'api' / 'streaming.py').read_text()
+    src = (REPO / "api" / "streaming.py").read_text()
 
     # _reasoning_text must be initialised
-    assert "_reasoning_text = ''" in src, \
+    assert "_reasoning_text = ''" in src, (
         "_reasoning_text variable not initialised in streaming.py"
+    )
 
     # on_reasoning must accumulate into _reasoning_text
-    assert '_reasoning_text += str(text)' in src, \
+    assert "_reasoning_text += str(text)" in src, (
         "on_reasoning callback does not accumulate into _reasoning_text"
+    )
 
     # Persistence block must exist before raw_session is built
-    assert "Persist reasoning trace in the session so it survives reload" in src, \
+    assert "Persist reasoning trace in the session so it survives reload" in src, (
         "Reasoning persistence comment not found in streaming.py"
+    )
 
-    assert "_rm['reasoning'] = _reasoning_text" in src, \
+    assert "_rm['reasoning'] = _reasoning_text" in src, (
         "Code to set _rm['reasoning'] not found in streaming.py"
+    )
 
     # Persistence block must come BEFORE raw_session assignment
     persist_idx = src.index("Persist reasoning trace in the session")
     raw_session_idx = src.index("raw_session = s.compact()")
-    assert persist_idx < raw_session_idx, \
+    assert persist_idx < raw_session_idx, (
         "Reasoning persistence block must appear before raw_session assignment"
+    )
 
 
 def test_done_handler_patches_reasoning_field():
     """messages.js done SSE handler must patch reasoningText onto the last assistant message."""
-    src = (REPO / 'static' / 'messages.js').read_text()
+    src = (REPO / "static" / "messages.js").read_text()
 
     # The persistence comment must be present inside the done handler
-    assert "Persist reasoning trace so thinking card survives page reload" in src, \
+    assert "Persist reasoning trace so thinking card survives page reload" in src, (
         "Reasoning persistence comment not found in messages.js done handler"
+    )
 
     # The guard and assignment must be present
-    assert "if(reasoningText){" in src, \
-        "reasoningText guard not found in messages.js"
+    assert "if(reasoningText){" in src, "reasoningText guard not found in messages.js"
 
-    assert "lastAsst.reasoning=reasoningText" in src, \
+    assert "lastAsst.reasoning=reasoningText" in src, (
         "lastAsst.reasoning assignment not found in messages.js"
+    )
 
     # Verify the patch is inside the done handler (after 'source.addEventListener' for done)
     done_handler_idx = src.index("source.addEventListener('done'")
-    persist_idx = src.index("Persist reasoning trace so thinking card survives page reload")
-    assert done_handler_idx < persist_idx, \
+    persist_idx = src.index(
+        "Persist reasoning trace so thinking card survives page reload"
+    )
+    assert done_handler_idx < persist_idx, (
         "Reasoning persistence patch must be inside the done SSE handler"
+    )
 
     # The guard must also check !lastAsst.reasoning to avoid overwriting server value
-    assert "!lastAsst.reasoning" in src, \
+    assert "!lastAsst.reasoning" in src, (
         "Guard '!lastAsst.reasoning' missing — would overwrite server-persisted reasoning"
+    )
 
 
 def test_rendermessages_reads_reasoning_from_messages():
     """ui.js renderMessages must read m.reasoning to display the thinking card."""
-    src = (REPO / 'static' / 'ui.js').read_text()
+    src = (REPO / "static" / "ui.js").read_text()
 
     # m.reasoning must be read in the render path
-    assert 'm.reasoning' in src, \
+    assert "m.reasoning" in src, (
         "m.reasoning not referenced in ui.js — thinking card won't render on reload"
+    )
 
     # The thinking card rendering block must also be present
-    assert 'thinking-card' in src, \
-        "thinking-card CSS class not found in ui.js"
+    assert "thinking-card" in src, "thinking-card CSS class not found in ui.js"
 
     # Specifically, the fallback that reads from top-level m.reasoning field
-    assert 'thinkingText=m.reasoning' in src.replace(' ', ''), \
+    assert "thinkingText=m.reasoning" in src.replace(" ", ""), (
         "thinkingText=m.reasoning assignment not found in ui.js renderMessages"
+    )
 
 
 def test_streaming_restores_prior_reasoning_metadata_after_followup():
@@ -610,26 +704,33 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     history before saving the session, including reinserting dropped
     reasoning-only assistant segments.
     """
-    src = (REPO / 'api' / 'streaming.py').read_text()
-    assert "def _restore_reasoning_metadata(" in src, \
+    src = (REPO / "api" / "streaming.py").read_text()
+    assert "def _restore_reasoning_metadata(" in src, (
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "s.context_messages = _next_context_messages" in src, \
+    )
+    assert "s.context_messages = _next_context_messages" in src, (
         "streaming.py must restore prior reasoning metadata into model context"
-    assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
+    )
+    assert "s.messages = _merge_display_messages_after_agent_result(" in src, (
         "streaming.py must merge restored result messages into the visible transcript"
-    assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
+    )
+    assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, (
         "streaming.py must reinsert dropped reasoning-only assistant messages"
+    )
 
 
 def test_routes_restores_prior_reasoning_metadata_after_followup():
     """The non-streaming route path must preserve prior reasoning metadata too."""
-    src = (REPO / 'api' / 'routes.py').read_text()
-    assert "_restore_reasoning_metadata" in src, \
+    src = (REPO / "api" / "routes.py").read_text()
+    assert "_restore_reasoning_metadata" in src, (
         "routes.py must import reasoning metadata restoration helper"
-    assert "s.context_messages = _next_context_messages" in src, \
+    )
+    assert "s.context_messages = _next_context_messages" in src, (
         "routes.py must restore prior reasoning metadata into model context"
-    assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
+    )
+    assert "s.messages = _merge_display_messages_after_agent_result(" in src, (
         "routes.py must merge restored result messages into the visible transcript"
+    )
 
 
 class TestCredentialPoolBackwardCompat(unittest.TestCase):
@@ -644,11 +745,24 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
 
         class OlderAgent:
             """Simulates a hermes-agent build that predates credential_pool."""
-            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
-                         platform=None, quiet_mode=False, enabled_toolsets=None,
-                         fallback_model=None, session_id=None, session_db=None,
-                         stream_delta_callback=None, reasoning_callback=None,
-                         tool_progress_callback=None, clarify_callback=None):
+
+            def __init__(
+                self,
+                model=None,
+                provider=None,
+                base_url=None,
+                api_key=None,
+                platform=None,
+                quiet_mode=False,
+                enabled_toolsets=None,
+                fallback_model=None,
+                session_id=None,
+                session_db=None,
+                stream_delta_callback=None,
+                reasoning_callback=None,
+                tool_progress_callback=None,
+                clarify_callback=None,
+            ):
                 # No api_mode / acp_command / acp_args / credential_pool params
                 captured["init_kwargs"] = {"session_id": session_id, "model": model}
                 self.session_id = session_id
@@ -663,7 +777,10 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
             def run_conversation(self, **kwargs):
                 return {
                     "messages": [
-                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {
+                            "role": "user",
+                            "content": kwargs.get("persist_user_message", ""),
+                        },
                         {"role": "assistant", "content": "ok"},
                     ]
                 }
@@ -692,37 +809,60 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
 
             def compact(self):
                 return {
-                    "session_id": self.session_id, "title": self.title,
-                    "workspace": self.workspace, "model": self.model,
-                    "created_at": 0, "updated_at": 0, "pinned": False,
-                    "archived": False, "project_id": None, "profile": None,
-                    "input_tokens": 0, "output_tokens": 0,
-                    "estimated_cost": None, "personality": None,
+                    "session_id": self.session_id,
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "pinned": False,
+                    "archived": False,
+                    "project_id": None,
+                    "profile": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "estimated_cost": None,
+                    "personality": None,
                 }
 
         fake_stream_id = "stream-compat-test"
         fake_queue = queue.Queue()
         fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
-        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
-            "provider": "openai", "base_url": None, "api_key": "sk-test",
-            "api_mode": "chat_completions", "command": None, "args": [],
-            "credential_pool": object(),
-        })
+        fake_rt_module.resolve_runtime_provider = mock.Mock(
+            return_value={
+                "provider": "openai",
+                "base_url": None,
+                "api_key": "sk-test",
+                "api_mode": "chat_completions",
+                "command": None,
+                "args": [],
+                "credential_pool": object(),
+            }
+        )
         fake_hermes_cli = types.ModuleType("hermes_cli")
         fake_hermes_cli.runtime_provider = fake_rt_module
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=None)
 
-        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
-             mock.patch.object(streaming, "_get_ai_agent", return_value=OlderAgent), \
-             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai", None)), \
-             mock.patch("api.config.get_config", return_value={}), \
-             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
-             mock.patch.dict(sys.modules, {
-                 "hermes_cli": fake_hermes_cli,
-                 "hermes_cli.runtime_provider": fake_rt_module,
-                 "hermes_state": fake_hermes_state,
-             }):
+        with (
+            mock.patch.object(streaming, "get_session", return_value=FakeSession()),
+            mock.patch.object(streaming, "_get_ai_agent", return_value=OlderAgent),
+            mock.patch.object(
+                streaming,
+                "resolve_model_provider",
+                return_value=("gpt-4o", "openai", None),
+            ),
+            mock.patch("api.config.get_config", return_value={}),
+            mock.patch("api.config._resolve_cli_toolsets", return_value=[]),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "hermes_cli": fake_hermes_cli,
+                    "hermes_cli.runtime_provider": fake_rt_module,
+                    "hermes_state": fake_hermes_state,
+                },
+            ),
+        ):
             streaming.STREAMS[fake_stream_id] = fake_queue
             # Must not raise TypeError
             streaming._run_agent_streaming(

@@ -7,26 +7,27 @@ Tests for fixes:
          The legacy raw sidebar count was removed by #584, and later reintroduced
          in a gated detailed-density mode by #673.
 """
+
 import pathlib
-import re
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
-INIT_SH   = (REPO_ROOT / "docker_init.bash").read_text(encoding="utf-8")
-UI_JS     = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+INIT_SH = (REPO_ROOT / "docker_init.bash").read_text(encoding="utf-8")
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 # ── #569: docker UID/GID auto-detect ─────────────────────────────────────────
 
+
 def test_569_uid_autodetect_present():
     """docker_init.bash must have workspace-based UID auto-detection (#569)."""
-    assert "stat -c '%u'" in INIT_SH or 'stat -c \'%u\'' in INIT_SH, (
+    assert "stat -c '%u'" in INIT_SH or "stat -c '%u'" in INIT_SH, (
         "docker_init.bash must use stat to read workspace UID (#569)"
     )
 
 
 def test_569_gid_autodetect_present():
     """docker_init.bash must have workspace-based GID auto-detection (#569)."""
-    assert "stat -c '%g'" in INIT_SH or 'stat -c \'%g\'' in INIT_SH, (
+    assert "stat -c '%g'" in INIT_SH or "stat -c '%g'" in INIT_SH, (
         "docker_init.bash must use stat to read workspace GID (#569)"
     )
 
@@ -49,7 +50,7 @@ def test_569_skips_root_uid():
     """Auto-detect must not use UID 0 (root-owned mount = untrustworthy)."""
     detect_block_start = INIT_SH.find("Auto-detect from mounted volumes")
     assert detect_block_start != -1, "auto-detect comment block not found"
-    block = INIT_SH[detect_block_start:detect_block_start + 1200]
+    block = INIT_SH[detect_block_start : detect_block_start + 1200]
     assert '"0"' in block or "'0'" in block, (
         "Auto-detect block must skip UID 0 to avoid incorrectly using root ownership"
     )
@@ -66,6 +67,7 @@ def test_569_fallback_preserved():
 
 
 # ── #668: UID/GID auto-detect from hermes-home shared volume (two-container) ──
+
 
 def test_668_uid_autodetect_checks_hermes_home():
     """docker_init.bash must probe hermes-home dirs for UID in two-container setups.
@@ -88,7 +90,7 @@ def test_668_gid_autodetect_checks_hermes_home():
     assert gid_detect_start != -1, (
         "GID auto-detect comment must be updated to mention shared volumes (#668)"
     )
-    gid_block = INIT_SH[gid_detect_start:gid_detect_start + 600]
+    gid_block = INIT_SH[gid_detect_start : gid_detect_start + 600]
     assert "/home/hermeswebui/.hermes" in gid_block or "HERMES_HOME" in gid_block, (
         "GID auto-detect block must probe hermes-home dirs (#668)"
     )
@@ -98,7 +100,7 @@ def test_668_uid_probe_loop_uses_break():
     """UID probe loop must stop on first match (no double-detection)."""
     uid_detect_start = INIT_SH.find("Auto-detect from mounted volumes")
     assert uid_detect_start != -1, "UID auto-detect comment not found"
-    uid_block = INIT_SH[uid_detect_start:uid_detect_start + 1200]
+    uid_block = INIT_SH[uid_detect_start : uid_detect_start + 1200]
     assert "break" in uid_block, (
         "UID probe loop must break after first successful detection "
         "to avoid being overridden by a later probe dir (#668)"
@@ -119,6 +121,7 @@ def test_668_hermes_home_probe_before_workspace():
 
 # ── #579: topbar message count already filters tool messages ──────────────────
 
+
 def test_579_topbar_filters_tool_messages():
     """ui.js topbar count must filter out role='tool' messages (#579).
 
@@ -132,15 +135,15 @@ def test_579_topbar_filters_tool_messages():
     assert meta_pos != -1, "topbarMeta assignment not found in ui.js"
 
     # Find the filter that precedes it — should exclude role==='tool'
-    context = UI_JS[max(0, meta_pos - 400):meta_pos + 100]
+    context = UI_JS[max(0, meta_pos - 400) : meta_pos + 100]
     assert "role" in context and "tool" in context, (
         "topbarMeta count must filter by role — "
         "messages with role='tool' must be excluded from the displayed count"
     )
     # The filter must exclude tool messages (not include them)
-    assert "!=='tool'" in context or "!= 'tool'" in context or "role!=='tool'" in context, (
-        "topbar count filter must use !== 'tool' to exclude tool messages"
-    )
+    assert (
+        "!=='tool'" in context or "!= 'tool'" in context or "role!=='tool'" in context
+    ), "topbar count filter must use !== 'tool' to exclude tool messages"
 
 
 def test_579_sidebar_count_is_gated_behind_detailed_density():
@@ -152,9 +155,10 @@ def test_579_sidebar_count_is_gated_behind_detailed_density():
     sidebar density.
     """
     sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in sessions_js, (
-        "sessions.js must normalize sidebar density before rendering metadata"
-    )
+    assert (
+        "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');"
+        in sessions_js
+    ), "sessions.js must normalize sidebar density before rendering metadata"
     assert "if(density==='detailed'){" in sessions_js, (
         "sessions.js must gate sidebar metadata behind detailed density mode"
     )

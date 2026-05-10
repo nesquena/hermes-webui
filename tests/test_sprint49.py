@@ -10,7 +10,6 @@ Covers:
 """
 
 import pathlib
-import re
 
 from api.streaming import _restore_reasoning_metadata
 
@@ -38,9 +37,10 @@ def test_footer_timestamp_uses_richer_format_for_older_messages():
 
 def test_timestamp_footer_stays_on_visible_response_segments():
     assert "if(hasVisibleBody){" in UI_JS
-    assert 'seg.insertAdjacentHTML(\'beforeend\', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);' in UI_JS, (
-        "Footer timestamp should stay attached to visible response segments"
-    )
+    assert (
+        "seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class=\"msg-body\">${bodyHtml}</div>${footHtml}`);"
+        in UI_JS
+    ), "Footer timestamp should stay attached to visible response segments"
     assert "assistantThinking.set(rawIdx, thinkingText);" in UI_JS, (
         "Thinking-only assistant segments should preserve thinking for the shared activity dropdown without rendering a footer"
     )
@@ -50,9 +50,9 @@ def test_timestamp_footer_stays_on_visible_response_segments():
 
 
 def test_footer_chrome_is_hover_only_for_user_and_assistant_messages():
-    assert ".msg-row[data-role=\"user\"] .msg-foot {\n  opacity: 0;" in UI_CSS
-    assert ".msg-row[data-role=\"user\"]:hover .msg-foot," in UI_CSS
-    assert ".msg-row[data-role=\"assistant\"] .msg-foot," in UI_CSS
+    assert '.msg-row[data-role="user"] .msg-foot {\n  opacity: 0;' in UI_CSS
+    assert '.msg-row[data-role="user"]:hover .msg-foot,' in UI_CSS
+    assert '.msg-row[data-role="assistant"] .msg-foot,' in UI_CSS
     assert ".assistant-turn .msg-foot {" in UI_CSS
     assert ".assistant-turn:hover .msg-foot," in UI_CSS
 
@@ -65,16 +65,30 @@ def test_last_assistant_keeps_usage_visible_and_reveals_time_and_actions_on_hove
         or "targetFoot.insertBefore(fragments[i], targetFoot.firstChild);" in UI_JS
     )
     assert ".assistant-turn .msg-foot-with-usage," in UI_CSS
-    assert ".msg-row[data-role=\"assistant\"] .msg-foot-with-usage {\n  opacity: 1;" in UI_CSS
-    assert ".msg-foot-with-usage .msg-time,\n.msg-foot-with-usage .msg-actions {\n  opacity: 0;" in UI_CSS
+    assert (
+        '.msg-row[data-role="assistant"] .msg-foot-with-usage {\n  opacity: 1;'
+        in UI_CSS
+    )
+    assert (
+        ".msg-foot-with-usage .msg-time,\n.msg-foot-with-usage .msg-actions {\n  opacity: 0;"
+        in UI_CSS
+    )
     assert ".assistant-turn:hover .msg-foot-with-usage .msg-time," in UI_CSS
 
 
 def test_restore_reasoning_metadata_preserves_existing_timestamps():
-    assert "def _restore_reasoning_metadata(previous_messages, updated_messages):" in STREAMING_PY
-    assert "if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):" in STREAMING_PY
+    assert (
+        "def _restore_reasoning_metadata(previous_messages, updated_messages):"
+        in STREAMING_PY
+    )
+    assert (
+        "if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):" in STREAMING_PY
+    )
     assert "cur_msg['timestamp'] = prev_msg['timestamp']" in STREAMING_PY
-    assert "elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):" in STREAMING_PY
+    assert (
+        "elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):"
+        in STREAMING_PY
+    )
     assert "cur_msg['_ts'] = prev_msg['_ts']" in STREAMING_PY
 
 

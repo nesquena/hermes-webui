@@ -12,21 +12,29 @@ This file pins the behaviour:
   - Mismatched / unpaired quotes are preserved (path may legitimately contain one).
   - Whitespace outside the quotes is also handled.
 """
-import pytest
 
 from api.workspace import _strip_surrounding_quotes
 
 
 class TestStripSurroundingQuotes:
     def test_unwrapped_path_unchanged(self):
-        assert _strip_surrounding_quotes("/Users/x/Documents/foo") == "/Users/x/Documents/foo"
+        assert (
+            _strip_surrounding_quotes("/Users/x/Documents/foo")
+            == "/Users/x/Documents/foo"
+        )
 
     def test_single_quotes_stripped(self):
         # macOS Finder default
-        assert _strip_surrounding_quotes("'/Users/x/Documents/foo'") == "/Users/x/Documents/foo"
+        assert (
+            _strip_surrounding_quotes("'/Users/x/Documents/foo'")
+            == "/Users/x/Documents/foo"
+        )
 
     def test_double_quotes_stripped(self):
-        assert _strip_surrounding_quotes('"/Users/x/Documents/foo"') == "/Users/x/Documents/foo"
+        assert (
+            _strip_surrounding_quotes('"/Users/x/Documents/foo"')
+            == "/Users/x/Documents/foo"
+        )
 
     def test_outer_whitespace_stripped_first(self):
         # User pastes with trailing whitespace, then the quotes are visible

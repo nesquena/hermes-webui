@@ -2,7 +2,7 @@
 Regression tests for #895 (set_hermes_default_model strips @nous: prefix + blocks on live fetch)
 and #894 (resolve_model_provider strips cross-namespace prefix for portal providers with base_url).
 """
-import threading
+
 import pytest
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from api.config import resolve_model_provider, set_hermes_default_model
 
 
 # ── Shared fixture ──────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
@@ -26,13 +27,15 @@ def _isolate(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(config, "_get_config_path", lambda: Path(str(config_file)))
     config.cfg.clear()
-    config.cfg.update({
-        "model": {
-            "provider": "nous",
-            "base_url": "https://router.nous.ai/v1",
-            "default": "anthropic/claude-opus-4.6",
+    config.cfg.update(
+        {
+            "model": {
+                "provider": "nous",
+                "base_url": "https://router.nous.ai/v1",
+                "default": "anthropic/claude-opus-4.6",
+            }
         }
-    })
+    )
     try:
         config._cfg_mtime = config_file.stat().st_mtime
     except OSError:
@@ -50,8 +53,8 @@ def _isolate(tmp_path, monkeypatch):
 
 # ── #894: portal-provider + config_base_url prefix-stripping ───────────────
 
-class TestResolveModelProviderPortalPriority:
 
+class TestResolveModelProviderPortalPriority:
     def test_minimax_prefix_preserved_for_nous(self):
         """Nous with base_url must NOT strip minimax/ prefix (#894)."""
         m, p, _ = resolve_model_provider("minimax/minimax-m2.7")
@@ -85,9 +88,11 @@ class TestResolveModelProviderPortalPriority:
 
 # ── #895: set_hermes_default_model persists @provider: prefix ──────────────
 
-class TestSetDefaultModelPreservesAtPrefix:
 
-    def test_at_nous_prefix_strips_to_bare_for_cli_compatibility(self, tmp_path, monkeypatch):
+class TestSetDefaultModelPreservesAtPrefix:
+    def test_at_nous_prefix_strips_to_bare_for_cli_compatibility(
+        self, tmp_path, monkeypatch
+    ):
         """set_hermes_default_model must persist the RESOLVED bare/slash form, not the
         `@provider:` prefix. The `@provider:` syntax is a WebUI-internal routing hint;
         the hermes-agent CLI reads `config.yaml -> model.default` directly and passes
@@ -99,13 +104,17 @@ class TestSetDefaultModelPreservesAtPrefix:
         form via the smart matcher in `_applyModelToDropdown()`.
         """
         import yaml
+
         config_file = tmp_path / "config.yaml"
         config_file.write_text(
             "model:\n  provider: nous\n  base_url: https://router.nous.ai/v1\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(config, "_get_config_path", lambda: Path(str(config_file)))
-        config.cfg["model"] = {"provider": "nous", "base_url": "https://router.nous.ai/v1"}
+        config.cfg["model"] = {
+            "provider": "nous",
+            "base_url": "https://router.nous.ai/v1",
+        }
         try:
             config._cfg_mtime = config_file.stat().st_mtime
         except OSError:
@@ -137,12 +146,14 @@ class TestSetDefaultModelPreservesAtPrefix:
         `@nous:anthropic/claude-opus-4.6`). `_applyModelToDropdown()` normalises
         on both sides and picks the matching option.
         """
-        js = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
+        js = (
+            Path(__file__).resolve().parent.parent / "static" / "panels.js"
+        ).read_text()
         # Find the block that sets _settingsHermesDefaultModelOnOpen
         anchor = "_settingsHermesDefaultModelOnOpen=(models&&models.default_model)||"
         idx = js.find(anchor)
         assert idx != -1, "Settings default-model initialisation not found in panels.js"
-        block = js[idx:idx + 1200]
+        block = js[idx : idx + 1200]
         assert "_applyModelToDropdown" in block, (
             "Settings picker must use _applyModelToDropdown() so a saved bare form "
             "(e.g. anthropic/claude-opus-4.6) still selects the matching "

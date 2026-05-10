@@ -1,7 +1,10 @@
 """
 Sprint 17 Tests: send_key setting, commands.js static file, workspace subdir listing.
 """
-import json, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -13,8 +16,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -30,6 +34,7 @@ def make_session(created_list):
 
 
 # ── Settings: send_key ──────────────────────────────────────────────────────
+
 
 def test_settings_send_key_default():
     """GET /api/settings returns send_key with default value 'enter'."""
@@ -74,6 +79,7 @@ def test_settings_unknown_key_ignored():
 
 # ── Static file: commands.js ────────────────────────────────────────────────
 
+
 def test_static_commands_js_served():
     """GET /static/commands.js returns 200 and contains COMMANDS registry."""
     req = urllib.request.Request(BASE + "/static/commands.js")
@@ -85,6 +91,7 @@ def test_static_commands_js_served():
 
 
 # ── Workspace: subdir listing ───────────────────────────────────────────────
+
 
 def test_list_workspace_root():
     """GET /api/list with path=. returns entries for workspace root."""

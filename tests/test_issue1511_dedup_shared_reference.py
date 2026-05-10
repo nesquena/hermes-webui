@@ -48,7 +48,11 @@ def test_groups_have_independent_model_lists():
     groups = [
         {"provider": "Xiaomi", "provider_id": "xiaomi", "models": copy.deepcopy(auto)},
         {"provider": "Ollama", "provider_id": "ollama", "models": copy.deepcopy(auto)},
-        {"provider": "HuggingFace", "provider_id": "huggingface", "models": copy.deepcopy(auto)},
+        {
+            "provider": "HuggingFace",
+            "provider_id": "huggingface",
+            "models": copy.deepcopy(auto),
+        },
     ]
     assert groups[0]["models"] is not groups[1]["models"]
     assert groups[0]["models"][0] is not groups[1]["models"][0]
@@ -75,8 +79,16 @@ def test_unconfigured_providers_no_shared_dedup_bleed():
     groups = [
         {"provider": "Xiaomi", "provider_id": "xiaomi", "models": copy.deepcopy(auto)},
         {"provider": "Ollama", "provider_id": "ollama", "models": copy.deepcopy(auto)},
-        {"provider": "HuggingFace", "provider_id": "huggingface", "models": copy.deepcopy(auto)},
-        {"provider": "Google Gemini CLI", "provider_id": "google-gemini-cli", "models": copy.deepcopy(auto)},
+        {
+            "provider": "HuggingFace",
+            "provider_id": "huggingface",
+            "models": copy.deepcopy(auto),
+        },
+        {
+            "provider": "Google Gemini CLI",
+            "provider_id": "google-gemini-cli",
+            "models": copy.deepcopy(auto),
+        },
     ]
     _deduplicate_model_ids(groups)
 
@@ -85,7 +97,9 @@ def test_unconfigured_providers_no_shared_dedup_bleed():
     assert by_pid["google-gemini-cli"]["models"][0]["label"] == "Deepseek V4 Flash"
 
     assert by_pid["huggingface"]["models"][0]["id"] == "@huggingface:deepseek-v4-flash"
-    assert by_pid["huggingface"]["models"][0]["label"] == "Deepseek V4 Flash (HuggingFace)"
+    assert (
+        by_pid["huggingface"]["models"][0]["label"] == "Deepseek V4 Flash (HuggingFace)"
+    )
 
     assert by_pid["ollama"]["models"][0]["id"] == "@ollama:deepseek-v4-flash"
     assert by_pid["ollama"]["models"][0]["label"] == "Deepseek V4 Flash (Ollama)"
@@ -96,7 +110,9 @@ def test_unconfigured_providers_no_shared_dedup_bleed():
     for g in groups:
         for m in g["models"]:
             n = m["label"].count("(")
-            assert n <= 1, f"label {m['label']!r} accumulated {n} provider names — shared-ref bug"
+            assert n <= 1, (
+                f"label {m['label']!r} accumulated {n} provider names — shared-ref bug"
+            )
 
 
 def test_shared_reference_pre_fix_demonstrates_corruption():
@@ -131,7 +147,9 @@ def test_shared_reference_pre_fix_demonstrates_corruption():
     )
 
 
-def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeypatch, tmp_path):
+def test_get_models_grouped_unconfigured_providers_get_independent_dicts(
+    monkeypatch, tmp_path
+):
     """Production-path regression guard for the exact line that was broken.
 
     Per Opus advisor feedback on stage-277: tests #1-3 above document the
@@ -147,7 +165,6 @@ def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeyp
     A regression of the deepcopy() removal causes the `is not` assertion
     to flip immediately.
     """
-    import importlib
 
     import api.config as cfg_mod
 
@@ -194,7 +211,12 @@ def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeyp
     # call at the assignment site, AND by running an integration check
     # of the loop pattern.
     import inspect
-    src = inspect.getsource(cfg_mod.get_models_grouped) if hasattr(cfg_mod, "get_models_grouped") else inspect.getsource(cfg_mod)
+
+    src = (
+        inspect.getsource(cfg_mod.get_models_grouped)
+        if hasattr(cfg_mod, "get_models_grouped")
+        else inspect.getsource(cfg_mod)
+    )
     assert "copy.deepcopy(auto_detected_models)" in src, (
         "api/config.py must wrap auto_detected_models in copy.deepcopy() at "
         "the unconfigured-provider fall-through (line ~2078) so dedup mutation "
@@ -206,7 +228,13 @@ def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeyp
     detected = ["provider-a", "provider-b"]
     groups = []
     for pid in sorted(detected):
-        groups.append({"provider": pid.title(), "provider_id": pid, "models": copy.deepcopy(fake_auto_detected)})
+        groups.append(
+            {
+                "provider": pid.title(),
+                "provider_id": pid,
+                "models": copy.deepcopy(fake_auto_detected),
+            }
+        )
     cfg_mod._deduplicate_model_ids(groups)
     assert groups[0]["models"] is not groups[1]["models"]
     assert groups[0]["models"][0] is not groups[1]["models"][0]
@@ -214,4 +242,3 @@ def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeyp
     assert groups[1]["models"][0]["id"] == "@provider-b:shared-model-x"
     assert groups[0]["models"][0]["label"].count("(") == 0
     assert groups[1]["models"][0]["label"].count("(") == 1
-

@@ -23,21 +23,28 @@ def test_load_workspaces_preserves_unavailable_entries_on_disk(tmp_path, monkeyp
 
     loaded = workspace.load_workspaces()
 
-    assert [w["path"] for w in loaded] == [str(existing.resolve()), str(unavailable.resolve())]
+    assert [w["path"] for w in loaded] == [
+        str(existing.resolve()),
+        str(unavailable.resolve()),
+    ]
     assert json.loads(ws_file.read_text(encoding="utf-8")) == raw
 
 
 def test_clean_workspace_list_still_renames_default_without_dropping_missing(tmp_path):
     missing = tmp_path / "temporarily-unavailable"
 
-    cleaned = workspace._clean_workspace_list([
-        {"path": str(missing), "name": "default"},
-    ])
+    cleaned = workspace._clean_workspace_list(
+        [
+            {"path": str(missing), "name": "default"},
+        ]
+    )
 
     assert cleaned == [{"path": str(missing.resolve()), "name": "Home"}]
 
 
-def test_validate_workspace_to_add_distinguishes_permission_denied(monkeypatch, tmp_path):
+def test_validate_workspace_to_add_distinguishes_permission_denied(
+    monkeypatch, tmp_path
+):
     candidate = tmp_path / "Documents"
     candidate.mkdir()
 
@@ -61,7 +68,9 @@ def test_validate_workspace_to_add_distinguishes_permission_denied(monkeypatch, 
     assert "Full Disk Access" in message
 
 
-def test_resolve_trusted_workspace_distinguishes_missing_from_permission_denied(monkeypatch, tmp_path):
+def test_resolve_trusted_workspace_distinguishes_missing_from_permission_denied(
+    monkeypatch, tmp_path
+):
     candidate = tmp_path / "Documents"
     candidate.mkdir()
 

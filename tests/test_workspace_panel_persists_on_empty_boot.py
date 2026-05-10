@@ -26,6 +26,7 @@ Fix verified by these tests:
   - ``canBrowse`` and ``openWorkspacePanel()`` include
     ``S._profileDefaultWorkspace`` so the toggle stays enabled.
 """
+
 import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -40,7 +41,7 @@ class TestSyncStateNoSession:
         """A 'preview' panel needs file content from a session — close it
         when there's no session."""
         idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = BOOT_JS[idx : idx + 800]
         assert "_workspacePanelMode==='preview'" in body, (
             "syncWorkspacePanelState must check _workspacePanelMode==='preview' "
             "before force-closing on no-session boot"
@@ -54,7 +55,7 @@ class TestSyncStateNoSession:
         run so the panel renders its 'no workspace' or default-workspace state
         rather than being force-closed."""
         idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = BOOT_JS[idx : idx + 800]
         # The else branch (browse / closed mode without session) calls UI sync
         assert "syncWorkspacePanelUI()" in body, (
             "syncWorkspacePanelState must call syncWorkspacePanelUI() in the "
@@ -83,7 +84,10 @@ class TestBootPathsRestorePanelPref:
             "Ephemeral-session boot path must read 'hermes-webui-workspace-panel-pref' "
             "from localStorage before calling syncWorkspacePanelState()"
         )
-        assert "_workspacePanelMode='browse'" in block or "_workspacePanelMode = 'browse'" in block, (
+        assert (
+            "_workspacePanelMode='browse'" in block
+            or "_workspacePanelMode = 'browse'" in block
+        ), (
             "Ephemeral-session path must set _workspacePanelMode='browse' "
             "when the pref is 'open'"
         )
@@ -97,13 +101,18 @@ class TestBootPathsRestorePanelPref:
         assert m_idx > 0, "no-saved-session path not found"
         # syncWorkspacePanelState should appear shortly after
         sync_idx = BOOT_JS.find("syncWorkspacePanelState()", m_idx)
-        assert sync_idx > 0, "syncWorkspacePanelState() not found after no-saved-session marker"
+        assert sync_idx > 0, (
+            "syncWorkspacePanelState() not found after no-saved-session marker"
+        )
         block = BOOT_JS[m_idx:sync_idx]
         assert self.PREF_PATTERN in block, (
             "No-saved-session boot path must read 'hermes-webui-workspace-panel-pref' "
             "before calling syncWorkspacePanelState()"
         )
-        assert "_workspacePanelMode='browse'" in block or "_workspacePanelMode = 'browse'" in block, (
+        assert (
+            "_workspacePanelMode='browse'" in block
+            or "_workspacePanelMode = 'browse'" in block
+        ), (
             "No-saved-session path must set _workspacePanelMode='browse' "
             "when the pref is 'open'"
         )
@@ -118,7 +127,7 @@ class TestToggleStaysEnabledWithProfileWorkspace:
         S._profileDefaultWorkspace is set, even with no active session."""
         idx = BOOT_JS.find("const canBrowse=")
         assert idx > 0, "canBrowse declaration not found in syncWorkspacePanelUI"
-        line = BOOT_JS[idx:idx + 200].split("\n", 1)[0]
+        line = BOOT_JS[idx : idx + 200].split("\n", 1)[0]
         assert "_profileDefaultWorkspace" in line, (
             "canBrowse must include S._profileDefaultWorkspace so the toggle "
             "button stays enabled when a profile workspace is configured"
@@ -129,7 +138,7 @@ class TestToggleStaysEnabledWithProfileWorkspace:
         S._profileDefaultWorkspace is set, otherwise clicking the toggle
         won't open the panel even though canBrowse said it should."""
         idx = BOOT_JS.find("function openWorkspacePanel(")
-        body = BOOT_JS[idx:idx + 600]
+        body = BOOT_JS[idx : idx + 600]
         # The early-return guard should include the profile-workspace check
         assert "_profileDefaultWorkspace" in body, (
             "openWorkspacePanel must include S._profileDefaultWorkspace in its "

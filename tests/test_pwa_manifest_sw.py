@@ -8,6 +8,7 @@ Covers:
   fallback Response would never be used)
 - /manifest.json, /manifest.webmanifest, /sw.js routes serve correct Content-Type
 """
+
 import json
 import re
 from pathlib import Path
@@ -79,7 +80,9 @@ class TestServiceWorker:
 
     def test_sw_bypasses_api_and_stream(self):
         src = SW.read_text(encoding="utf-8")
-        assert "/api/" in src, "SW must bypass /api/* (no cached auth/session responses)"
+        assert "/api/" in src, (
+            "SW must bypass /api/* (no cached auth/session responses)"
+        )
         assert "/stream" in src, "SW must bypass streaming endpoints"
 
     def test_sw_offline_fallback_awaits_caches_match(self):
@@ -118,7 +121,10 @@ class TestServiceWorker:
         src = SW.read_text(encoding="utf-8")
         assert "Shell assets: network-first with cache fallback" in src
         assert "fetch(event.request).then((response)" in src
-        assert "caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))" in src
+        assert (
+            "caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))"
+            in src
+        )
         assert ".catch(() => caches.match(event.request)" in src
         assert "if (cached) return cached;" not in src, (
             "shell assets must not be cache-first; stale JS can survive hard refresh"
@@ -140,7 +146,7 @@ class TestPWARoutes:
         # The handler block for /manifest.json
         idx = src.find('"/manifest.json"')
         assert idx != -1, "routes.py must handle /manifest.json"
-        block = src[idx:idx + 800]
+        block = src[idx : idx + 800]
         assert "application/manifest+json" in block, (
             "manifest.json route must serve Content-Type: application/manifest+json"
         )
@@ -152,7 +158,7 @@ class TestPWARoutes:
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
-        block = src[idx:idx + 1000]
+        block = src[idx : idx + 1000]
         assert "__WEBUI_VERSION__" in block, (
             "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
         )
@@ -164,8 +170,8 @@ class TestPWARoutes:
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
-        block = src[idx:idx + 1200]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+        block = src[idx : idx + 1200]
+        assert 'quote(WEBUI_VERSION, safe="")' in block, (
             "sw.js route must URL-encode the injected cache version so unusual git tags "
             "cannot break the JavaScript string literal"
         )
@@ -173,7 +179,7 @@ class TestPWARoutes:
     def test_sw_route_sets_service_worker_allowed(self):
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('"/sw.js"')
-        block = src[idx:idx + 1000]
+        block = src[idx : idx + 1000]
         assert "Service-Worker-Allowed" in block, (
             "sw.js route must set Service-Worker-Allowed header so the SW can control "
             "the expected scope"
@@ -183,7 +189,7 @@ class TestPWARoutes:
         src = AUTH.read_text(encoding="utf-8")
         public_idx = src.find("PUBLIC_PATHS")
         assert public_idx != -1, "auth.py must define PUBLIC_PATHS"
-        block = src[public_idx:public_idx + 400]
+        block = src[public_idx : public_idx + 400]
         assert "'/sw.js'" in block, (
             "/sw.js must be public so service-worker updates never return login HTML"
         )
@@ -256,7 +262,7 @@ class TestIndexHtmlIntegration:
             # Either inline `?v=__WEBUI_VERSION__` or via the VQ constant
             # produces a URL string the cache lookup can match.
             has_inline = f"{asset}?v=__WEBUI_VERSION__" in src
-            has_concat = f"{asset}' + VQ" in src or f"{asset}\" + VQ" in src
+            has_concat = f"{asset}' + VQ" in src or f'{asset}" + VQ' in src
             assert has_inline or has_concat, (
                 f"sw.js SHELL_ASSETS entry for {asset} must carry "
                 "?v=__WEBUI_VERSION__ to match the URL the page requests"
@@ -272,7 +278,7 @@ class TestIndexHtmlIntegration:
         src = SW.read_text(encoding="utf-8")
         marker = "// Shell assets: network-first with cache fallback"
         assert marker in src
-        block = src[src.find(marker):src.find(marker) + 900]
+        block = src[src.find(marker) : src.find(marker) + 900]
         assert "fetch(event.request).then" in block
         assert "caches.match(event.request)" in block
         assert "caches.match(event.request).then((cached)" not in block[:250]
@@ -283,8 +289,8 @@ class TestIndexHtmlIntegration:
         if idx == -1:
             idx = src.find('parsed.path.startswith("/session/")')
         assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
-        block = src[idx:idx + 800]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+        block = src[idx : idx + 800]
+        assert 'quote(WEBUI_VERSION, safe="")' in block, (
             "index route must URL-encode the cache-busting version token before "
             "injecting it into script src attributes and service worker registration"
         )

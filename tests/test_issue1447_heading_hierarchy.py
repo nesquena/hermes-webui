@@ -68,10 +68,16 @@ def test_msg_body_heading_sizes_form_clear_hierarchy():
     assert h3 >= h4 + 2, f"h3 ({h3}) must be at least 2px larger than h4 ({h4})"
     # Body is 14px.
     assert h4 >= 14, f"h4 ({h4}) must not be smaller than body (14px)"
-    assert h5 >= 14, f"h5 ({h5}) must not be smaller than body (14px) — uppercase compensates"
-    assert h6 >= 13, f"h6 ({h6}) must not be much smaller than body (uppercase compensates) — got {h6}"
+    assert h5 >= 14, (
+        f"h5 ({h5}) must not be smaller than body (14px) — uppercase compensates"
+    )
+    assert h6 >= 13, (
+        f"h6 ({h6}) must not be much smaller than body (uppercase compensates) — got {h6}"
+    )
     # h3 must be visibly above body — Cygnus's specific complaint.
-    assert h3 > 14, f"h3 ({h3}) must be larger than body (14px) so it is visibly a heading"
+    assert h3 > 14, (
+        f"h3 ({h3}) must be larger than body (14px) so it is visibly a heading"
+    )
 
 
 def test_msg_body_h1_and_h2_have_bottom_border():

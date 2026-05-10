@@ -27,9 +27,7 @@ The fix:
 """
 
 import pathlib
-import queue
 import sys
-import time
 import uuid
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -41,12 +39,14 @@ class TestParallelApprovalsHeadFidelity:
 
     def setup_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
 
     def teardown_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
@@ -54,21 +54,28 @@ class TestParallelApprovalsHeadFidelity:
     def test_second_submit_pending_sends_head_not_tail(self):
         """When B is appended while A is still pending, SSE payload must show A as head."""
         from api import routes as r
+
         sid = f"sse-headtail-{uuid.uuid4().hex[:8]}"
         q = r._approval_sse_subscribe(sid)
         try:
-            r.submit_pending(sid, {
-                "command": "first-A",
-                "pattern_key": "first",
-                "pattern_keys": ["first"],
-                "description": "A",
-            })
-            r.submit_pending(sid, {
-                "command": "second-B",
-                "pattern_key": "second",
-                "pattern_keys": ["second"],
-                "description": "B",
-            })
+            r.submit_pending(
+                sid,
+                {
+                    "command": "first-A",
+                    "pattern_key": "first",
+                    "pattern_keys": ["first"],
+                    "description": "A",
+                },
+            )
+            r.submit_pending(
+                sid,
+                {
+                    "command": "second-B",
+                    "pattern_key": "second",
+                    "pattern_keys": ["second"],
+                    "description": "B",
+                },
+            )
             # First payload should be A (just-appended, also head).
             p1 = q.get(timeout=1)
             assert p1["pending"]["command"] == "first-A"
@@ -89,12 +96,14 @@ class TestRespondNotifiesTrailingApproval:
 
     def setup_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
 
     def teardown_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
@@ -102,25 +111,32 @@ class TestRespondNotifiesTrailingApproval:
     def test_respond_to_first_pushes_second_as_new_head(self):
         """submit A; submit B; respond(A) -> SSE must push (B, 1) so the UI surfaces B."""
         from api import routes as r
+
         sid = f"sse-trailing-{uuid.uuid4().hex[:8]}"
 
         # Subscribe BEFORE any submit so we capture all events deterministically.
         sub_q = r._approval_sse_subscribe(sid)
         try:
-            r.submit_pending(sid, {
-                "command": "first-A",
-                "pattern_key": "p1",
-                "pattern_keys": ["p1"],
-                "description": "A",
-                "approval_id": "id-A",
-            })
-            r.submit_pending(sid, {
-                "command": "second-B",
-                "pattern_key": "p2",
-                "pattern_keys": ["p2"],
-                "description": "B",
-                "approval_id": "id-B",
-            })
+            r.submit_pending(
+                sid,
+                {
+                    "command": "first-A",
+                    "pattern_key": "p1",
+                    "pattern_keys": ["p1"],
+                    "description": "A",
+                    "approval_id": "id-A",
+                },
+            )
+            r.submit_pending(
+                sid,
+                {
+                    "command": "second-B",
+                    "pattern_key": "p2",
+                    "pattern_keys": ["p2"],
+                    "description": "B",
+                    "approval_id": "id-B",
+                },
+            )
             # Drain the two submit-driven events.
             sub_q.get(timeout=1)  # head=A, total=1
             sub_q.get(timeout=1)  # head=A, total=2 (head is still A)
@@ -130,6 +146,7 @@ class TestRespondNotifiesTrailingApproval:
             # would require an HTTP handler mock; the inner sequence is what we
             # need to verify.)
             from api.routes import _approval_sse_notify_locked, _lock, _pending
+
             with _lock:
                 qlist = _pending.get(sid)
                 # Pop A by approval_id
@@ -139,16 +156,20 @@ class TestRespondNotifiesTrailingApproval:
                         break
                 # Re-emit head
                 if isinstance(_pending.get(sid), list) and _pending[sid]:
-                    _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                    _approval_sse_notify_locked(
+                        sid, _pending[sid][0], len(_pending[sid])
+                    )
                 else:
                     _approval_sse_notify_locked(sid, None, 0)
 
             # SSE must push (B, 1) so the UI surfaces the trailing approval.
             p3 = sub_q.get(timeout=1)
-            assert p3["pending"] is not None, \
+            assert p3["pending"] is not None, (
                 "After responding to A, SSE must emit the new head B (not None)"
-            assert p3["pending"]["command"] == "second-B", \
+            )
+            assert p3["pending"]["command"] == "second-B", (
                 f"New head should be B, got: {p3['pending']['command']}"
+            )
             assert p3["pending_count"] == 1
         finally:
             r._approval_sse_unsubscribe(sid, sub_q)
@@ -156,20 +177,25 @@ class TestRespondNotifiesTrailingApproval:
     def test_respond_to_only_pending_pushes_empty_state(self):
         """If respond pops the last entry, SSE must push a None/0 sentinel so UI hides card."""
         from api import routes as r
+
         sid = f"sse-empty-{uuid.uuid4().hex[:8]}"
 
         sub_q = r._approval_sse_subscribe(sid)
         try:
-            r.submit_pending(sid, {
-                "command": "only-A",
-                "pattern_key": "p",
-                "pattern_keys": ["p"],
-                "description": "A",
-                "approval_id": "id-only-A",
-            })
+            r.submit_pending(
+                sid,
+                {
+                    "command": "only-A",
+                    "pattern_key": "p",
+                    "pattern_keys": ["p"],
+                    "description": "A",
+                    "approval_id": "id-only-A",
+                },
+            )
             sub_q.get(timeout=1)  # drain submit notify
 
             from api.routes import _approval_sse_notify_locked, _lock, _pending
+
             with _lock:
                 qlist = _pending.get(sid)
                 for i, e in enumerate(qlist):
@@ -179,13 +205,16 @@ class TestRespondNotifiesTrailingApproval:
                 if not qlist:
                     _pending.pop(sid, None)
                 if isinstance(_pending.get(sid), list) and _pending[sid]:
-                    _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
+                    _approval_sse_notify_locked(
+                        sid, _pending[sid][0], len(_pending[sid])
+                    )
                 else:
                     _approval_sse_notify_locked(sid, None, 0)
 
             payload = sub_q.get(timeout=1)
-            assert payload["pending"] is None, \
+            assert payload["pending"] is None, (
                 "After responding to the only approval, SSE must push pending=None"
+            )
             assert payload["pending_count"] == 0
         finally:
             r._approval_sse_unsubscribe(sid, sub_q)
@@ -196,12 +225,14 @@ class TestNotifyOrderUnderContention:
 
     def setup_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
 
     def teardown_method(self):
         from api import routes as r
+
         with r._lock:
             r._approval_sse_subscribers.clear()
             r._pending.clear()
@@ -215,6 +246,7 @@ class TestNotifyOrderUnderContention:
         """
         import threading
         from api import routes as r
+
         sid = f"sse-order-{uuid.uuid4().hex[:8]}"
 
         sub_q = r._approval_sse_subscribe(sid)
@@ -225,12 +257,15 @@ class TestNotifyOrderUnderContention:
             def submitter(idx):
                 try:
                     barrier.wait(timeout=2)
-                    r.submit_pending(sid, {
-                        "command": f"cmd-{idx}",
-                        "pattern_key": f"p{idx}",
-                        "pattern_keys": [f"p{idx}"],
-                        "description": f"d{idx}",
-                    })
+                    r.submit_pending(
+                        sid,
+                        {
+                            "command": f"cmd-{idx}",
+                            "pattern_key": f"p{idx}",
+                            "pattern_keys": [f"p{idx}"],
+                            "description": f"d{idx}",
+                        },
+                    )
                 except Exception as e:
                     errors.append(e)
 
@@ -253,7 +288,6 @@ class TestNotifyOrderUnderContention:
                 f"pending_count must be monotonically increasing under contention. "
                 f"Got: {counts}. Pre-fix this could be out-of-order."
             )
-            assert counts == list(range(1, 9)), \
-                f"Expected [1..8], got {counts}"
+            assert counts == list(range(1, 9)), f"Expected [1..8], got {counts}"
         finally:
             r._approval_sse_unsubscribe(sid, sub_q)

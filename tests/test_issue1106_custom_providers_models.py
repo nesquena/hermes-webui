@@ -1,5 +1,5 @@
 """Tests for #1106 — custom_providers[].models dict keys populate model dropdown."""
-import pytest
+
 import api.config as config
 
 
@@ -93,7 +93,12 @@ class TestCustomProvidersModelsDict:
             ],
         )
         ids = _all_model_ids_bare(result)
-        for expected in ["unsloth-qwen3.6-35b-a3b", "gemma4-26b", "qwen3.5-27b", "qwen3-coder-30b"]:
+        for expected in [
+            "unsloth-qwen3.6-35b-a3b",
+            "gemma4-26b",
+            "qwen3.5-27b",
+            "qwen3-coder-30b",
+        ]:
             assert expected in ids, f"Expected '{expected}' in model IDs, got {ids}"
 
     def test_models_dict_without_model_field_still_works(self):
@@ -132,7 +137,9 @@ class TestCustomProvidersModelsDict:
             ],
         )
         ids = _all_model_ids_bare(result)
-        assert ids.count("base-model") == 1, f"'base-model' should appear exactly once, got {ids.count('base-model')}"
+        assert ids.count("base-model") == 1, (
+            f"'base-model' should appear exactly once, got {ids.count('base-model')}"
+        )
         assert "other-model" in ids
 
     def test_unnamed_provider_models_dict_works(self):

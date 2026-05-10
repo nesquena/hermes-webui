@@ -18,7 +18,6 @@ import subprocess
 import textwrap
 import time
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
@@ -29,10 +28,12 @@ UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 # Backend: /api/sessions includes server_time and server_tz
 # ---------------------------------------------------------------------------
 
+
 def test_sessions_endpoint_includes_server_time_and_tz():
     """GET /api/sessions must return server_time (float) and server_tz (str)."""
     from tests._pytest_port import BASE
     import urllib.request
+
     with urllib.request.urlopen(BASE + "/api/sessions", timeout=10) as r:
         data = json.loads(r.read())
     assert "server_time" in data
@@ -51,6 +52,7 @@ def test_server_time_allows_clock_skew_compensation():
     """server_time lets the client detect clock skew relative to the server."""
     from tests._pytest_port import BASE
     import urllib.request
+
     before = time.time()
     with urllib.request.urlopen(BASE + "/api/sessions", timeout=10) as r:
         data = json.loads(r.read())
@@ -63,6 +65,7 @@ def test_server_time_allows_clock_skew_compensation():
 # ---------------------------------------------------------------------------
 # JS: _serverNowMs compensates for clock skew
 # ---------------------------------------------------------------------------
+
 
 def _extract_function(source: str, name: str) -> str:
     marker = f"function {name}"
@@ -120,7 +123,9 @@ def _run_time_case(script_body: str, tz: str = "UTC") -> dict:
         {script_body}
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     return json.loads(proc.stdout)
 
 
@@ -279,6 +284,7 @@ def test_explicit_now_param_overrides_server_clock():
 # JS: _serverTzOptions builds correct timeZone option
 # ---------------------------------------------------------------------------
 
+
 def test_server_tz_options_positive_offset():
     result = _run_time_case(
         """
@@ -339,6 +345,7 @@ def test_server_tz_options_empty_returns_undefined():
 # JS: _formatMessageFooterTimestamp uses server timezone
 # ---------------------------------------------------------------------------
 
+
 def _extract_ui_function(name: str) -> str:
     return _extract_function(UI_JS, name)
 
@@ -390,7 +397,9 @@ def test_message_footer_timestamp_uses_server_tz():
         process.stdout.write(JSON.stringify({{ formatted: result }}));
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     data = json.loads(proc.stdout)
     # Should display in UTC+8, not America/New_York.
     # 2026-03-29 02:00 UTC = 10:00 in UTC+8
@@ -430,7 +439,9 @@ def test_message_footer_timestamp_handles_fractional_offset():
         process.stdout.write(JSON.stringify({{ formatted: result }}));
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     data = json.loads(proc.stdout)
     # 2026-03-29 02:00 UTC = 07:30 IST. Old Etc/GMT-5 mapping would have shown 07:00.
     # Accept either "07:30" or "7:30" (en-US uses hour:'numeric' for non-same-day).
@@ -462,7 +473,9 @@ def test_message_footer_timestamp_falls_back_without_server_tz():
         process.stdout.write(JSON.stringify({{ formatted: result, hasValue: result.length > 0 }}));
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     data = json.loads(proc.stdout)
     assert data["hasValue"] is True
 
@@ -470,6 +483,7 @@ def test_message_footer_timestamp_falls_back_without_server_tz():
 # ---------------------------------------------------------------------------
 # JS: sessions.js contains the compensation variables and helpers
 # ---------------------------------------------------------------------------
+
 
 def test_sessions_js_has_server_time_compensation_vars():
     assert "_serverTimeDelta" in SESSIONS_JS

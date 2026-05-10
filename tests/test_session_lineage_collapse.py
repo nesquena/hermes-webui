@@ -1,4 +1,5 @@
 """Regression tests for sidebar lineage collapse helpers."""
+
 import json
 import shutil
 import subprocess
@@ -63,7 +64,10 @@ console.log(JSON.stringify(collapsed));
     by_sid = {row["session_id"]: row for row in collapsed}
     assert set(by_sid) == {"tip", "solo"}
     assert by_sid["tip"]["_lineage_collapsed_count"] == 2
-    assert [seg["session_id"] for seg in by_sid["tip"]["_lineage_segments"]] == ["tip", "root"]
+    assert [seg["session_id"] for seg in by_sid["tip"]["_lineage_segments"]] == [
+        "tip",
+        "root",
+    ]
 
 
 def test_sidebar_active_state_can_fall_back_to_url_session_during_boot():
@@ -167,8 +171,12 @@ console.log(JSON.stringify(collapsed));
     assert [row["session_id"] for row in collapsed] == ["seg10"]
     assert collapsed[0]["_lineage_collapsed_count"] == 4
     assert collapsed[0]["_compression_segment_count"] == 10
-    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg10", "seg9", "seg8", "seg7"]
-
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == [
+        "seg10",
+        "seg9",
+        "seg8",
+        "seg7",
+    ]
 
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
@@ -297,7 +305,9 @@ def test_lineage_segment_expansion_static_contract():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "const _expandedLineageKeys = new Set();" in js
-    assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
+    assert (
+        "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
+    )
     assert "segmentCountEl.setAttribute('aria-expanded'" in js
     assert "_expandedLineageKeys.has(lineageKey)" in js
     assert "_expandedLineageKeys.add(lineageKey)" in js
@@ -358,4 +368,6 @@ def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
     ]
     locale_count = i18n.count("session_meta_messages:")
     for key in required:
-        assert i18n.count(key) >= locale_count, f"{key} missing from one or more locale blocks"
+        assert i18n.count(key) >= locale_count, (
+            f"{key} missing from one or more locale blocks"
+        )

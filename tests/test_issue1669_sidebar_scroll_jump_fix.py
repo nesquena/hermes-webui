@@ -16,6 +16,7 @@ This test pins:
 - The scroll handler short-circuits when total <= threshold (prevents the
   rebuild churn entirely on small lists)
 """
+
 from pathlib import Path
 
 SESSIONS_JS = Path(__file__).parent.parent / "static" / "sessions.js"
@@ -62,9 +63,10 @@ def test_scroll_handler_short_circuits_below_virtualization_threshold():
         "without this guard, the rAF re-render fires on every scroll event "
         "even when there's nothing to virtualize."
     )
-    assert "total<=SESSION_VIRTUAL_THRESHOLD_ROWS" in body or "total <= SESSION_VIRTUAL_THRESHOLD_ROWS" in body, (
-        "Expected explicit total<=THRESHOLD comparison to short-circuit the re-render."
-    )
+    assert (
+        "total<=SESSION_VIRTUAL_THRESHOLD_ROWS" in body
+        or "total <= SESSION_VIRTUAL_THRESHOLD_ROWS" in body
+    ), "Expected explicit total<=THRESHOLD comparison to short-circuit the re-render."
     # The early return must be BEFORE the rAF schedule (else it's dead code)
     early_return_idx = body.find("return")
     raf_idx = body.find("requestAnimationFrame")

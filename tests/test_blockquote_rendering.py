@@ -10,10 +10,13 @@ Root cause: the old rule was `s.replace(/^> (.+)$/gm, ...)` which had three bugs
 Fix: group consecutive `>` lines into a single `<blockquote>`, handle bare `>` lines
 as `<br>`, and strip the `>` prefix before passing each line to `inlineMd()`.
 """
+
 import re
 import pathlib
 
-UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(
+    encoding="utf-8"
+)
 
 # ---------------------------------------------------------------------------
 # Python mirror of the new blockquote rule + inlineMd (for behavioural tests)
@@ -29,7 +32,11 @@ def _esc(s):
 def _inline_md(t):
     """Minimal inlineMd mirror — bold, italic, inline-code only."""
     t = re.sub(r"`([^`\n]+)`", lambda m: f"<code>{_esc(m.group(1))}</code>", t)
-    t = re.sub(r"\*\*\*(.+?)\*\*\*", lambda m: f"<strong><em>{_esc(m.group(1))}</em></strong>", t)
+    t = re.sub(
+        r"\*\*\*(.+?)\*\*\*",
+        lambda m: f"<strong><em>{_esc(m.group(1))}</em></strong>",
+        t,
+    )
     t = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{_esc(m.group(1))}</strong>", t)
     t = re.sub(r"\*([^*\n]+)\*", lambda m: f"<em>{_esc(m.group(1))}</em>", t)
     return t
@@ -37,6 +44,7 @@ def _inline_md(t):
 
 def _apply_blockquote(s):
     """Python mirror of the new group-based blockquote rule in ui.js."""
+
     def replacer(m):
         block = m.group(0)
         lines = block.split("\n")
@@ -62,6 +70,7 @@ def _apply_blockquote(s):
 # ---------------------------------------------------------------------------
 # Source-level structural tests
 # ---------------------------------------------------------------------------
+
 
 class TestBlockquoteSourceStructure:
     """The new rule must be present in ui.js and the old single-line rule must be gone."""
@@ -107,6 +116,7 @@ class TestBlockquoteSourceStructure:
 # ---------------------------------------------------------------------------
 # Behavioural tests (using the Python mirror)
 # ---------------------------------------------------------------------------
+
 
 class TestMultiLineBlockquote:
     """Consecutive > lines must become ONE <blockquote>, not many."""
@@ -229,7 +239,7 @@ class TestBlockquoteFollowedByParagraph:
         assert out.count("<blockquote>") == 1
         assert "Normal paragraph" in out
         # Normal paragraph must be outside the blockquote
-        after_bq = out[out.index("</blockquote>"):]
+        after_bq = out[out.index("</blockquote>") :]
         assert "Normal paragraph" in after_bq
 
 

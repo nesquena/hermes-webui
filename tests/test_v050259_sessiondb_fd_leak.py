@@ -17,7 +17,6 @@ finalizes the agent — which on a long-running server may be never.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -80,14 +79,14 @@ def test_lru_eviction_closes_evicted_agent_session_db():
     # Negative pattern: the old `evicted_sid, _ = ...` discard form must NOT
     # be present — that's the bug shape.
     assert "evicted_sid, _ = SESSION_AGENT_CACHE.popitem" not in block, (
-        "LRU eviction must capture the evicted entry so the agent\'s "
+        "LRU eviction must capture the evicted entry so the agent's "
         "_session_db can be closed. The `evicted_sid, _ = ...` discard form "
         "is the original bug shape."
     )
 
     # Positive pattern: must close on the evicted agent.
     assert "_evicted_agent._session_db.close()" in block, (
-        "LRU eviction must close the evicted agent\'s _session_db. "
+        "LRU eviction must close the evicted agent's _session_db. "
         "(Opus pre-release follow-up to PR #1421.)"
     )
 
@@ -107,8 +106,11 @@ def test_session_db_close_is_idempotent():
     confirmation when both repos are co-located.
     """
     import importlib.util
+
     if importlib.util.find_spec("hermes_state") is None:
-        pytest.skip("hermes_state not on import path (CI-only — agent repo not present)")
+        pytest.skip(
+            "hermes_state not on import path (CI-only — agent repo not present)"
+        )
     from hermes_state import SessionDB  # type: ignore
     import tempfile
 
@@ -136,12 +138,14 @@ def test_cached_agent_reuse_calls_close_on_old_session_db():
     agent and verify the mock SessionDB.close() is called when _session_db
     is replaced. Pins the runtime behavior, not just the source pattern."""
     import sys
+
     sys.path.insert(0, str(REPO))
 
     class MockSessionDB:
         def __init__(self, name):
             self.name = name
             self.close_calls = 0
+
         def close(self):
             self.close_calls += 1
 
@@ -188,6 +192,7 @@ def test_lru_eviction_closes_evicted_session_db():
         def __init__(self, name):
             self.name = name
             self.close_calls = 0
+
         def close(self):
             self.close_calls += 1
 
@@ -206,8 +211,13 @@ def test_lru_eviction_closes_evicted_session_db():
     while len(cache) > MAX:
         evicted_sid, evicted_entry = cache.popitem(last=False)
         try:
-            _evicted_agent = evicted_entry[0] if isinstance(evicted_entry, tuple) else None
-            if _evicted_agent is not None and getattr(_evicted_agent, "_session_db", None) is not None:
+            _evicted_agent = (
+                evicted_entry[0] if isinstance(evicted_entry, tuple) else None
+            )
+            if (
+                _evicted_agent is not None
+                and getattr(_evicted_agent, "_session_db", None) is not None
+            ):
                 _evicted_agent._session_db.close()
         except Exception:
             pass

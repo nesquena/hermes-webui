@@ -10,10 +10,10 @@ Validates:
   - Atomic write leaves no .tmp file behind
   - Deadlock guard on fallback path
 """
+
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,7 +47,9 @@ def _isolate_session_dir(tmp_path, monkeypatch):
 
 def _make_session(session_id, title="Untitled", updated_at=None):
     """Helper to create a Session with a known ID and title."""
-    s = Session(session_id=session_id, title=title, messages=[{"role": "user", "content": "hi"}])
+    s = Session(
+        session_id=session_id, title=title, messages=[{"role": "user", "content": "hi"}]
+    )
     if updated_at is not None:
         s.updated_at = updated_at
     return s
@@ -91,7 +93,9 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
         updated_at=300.0,
         messages=[{"role": "assistant", "content": "reply", "_ts": 100.0}],
     )
-    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    s.path.write_text(
+        json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     _write_index_file(
         index_file,
         [
@@ -125,12 +129,12 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
 
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────
 
+
 def test_incremental_patch_correctness():
     """Pre-write an index with 3 sessions (A, B, C). Create an updated
     Session for B with a new title. Call _write_session_index(updates=[B]).
     Verify A and C are unchanged, B has the new title, sort order preserved.
     """
-
 
     # We need to get the fixture values — but since it's autouse, the monkeypatch
     # has already been applied. Access the patched values directly.
@@ -144,7 +148,9 @@ def test_incremental_patch_correctness():
 
     # Write session files to disk (so full rebuild can find them)
     for s in (sA, sB, sC):
-        s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        s.path.write_text(
+            json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     # Build initial index
     _write_session_index(updates=None)
@@ -176,6 +182,7 @@ def test_incremental_patch_correctness():
 
 # ── 7. test_new_session_appended_to_index ─────────────────────────────────
 
+
 def test_new_session_appended_to_index():
     """Pre-write index with sessions A, B. Call _write_session_index(updates=[C])
     where C is not in the existing index. Verify C appears in the index.
@@ -187,13 +194,17 @@ def test_new_session_appended_to_index():
     sB = _make_session("sess_b", "Bravo", updated_at=200.0)
 
     for s in (sA, sB):
-        s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        s.path.write_text(
+            json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     _write_session_index(updates=None)
 
     # Create a new session C not in the index
     sC = _make_session("sess_c", "Charlie", updated_at=300.0)
-    sC.path.write_text(json.dumps(sC.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sC.path.write_text(
+        json.dumps(sC.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     _write_session_index(updates=[sC])
 
@@ -226,7 +237,9 @@ def test_incremental_update_prunes_stale_entries():
     _write_index_file(index_file, [stale])
 
     sA = _make_session("sess_a", "Alpha", updated_at=200.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     _write_session_index(updates=[sA])
 
@@ -248,7 +261,9 @@ def test_load_metadata_only_does_not_parse_large_message_body():
     )
     s.save()
 
-    with patch.object(Session, "load", side_effect=AssertionError("full load should not run")):
+    with patch.object(
+        Session, "load", side_effect=AssertionError("full load should not run")
+    ):
         meta = Session.load_metadata_only("sess_large")
 
     assert meta is not None
@@ -293,6 +308,7 @@ def test_session_save_does_not_persist_metadata_message_count_hint():
 
 # ── 8. test_first_call_full_rebuild ──────────────────────────────────────
 
+
 def test_first_call_full_rebuild():
     """When no index file exists, calling _write_session_index(updates=[session])
     should fall back to full rebuild and create the index.
@@ -304,7 +320,9 @@ def test_first_call_full_rebuild():
     assert not index_file.exists()
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     # Call with updates — should trigger full rebuild since index doesn't exist
     _write_session_index(updates=[sA])
@@ -319,6 +337,7 @@ def test_first_call_full_rebuild():
 
 # ── 9. test_corrupt_index_fallback ────────────────────────────────────────
 
+
 def test_corrupt_index_fallback():
     """Write garbage/invalid JSON to SESSION_INDEX_FILE. Call
     _write_session_index(updates=[session]). Verify it falls back to
@@ -331,7 +350,9 @@ def test_corrupt_index_fallback():
     index_file.write_text("THIS IS NOT JSON {{{", encoding="utf-8")
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     # Should not raise; should fall back to full rebuild
     _write_session_index(updates=[sA])
@@ -347,6 +368,7 @@ def test_corrupt_index_fallback():
 
 # ── 10. test_concurrent_saves_dont_lose_data ────────────────────────────
 
+
 def test_concurrent_saves_dont_lose_data():
     """Create 2 threads, each calling Session.save() on different sessions
     with a pre-existing index. Use a threading.Event barrier to force them
@@ -359,7 +381,9 @@ def test_concurrent_saves_dont_lose_data():
     sB = _make_session("sess_b", "Bravo", updated_at=200.0)
 
     for s in (sA, sB):
-        s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+        s.path.write_text(
+            json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     # Build initial index
     _write_session_index(updates=None)
@@ -402,11 +426,16 @@ def test_concurrent_saves_dont_lose_data():
 
     assert "sess_a" in index_map, "Session A should be in index"
     assert "sess_b" in index_map, "Session B should be in index"
-    assert index_map["sess_a"]["title"] == "Alpha V2", "Session A title should be updated"
-    assert index_map["sess_b"]["title"] == "Bravo V2", "Session B title should be updated"
+    assert index_map["sess_a"]["title"] == "Alpha V2", (
+        "Session A title should be updated"
+    )
+    assert index_map["sess_b"]["title"] == "Bravo V2", (
+        "Session B title should be updated"
+    )
 
 
 # ── 11. test_atomic_write_no_tmp_remains ─────────────────────────────────
+
 
 def test_atomic_write_no_tmp_remains():
     """After _write_session_index completes, no .tmp file should remain
@@ -416,7 +445,9 @@ def test_atomic_write_no_tmp_remains():
     index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     _write_session_index(updates=[sA])
 
@@ -430,10 +461,13 @@ def test_atomic_write_no_tmp_remains():
     _write_session_index(updates=[sA])
 
     tmp_files = list(session_dir.glob("*.tmp"))
-    assert len(tmp_files) == 0, f"Unexpected .tmp files after incremental write: {tmp_files}"
+    assert len(tmp_files) == 0, (
+        f"Unexpected .tmp files after incremental write: {tmp_files}"
+    )
 
 
 # ── 12. test_deadlock_guard_on_fallback ──────────────────────────────────
+
 
 def test_deadlock_guard_on_fallback():
     """Mock the index file read to raise an exception, then verify
@@ -446,14 +480,27 @@ def test_deadlock_guard_on_fallback():
     index_file = models.SESSION_INDEX_FILE
 
     # Create a valid index file so the incremental path is attempted
-    _write_index_file(index_file, [
-        {"session_id": "sess_a", "title": "Alpha", "updated_at": 100.0,
-         "workspace": "/tmp", "model": "test", "message_count": 0,
-         "created_at": 100.0, "pinned": False, "archived": False},
-    ])
+    _write_index_file(
+        index_file,
+        [
+            {
+                "session_id": "sess_a",
+                "title": "Alpha",
+                "updated_at": 100.0,
+                "workspace": "/tmp",
+                "model": "test",
+                "message_count": 0,
+                "created_at": 100.0,
+                "pinned": False,
+                "archived": False,
+            },
+        ],
+    )
 
     sB = _make_session("sess_b", "Bravo", updated_at=200.0)
-    sB.path.write_text(json.dumps(sB.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sB.path.write_text(
+        json.dumps(sB.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     # Make the index file read raise an exception to trigger fallback
     original_read_text = Path.read_text
@@ -500,7 +547,9 @@ def test_incremental_index_disk_io_runs_outside_lock(monkeypatch):
     index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     _write_session_index(updates=None)  # seed index
 
     sA.title = "Alpha V2"
@@ -526,7 +575,9 @@ def test_incremental_index_disk_io_runs_outside_lock(monkeypatch):
 def test_full_rebuild_index_disk_io_runs_outside_lock(monkeypatch):
     """Full-rebuild disk I/O (fsync/replace) must run after releasing LOCK."""
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
-    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    sA.path.write_text(
+        json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     fsync_lock_states = []
     original_fsync = models.os.fsync

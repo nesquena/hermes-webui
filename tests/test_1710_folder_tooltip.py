@@ -5,9 +5,8 @@ is therefore misleading on directory rows.
 Fix: gate the tooltip on `item.type !== 'dir'` so it appears only on files.
 Folder rename is still reachable via the right-click context menu.
 """
-from pathlib import Path
 
-import pytest
+from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

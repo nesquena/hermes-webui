@@ -6,6 +6,7 @@ user scroll position. The bug was that scrollToBottom() was called
 unconditionally inside renderMessages() and appendThinking(), even during
 an active stream — overriding any scroll position the user had set.
 """
+
 import pathlib
 import re
 
@@ -16,7 +17,6 @@ STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
 class TestScrollPinningFix:
-
     def test_render_messages_respects_active_stream(self):
         """renderMessages() must not call scrollToBottom() while streaming (#677).
 
@@ -74,10 +74,12 @@ class TestScrollPinningFix:
         if near_bottom_pos == -1:
             near_bottom_pos = UI_JS.find("nearBottom =")
         assert near_bottom_pos != -1, "nearBottom scroll threshold assignment not found"
-        threshold_line = UI_JS[near_bottom_pos:near_bottom_pos + 120]
+        threshold_line = UI_JS[near_bottom_pos : near_bottom_pos + 120]
         # Extract the numeric threshold
         match = re.search(r"<\s*(\d+)", threshold_line)
-        assert match, f"Numeric threshold not found near nearBottom assignment: {threshold_line!r}"
+        assert match, (
+            f"Numeric threshold not found near nearBottom assignment: {threshold_line!r}"
+        )
         threshold = int(match.group(1))
         assert threshold >= 150, (
             f"Scroll re-pin threshold is {threshold}px — must be >= 150px to avoid "
@@ -101,7 +103,7 @@ class TestScrollPinningFix:
         """Scroll-to-bottom button must be hidden by default (display:none) (#677)."""
         btn_pos = INDEX_HTML.find("scrollToBottomBtn")
         assert btn_pos != -1
-        btn_context = INDEX_HTML[btn_pos:btn_pos + 200]
+        btn_context = INDEX_HTML[btn_pos : btn_pos + 200]
         assert "display:none" in btn_context or 'display="none"' in btn_context, (
             "scrollToBottomBtn must be hidden by default — only shown when user scrolls up (#677)"
         )
@@ -116,7 +118,7 @@ class TestScrollPinningFix:
         """Scroll-to-bottom button must use position:sticky so it stays visible (#677)."""
         btn_css_pos = STYLE_CSS.find(".scroll-to-bottom-btn")
         assert btn_css_pos != -1
-        btn_css = STYLE_CSS[btn_css_pos:btn_css_pos + 300]
+        btn_css = STYLE_CSS[btn_css_pos : btn_css_pos + 300]
         assert "sticky" in btn_css, (
             ".scroll-to-bottom-btn must use position:sticky to stay at bottom of viewport (#677)"
         )
@@ -127,7 +129,7 @@ class TestScrollPinningFix:
         assert scroll_listener_start != -1, "scroll event listener not found"
         # After #1360 fix, the nearBottom + btn logic lives inside an rAF
         # callback — extend search window to cover the full listener block.
-        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 600]
+        listener_block = UI_JS[scroll_listener_start : scroll_listener_start + 600]
         assert "scrollToBottomBtn" in listener_block, (
             "Scroll listener must show/hide scrollToBottomBtn based on _scrollPinned (#677)"
         )
@@ -136,7 +138,7 @@ class TestScrollPinningFix:
         """scrollToBottomBtn onclick must call scrollToBottom() (#677)."""
         btn_pos = INDEX_HTML.find("scrollToBottomBtn")
         assert btn_pos != -1
-        btn_context = INDEX_HTML[btn_pos:btn_pos + 200]
+        btn_context = INDEX_HTML[btn_pos : btn_pos + 200]
         assert "scrollToBottom()" in btn_context, (
             "scrollToBottomBtn onclick must call scrollToBottom() (#677)"
         )

@@ -35,7 +35,9 @@ def _run_i18n_case(script_expr: str) -> dict:
         process.stdout.write(JSON.stringify(out));
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     return json.loads(proc.stdout)
 
 

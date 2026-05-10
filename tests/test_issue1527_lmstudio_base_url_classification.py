@@ -95,8 +95,7 @@ def _mock_model_discovery(monkeypatch, model_ids: list[str], resolved_ip: str) -
 
 def _groups_by_id() -> dict[str, dict]:
     return {
-        group["provider_id"]: group
-        for group in config.get_available_models()["groups"]
+        group["provider_id"]: group for group in config.get_available_models()["groups"]
     }
 
 
@@ -140,7 +139,9 @@ providers:
     assert {"qwen3.6-35b-a3b@q6_k", "second-lmstudio-model"} <= model_ids
 
 
-def test_custom_configured_base_url_is_not_reclassified_as_ollama(tmp_path, monkeypatch):
+def test_custom_configured_base_url_is_not_reclassified_as_ollama(
+    tmp_path, monkeypatch
+):
     _write_config(
         tmp_path,
         monkeypatch,
@@ -178,9 +179,7 @@ providers:
 """,
     )
 
-    model, provider, base_url = config.resolve_model_provider(
-        "qwen3.6-35b-a3b@q6_k"
-    )
+    model, provider, base_url = config.resolve_model_provider("qwen3.6-35b-a3b@q6_k")
 
     assert model == "qwen3.6-35b-a3b@q6_k"
     assert provider == "lmstudio"

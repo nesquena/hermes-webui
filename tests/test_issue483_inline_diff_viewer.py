@@ -1,5 +1,4 @@
 """Tests for issue #483 — inline diff/patch viewer."""
-import pytest
 
 
 class TestFencedDiffRenderer:
@@ -11,7 +10,7 @@ class TestFencedDiffRenderer:
             content = f.read()
         assert "diff-block" in content, "Missing diff-block class"
         # Should be in the fenced block renderer
-        assert "pre class=\"diff-block\"" in content
+        assert 'pre class="diff-block"' in content
 
     def test_diff_lines_get_span_classes(self):
         """Each diff line should be wrapped in a span with appropriate class."""
@@ -63,7 +62,9 @@ class TestMediaDiffInline:
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
         count = content.count("loadDiffInline()")
-        assert count >= 2, f"loadDiffInline() called {count} times, expected >= 2 (cached + fresh render)"
+        assert count >= 2, (
+            f"loadDiffInline() called {count} times, expected >= 2 (cached + fresh render)"
+        )
 
     def test_diff_inline_error_class(self):
         """Should have error state class."""
@@ -78,16 +79,28 @@ class TestDiffCSS:
     def test_diff_css_classes_exist(self):
         with open("static/style.css", "r", encoding="utf-8") as f:
             content = f.read()
-        for cls in (".diff-block", ".diff-line", ".diff-plus", ".diff-minus",
-                    ".diff-hunk", ".diff-inline-load", ".diff-inline", ".diff-inline-error"):
+        for cls in (
+            ".diff-block",
+            ".diff-line",
+            ".diff-plus",
+            ".diff-minus",
+            ".diff-hunk",
+            ".diff-inline-load",
+            ".diff-inline",
+            ".diff-inline-error",
+        ):
             assert cls in content, f"Missing CSS class: {cls}"
 
     def test_diff_colors_are_present(self):
         """Green for plus, red for minus should use rgba colors."""
         with open("static/style.css", "r", encoding="utf-8") as f:
             content = f.read()
-        assert "rgba(34,197,94" in content or "#22c55e" in content, "Missing green color for diff-plus"
-        assert "rgba(239,68,68" in content or "#ef4444" in content, "Missing red color for diff-minus"
+        assert "rgba(34,197,94" in content or "#22c55e" in content, (
+            "Missing green color for diff-plus"
+        )
+        assert "rgba(239,68,68" in content or "#ef4444" in content, (
+            "Missing red color for diff-minus"
+        )
 
 
 class TestDiffI18n:
@@ -97,4 +110,6 @@ class TestDiffI18n:
         with open("static/i18n.js", "r", encoding="utf-8") as f:
             content = f.read()
         count = content.count("diff_loading")
-        assert count >= 8, f"diff_loading found {count} times, expected >= 8 (one per locale)"
+        assert count >= 8, (
+            f"diff_loading found {count} times, expected >= 8 (one per locale)"
+        )

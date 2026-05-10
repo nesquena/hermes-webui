@@ -4,6 +4,7 @@ These tests intentionally follow the repo's existing pytest style: read static
 source files, isolate the relevant function/rule, and assert implementation
 invariants before changing the UI.
 """
+
 import pathlib
 import re
 
@@ -66,21 +67,26 @@ def _function_body(src: str, name: str) -> str:
             depth -= 1
         i += 1
     assert depth == 0, f"{name}() body did not close"
-    return src[brace + 1:i - 1]
+    return src[brace + 1 : i - 1]
 
 
 class TestToolCallGroupingStatic:
     def test_simplified_tool_calling_setting_is_wired_through_frontend(self):
-        assert "settingsSimplifiedToolCalling" in (REPO / "static" / "index.html").read_text(encoding="utf-8"), (
+        assert "settingsSimplifiedToolCalling" in (
+            REPO / "static" / "index.html"
+        ).read_text(encoding="utf-8"), (
             "Settings should expose a Compact tool activity checkbox."
         )
-        assert "window._simplifiedToolCalling" in (REPO / "static" / "boot.js").read_text(encoding="utf-8"), (
+        assert "window._simplifiedToolCalling" in (
+            REPO / "static" / "boot.js"
+        ).read_text(encoding="utf-8"), (
             "Boot should hydrate simplified_tool_calling into a runtime flag."
         )
         panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
-        assert "settingsSimplifiedToolCalling" in panels and "simplified_tool_calling" in panels, (
-            "Settings panel should load and save the simplified_tool_calling setting."
-        )
+        assert (
+            "settingsSimplifiedToolCalling" in panels
+            and "simplified_tool_calling" in panels
+        ), "Settings panel should load and save the simplified_tool_calling setting."
 
     def test_simplified_tool_calling_autosave_hot_applies_renderer_mode(self):
         panels = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
@@ -107,7 +113,9 @@ class TestToolCallGroupingStatic:
         assert "data-tool-call-group" in helper, (
             "Tool-call groups need a stable data-tool-call-group attribute for CSS and tests."
         )
-        assert re.search(r"cards\.length|toolCount|toolCalls\.length|group\.length", fn + helper), (
+        assert re.search(
+            r"cards\.length|toolCount|toolCalls\.length|group\.length", fn + helper
+        ), (
             "The simplified group header should derive its summary/count from the number of tool calls."
         )
 
@@ -139,7 +147,9 @@ class TestToolCallGroupingStatic:
             "The summary sync path should not update a hidden/removed trailing count badge."
         )
 
-    def test_activity_summary_keeps_header_compact_without_tool_names_or_thinking_prefix(self):
+    def test_activity_summary_keeps_header_compact_without_tool_names_or_thinking_prefix(
+        self,
+    ):
         helper = _function_body(UI_JS, "ensureActivityGroup")
         sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
         assert "tool-call-group-list" not in helper, (
@@ -200,7 +210,9 @@ class TestToolCallGroupingStatic:
         assert "live:" in live_fn + thinking_fn, (
             "Live Activity groups should be keyed by active stream id."
         )
-        assert "_copyActivityDisclosureState('live:'+streamId, 'assistant:'" in done_fn, (
+        assert (
+            "_copyActivityDisclosureState('live:'+streamId, 'assistant:'" in done_fn
+        ), (
             "When a live turn settles, its saved disclosure state should transfer to the persisted assistant turn."
         )
 
@@ -226,12 +238,16 @@ class TestToolCallGroupingStatic:
             "Thinking content should be nested inside the shared activity dropdown, not rendered separately."
         )
         render_fn = _function_body(UI_JS, "renderMessages")
-        assert "isSimplifiedToolCalling()" in render_fn and "assistantThinking.set(rawIdx, thinkingText)" in render_fn, (
+        assert (
+            "isSimplifiedToolCalling()" in render_fn
+            and "assistantThinking.set(rawIdx, thinkingText)" in render_fn
+        ), (
             "Settled thinking should move into the shared activity dropdown only when Compact tool activity is enabled."
         )
-        assert "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))" in render_fn, (
-            "The non-simplified path should preserve standalone settled thinking cards."
-        )
+        assert (
+            "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))"
+            in render_fn
+        ), "The non-simplified path should preserve standalone settled thinking cards."
 
     def test_live_thinking_uses_shared_activity_dropdown_only_when_simplified(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
@@ -319,9 +335,10 @@ class TestToolCardDesignTokens:
         assert "padding:var(--space-1)var(--space-3)" in css_min, (
             ".tool-card-header padding should use spacing tokens."
         )
-        assert ".tool-card-name{" in css_min and "font-size:var(--font-size-xs)" in css_min, (
-            ".tool-card-name should use --font-size-xs."
-        )
-        assert ".tool-card-preview{" in css_min and "font-size:var(--font-size-xs)" in css_min, (
-            ".tool-card-preview should use --font-size-xs."
-        )
+        assert (
+            ".tool-card-name{" in css_min and "font-size:var(--font-size-xs)" in css_min
+        ), ".tool-card-name should use --font-size-xs."
+        assert (
+            ".tool-card-preview{" in css_min
+            and "font-size:var(--font-size-xs)" in css_min
+        ), ".tool-card-preview should use --font-size-xs."

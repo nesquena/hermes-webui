@@ -29,7 +29,7 @@ def test_finalize_thinking_card_guard_exists():
     start = UI_JS.find("function finalizeThinkingCard()")
     assert start != -1, "finalizeThinkingCard() must exist"
     end = UI_JS.find("\nfunction ", start + 1)
-    body = UI_JS[start:end if end != -1 else len(UI_JS)]
+    body = UI_JS[start : end if end != -1 else len(UI_JS)]
     # The guard must read dataset.sessionId from the live turn AND compare
     # against S.session.session_id. The exact form must early-return.
     assert "dataset.sessionId" in body, (
@@ -53,14 +53,16 @@ def test_live_turn_creation_sites_stamp_session_id():
     for m in re.finditer(r"\.id=['\"]liveAssistantTurn['\"]", UI_JS):
         # Find what variable name was used (e.g. `turn.id=`, `currentAssistantTurn.id=`)
         line_start = UI_JS.rfind("\n", 0, m.start()) + 1
-        line = UI_JS[line_start:m.end() + 1]
+        line = UI_JS[line_start : m.end() + 1]
         # Get the variable name
         var_m = re.search(r"(\w+)\.id=['\"]liveAssistantTurn['\"]", line)
         var_name = var_m.group(1) if var_m else "?"
         # Look at the next ~500 chars for a dataset.sessionId stamp on the same var
         # (500 chars accommodates an explanatory comment block before the stamp).
-        window = UI_JS[m.end():m.end() + 500]
-        stamped = bool(re.search(rf"{re.escape(var_name)}\.dataset\.sessionId\s*=", window))
+        window = UI_JS[m.end() : m.end() + 500]
+        stamped = bool(
+            re.search(rf"{re.escape(var_name)}\.dataset\.sessionId\s*=", window)
+        )
         sites.append((var_name, m.start(), stamped))
 
     assert sites, "Expected at least one site setting `<var>.id='liveAssistantTurn'`"

@@ -9,10 +9,10 @@ Covers:
 - CSS classes for .yolo-pill and .approval-btn.yolo
 - i18n keys present in all 6 locales
 """
+
 import os
 import re
 import json
-import pathlib
 import pytest
 
 from tests.conftest import requires_agent_modules
@@ -21,7 +21,9 @@ TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')
 
 
 def _get(path, expect_ok=True):
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
+
     try:
         with urllib.request.urlopen(TEST_BASE + path, timeout=10) as r:
             return json.loads(r.read())
@@ -36,7 +38,9 @@ def _get(path, expect_ok=True):
 
 
 def _post(path, body=None, expect_ok=True):
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
+
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
         TEST_BASE + path, data=data, headers={"Content-Type": "application/json"}
@@ -53,6 +57,7 @@ def _post(path, body=None, expect_ok=True):
 
 
 # ── Backend endpoint tests ──
+
 
 @requires_agent_modules
 class TestYoloEndpointGet:
@@ -128,6 +133,7 @@ class TestYoloEndpointPost:
 
 
 # ── Frontend JS tests (static file analysis — no server needed) ──
+
 
 class TestYoloCommandRegistration:
     """/yolo slash command should be registered in commands.js."""
@@ -220,7 +226,7 @@ class TestYoloI18n:
         start = match.end()
         next_locale = re.search(r"\n  \w{2}:\s*\{", i18n_js[start:])
         if next_locale:
-            block = i18n_js[start:start + next_locale.start()]
+            block = i18n_js[start : start + next_locale.start()]
         else:
             block = i18n_js[start:]
 

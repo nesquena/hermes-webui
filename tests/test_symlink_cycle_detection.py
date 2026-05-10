@@ -11,12 +11,11 @@ recursion.  Covers:
 - Symlink entries carry correct type / is_dir / target fields
 - Browsing into a symlink directory via workspace-relative path works
 """
+
 import json
-import os
 import pathlib
 import urllib.request
 import urllib.error
-import tempfile
 
 from tests._pytest_port import BASE
 
@@ -30,8 +29,9 @@ def get(path):
 def post(path, body=None):
     url = BASE + path
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=data,
-          headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -57,7 +57,9 @@ def make_session(created_list, ws=None):
 class TestSymlinkCycleDetection:
     """Symlink cycle detection in list_dir / safe_resolve_ws."""
 
-    def test_external_symlink_listed_as_symlink(self, cleanup_test_sessions, tmp_path_factory):
+    def test_external_symlink_listed_as_symlink(
+        self, cleanup_test_sessions, tmp_path_factory
+    ):
         """External symlink dir should appear with type='symlink', is_dir=True."""
         ws = tmp_path_factory.mktemp("ws")
         target = tmp_path_factory.mktemp("target")
@@ -87,7 +89,9 @@ class TestSymlinkCycleDetection:
         names = [e["name"] for e in entries]
         assert "inner.txt" in names
 
-    def test_self_referencing_symlink_filtered(self, cleanup_test_sessions, tmp_path_factory):
+    def test_self_referencing_symlink_filtered(
+        self, cleanup_test_sessions, tmp_path_factory
+    ):
         """Symlink pointing to the workspace root itself must be filtered out."""
         ws = tmp_path_factory.mktemp("ws")
         (ws / "file.txt").write_text("data")
@@ -130,7 +134,9 @@ class TestSymlinkCycleDetection:
         # List inside ext/subdir — 'back' should be filtered
         listing2 = get(f"/api/list?session_id={sid}&path=ext/subdir")
         names2 = [e["name"] for e in listing2["entries"]]
-        assert "back" not in names2, "Cycle symlink inside external target should be filtered"
+        assert "back" not in names2, (
+            "Cycle symlink inside external target should be filtered"
+        )
 
     def test_symlink_file_entry(self, cleanup_test_sessions, tmp_path_factory):
         """Symlink to a file should have is_dir=False and include size."""
@@ -147,7 +153,9 @@ class TestSymlinkCycleDetection:
         assert link[0]["is_dir"] is False
         assert link[0]["size"] == 11  # len("hello world")
 
-    def test_path_traversal_still_blocked(self, cleanup_test_sessions, tmp_path_factory):
+    def test_path_traversal_still_blocked(
+        self, cleanup_test_sessions, tmp_path_factory
+    ):
         """Raw .. traversal must still be blocked even with symlink support."""
         ws = tmp_path_factory.mktemp("ws")
         sid, _ = make_session(cleanup_test_sessions, ws)

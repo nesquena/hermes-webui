@@ -12,11 +12,10 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
-import os
+
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -137,8 +136,7 @@ class TestBlockquotePrefixStrip:
         """Task lists inside blockquotes render checkbox spans, not literal [x]."""
         out = _render(driver_path, "> - [x] done\n> - [ ] todo")
         assert 'class="task-done"' in out, (
-            f"`- [x]` inside a blockquote must produce a task-done span.  "
-            f"Got: {out!r}"
+            f"`- [x]` inside a blockquote must produce a task-done span.  Got: {out!r}"
         )
         assert 'class="task-todo"' in out
 
@@ -155,38 +153,45 @@ class TestRendererSanitization:
     @pytest.mark.parametrize(
         "payload, forbidden",
         [
-            ('<img src=x onerror=alert(1)>', 'onerror'),
-            ('<span onclick=alert(1)>click</span>', 'onclick'),
-            ('<div onmouseover=alert(1)>hover</div>', 'onmouseover'),
-            ('<a href="javascript:alert(1)">x</a>', 'javascript:'),
+            ("<img src=x onerror=alert(1)>", "onerror"),
+            ("<span onclick=alert(1)>click</span>", "onclick"),
+            ("<div onmouseover=alert(1)>hover</div>", "onmouseover"),
+            ('<a href="javascript:alert(1)">x</a>', "javascript:"),
         ],
     )
-    def test_raw_html_dangerous_attributes_and_schemes_are_removed(self, driver_path, payload, forbidden):
+    def test_raw_html_dangerous_attributes_and_schemes_are_removed(
+        self, driver_path, payload, forbidden
+    ):
         out = _render(driver_path, payload).lower()
         assert forbidden not in out, f"dangerous HTML survived sanitization: {out!r}"
-        assert 'alert(1)' not in out, f"executable payload text should not remain executable: {out!r}"
+        assert "alert(1)" not in out, (
+            f"executable payload text should not remain executable: {out!r}"
+        )
 
-    def test_generated_image_markdown_uses_delegated_lightbox_not_inline_js(self, driver_path):
+    def test_generated_image_markdown_uses_delegated_lightbox_not_inline_js(
+        self, driver_path
+    ):
         out = _render(driver_path, "![capy](https://example.com/capy.png)").lower()
-        assert '<img' in out and 'msg-media-img' in out
-        assert 'onclick' not in out
-        assert '_openimglightbox' not in out
+        assert "<img" in out and "msg-media-img" in out
+        assert "onclick" not in out
+        assert "_openimglightbox" not in out
 
     def test_media_token_image_uses_delegated_lightbox_not_inline_js(self, driver_path):
         out = _render(driver_path, "MEDIA:https://example.com/capy.png").lower()
-        assert '<img' in out and 'msg-media-img' in out
-        assert 'onclick' not in out
-        assert '_openimglightbox' not in out
+        assert "<img" in out and "msg-media-img" in out
+        assert "onclick" not in out
+        assert "_openimglightbox" not in out
 
-    def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
-        out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()
-        assert '&lt;img' in out
-        assert '<img' not in out
-        assert 'onerror' not in out or '&lt;img' in out
+    def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(
+        self, driver_path
+    ):
+        out = _render(driver_path, "<img src=x onerror=alert(1)//").lower()
+        assert "&lt;img" in out
+        assert "<img" not in out
+        assert "onerror" not in out or "&lt;img" in out
 
 
 class TestCommonLLMShapes:
-
     def test_strikethrough_outside_quote(self, driver_path):
         out = _render(driver_path, "This was ~~outdated~~ but is now fine.")
         assert "<del>outdated</del>" in out
@@ -409,9 +414,7 @@ class TestBugOrderedListInsideBlockquote:
         )
         # All three list items present
         for item in ["Open the app", "Click the button", "Observe the crash"]:
-            assert f">{item}</li>" in out, (
-                f"Missing <li>{item}</li> in {out!r}"
-            )
+            assert f">{item}</li>" in out, f"Missing <li>{item}</li> in {out!r}"
 
 
 class TestBugHorizontalRuleInsideBlockquote:
@@ -420,16 +423,12 @@ class TestBugHorizontalRuleInsideBlockquote:
     def test_hr_renders_inside_blockquote(self, driver_path):
         src = "> Above the rule\n>\n> ---\n>\n> Below the rule"
         out = _render(driver_path, src)
-        assert "<hr>" in out, (
-            f"--- inside blockquote must render as <hr>: {out!r}"
-        )
+        assert "<hr>" in out, f"--- inside blockquote must render as <hr>: {out!r}"
         assert "Above the rule" in out
         assert "Below the rule" in out
         # No literal '---' as text
         text_only = re.sub(r"<[^>]+>", "", out)
-        assert "---" not in text_only, (
-            f"Literal --- in rendered text: {text_only!r}"
-        )
+        assert "---" not in text_only, f"Literal --- in rendered text: {text_only!r}"
 
 
 class TestBugComplexBlockquoteAllFeatures:
@@ -518,9 +517,7 @@ class TestBlockquoteRegressionsDontTouchOutsideContent:
         src = "> outer line\n> > inner line"
         out = _render(driver_path, src)
         # Should produce nested <blockquote><blockquote>
-        assert out.count("<blockquote>") == 2, (
-            f"Expected 2 <blockquote>: {out!r}"
-        )
+        assert out.count("<blockquote>") == 2, f"Expected 2 <blockquote>: {out!r}"
 
 
 class TestBlockquoteEntityEncodedInput:
@@ -545,7 +542,9 @@ class TestBlockquoteEntityEncodedInput:
         assert "<blockquote>" in out, (
             f"Entity-encoded blockquote with fenced code must render: {out!r}"
         )
-        assert "<pre>" in out, f"Fenced code inside entity-encoded blockquote must render: {out!r}"
+        assert "<pre>" in out, (
+            f"Fenced code inside entity-encoded blockquote must render: {out!r}"
+        )
 
 
 class TestMermaidToolOutputGuard:
@@ -559,28 +558,35 @@ class TestMermaidToolOutputGuard:
         )
         assert '<div class="pre-header">mermaid</div>' in out
         assert '<pre><code class="language-mermaid">' in out
-        assert '23|flowchart TB' in out
+        assert "23|flowchart TB" in out
 
     def test_valid_mermaid_fence_still_creates_mermaid_block(self, driver_path):
         out = _render(driver_path, "```mermaid\nflowchart TB\n    A --> B\n```")
         assert 'class="mermaid-block"' in out, (
             f"Valid Mermaid fences should still be queued for Mermaid rendering: {out!r}"
         )
-        assert 'flowchart TB' in out
+        assert "flowchart TB" in out
 
     def test_valid_mermaid_c4_fence_still_creates_mermaid_block(self, driver_path):
-        out = _render(driver_path, "```mermaid\nC4Context\n    title System Context\n```")
+        out = _render(
+            driver_path, "```mermaid\nC4Context\n    title System Context\n```"
+        )
         assert 'class="mermaid-block"' in out, (
             f"Valid C4 Mermaid fences should still be queued for Mermaid rendering: {out!r}"
         )
-        assert 'C4Context' in out
+        assert "C4Context" in out
 
-    def test_valid_mermaid_frontmatter_fence_still_creates_mermaid_block(self, driver_path):
-        out = _render(driver_path, "```mermaid\n---\ntitle: Demo\n---\nflowchart TB\n    A --> B\n```")
+    def test_valid_mermaid_frontmatter_fence_still_creates_mermaid_block(
+        self, driver_path
+    ):
+        out = _render(
+            driver_path,
+            "```mermaid\n---\ntitle: Demo\n---\nflowchart TB\n    A --> B\n```",
+        )
         assert 'class="mermaid-block"' in out, (
             f"Valid Mermaid fences with frontmatter should still be queued for Mermaid rendering: {out!r}"
         )
-        assert 'title: Demo' in out
+        assert "title: Demo" in out
 
     def test_prose_mention_of_mermaid_fence_renders_as_code_block(self, driver_path):
         src = "```mermaid\n` fence should not be auto-rendered too aggressively.\n\nSome prose, not a diagram.\n```"
@@ -590,7 +596,7 @@ class TestMermaidToolOutputGuard:
         )
         assert '<div class="pre-header">mermaid</div>' in out
         assert '<pre><code class="language-mermaid">' in out
-        assert 'Some prose, not a diagram.' in out
+        assert "Some prose, not a diagram." in out
 
 
 class TestRawPreCodePreservation:

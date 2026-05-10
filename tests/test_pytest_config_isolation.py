@@ -1,4 +1,5 @@
 """Regression coverage for pytest isolation of Hermes config paths."""
+
 import os
 from pathlib import Path
 

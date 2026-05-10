@@ -83,7 +83,11 @@ def test_available_models_drops_base_url_derived_custom_slug(monkeypatch):
     fake_auth.get_auth_status = lambda _pid: {"key_source": "config_yaml"}
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
-    monkeypatch.setattr(config, "_get_auth_store_path", lambda: config.Path("/tmp/does-not-exist-auth.json"))
+    monkeypatch.setattr(
+        config,
+        "_get_auth_store_path",
+        lambda: config.Path("/tmp/does-not-exist-auth.json"),
+    )
     monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
 
     class _Resp:

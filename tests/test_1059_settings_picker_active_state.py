@@ -8,10 +8,15 @@ override on the active state.
 
 Issue: #1059 (settings picker active state)
 """
+
 from pathlib import Path
 
-BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
-STYLE_CSS = (Path(__file__).parent.parent / "static" / "style.css").read_text(encoding="utf-8")
+BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(
+    encoding="utf-8"
+)
+STYLE_CSS = (Path(__file__).parent.parent / "static" / "style.css").read_text(
+    encoding="utf-8"
+)
 
 
 class TestSettingsPickerActiveState:
@@ -21,7 +26,7 @@ class TestSettingsPickerActiveState:
         """_syncThemePicker must toggle .active class, not set inline borderColor."""
         idx = BOOT_JS.find("function _syncThemePicker(")
         assert idx >= 0, "_syncThemePicker function not found in boot.js"
-        body = BOOT_JS[idx:idx + 300]
+        body = BOOT_JS[idx : idx + 300]
         assert "classList.toggle" in body, (
             "_syncThemePicker must use classList.toggle('active', ...) — "
             "inline style.borderColor is overridden by !important CSS rules"
@@ -36,7 +41,7 @@ class TestSettingsPickerActiveState:
         """_syncFontSizePicker must toggle .active class."""
         idx = BOOT_JS.find("function _syncFontSizePicker(")
         assert idx >= 0, "_syncFontSizePicker function not found in boot.js"
-        body = BOOT_JS[idx:idx + 300]
+        body = BOOT_JS[idx : idx + 300]
         assert "classList.toggle" in body, (
             "_syncFontSizePicker must use classList.toggle('active', ...)"
         )
@@ -48,7 +53,7 @@ class TestSettingsPickerActiveState:
         """_syncSkinPicker must toggle .active class."""
         idx = BOOT_JS.find("function _syncSkinPicker(")
         assert idx >= 0, "_syncSkinPicker function not found in boot.js"
-        body = BOOT_JS[idx:idx + 300]
+        body = BOOT_JS[idx : idx + 300]
         assert "classList.toggle" in body, (
             "_syncSkinPicker must use classList.toggle('active', ...)"
         )
@@ -69,7 +74,7 @@ class TestSettingsPickerActiveState:
         )
         # The active rule must use !important to beat the base !important rule
         idx = STYLE_CSS.find(".theme-pick-btn.active")
-        rule = STYLE_CSS[idx:idx + 200]
+        rule = STYLE_CSS[idx : idx + 200]
         assert "!important" in rule, (
             ".theme-pick-btn.active must use !important to override "
             "the base border-color:var(--border)!important rule"
@@ -78,7 +83,7 @@ class TestSettingsPickerActiveState:
     def test_active_rule_uses_accent_color(self):
         """The .active rule must apply the accent color to make selection visible."""
         idx = STYLE_CSS.find(".theme-pick-btn.active")
-        rule = STYLE_CSS[idx:idx + 200]
+        rule = STYLE_CSS[idx : idx + 200]
         assert "var(--accent)" in rule, (
             ".theme-pick-btn.active must set border-color to var(--accent)"
         )

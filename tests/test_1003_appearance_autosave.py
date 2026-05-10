@@ -6,6 +6,7 @@ Focus:
 - Full-save flow should still include font_size.
 - /api/settings should accept appearance-only payloads and preserve untouched fields.
 """
+
 import json
 import re
 import urllib.error
@@ -15,17 +16,27 @@ from pathlib import Path
 from tests._pytest_port import BASE
 
 
-BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(encoding="utf-8")
-PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
-INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+BOOT_JS = (Path(__file__).parent.parent / "static" / "boot.js").read_text(
+    encoding="utf-8"
+)
+PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
+    encoding="utf-8"
+)
+INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(
+    encoding="utf-8"
+)
+I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(
+    encoding="utf-8"
+)
 
 
 def _function_block(src: str, name: str) -> str:
     marker = re.search(rf"(^|\n)(?:async\s+)?function\s+{re.escape(name)}\(", src)
     assert marker is not None, f"{name}() not found"
     start = marker.start()
-    next_marker = re.search(r"\n(?:function\s+\w+\(|async\s+function\s+\w+\()", src[start + 1 :])
+    next_marker = re.search(
+        r"\n(?:function\s+\w+\(|async\s+function\s+\w+\()", src[start + 1 :]
+    )
     if next_marker:
         end = start + 1 + next_marker.start()
     else:
@@ -121,7 +132,10 @@ def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_
         "check_for_updates": original.get("check_for_updates"),
     }
     try:
-        d, status = _post("/api/settings", {"theme": "system", "skin": "charizard", "font_size": "large"})
+        d, status = _post(
+            "/api/settings",
+            {"theme": "system", "skin": "charizard", "font_size": "large"},
+        )
         assert status == 200
         assert d.get("theme") == "system"
         assert d.get("skin") == "charizard"
@@ -131,8 +145,11 @@ def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_
         assert reloaded.get("show_cli_sessions") == snapshot["show_cli_sessions"]
         assert reloaded.get("check_for_updates") == snapshot["check_for_updates"]
     finally:
-        _post("/api/settings", {
-            "theme": snapshot["theme"],
-            "skin": snapshot["skin"],
-            "font_size": snapshot["font_size"],
-        })
+        _post(
+            "/api/settings",
+            {
+                "theme": snapshot["theme"],
+                "skin": snapshot["skin"],
+                "font_size": snapshot["font_size"],
+            },
+        )

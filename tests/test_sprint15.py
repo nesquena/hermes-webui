@@ -1,7 +1,10 @@
 """
 Sprint 15 Tests: session projects (CRUD, move, backward compat).
 """
-import json, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -13,8 +16,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -49,6 +53,7 @@ def cleanup_projects(project_ids):
 
 
 # ── Project CRUD ─────────────────────────────────────────────────────────
+
 
 def test_create_project():
     """Creating a project returns a valid project dict."""
@@ -90,7 +95,9 @@ def test_rename_project():
     pids = []
     try:
         pid, _ = make_project(pids, "Old Name")
-        d, status = post("/api/projects/rename", {"project_id": pid, "name": "New Name"})
+        d, status = post(
+            "/api/projects/rename", {"project_id": pid, "name": "New Name"}
+        )
         assert status == 200
         assert d["project"]["name"] == "New Name"
         # Verify via list
@@ -155,6 +162,7 @@ def test_delete_nonexistent_project():
 
 # ── Session move ─────────────────────────────────────────────────────────
 
+
 def test_session_move_to_project():
     """Moving a session to a project sets its project_id."""
     pids = []
@@ -197,7 +205,9 @@ def test_session_project_in_list():
         pid, _ = make_project(pids, "Listed")
         sid, _ = make_session(sids)
         # Give it a title so it shows in list (non-empty Untitled sessions are hidden)
-        post("/api/session/rename", {"session_id": sid, "title": "Project Test Session"})
+        post(
+            "/api/session/rename", {"session_id": sid, "title": "Project Test Session"}
+        )
         post("/api/session/move", {"session_id": sid, "project_id": pid})
         dl, _ = get("/api/sessions")
         match = [s for s in dl["sessions"] if s["session_id"] == sid]
@@ -210,6 +220,7 @@ def test_session_project_in_list():
 
 
 # ── Backward compat ──────────────────────────────────────────────────────
+
 
 def test_compact_includes_project_id():
     """New session compact dict includes project_id as null."""

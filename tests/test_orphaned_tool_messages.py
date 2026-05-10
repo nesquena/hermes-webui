@@ -4,6 +4,7 @@ Regression for issue #534: strictly-conformant providers (Mercury-2/Inception,
 newer OpenAI models) reject histories containing tool-role messages whose
 tool_call_id has no matching tool_calls entry in a prior assistant message.
 """
+
 import sys
 import pathlib
 
@@ -17,11 +18,18 @@ from api.streaming import _sanitize_messages_for_api
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _asst_with_tool_call(call_id="call-1", call_id_key="id"):
     return {
         "role": "assistant",
         "content": None,
-        "tool_calls": [{"type": "function", call_id_key: call_id, "function": {"name": "terminal", "arguments": "{}"}}],
+        "tool_calls": [
+            {
+                "type": "function",
+                call_id_key: call_id,
+                "function": {"name": "terminal", "arguments": "{}"},
+            }
+        ],
         "_ts": 12345,  # extra field that should be stripped
     }
 
@@ -41,6 +49,7 @@ def _asst(text="hi"):
 # ---------------------------------------------------------------------------
 # Tests: normal valid histories are preserved
 # ---------------------------------------------------------------------------
+
 
 def test_valid_tool_roundtrip_preserved():
     """A linked assistant→tool pair must be kept intact."""
@@ -72,8 +81,16 @@ def test_multiple_valid_tool_calls_preserved():
         "role": "assistant",
         "content": None,
         "tool_calls": [
-            {"type": "function", "id": "call-1", "function": {"name": "f1", "arguments": "{}"}},
-            {"type": "function", "id": "call-2", "function": {"name": "f2", "arguments": "{}"}},
+            {
+                "type": "function",
+                "id": "call-1",
+                "function": {"name": "f1", "arguments": "{}"},
+            },
+            {
+                "type": "function",
+                "id": "call-2",
+                "function": {"name": "f2", "arguments": "{}"},
+            },
         ],
     }
     msgs = [_user(), asst, _tool_result("call-1"), _tool_result("call-2"), _asst()]
@@ -85,6 +102,7 @@ def test_multiple_valid_tool_calls_preserved():
 # ---------------------------------------------------------------------------
 # Tests: orphaned tool messages are dropped
 # ---------------------------------------------------------------------------
+
 
 def test_orphaned_tool_message_dropped():
     """A tool message with no matching assistant tool_call is dropped."""
@@ -110,8 +128,8 @@ def test_partially_orphaned_tool_messages():
     msgs = [
         _user(),
         asst,
-        _tool_result("call-valid"),   # linked → kept
-        _tool_result("call-ghost"),   # orphaned → dropped
+        _tool_result("call-valid"),  # linked → kept
+        _tool_result("call-ghost"),  # orphaned → dropped
         _asst(),
     ]
     result = _sanitize_messages_for_api(msgs)
@@ -133,6 +151,7 @@ def test_orphaned_tool_only_history():
 # Tests: Anthropic 'call_id' field name (not OpenAI 'id')
 # ---------------------------------------------------------------------------
 
+
 def test_anthropic_call_id_field_recognized():
     """Anthropic tool calls use 'call_id' not 'id' — both must be recognized."""
     asst = _asst_with_tool_call("call-anthropic", call_id_key="call_id")
@@ -145,6 +164,7 @@ def test_anthropic_call_id_field_recognized():
 # ---------------------------------------------------------------------------
 # Tests: edge cases
 # ---------------------------------------------------------------------------
+
 
 def test_empty_messages_list():
     assert _sanitize_messages_for_api([]) == []

@@ -17,16 +17,27 @@ These tests exercise the full chain to guard against the regression:
 2. Setting the marker survives the streaming finally
 3. routes.py consumer discards atomically on read
 """
+
 import re
 from pathlib import Path
 
 
 def _read_streaming():
-    return Path(__file__).parents[1].joinpath("api", "streaming.py").read_text(encoding="utf-8")
+    return (
+        Path(__file__)
+        .parents[1]
+        .joinpath("api", "streaming.py")
+        .read_text(encoding="utf-8")
+    )
 
 
 def _read_routes():
-    return Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
+    return (
+        Path(__file__)
+        .parents[1]
+        .joinpath("api", "routes.py")
+        .read_text(encoding="utf-8")
+    )
 
 
 def test_streaming_finally_does_not_discard_pending_goal_continuation():
@@ -43,7 +54,7 @@ def test_streaming_finally_does_not_discard_pending_goal_continuation():
     assert pop_idx != -1, "STREAM_GOAL_RELATED cleanup not found — test needs update"
 
     # Look at the next ~600 chars (the immediate cleanup block).
-    block = src[pop_idx:pop_idx + 600]
+    block = src[pop_idx : pop_idx + 600]
 
     # The discard must NOT appear in this cleanup block.
     assert "PENDING_GOAL_CONTINUATION.discard" not in block, (
@@ -84,6 +95,7 @@ def test_pending_goal_continuation_is_a_set():
     """The marker store must be a set so add/discard is GIL-safe single-op
     (mutated from streaming worker thread, read from HTTP threads)."""
     from api.config import PENDING_GOAL_CONTINUATION
+
     assert isinstance(PENDING_GOAL_CONTINUATION, set), (
         "PENDING_GOAL_CONTINUATION must be a set for thread-safe single-op "
         "add/discard semantics"

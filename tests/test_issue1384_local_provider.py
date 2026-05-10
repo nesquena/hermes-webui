@@ -26,7 +26,6 @@ healed automatically:
 import re
 from pathlib import Path
 
-import pytest
 
 import api.config as cfg
 
@@ -57,7 +56,7 @@ class TestAutoDetectWritesCustom:
             r'\s*provider = "ollama"\s*\n'
             r'\s*elif "lmstudio" in host or "lm-studio" in host:\s*\n'
             r'\s*provider = "lmstudio"\s*\n'
-            r'\s*else:',
+            r"\s*else:",
             src,
         )
         assert m, "Auto-detect host-classifier block not found in api/config.py"
@@ -66,7 +65,7 @@ class TestAutoDetectWritesCustom:
         provider_assign = re.search(r'provider = "([a-z-]+)"', tail)
         assert provider_assign, "No provider assignment found after auto-detect else"
         assert provider_assign.group(1) == "custom", (
-            f"Auto-detect else branch must assign provider = \"custom\", "
+            f'Auto-detect else branch must assign provider = "custom", '
             f"got {provider_assign.group(1)!r}"
         )
 
@@ -91,7 +90,9 @@ class TestResolveModelProviderHealsLegacyLocal:
         monkeypatch.setattr(cfg, "_get_config_path", lambda: cfgfile)
         cfg.reload_config()
         try:
-            model_id, provider, base_url = cfg.resolve_model_provider("qwen2.5-coder:14b")
+            model_id, provider, base_url = cfg.resolve_model_provider(
+                "qwen2.5-coder:14b"
+            )
             assert provider == "custom", (
                 f"resolve_model_provider must rewrite legacy 'local' to 'custom', "
                 f"got {provider!r}"
@@ -123,9 +124,7 @@ class TestResolveModelProviderHealsLegacyLocal:
         """The migration must not touch any other provider name."""
         cfgfile = tmp_path / "config.yaml"
         cfgfile.write_text(
-            "model:\n"
-            "  default: claude-sonnet-4.6\n"
-            "  provider: anthropic\n",
+            "model:\n  default: claude-sonnet-4.6\n  provider: anthropic\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(cfg, "_get_config_path", lambda: cfgfile)

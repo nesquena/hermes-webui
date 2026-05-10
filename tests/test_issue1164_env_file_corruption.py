@@ -15,6 +15,7 @@ Fix:
 
 Sprint/commit: v0.50.227+
 """
+
 import os
 import tempfile
 import textwrap
@@ -30,6 +31,7 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
         self.env_path = Path(self.tmpdir) / ".env"
         # Must import AFTER setting up, as the module has top-level code
         from api.providers import _write_env_file
+
         self._write_env_file = _write_env_file
 
     def tearDown(self):
@@ -37,6 +39,7 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
         for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "NEW_KEY"):
             os.environ.pop(key, None)
         import shutil
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _read(self) -> str:
@@ -46,38 +49,40 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
 
     def test_comments_preserved_on_update(self):
         """Comments in .env must survive a key value update."""
-        self.env_path.write_text(textwrap.dedent("""\
+        self.env_path.write_text(
+            textwrap.dedent("""\
             # Hermes API keys
             OPENROUTER_API_KEY=sk-or-old
             # Another comment
             OPENAI_API_KEY=sk-oai-old
-        """).strip() + "\n", encoding="utf-8")
+        """).strip()
+            + "\n",
+            encoding="utf-8",
+        )
 
         self._write_env_file(self.env_path, {"OPENROUTER_API_KEY": "sk-or-new"})
 
         content = self._read()
-        self.assertIn("# Hermes API keys", content,
-                      "Leading comment must be preserved")
-        self.assertIn("# Another comment", content,
-                      "Inline comment must be preserved")
+        self.assertIn("# Hermes API keys", content, "Leading comment must be preserved")
+        self.assertIn("# Another comment", content, "Inline comment must be preserved")
         self.assertIn("sk-or-new", content)
 
     def test_blank_lines_preserved(self):
         """Blank lines between key blocks must be preserved."""
-        self.env_path.write_text(
-            "KEY_A=val_a\n\nKEY_B=val_b\n", encoding="utf-8")
+        self.env_path.write_text("KEY_A=val_a\n\nKEY_B=val_b\n", encoding="utf-8")
 
         self._write_env_file(self.env_path, {"KEY_A": "updated"})
 
         content = self._read()
-        self.assertEqual(content.count("\n\n"), 1,
-                         "Blank line between keys must be preserved")
+        self.assertEqual(
+            content.count("\n\n"), 1, "Blank line between keys must be preserved"
+        )
 
     def test_key_order_preserved(self):
         """Original key order must not be sorted alphabetically."""
         self.env_path.write_text(
-            "ZZZ_KEY=last\nAAA_KEY=first\nBBB_KEY=middle\n",
-            encoding="utf-8")
+            "ZZZ_KEY=last\nAAA_KEY=first\nBBB_KEY=middle\n", encoding="utf-8"
+        )
 
         self._write_env_file(self.env_path, {"AAA_KEY": "updated"})
 
@@ -86,15 +91,16 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
         aaa_pos = content.find("AAA_KEY")
         bbb_pos = content.find("BBB_KEY")
         # Original order: ZZZ, AAA, BBB
-        self.assertLess(zzz_pos, aaa_pos,
-                        "ZZZ_KEY must still come before AAA_KEY (original order)")
-        self.assertLess(aaa_pos, bbb_pos,
-                        "AAA_KEY must still come before BBB_KEY (original order)")
+        self.assertLess(
+            zzz_pos, aaa_pos, "ZZZ_KEY must still come before AAA_KEY (original order)"
+        )
+        self.assertLess(
+            aaa_pos, bbb_pos, "AAA_KEY must still come before BBB_KEY (original order)"
+        )
 
     def test_new_key_appended_with_separator(self):
         """New keys are appended at the end with a blank-line separator."""
-        self.env_path.write_text(
-            "EXISTING_KEY=value\n", encoding="utf-8")
+        self.env_path.write_text("EXISTING_KEY=value\n", encoding="utf-8")
 
         self._write_env_file(self.env_path, {"NEW_KEY": "new_value"})
 
@@ -105,12 +111,16 @@ class TestEnvFileCommentPreservation(unittest.TestCase):
 
     def test_key_removal_preserves_others(self):
         """Removing a key leaves other keys and comments intact."""
-        self.env_path.write_text(textwrap.dedent("""\
+        self.env_path.write_text(
+            textwrap.dedent("""\
             # Comment A
             KEY_A=val_a
             # Comment B
             KEY_B=val_b
-        """).strip() + "\n", encoding="utf-8")
+        """).strip()
+            + "\n",
+            encoding="utf-8",
+        )
 
         self._write_env_file(self.env_path, {"KEY_B": None})
 
@@ -137,21 +147,29 @@ class TestOnboardingUsesProviderWriteEnv(unittest.TestCase):
         """api.onboarding._write_env_file must be the same object as
         api.providers._write_env_file (shared implementation with lock)."""
         from api import onboarding, providers
+
         self.assertIs(
             onboarding._write_env_file,
             providers._write_env_file,
-            "onboarding must use providers._write_env_file for thread safety (#1164)"
+            "onboarding must use providers._write_env_file for thread safety (#1164)",
         )
 
     def test_providers_write_env_holds_env_lock(self):
         """providers._write_env_file must acquire _ENV_LOCK from api.streaming."""
         import inspect
         from api.providers import _write_env_file
+
         source = inspect.getsource(_write_env_file)
-        self.assertIn("_ENV_LOCK", source,
-                      "_write_env_file must use _ENV_LOCK for concurrency safety")
-        self.assertIn("from api.streaming import _ENV_LOCK", source,
-                      "_ENV_LOCK must be imported from api.streaming")
+        self.assertIn(
+            "_ENV_LOCK",
+            source,
+            "_write_env_file must use _ENV_LOCK for concurrency safety",
+        )
+        self.assertIn(
+            "from api.streaming import _ENV_LOCK",
+            source,
+            "_ENV_LOCK must be imported from api.streaming",
+        )
 
     def test_providers_write_env_uses_atomic_rename(self):
         """providers._write_env_file must write atomically via tempfile +
@@ -159,12 +177,18 @@ class TestOnboardingUsesProviderWriteEnv(unittest.TestCase):
         a truncated half-written file (#1164 cross-process leg)."""
         import inspect
         from api.providers import _write_env_file
+
         source = inspect.getsource(_write_env_file)
-        self.assertIn("tempfile", source,
-                      "_write_env_file must stage writes through a tempfile")
-        self.assertIn("os.replace(", source,
-                      "_write_env_file must atomically rename via os.replace")
+        self.assertIn(
+            "tempfile", source, "_write_env_file must stage writes through a tempfile"
+        )
+        self.assertIn(
+            "os.replace(",
+            source,
+            "_write_env_file must atomically rename via os.replace",
+        )
         # The original O_TRUNC pattern must NOT remain — it is the source of
         # the cross-process race the PR is closing.
-        self.assertNotIn("O_TRUNC", source,
-                         "_write_env_file must not truncate-in-place (#1164)")
+        self.assertNotIn(
+            "O_TRUNC", source, "_write_env_file must not truncate-in-place (#1164)"
+        )

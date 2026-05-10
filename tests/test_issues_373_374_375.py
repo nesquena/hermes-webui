@@ -5,18 +5,19 @@ Tests for issues #373, #374, and #375.
 #374: Remove stale OpenAI models from default list (gpt-4o, o3)
 #375: Model dropdown should fetch live models from provider
 """
+
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
-CONFIG_PY    = (REPO / "api" / "config.py").read_text(encoding="utf-8")
-ROUTES_PY    = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
-MESSAGES_JS  = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
-UI_JS        = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
+ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 # ── Issue #373: Silent error detection ──────────────────────────────────────
+
 
 class TestSilentErrorDetection:
     """streaming.py must emit apperror when agent returns no assistant reply."""
@@ -38,7 +39,9 @@ class TestSilentErrorDetection:
         # The return statement must come after the put('apperror') for no_response
         no_resp_pos = STREAMING_PY.find("'no_response'")
         # Comment updated: "apperror already closes the stream on the client side"
-        return_pos = STREAMING_PY.find("return  # apperror already closes the stream", no_resp_pos)
+        return_pos = STREAMING_PY.find(
+            "return  # apperror already closes the stream", no_resp_pos
+        )
         assert no_resp_pos != -1, "no_response type not found in streaming.py"
         assert return_pos != -1, (
             "streaming.py must return after emitting apperror to prevent also emitting done (#373)"
@@ -57,9 +60,9 @@ class TestSilentErrorDetection:
     def test_messages_js_done_handler_detects_no_reply(self):
         """messages.js done handler must show an error if no assistant reply arrived."""
         # Check for either the variable name or the inlined check pattern
-        has_no_reply_guard = (
-            "hasAssistantReply" in MESSAGES_JS
-            or ("role==='assistant'" in MESSAGES_JS and "No response received" in MESSAGES_JS)
+        has_no_reply_guard = "hasAssistantReply" in MESSAGES_JS or (
+            "role==='assistant'" in MESSAGES_JS
+            and "No response received" in MESSAGES_JS
         )
         assert has_no_reply_guard, (
             "messages.js done handler must detect zero assistant replies (#373)"
@@ -82,6 +85,7 @@ class TestSilentErrorDetection:
 
 
 # ── Issue #374: Stale model list cleanup ─────────────────────────────────────
+
 
 class TestStaleModelListCleanup:
     """gpt-4o and o3 must be removed from the primary OpenAI model lists."""
@@ -131,6 +135,7 @@ class TestStaleModelListCleanup:
     def test_fallback_has_gpt54(self):
         """_FALLBACK_MODELS must contain gpt-5.4-mini as the primary OpenAI option."""
         from api.config import _FALLBACK_MODELS
+
         ids = [m["id"] for m in _FALLBACK_MODELS]
         assert any("gpt-5.4-mini" in mid for mid in ids), (
             "_FALLBACK_MODELS must include gpt-5.4-mini as the primary OpenAI option"
@@ -150,6 +155,7 @@ class TestStaleModelListCleanup:
 
 # ── Issue #375: Live model fetching ─────────────────────────────────────────
 
+
 class TestLiveModelFetching:
     """Backend and frontend must support live model fetching from provider APIs."""
 
@@ -167,15 +173,15 @@ class TestLiveModelFetching:
 
     def test_live_models_handler_validates_scheme(self):
         """_handle_live_models must validate URL scheme to prevent file:// injection (B310)."""
-        assert "nosec B310" in ROUTES_PY or ("scheme" in ROUTES_PY and "http" in ROUTES_PY), (
-            "_handle_live_models must validate URL scheme before urlopen (#375)"
-        )
+        assert "nosec B310" in ROUTES_PY or (
+            "scheme" in ROUTES_PY and "http" in ROUTES_PY
+        ), "_handle_live_models must validate URL scheme before urlopen (#375)"
 
     def test_live_models_handler_has_ssrf_guard(self):
         """_handle_live_models must guard against SSRF (private IP access)."""
-        assert "ssrf_blocked" in ROUTES_PY or ("is_private" in ROUTES_PY and "live" in ROUTES_PY), (
-            "_handle_live_models must have SSRF protection for private IP ranges (#375)"
-        )
+        assert "ssrf_blocked" in ROUTES_PY or (
+            "is_private" in ROUTES_PY and "live" in ROUTES_PY
+        ), "_handle_live_models must have SSRF protection for private IP ranges (#375)"
 
     def test_live_models_all_providers_handled_via_agent(self):
         """_handle_live_models must delegate to provider_model_ids() which handles all
@@ -189,9 +195,10 @@ class TestLiveModelFetching:
 
     def test_frontend_has_fetch_live_models_function(self):
         """ui.js must define _fetchLiveModels() for background live model loading (#375)."""
-        assert "function _fetchLiveModels(" in UI_JS or "async function _fetchLiveModels(" in UI_JS, (
-            "ui.js must define _fetchLiveModels() function (#375)"
-        )
+        assert (
+            "function _fetchLiveModels(" in UI_JS
+            or "async function _fetchLiveModels(" in UI_JS
+        ), "ui.js must define _fetchLiveModels() function (#375)"
 
     def test_frontend_live_models_cache_exists(self):
         """ui.js must cache live model responses to avoid redundant API calls (#375)."""
@@ -217,7 +224,7 @@ class TestLiveModelFetching:
         # The old skip list (anthropic, google, gemini) must be gone from the guard
         skip_guard_pos = UI_JS.find("includes(provider)")
         if skip_guard_pos != -1:
-            guard_line = UI_JS[max(0,skip_guard_pos-100):skip_guard_pos+50]
+            guard_line = UI_JS[max(0, skip_guard_pos - 100) : skip_guard_pos + 50]
             assert "anthropic" not in guard_line, (
                 "_fetchLiveModels must not skip anthropic — backend now handles it (#375 upgrade)"
             )
@@ -234,6 +241,7 @@ class TestLiveModelFetching:
 
 
 # ── #669: Gemini model IDs must be valid for Google AI Studio endpoint ────────
+
 
 class TestGeminiModelIds:
     """Gemini 3.x model IDs must be valid for the native Google AI Studio provider.
@@ -254,7 +262,7 @@ class TestGeminiModelIds:
         """_PROVIDER_MODELS['gemini'] must contain valid Gemini 3.x model IDs (#669)."""
         gemini_block_start = CONFIG_PY.find('"gemini": [')
         assert gemini_block_start != -1, "_PROVIDER_MODELS['gemini'] block not found"
-        gemini_block = CONFIG_PY[gemini_block_start:gemini_block_start + 600]
+        gemini_block = CONFIG_PY[gemini_block_start : gemini_block_start + 600]
         for mid in self.VALID_GEMINI_3:
             assert mid in gemini_block, (
                 f"_PROVIDER_MODELS['gemini'] must contain {mid!r} — "
@@ -269,7 +277,7 @@ class TestGeminiModelIds:
         """
         gemini_block_start = CONFIG_PY.find('"gemini": [')
         assert gemini_block_start != -1
-        gemini_block = CONFIG_PY[gemini_block_start:gemini_block_start + 600]
+        gemini_block = CONFIG_PY[gemini_block_start : gemini_block_start + 600]
         assert "gemini-3.1-flash-lite-preview" in gemini_block, (
             "_PROVIDER_MODELS['gemini'] missing gemini-3.1-flash-lite-preview — "
             "this was the exact model the #669 reporter tried and got API_KEY_INVALID"
@@ -283,9 +291,9 @@ class TestGeminiModelIds:
         depth = 0
         pos = fallback_start + len("_FALLBACK_MODELS = [")
         for i, ch in enumerate(CONFIG_PY[pos:], start=pos):
-            if ch == '[':
+            if ch == "[":
                 depth += 1
-            elif ch == ']':
+            elif ch == "]":
                 if depth == 0:
                     fallback_end = i
                     break
@@ -300,14 +308,17 @@ class TestGeminiModelIds:
         """_PROVIDER_MODELS['gemini'] must retain stable Gemini 2.5 models (#669)."""
         gemini_block_start = CONFIG_PY.find('"gemini": [')
         assert gemini_block_start != -1
-        gemini_block = CONFIG_PY[gemini_block_start:gemini_block_start + 600]
+        gemini_block = CONFIG_PY[gemini_block_start : gemini_block_start + 600]
         assert "gemini-2.5-pro" in gemini_block, (
             "_PROVIDER_MODELS['gemini'] must keep gemini-2.5-pro as a stable fallback"
         )
 
     def test_no_invalid_gemini_3_pro_model(self):
         """gemini-3-pro-preview must not appear — it was shut down March 9 2026 (#669)."""
-        assert "gemini-3-pro-preview" not in CONFIG_PY or "gemini-3.1-pro-preview" in CONFIG_PY, (
+        assert (
+            "gemini-3-pro-preview" not in CONFIG_PY
+            or "gemini-3.1-pro-preview" in CONFIG_PY
+        ), (
             "gemini-3-pro-preview was shut down — use gemini-3.1-pro-preview instead (#669)"
         )
         # More precise: ensure the bare (non-.1) version isn't the only one present

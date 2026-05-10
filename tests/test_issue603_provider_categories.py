@@ -11,8 +11,8 @@ Validates:
   - Fallback when categories are empty
 """
 
-import pytest
-import sys, os
+import sys
+import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -25,6 +25,7 @@ from api.onboarding import (
 
 
 # ── Backend: provider catalog structure ──────────────────────────────────
+
 
 class TestProviderCatalog:
     """Verify the extended provider catalog has categories."""
@@ -149,15 +150,26 @@ class TestProviderCategoryOrder:
 
 # ── Backend: _build_setup_catalog ────────────────────────────────────────
 
+
 class TestBuildSetupCatalog:
     def test_catalog_has_categories_key(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         assert "categories" in catalog
         assert isinstance(catalog["categories"], list)
 
     def test_catalog_categories_have_providers_list(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         all_provider_ids = {p["id"] for p in catalog["providers"]}
         for cat in catalog["categories"]:
@@ -166,13 +178,23 @@ class TestBuildSetupCatalog:
                 assert pid in all_provider_ids
 
     def test_catalog_providers_have_category_field(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         for p in catalog["providers"]:
             assert "category" in p
 
     def test_catalog_providers_sorted_by_category(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         cat_order = {c["id"]: c["order"] for c in _PROVIDER_CATEGORIES}
         prev_order = -1
@@ -182,13 +204,23 @@ class TestBuildSetupCatalog:
             prev_order = order
 
     def test_catalog_quick_flag_on_openrouter(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         orow = next(p for p in catalog["providers"] if p["id"] == "openrouter")
         assert orow["quick"] is True
 
     def test_catalog_no_quick_flag_on_others(self):
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         catalog = _build_setup_catalog(cfg)
         for p in catalog["providers"]:
             if p["id"] != "openrouter":
@@ -196,6 +228,7 @@ class TestBuildSetupCatalog:
 
 
 # ── Backend: apply_onboarding_setup base_url handling ───────────────────
+
 
 class TestApplyBaseURL:
     """Verify the generic base_url save logic."""
@@ -217,17 +250,21 @@ class TestApplyBaseURL:
         monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
 
         saved_cfg = {}
+
         def mock_save(p, cfg):
             saved_cfg.update(cfg)
+
         monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
 
-        apply_onboarding_setup({
-            "provider": "ollama",
-            "model": "qwen3:32b",
-            "api_key": "test-key",
-            "base_url": "http://my-ollama:11434/v1",
-            "confirm_overwrite": True,
-        })
+        apply_onboarding_setup(
+            {
+                "provider": "ollama",
+                "model": "qwen3:32b",
+                "api_key": "test-key",
+                "base_url": "http://my-ollama:11434/v1",
+                "confirm_overwrite": True,
+            }
+        )
 
         assert saved_cfg["model"]["base_url"] == "http://my-ollama:11434/v1"
 
@@ -246,16 +283,20 @@ class TestApplyBaseURL:
         monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
 
         saved_cfg = {}
+
         def mock_save(p, cfg):
             saved_cfg.update(cfg)
+
         monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
 
-        apply_onboarding_setup({
-            "provider": "openai",
-            "model": "gpt-4o",
-            "api_key": "test-key",
-            "confirm_overwrite": True,
-        })
+        apply_onboarding_setup(
+            {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "test-key",
+                "confirm_overwrite": True,
+            }
+        )
 
         assert saved_cfg["model"]["base_url"] == "https://api.openai.com/v1"
 
@@ -274,27 +315,36 @@ class TestApplyBaseURL:
         monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
 
         saved_cfg = {}
+
         def mock_save(p, cfg):
             saved_cfg.update(cfg)
+
         monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
 
-        apply_onboarding_setup({
-            "provider": "anthropic",
-            "model": "claude-sonnet-4.6",
-            "api_key": "test-key",
-            "confirm_overwrite": True,
-        })
+        apply_onboarding_setup(
+            {
+                "provider": "anthropic",
+                "model": "claude-sonnet-4.6",
+                "api_key": "test-key",
+                "confirm_overwrite": True,
+            }
+        )
 
         assert "base_url" not in saved_cfg["model"]
 
 
 # ── Frontend: i18n keys ─────────────────────────────────────────────────
 
+
 class TestI18nCategoryKeys:
     def test_en_has_all_category_keys(self):
         with open("static/i18n.js", encoding="utf-8") as f:
             content = f.read()
-        for key in ["provider_category_easy_start", "provider_category_self_hosted", "provider_category_specialized"]:
+        for key in [
+            "provider_category_easy_start",
+            "provider_category_self_hosted",
+            "provider_category_specialized",
+        ]:
             assert f"{key}:" in content, f"Missing i18n key: {key}"
 
     def test_ru_has_all_category_keys(self):
@@ -337,25 +387,37 @@ class TestApplyBaseURLSpecialized:
         monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
         monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)
         monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
-        monkeypatch.setattr("api.onboarding._normalize_model_for_provider", lambda prov, m: m)
+        monkeypatch.setattr(
+            "api.onboarding._normalize_model_for_provider", lambda prov, m: m
+        )
         monkeypatch.setattr("api.onboarding._write_env_file", lambda p, d: None)
         monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda *a: True)
         monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
 
         saved_cfg = {}
+
         def mock_save(p, cfg):
             saved_cfg.update(cfg)
+
         monkeypatch.setattr("api.onboarding._save_yaml_config", mock_save)
 
         from api.onboarding import apply_onboarding_setup
-        apply_onboarding_setup({"provider": provider, "model": model, "api_key": "test-key", "confirm_overwrite": True})
+
+        apply_onboarding_setup(
+            {
+                "provider": provider,
+                "model": model,
+                "api_key": "test-key",
+                "confirm_overwrite": True,
+            }
+        )
         return saved_cfg
 
     def test_gemini_gets_default_base_url(self, tmp_path, monkeypatch):
         saved = self._run_setup(tmp_path, monkeypatch, "gemini")
-        assert "generativelanguage.googleapis.com" in saved.get("model", {}).get("base_url", ""), (
-            "gemini setup must write the Gemini base_url to config"
-        )
+        assert "generativelanguage.googleapis.com" in saved.get("model", {}).get(
+            "base_url", ""
+        ), "gemini setup must write the Gemini base_url to config"
 
     def test_deepseek_gets_default_base_url(self, tmp_path, monkeypatch):
         saved = self._run_setup(tmp_path, monkeypatch, "deepseek")

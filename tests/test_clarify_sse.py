@@ -9,7 +9,6 @@ Covers:
 import os
 import queue
 import threading
-import textwrap
 
 import pytest
 
@@ -27,12 +26,15 @@ def _read(path):
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Static analysis — verify code structure without importing the server
 # ══════════════════════════════════════════════════════════════════════════════
-@pytest.mark.parametrize("marker", [
-    "_clarify_sse_subscribers",
-    "def sse_subscribe",
-    "def sse_unsubscribe",
-    "_clarify_sse_notify",
-])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "_clarify_sse_subscribers",
+        "def sse_subscribe",
+        "def sse_unsubscribe",
+        "_clarify_sse_notify",
+    ],
+)
 class TestClarifySSEBackendMarkers:
     def test_clarify_module_has_marker(self, marker):
         src = _read(_CLARIFY)
@@ -89,7 +91,9 @@ class TestClarifySSEFrontendCode:
         assert "'clarify'" in self.js or '"clarify"' in self.js
 
     def test_frontend_has_fallback_poll(self):
-        assert "_startClarifyFallbackPoll" in self.js or "clarifyFallbackTimer" in self.js
+        assert (
+            "_startClarifyFallbackPoll" in self.js or "clarifyFallbackTimer" in self.js
+        )
 
     def test_frontend_fallback_interval_3s(self):
         # Fallback poll interval should be 3000ms
@@ -110,6 +114,7 @@ class TestClarifySSEFrontendCode:
 def clarify_mod():
     """Import api.clarify fresh (module-level state is shared)."""
     from api import clarify
+
     return clarify
 
 

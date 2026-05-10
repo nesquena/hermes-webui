@@ -3,6 +3,7 @@ Sprint 28 Tests: /personality slash command — backend API coverage.
 Tests: GET /api/personalities, POST /api/personality/set, Session.compact(),
 path traversal defence, size cap, clear personality.
 """
+
 import json
 import pathlib
 import shutil
@@ -24,8 +25,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                 headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -41,7 +43,7 @@ def _personalities_dir():
     so get_active_hermes_home() returns TEST_STATE_DIR, and personalities
     live at TEST_STATE_DIR/personalities.
     """
-    p = TEST_STATE_DIR / 'personalities'
+    p = TEST_STATE_DIR / "personalities"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -69,6 +71,7 @@ def _cleanup_session(sid):
 
 
 # ── GET /api/personalities ────────────────────────────────────────────────────
+
 
 def test_personalities_empty_when_none_exist():
     """GET /api/personalities returns empty list when no personalities exist."""
@@ -116,29 +119,32 @@ def test_personalities_skips_non_dict_config():
 
 _test_personalities = {}
 
+
 def _inject_personality(name, value):
     """Write a personality into the test config.yaml so the server picks it up."""
     _test_personalities[name] = value
     _write_test_config()
+
 
 def _remove_personality(name):
     """Remove a personality from the test config.yaml."""
     _test_personalities.pop(name, None)
     _write_test_config()
 
+
 def _write_test_config():
     """Write config.yaml with test personalities using simple YAML format."""
     TEST_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    config_path = TEST_STATE_DIR / 'config.yaml'
-    lines = ['agent:', '  personalities:']
+    config_path = TEST_STATE_DIR / "config.yaml"
+    lines = ["agent:", "  personalities:"]
     for pname, pval in _test_personalities.items():
         if isinstance(pval, dict):
-            lines.append(f'    {pname}:')
+            lines.append(f"    {pname}:")
             for k, v in pval.items():
                 lines.append(f'      {k}: "{v}"')
         else:
             lines.append(f'    {pname}: "{pval}"')
-    config_path.write_text('\n'.join(lines) + '\n')
+    config_path.write_text("\n".join(lines) + "\n")
 
 
 def test_set_personality_valid():
@@ -199,8 +205,9 @@ def test_set_personality_not_found_returns_404():
     """Setting a non-existent personality returns 404."""
     sid = _make_session()
     try:
-        d, status = post("/api/personality/set",
-                         {"session_id": sid, "name": "doesnotexist"})
+        d, status = post(
+            "/api/personality/set", {"session_id": sid, "name": "doesnotexist"}
+        )
         assert status == 404
     finally:
         _cleanup_session(sid)
@@ -210,8 +217,9 @@ def test_set_personality_nonexistent_returns_404():
     """Names not in config.yaml agent.personalities return 404."""
     sid = _make_session()
     try:
-        d, status = post("/api/personality/set",
-                         {"session_id": sid, "name": "doesnotexist"})
+        d, status = post(
+            "/api/personality/set", {"session_id": sid, "name": "doesnotexist"}
+        )
         assert status == 404, f"Expected 404, got {status}: {d}"
     finally:
         _cleanup_session(sid)
@@ -219,6 +227,7 @@ def test_set_personality_nonexistent_returns_404():
 
 def test_set_personality_missing_session_returns_404():
     """Setting personality on non-existent session returns 404."""
-    d, status = post("/api/personality/set",
-                     {"session_id": "nonexistent000", "name": "x"})
+    d, status = post(
+        "/api/personality/set", {"session_id": "nonexistent000", "name": "x"}
+    )
     assert status == 404

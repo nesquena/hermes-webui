@@ -30,13 +30,16 @@ def test_sse_heartbeat_constant_below_kernel_keepalive_window():
 
     # Pull the literal value.
     import re
+
     m = re.search(r"_SSE_HEARTBEAT_INTERVAL_SECONDS\s*=\s*(\d+)", src)
     assert m, "Could not parse _SSE_HEARTBEAT_INTERVAL_SECONDS literal"
     heartbeat = int(m.group(1))
 
     # Reproduce the kernel-keepalive window from server.py setsockopt block.
     server_src = (REPO / "server.py").read_text(encoding="utf-8")
-    assert "TCP_KEEPIDLE" in server_src, "TCP_KEEPIDLE must be set on accepted connections"
+    assert "TCP_KEEPIDLE" in server_src, (
+        "TCP_KEEPIDLE must be set on accepted connections"
+    )
     keepidle = int(re.search(r"TCP_KEEPIDLE.*?(\d+)\)", server_src, re.S).group(1))
     keepintvl = int(re.search(r"TCP_KEEPINTVL.*?(\d+)\)", server_src, re.S).group(1))
     keepcnt = int(re.search(r"TCP_KEEPCNT.*?(\d+)\)", server_src, re.S).group(1))
@@ -58,6 +61,7 @@ def test_no_sse_handler_uses_30s_or_higher_timeout():
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 
     import re
+
     # Catch q.get(timeout=30), subscriber.get(timeout=30), term.output.get(timeout=25), etc.
     bad = re.findall(r"\.get\(timeout=3[05]\)", src)
     assert not bad, (
@@ -71,8 +75,8 @@ def test_each_named_sse_handler_uses_constant():
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
 
     expected_callers = [
-        "subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)",     # main agent SSE
-        "term.output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)",   # terminal SSE
+        "subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)",  # main agent SSE
+        "term.output.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)",  # terminal SSE
     ]
     for caller in expected_callers:
         assert caller in src, (

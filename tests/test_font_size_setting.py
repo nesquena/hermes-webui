@@ -1,8 +1,10 @@
 """Tests for font size setting (#833) — 3-toggle Small/Default/Large in Appearance."""
+
 import os
 import re
 
 _SRC = os.path.join(os.path.dirname(__file__), "..")
+
 
 def _read(name):
     return open(os.path.join(_SRC, name), encoding="utf-8").read()
@@ -14,21 +16,27 @@ class TestFontSizeCssModifiers:
     def test_small_font_size_rule_exists(self):
         css = _read("static/style.css")
         assert 'data-font-size="small"' in css, (
-            "style.css must have :root[data-font-size=\"small\"] font-size rule"
+            'style.css must have :root[data-font-size="small"] font-size rule'
         )
 
     def test_large_font_size_rule_exists(self):
         css = _read("static/style.css")
         assert 'data-font-size="large"' in css, (
-            "style.css must have :root[data-font-size=\"large\"] font-size rule"
+            'style.css must have :root[data-font-size="large"] font-size rule'
         )
 
     def test_small_is_smaller_than_default(self):
         css = _read("static/style.css")
         # Match both compact {font-size:12px} and spaced { font-size: 12px; } formats
-        m_small = re.search(r':root\[data-font-size="small"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
-        m_large = re.search(r':root\[data-font-size="large"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
-        assert m_small and m_large, "Both small and large font-size rules must set px values"
+        m_small = re.search(
+            r':root\[data-font-size="small"\][^{]*\{[^}]*font-size:\s*(\d+)px', css
+        )
+        m_large = re.search(
+            r':root\[data-font-size="large"\][^{]*\{[^}]*font-size:\s*(\d+)px', css
+        )
+        assert m_small and m_large, (
+            "Both small and large font-size rules must set px values"
+        )
         assert int(m_small.group(1)) < 14, "Small font size must be < 14px (default)"
         assert int(m_large.group(1)) > 14, "Large font size must be > 14px (default)"
 
@@ -91,9 +99,7 @@ class TestFontSizeBootScript:
         next_pane_starts = [
             html.find(m, appearance_start + 1) for m in next_pane_markers
         ]
-        after_appearance = min(
-            [p for p in next_pane_starts if p != -1] or [len(html)]
-        )
+        after_appearance = min([p for p in next_pane_starts if p != -1] or [len(html)])
         picker_pos = html.find('id="fontSizePickerGrid"')
         assert appearance_start != -1, "settingsPaneAppearance not found"
         assert picker_pos != -1, "fontSizePickerGrid not found"
@@ -108,9 +114,7 @@ class TestFontSizeJsFunctions:
 
     def test_pick_font_size_function_exists(self):
         boot = _read("static/boot.js")
-        assert "function _pickFontSize(" in boot, (
-            "boot.js must define _pickFontSize()"
-        )
+        assert "function _pickFontSize(" in boot, "boot.js must define _pickFontSize()"
 
     def test_apply_font_size_function_exists(self):
         boot = _read("static/boot.js")
@@ -127,7 +131,7 @@ class TestFontSizeJsFunctions:
     def test_pick_font_size_persists_to_localstorage(self):
         boot = _read("static/boot.js")
         idx = boot.find("function _pickFontSize(")
-        block = boot[idx:idx+400]
+        block = boot[idx : idx + 400]
         assert "localStorage.setItem('hermes-font-size'" in block, (
             "_pickFontSize must persist choice to localStorage"
         )
@@ -135,7 +139,7 @@ class TestFontSizeJsFunctions:
     def test_apply_font_size_sets_data_attribute(self):
         boot = _read("static/boot.js")
         idx = boot.find("function _applyFontSize(")
-        block = boot[idx:idx+300]
+        block = boot[idx : idx + 300]
         assert "dataset.fontSize" in block, (
             "_applyFontSize must set document.documentElement.dataset.fontSize"
         )
@@ -150,10 +154,15 @@ class TestFontSizeI18nCoverage:
         if start < 0:
             return set()
         end = src.find(stop_marker, start)
-        block = src[start:end if end > 0 else start + 20000]
+        block = src[start : end if end > 0 else start + 20000]
         return set(re.findall(r"(\w[\w_]+):", block))
 
-    REQUIRED_KEYS = {"settings_label_font_size", "font_size_small", "font_size_default", "font_size_large"}
+    REQUIRED_KEYS = {
+        "settings_label_font_size",
+        "font_size_small",
+        "font_size_default",
+        "font_size_large",
+    }
 
     def test_all_locales_have_font_size_keys(self):
         src = _read("static/i18n.js")
@@ -166,12 +175,16 @@ class TestFontSizeI18nCoverage:
     def test_font_size_small_key_in_all_locales(self):
         src = _read("static/i18n.js")
         count = src.count("font_size_small")
-        assert count >= 6, f"font_size_small must appear in all 6 locales, found {count}"
+        assert count >= 6, (
+            f"font_size_small must appear in all 6 locales, found {count}"
+        )
 
     def test_font_size_large_key_in_all_locales(self):
         src = _read("static/i18n.js")
         count = src.count("font_size_large")
-        assert count >= 6, f"font_size_large must appear in all 6 locales, found {count}"
+        assert count >= 6, (
+            f"font_size_large must appear in all 6 locales, found {count}"
+        )
 
 
 class TestFontSizeCssTargetedOverrides:
@@ -184,45 +197,57 @@ class TestFontSizeCssTargetedOverrides:
 
     def test_msg_body_overridden_for_small(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="small"] .msg-body' in css, \
+        assert ':root[data-font-size="small"] .msg-body' in css, (
             "Chat message text must be explicitly scaled for small"
+        )
 
     def test_msg_body_overridden_for_large(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="large"] .msg-body' in css, \
+        assert ':root[data-font-size="large"] .msg-body' in css, (
             "Chat message text must be explicitly scaled for large"
+        )
 
     def test_session_item_overridden_for_small(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="small"] .session-item' in css, \
+        assert ':root[data-font-size="small"] .session-item' in css, (
             "Sidebar session list text must be explicitly scaled for small"
+        )
 
     def test_session_item_overridden_for_large(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="large"] .session-item' in css, \
+        assert ':root[data-font-size="large"] .session-item' in css, (
             "Sidebar session list text must be explicitly scaled for large"
+        )
 
     def test_composer_overridden_for_small(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="small"] #msg' in css, \
+        assert ':root[data-font-size="small"] #msg' in css, (
             "Composer textarea must be explicitly scaled for small"
+        )
 
     def test_composer_overridden_for_large(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="large"] #msg' in css, \
+        assert ':root[data-font-size="large"] #msg' in css, (
             "Composer textarea must be explicitly scaled for large"
+        )
         # Large composer must not equal the default 16px — that's a no-op
         import re
-        m = re.search(r':root\[data-font-size="large"\] #msg \{ font-size: (\d+)px', css)
-        assert m and int(m.group(1)) != 16, \
+
+        m = re.search(
+            r':root\[data-font-size="large"\] #msg \{ font-size: (\d+)px', css
+        )
+        assert m and int(m.group(1)) != 16, (
             "Large composer font-size must differ from default (16px) to have visible effect"
+        )
 
     def test_file_item_overridden_for_small(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="small"] .file-item' in css, \
+        assert ':root[data-font-size="small"] .file-item' in css, (
             "Workspace file tree text must be explicitly scaled for small"
+        )
 
     def test_file_item_overridden_for_large(self):
         css = _read("static/style.css")
-        assert ':root[data-font-size="large"] .file-item' in css, \
+        assert ':root[data-font-size="large"] .file-item' in css, (
             "Workspace file tree text must be explicitly scaled for large"
+        )

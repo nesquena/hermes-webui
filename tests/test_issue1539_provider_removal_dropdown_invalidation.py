@@ -32,8 +32,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -144,7 +142,9 @@ class TestProviderRemoveInvalidatesDropdowns:
 
     def test_dropdown_flush_calls_slash_cache_invalidator(self):
         src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
+        body = _extract_function_body(
+            src, "function _refreshModelDropdownsAfterProviderChange("
+        )
         # Must invoke the commands.js helper — directly poking module-local
         # lets across module boundaries is brittle.
         assert "_invalidateSlashModelCache" in body, (
@@ -155,7 +155,9 @@ class TestProviderRemoveInvalidatesDropdowns:
 
     def test_dropdown_flush_calls_populate_model_dropdown(self):
         src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
+        body = _extract_function_body(
+            src, "function _refreshModelDropdownsAfterProviderChange("
+        )
         assert "populateModelDropdown" in body, (
             "_refreshModelDropdownsAfterProviderChange must call "
             "populateModelDropdown() so the composer model picker, Settings → "
@@ -168,7 +170,9 @@ class TestProviderRemoveInvalidatesDropdowns:
         """If commands.js or ui.js failed to load, the providers panel must
         still update — the dropdown flush is best-effort (#1539)."""
         src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
+        body = _extract_function_body(
+            src, "function _refreshModelDropdownsAfterProviderChange("
+        )
         # Outer try/catch wraps the whole helper so a runtime error inside
         # populateModelDropdown / cache flush cannot surface as an unhandled
         # rejection that breaks the surrounding save/remove flow.
@@ -189,7 +193,9 @@ class TestProviderRemoveInvalidatesDropdowns:
         synchronously inside the helper — otherwise a slow /api/models would
         delay the providers panel re-render (#1539)."""
         src = _read_static("panels.js")
-        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
+        body = _extract_function_body(
+            src, "function _refreshModelDropdownsAfterProviderChange("
+        )
         # The helper itself is non-async (signature checked indirectly: the
         # source begins with 'function _refresh...', not 'async function').
         # Anything async is fired with Promise.resolve(...).catch(...) so the

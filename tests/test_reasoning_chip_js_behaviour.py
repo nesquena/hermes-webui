@@ -10,7 +10,7 @@ label fell through to a wrong value for an unknown input.
 This file pins the actual rendered output for every effort state so the
 chip's None/Default visibility cannot silently regress.
 """
-import os
+
 import shutil
 import subprocess
 from pathlib import Path
@@ -106,9 +106,12 @@ def driver_path(tmp_path_factory):
 def _apply(driver_path, value):
     """Run _applyReasoningChip(value) against the actual ui.js."""
     import json as _json
+
     result = subprocess.run(
         [NODE, driver_path, str(UI_JS_PATH), _json.dumps(value)],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -124,7 +127,6 @@ def _apply(driver_path, value):
 
 
 class TestChipAlwaysVisible:
-
     def test_empty_string_shows_chip_with_default_label(self, driver_path):
         out = _apply(driver_path, "")
         assert out["display"] == "", f"empty effort must show the chip: {out}"

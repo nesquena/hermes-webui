@@ -50,10 +50,14 @@ def test_ui_js_exposes_shared_dialog_helpers():
 def test_no_native_confirm_calls_remain_in_static_js():
     for path in (REPO / "static").glob("*.js"):
         src = path.read_text(encoding="utf-8")
-        assert not re.search(r"\bconfirm\s*\(", src), f"native confirm() remains in {path.name}"
+        assert not re.search(r"\bconfirm\s*\(", src), (
+            f"native confirm() remains in {path.name}"
+        )
 
 
 def test_no_native_prompt_calls_remain_in_static_js():
     for path in (REPO / "static").glob("*.js"):
         src = path.read_text(encoding="utf-8")
-        assert not re.search(r"\bprompt\s*\(", src), f"native prompt() remains in {path.name}"
+        assert not re.search(r"\bprompt\s*\(", src), (
+            f"native prompt() remains in {path.name}"
+        )

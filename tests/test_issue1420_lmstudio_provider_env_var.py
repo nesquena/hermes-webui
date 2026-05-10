@@ -61,6 +61,7 @@ def _install_fake_hermes_cli(monkeypatch):
 
     try:
         from api.config import invalidate_models_cache
+
         invalidate_models_cache()
     except Exception:
         pass
@@ -108,6 +109,7 @@ class TestIssue1420LMStudioProviderEnvVar:
         `_PROVIDER_ENV_VAR_ALIASES` so existing users don't lose detection.
         """
         from api.providers import _PROVIDER_ENV_VAR, _PROVIDER_ENV_VAR_ALIASES
+
         assert "lmstudio" in _PROVIDER_ENV_VAR, (
             "_PROVIDER_ENV_VAR is missing the 'lmstudio' entry — Settings → "
             "Providers will render LM Studio as has_key=False / "
@@ -141,6 +143,7 @@ class TestIssue1420LMStudioProviderEnvVar:
         restore = _swap_in_test_config({"model": {"provider": "lmstudio"}})
         try:
             from api.providers import get_providers
+
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert "lmstudio" in by_id, (
@@ -179,12 +182,15 @@ class TestIssue1420LMStudioProviderEnvVar:
         monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
         monkeypatch.delenv("LM_API_KEY", raising=False)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "lmstudio"},
-            "providers": {"lmstudio": {"api_key": "lm-studio"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "lmstudio"},
+                "providers": {"lmstudio": {"api_key": "lm-studio"}},
+            }
+        )
         try:
             from api.providers import get_providers
+
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert by_id["lmstudio"]["has_key"] is True, (
@@ -214,6 +220,7 @@ class TestIssue1420LMStudioProviderEnvVar:
         restore = _swap_in_test_config({"model": {"provider": "lmstudio"}})
         try:
             from api.providers import get_providers
+
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert by_id["lmstudio"]["has_key"] is False
@@ -226,7 +233,9 @@ class TestIssue1420LMStudioProviderEnvVar:
         finally:
             restore()
 
-    def test_lmstudio_does_not_collide_with_other_providers(self, monkeypatch, tmp_path):
+    def test_lmstudio_does_not_collide_with_other_providers(
+        self, monkeypatch, tmp_path
+    ):
         """LMSTUDIO_API_KEY must NOT cross-detect any other provider.
 
         Sibling-defense modeled on the #1410 (OLLAMA_API_KEY / Ollama Cloud /
@@ -240,12 +249,25 @@ class TestIssue1420LMStudioProviderEnvVar:
         # Strip every other detection signal so LMSTUDIO_API_KEY is the only
         # input — any other provider showing has_key=True must be a leak.
         for var in (
-            "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
-            "GH_TOKEN", "GITHUB_TOKEN", "OLLAMA_API_KEY", "GOOGLE_API_KEY",
-            "GEMINI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY",
-            "MINIMAX_CN_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY",
-            "GLM_API_KEY", "KIMI_API_KEY", "OPENCODE_ZEN_API_KEY",
-            "OPENCODE_GO_API_KEY", "NVIDIA_API_KEY", "LMSTUDIO_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "OLLAMA_API_KEY",
+            "GOOGLE_API_KEY",
+            "GEMINI_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "MINIMAX_API_KEY",
+            "MINIMAX_CN_API_KEY",
+            "MISTRAL_API_KEY",
+            "XAI_API_KEY",
+            "GLM_API_KEY",
+            "KIMI_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "OPENCODE_GO_API_KEY",
+            "NVIDIA_API_KEY",
+            "LMSTUDIO_API_KEY",
         ):
             monkeypatch.delenv(var, raising=False)
         # Set the canonical post-#1500 env var; sibling providers must not
@@ -255,10 +277,13 @@ class TestIssue1420LMStudioProviderEnvVar:
         restore = _swap_in_test_config({"model": {"provider": "lmstudio"}})
         try:
             from api.providers import get_providers
+
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
 
-            assert by_id["lmstudio"]["has_key"] is True, "lmstudio itself should be configured"
+            assert by_id["lmstudio"]["has_key"] is True, (
+                "lmstudio itself should be configured"
+            )
             for pid, entry in by_id.items():
                 if pid == "lmstudio":
                     continue

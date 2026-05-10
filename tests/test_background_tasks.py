@@ -18,14 +18,12 @@ non-functional as originally shipped.  The fix in api/background.py +
 api/routes.py wires the completion hook and keeps running tasks in the
 tracker until they resolve.
 """
+
 from __future__ import annotations
 
-import os
 import pathlib
 import sys
-import time
 import unittest
-from unittest.mock import patch
 
 
 # Ensure the repo root is importable without relying on CWD.
@@ -39,6 +37,7 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
 
     def setUp(self):
         import api.background as bg
+
         bg._BACKGROUND_TASKS.clear()
         self.bg = bg
 
@@ -47,8 +46,11 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
         can still find it after the first poll returns."""
         parent = "parent-session-1"
         self.bg.track_background(
-            parent_sid=parent, bg_sid="bg-a", stream_id="s-a",
-            task_id="task-a", prompt="long task",
+            parent_sid=parent,
+            bg_sid="bg-a",
+            stream_id="s-a",
+            task_id="task-a",
+            prompt="long task",
         )
 
         # First poll: task is still running, no done results to return
@@ -58,11 +60,15 @@ class TestGetResultsKeepsRunningTasks(unittest.TestCase):
         # The running task MUST still be tracked — otherwise the worker
         # thread's complete_background call cannot find it.
         remaining = self.bg.get_background_tasks(parent)
-        self.assertEqual(len(remaining), 1, (
-            "get_results dropped the still-running task — subsequent "
-            "complete_background() calls will silently no-op and the "
-            "result will be lost forever"
-        ))
+        self.assertEqual(
+            len(remaining),
+            1,
+            (
+                "get_results dropped the still-running task — subsequent "
+                "complete_background() calls will silently no-op and the "
+                "result will be lost forever"
+            ),
+        )
         self.assertEqual(remaining[0]["status"], "running")
         self.assertEqual(remaining[0]["task_id"], "task-a")
 
@@ -128,20 +134,28 @@ class TestBackgroundCompletionHookWiring(unittest.TestCase):
         self.assertGreater(idx, -1, "_handle_background() not found in routes.py")
         # Take a generous window around the function body
         end = routes_src.find("\ndef ", idx + 1)
-        body = routes_src[idx:end if end > 0 else idx + 3000]
+        body = routes_src[idx : end if end > 0 else idx + 3000]
 
-        self.assertIn("complete_background", body, (
-            "_handle_background worker must call complete_background() after "
-            "_run_agent_streaming returns — otherwise the tracker never "
-            "transitions the task to status='done' and /api/background/status "
-            "returns nothing forever. See api/background.py:complete_background."
-        ))
+        self.assertIn(
+            "complete_background",
+            body,
+            (
+                "_handle_background worker must call complete_background() after "
+                "_run_agent_streaming returns — otherwise the tracker never "
+                "transitions the task to status='done' and /api/background/status "
+                "returns nothing forever. See api/background.py:complete_background."
+            ),
+        )
         # Must extract the last assistant message content from the bg session
         self.assertIn("_run_agent_streaming", body)
-        self.assertIn("Session.load", body, (
-            "_run_bg_and_notify must reload the bg session to extract the "
-            "final assistant reply so complete_background gets an actual answer"
-        ))
+        self.assertIn(
+            "Session.load",
+            body,
+            (
+                "_run_bg_and_notify must reload the bg session to extract the "
+                "final assistant reply so complete_background gets an actual answer"
+            ),
+        )
 
 
 if __name__ == "__main__":

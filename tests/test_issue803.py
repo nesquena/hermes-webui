@@ -13,62 +13,75 @@ Covers:
   4. switch_profile(process_wide=False) does NOT mutate process globals
   5. Concurrent requests on different threads see independent profiles
 """
+
 import os
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 
 # ── 1. Cookie build/parse roundtrip ──────────────────────────────────────────
 
-class TestProfileCookieHelpers:
 
+class TestProfileCookieHelpers:
     def test_build_profile_cookie_sets_value(self):
         from api.helpers import build_profile_cookie
-        s = build_profile_cookie('alice')
-        assert 'hermes_profile=alice' in s
-        assert 'HttpOnly' in s
-        assert 'SameSite=Lax' in s
-        assert 'Path=/' in s
+
+        s = build_profile_cookie("alice")
+        assert "hermes_profile=alice" in s
+        assert "HttpOnly" in s
+        assert "SameSite=Lax" in s
+        assert "Path=/" in s
 
     def test_build_profile_cookie_default_persists(self):
         from api.helpers import build_profile_cookie
-        s = build_profile_cookie('default')
-        assert 'hermes_profile=default' in s
-        assert 'Max-Age=0' not in s
+
+        s = build_profile_cookie("default")
+        assert "hermes_profile=default" in s
+        assert "Max-Age=0" not in s
 
     def test_get_profile_cookie_returns_none_when_absent(self):
         from api.helpers import get_profile_cookie
+
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': ''
+        handler.headers.get = lambda k, d="": ""
         assert get_profile_cookie(handler) is None
 
     def test_get_profile_cookie_extracts_valid_name(self):
         from api.helpers import get_profile_cookie
+
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': 'hermes_profile=alice' if k == 'Cookie' else d
-        assert get_profile_cookie(handler) == 'alice'
+        handler.headers.get = lambda k, d="": (
+            "hermes_profile=alice" if k == "Cookie" else d
+        )
+        assert get_profile_cookie(handler) == "alice"
 
     def test_get_profile_cookie_accepts_default(self):
         from api.helpers import get_profile_cookie
+
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': 'hermes_profile=default' if k == 'Cookie' else d
-        assert get_profile_cookie(handler) == 'default'
+        handler.headers.get = lambda k, d="": (
+            "hermes_profile=default" if k == "Cookie" else d
+        )
+        assert get_profile_cookie(handler) == "default"
 
     def test_get_profile_cookie_rejects_injection(self):
         """Cookie value must pass _PROFILE_ID_RE fullmatch — rejects traversal/injection."""
         from api.helpers import get_profile_cookie
-        for bad in ('../etc', 'a/b', 'name;DROP', 'WithCaps', 'has space', '.hidden'):
+
+        for bad in ("../etc", "a/b", "name;DROP", "WithCaps", "has space", ".hidden"):
             handler = MagicMock()
-            handler.headers.get = lambda k, d='', v=bad: f'hermes_profile={v}' if k == 'Cookie' else d
+            handler.headers.get = lambda k, d="", v=bad: (
+                f"hermes_profile={v}" if k == "Cookie" else d
+            )
             assert get_profile_cookie(handler) is None, f"{bad!r} should be rejected"
 
     def test_get_profile_cookie_ignores_malformed_header(self):
         from api.helpers import get_profile_cookie
+
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': '\x00\x01not-a-cookie' if k == 'Cookie' else d
+        handler.headers.get = lambda k, d="": (
+            "\x00\x01not-a-cookie" if k == "Cookie" else d
+        )
         # Must not raise; returns None
         result = get_profile_cookie(handler)
         assert result is None
@@ -76,64 +89,69 @@ class TestProfileCookieHelpers:
     def test_profile_cookie_name_defaults_to_hermes_profile(self, monkeypatch):
         from api.helpers import build_profile_cookie
 
-        monkeypatch.delenv('WEBUI_PROFILE_COOKIE_NAME', raising=False)
+        monkeypatch.delenv("WEBUI_PROFILE_COOKIE_NAME", raising=False)
 
-        s = build_profile_cookie('alice')
-        assert 'hermes_profile=alice' in s
+        s = build_profile_cookie("alice")
+        assert "hermes_profile=alice" in s
 
     def test_profile_cookie_name_can_be_isolated_per_webui_instance(self, monkeypatch):
         from api.helpers import build_profile_cookie, get_profile_cookie
 
-        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_social')
+        monkeypatch.setenv("WEBUI_PROFILE_COOKIE_NAME", "hermes_profile_social")
 
-        s = build_profile_cookie('writer')
-        assert 'hermes_profile_social=writer' in s
-        assert 'hermes_profile=writer' not in s
+        s = build_profile_cookie("writer")
+        assert "hermes_profile_social=writer" in s
+        assert "hermes_profile=writer" not in s
 
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': (
-            'hermes_profile=wrong; hermes_profile_social=writer' if k == 'Cookie' else d
+        handler.headers.get = lambda k, d="": (
+            "hermes_profile=wrong; hermes_profile_social=writer" if k == "Cookie" else d
         )
-        assert get_profile_cookie(handler) == 'writer'
+        assert get_profile_cookie(handler) == "writer"
 
     def test_configured_profile_cookie_ignores_default_cookie_name(self, monkeypatch):
         from api.helpers import get_profile_cookie
 
-        monkeypatch.setenv('WEBUI_PROFILE_COOKIE_NAME', 'hermes_profile_main')
+        monkeypatch.setenv("WEBUI_PROFILE_COOKIE_NAME", "hermes_profile_main")
 
         handler = MagicMock()
-        handler.headers.get = lambda k, d='': 'hermes_profile=social_profile' if k == 'Cookie' else d
+        handler.headers.get = lambda k, d="": (
+            "hermes_profile=social_profile" if k == "Cookie" else d
+        )
         assert get_profile_cookie(handler) is None
 
 
 # ── 2. Thread-local request context ──────────────────────────────────────────
 
-class TestThreadLocalProfileContext:
 
+class TestThreadLocalProfileContext:
     def test_tls_takes_priority_over_global(self):
         import api.profiles as p
+
         original = p._active_profile
         try:
-            p._active_profile = 'global-default'
-            p.set_request_profile('alice')
-            assert p.get_active_profile_name() == 'alice'
+            p._active_profile = "global-default"
+            p.set_request_profile("alice")
+            assert p.get_active_profile_name() == "alice"
         finally:
             p.clear_request_profile()
             p._active_profile = original
 
     def test_global_used_when_tls_cleared(self):
         import api.profiles as p
+
         original = p._active_profile
         try:
-            p._active_profile = 'global-default'
-            p.set_request_profile('alice')
+            p._active_profile = "global-default"
+            p.set_request_profile("alice")
             p.clear_request_profile()
-            assert p.get_active_profile_name() == 'global-default'
+            assert p.get_active_profile_name() == "global-default"
         finally:
             p._active_profile = original
 
     def test_clear_is_idempotent(self):
         import api.profiles as p
+
         # Calling clear on a thread that never set anything must not raise
         p.clear_request_profile()
         p.clear_request_profile()
@@ -141,15 +159,17 @@ class TestThreadLocalProfileContext:
 
 # ── 3. get_active_hermes_home routes through TLS ─────────────────────────────
 
+
 def test_get_active_hermes_home_respects_tls(tmp_path, monkeypatch):
     import api.profiles as p
-    monkeypatch.setattr(p, '_DEFAULT_HERMES_HOME', tmp_path)
-    profile_dir = tmp_path / 'profiles' / 'alice'
+
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", tmp_path)
+    profile_dir = tmp_path / "profiles" / "alice"
     profile_dir.mkdir(parents=True)
     try:
-        p.set_request_profile('alice')
+        p.set_request_profile("alice")
         assert p.get_active_hermes_home() == profile_dir
-        p.set_request_profile('default')
+        p.set_request_profile("default")
         assert p.get_active_hermes_home() == tmp_path
     finally:
         p.clear_request_profile()
@@ -157,25 +177,26 @@ def test_get_active_hermes_home_respects_tls(tmp_path, monkeypatch):
 
 # ── 4. switch_profile(process_wide=False) does not mutate globals ─────────────
 
+
 def test_switch_profile_process_wide_false_does_not_mutate_global():
     """Per-client switches from the WebUI must leave _active_profile untouched."""
     import api.profiles as p
 
     # Monkey in a fake profile listing so switch_profile finds 'alice'
     original_global = p._active_profile
-    original_env_home = os.environ.get('HERMES_HOME')
+    original_env_home = os.environ.get("HERMES_HOME")
 
     # We need a profile that exists to get past the validation path.
     # Use 'default' — switch_profile accepts it without requiring hermes_cli.
     try:
-        result = p.switch_profile('default', process_wide=False)
+        result = p.switch_profile("default", process_wide=False)
         # Global must not change
         assert p._active_profile == original_global, (
             f"process_wide=False must not mutate _active_profile "
             f"(was {original_global!r}, now {p._active_profile!r})"
         )
         # HERMES_HOME env must not change
-        assert os.environ.get('HERMES_HOME') == original_env_home, (
+        assert os.environ.get("HERMES_HOME") == original_env_home, (
             "process_wide=False must not mutate os.environ['HERMES_HOME']"
         )
         # Response still shape-compatible
@@ -185,6 +206,7 @@ def test_switch_profile_process_wide_false_does_not_mutate_global():
 
 
 # ── 5. Concurrent threads see independent profile context ────────────────────
+
 
 def test_concurrent_threads_see_independent_profiles():
     """The whole point of thread-local isolation: two threads, two cookies,
@@ -205,11 +227,13 @@ def test_concurrent_threads_see_independent_profiles():
         except Exception as exc:
             errors.append(exc)
 
-    t1 = threading.Thread(target=worker, args=('alice', 'alice'))
-    t2 = threading.Thread(target=worker, args=('bob', 'bob'))
-    t1.start(); t2.start()
-    t1.join(timeout=10); t2.join(timeout=10)
+    t1 = threading.Thread(target=worker, args=("alice", "alice"))
+    t2 = threading.Thread(target=worker, args=("bob", "bob"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
 
     assert not errors, f"Workers raised: {errors}"
-    assert results.get('alice') == 'alice', f"alice thread saw {results.get('alice')!r}"
-    assert results.get('bob') == 'bob', f"bob thread saw {results.get('bob')!r}"
+    assert results.get("alice") == "alice", f"alice thread saw {results.get('alice')!r}"
+    assert results.get("bob") == "bob", f"bob thread saw {results.get('bob')!r}"

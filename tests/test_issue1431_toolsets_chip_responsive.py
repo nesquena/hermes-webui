@@ -8,6 +8,7 @@ The chip must:
   * Continue to track state through _applyToolsetsChip() so /api/session/toolsets
     keeps working for scripted callers regardless of UI visibility.
 """
+
 import re
 
 
@@ -24,8 +25,9 @@ class TestToolsetsChipResponsiveCSS:
         css = _src("style.css")
         # The base rule (outside any @container or @media block) must default-hide
         m = re.search(
-            r'^\s*\.composer-toolsets-wrap\{[^}]*\}',
-            css, re.MULTILINE,
+            r"^\s*\.composer-toolsets-wrap\{[^}]*\}",
+            css,
+            re.MULTILINE,
         )
         assert m, "Base .composer-toolsets-wrap CSS rule must exist"
         rule = m.group(0)
@@ -39,8 +41,9 @@ class TestToolsetsChipResponsiveCSS:
         # Find the min-width container query — accept either display:block or display:flex
         # (we use block to match sibling wraps but either is a valid reveal)
         m = re.search(
-            r'@container\s+composer-footer\s*\(\s*min-width:\s*1100px\s*\)\s*\{[^}]*\.composer-toolsets-wrap\s*\{[^}]*display:\s*(block|flex)[^}]*\}',
-            css, re.DOTALL,
+            r"@container\s+composer-footer\s*\(\s*min-width:\s*1100px\s*\)\s*\{[^}]*\.composer-toolsets-wrap\s*\{[^}]*display:\s*(block|flex)[^}]*\}",
+            css,
+            re.DOTALL,
         )
         assert m, (
             "Must have @container composer-footer (min-width: 1100px) rule "
@@ -52,8 +55,9 @@ class TestToolsetsChipResponsiveCSS:
         css = _src("style.css")
         # Look for the existing 520px rule that already hid composer-toolsets-wrap
         m = re.search(
-            r'@container\s+composer-footer\s*\(\s*max-width:\s*520px\s*\).*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important',
-            css, re.DOTALL,
+            r"@container\s+composer-footer\s*\(\s*max-width:\s*520px\s*\).*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important",
+            css,
+            re.DOTALL,
         )
         assert m, (
             "@container composer-footer (max-width: 520px) must continue to "
@@ -64,8 +68,9 @@ class TestToolsetsChipResponsiveCSS:
         """The existing @media max-width:640px rule must still hide the chip on mobile."""
         css = _src("style.css")
         m = re.search(
-            r'@media\s*\(\s*max-width:\s*640px\s*\).*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important',
-            css, re.DOTALL,
+            r"@media\s*\(\s*max-width:\s*640px\s*\).*?\.composer-toolsets-wrap\s*\{\s*display:\s*none\s*!important",
+            css,
+            re.DOTALL,
         )
         assert m, (
             "@media (max-width:640px) must continue to hide "
@@ -79,7 +84,9 @@ class TestToolsetsChipJSDoesNotForceHide:
     def test_applyToolsetsChip_does_not_set_display_none(self):
         """_applyToolsetsChip must not contain wrap.style.display = 'none'."""
         js = _src("ui.js")
-        m = re.search(r'function _applyToolsetsChip\([^)]*\)\s*\{.*?\n\}', js, re.DOTALL)
+        m = re.search(
+            r"function _applyToolsetsChip\([^)]*\)\s*\{.*?\n\}", js, re.DOTALL
+        )
         assert m, "_applyToolsetsChip function must exist"
         body = m.group(0)
         # The PR initially had wrap.style.display = 'none'; we replaced with CSS.
@@ -95,14 +102,13 @@ class TestToolsetsChipJSDoesNotForceHide:
     def test_applyToolsetsChip_clears_inline_style(self):
         """_applyToolsetsChip must clear inline display so CSS rules can apply."""
         js = _src("ui.js")
-        m = re.search(r'function _applyToolsetsChip\([^)]*\)\s*\{.*?\n\}', js, re.DOTALL)
+        m = re.search(
+            r"function _applyToolsetsChip\([^)]*\)\s*\{.*?\n\}", js, re.DOTALL
+        )
         assert m, "_applyToolsetsChip function must exist"
         body = m.group(0)
         # Either ='' or ="" (clearing inline style)
-        assert (
-            "wrap.style.display = ''" in body
-            or 'wrap.style.display = ""' in body
-        ), (
+        assert "wrap.style.display = ''" in body or 'wrap.style.display = ""' in body, (
             "_applyToolsetsChip must clear wrap.style.display so the CSS "
             "@container query is the single source of truth"
         )
@@ -148,6 +154,7 @@ class TestToolsetsAPIStillWorks:
         except FileNotFoundError:
             # If routes.py is named differently, search
             import os
+
             found = False
             for root, _, files in os.walk("api"):
                 for f in files:
@@ -196,7 +203,8 @@ class TestToolsetsDropdownResizeGuard:
         # It must check chip.offsetParent === null and close, not reposition
         m = re.search(
             r"window\.addEventListener\('resize',\s*\([^)]*\)\s*=>\s*\{[^}]*composerToolsetsDropdown[^}]*\}",
-            js, re.DOTALL,
+            js,
+            re.DOTALL,
         )
         assert m, "Toolsets resize handler must exist"
         body = m.group(0)
@@ -216,7 +224,8 @@ class TestToolsetsDropdownResizeGuard:
         js = _src("ui.js")
         m = re.search(
             r"function _positionToolsetsDropdown\(\)\s*\{.*?\n\}",
-            js, re.DOTALL,
+            js,
+            re.DOTALL,
         )
         assert m, "_positionToolsetsDropdown function must exist"
         body = m.group(0)
@@ -232,7 +241,8 @@ class TestToolsetsDropdownResizeGuard:
         js = _src("ui.js")
         m = re.search(
             r"function toggleToolsetsDropdown\(\)\s*\{.*?\n\}",
-            js, re.DOTALL,
+            js,
+            re.DOTALL,
         )
         assert m, "toggleToolsetsDropdown function must exist"
         body = m.group(0)

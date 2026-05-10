@@ -39,12 +39,13 @@ from tests._pytest_port import BASE
 
 # Sample credentials that should be masked in every API response
 _FAKE_GITHUB_PAT = "ghp_TestFakeCredential1234567890ab"
-_FAKE_SK_KEY     = "sk-TestFakeOpenAIKey1234567890abcdef"
-_FAKE_HF_TOKEN   = "hf_TestFakeHuggingFaceToken12345"
-_FAKE_AWS_KEY    = "AKIATESTFAKEKEY12345"
+_FAKE_SK_KEY = "sk-TestFakeOpenAIKey1234567890abcdef"
+_FAKE_HF_TOKEN = "hf_TestFakeHuggingFaceToken12345"
+_FAKE_AWS_KEY = "AKIATESTFAKEKEY12345"
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
+
 
 def _get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -54,7 +55,8 @@ def _get(path):
 def _post(path, body=None):
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
-        BASE + path, data=data,
+        BASE + path,
+        data=data,
         headers={"Content-Type": "application/json"},
     )
     try:
@@ -81,9 +83,11 @@ def _assert_no_plaintext_credentials(text: str, label: str = ""):
 
 # ── helpers.py unit tests (import-level, no test_server needed) ───────────────────
 
+
 def test_redact_value_str():
     """_redact_value masks a plaintext GitHub PAT in a string."""
     from api.helpers import _redact_value
+
     result = _redact_value(f"my token is {_FAKE_GITHUB_PAT} bye")
     assert _FAKE_GITHUB_PAT not in result
     assert "ghp_Te" in result  # prefix preserved
@@ -92,6 +96,7 @@ def test_redact_value_str():
 def test_redact_value_dict():
     """_redact_value recurses into dicts."""
     from api.helpers import _redact_value
+
     d = {"content": f"key={_FAKE_SK_KEY}", "role": "user"}
     result = _redact_value(d)
     assert _FAKE_SK_KEY not in result["content"]
@@ -101,6 +106,7 @@ def test_redact_value_dict():
 def test_redact_value_list():
     """_redact_value recurses into lists."""
     from api.helpers import _redact_value
+
     lst = [{"content": _FAKE_GITHUB_PAT}, {"content": "safe text"}]
     result = _redact_value(lst)
     assert _FAKE_GITHUB_PAT not in result[0]["content"]
@@ -120,6 +126,7 @@ def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.redact", fake_redact)
 
     import api.helpers as helpers
+
     helpers = importlib.reload(helpers)
     try:
         result = helpers._redact_value(f"token={_FAKE_GITHUB_PAT}")
@@ -132,6 +139,7 @@ def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
 def test_redact_session_data_messages():
     """redact_session_data masks credentials in messages[]."""
     from api.helpers import redact_session_data
+
     session = {
         "session_id": "abc123",
         "title": f"my token {_FAKE_GITHUB_PAT}",
@@ -140,8 +148,11 @@ def test_redact_session_data_messages():
             {"role": "assistant", "content": "sure"},
         ],
         "tool_calls": [
-            {"name": "terminal", "args": {"command": f"gh auth login --token {_FAKE_GITHUB_PAT}"},
-             "snippet": "ok"},
+            {
+                "name": "terminal",
+                "args": {"command": f"gh auth login --token {_FAKE_GITHUB_PAT}"},
+                "snippet": "ok",
+            },
         ],
     }
     result = redact_session_data(session)
@@ -155,14 +166,20 @@ def test_redact_session_data_messages():
 def test_redact_session_data_multiple_cred_types():
     """redact_session_data handles sk-, ghp_, hf_, and AKIA keys."""
     from api.helpers import redact_session_data
+
     session = {
         "title": "test",
-        "messages": [{"role": "user", "content": (
-            f"openai={_FAKE_SK_KEY} "
-            f"github={_FAKE_GITHUB_PAT} "
-            f"hf={_FAKE_HF_TOKEN} "
-            f"aws={_FAKE_AWS_KEY}"
-        )}],
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    f"openai={_FAKE_SK_KEY} "
+                    f"github={_FAKE_GITHUB_PAT} "
+                    f"hf={_FAKE_HF_TOKEN} "
+                    f"aws={_FAKE_AWS_KEY}"
+                ),
+            }
+        ],
         "tool_calls": [],
     }
     result = redact_session_data(session)
@@ -173,6 +190,7 @@ def test_redact_session_data_multiple_cred_types():
 def test_redact_session_data_non_sensitive_unchanged():
     """redact_session_data does not corrupt innocent content."""
     from api.helpers import redact_session_data
+
     session = {
         "title": "Hello world",
         "messages": [{"role": "user", "content": "What is 2+2?"}],
@@ -187,6 +205,7 @@ def test_redact_session_data_non_sensitive_unchanged():
 # ── API-level tests (require running test server started by conftest.py) ─────
 # Run via `start.sh && pytest tests/test_security_redaction.py -v`
 
+
 def _create_session_with_credentials() -> str:
     """Write a session file with credential-containing messages directly to disk.
 
@@ -194,9 +213,12 @@ def _create_session_with_credentials() -> str:
     from disk, exercising the redaction code path on load.
     Uses TEST_STATE_DIR from conftest.py (the isolated test server state directory).
     """
-    import time, uuid
+    import time
+    import uuid
+
     try:
         from conftest import TEST_STATE_DIR
+
         sessions_dir = TEST_STATE_DIR / "sessions"
     except ImportError:
         from api.config import SESSION_DIR as sessions_dir
@@ -207,27 +229,40 @@ def _create_session_with_credentials() -> str:
     sid = "sec_test_" + uuid.uuid4().hex[:8]
     now = time.time()
     session_file = sessions_dir / f"{sid}.json"
-    session_file.write_text(json.dumps({
-        "session_id": sid,
-        "title": f"session with {_FAKE_GITHUB_PAT}",
-        "workspace": "/tmp",
-        "model": "test",
-        "created_at": now,
-        "updated_at": now,
-        "pinned": False, "archived": False, "project_id": None,
-        "profile": "default", "input_tokens": 0, "output_tokens": 0,
-        "estimated_cost": None, "personality": None,
-        "messages": [
-            {"role": "user",      "content": f"my PAT is {_FAKE_GITHUB_PAT}"},
-            {"role": "assistant", "content": f"sk key is {_FAKE_SK_KEY}"},
-            {"role": "tool",      "content": "result ok", "name": "terminal"},
-        ],
-        "tool_calls": [
-            {"name": "terminal",
-             "args": {"command": f"gh auth login --token {_FAKE_GITHUB_PAT}"},
-             "snippet": "blocked"}
-        ],
-    }))
+    session_file.write_text(
+        json.dumps(
+            {
+                "session_id": sid,
+                "title": f"session with {_FAKE_GITHUB_PAT}",
+                "workspace": "/tmp",
+                "model": "test",
+                "created_at": now,
+                "updated_at": now,
+                "pinned": False,
+                "archived": False,
+                "project_id": None,
+                "profile": "default",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "estimated_cost": None,
+                "personality": None,
+                "messages": [
+                    {"role": "user", "content": f"my PAT is {_FAKE_GITHUB_PAT}"},
+                    {"role": "assistant", "content": f"sk key is {_FAKE_SK_KEY}"},
+                    {"role": "tool", "content": "result ok", "name": "terminal"},
+                ],
+                "tool_calls": [
+                    {
+                        "name": "terminal",
+                        "args": {
+                            "command": f"gh auth login --token {_FAKE_GITHUB_PAT}"
+                        },
+                        "snippet": "blocked",
+                    }
+                ],
+            }
+        )
+    )
     return sid
 
 
@@ -235,6 +270,7 @@ def test_api_session_redacts_messages():
     """GET /api/session route must call redact_session_data() before returning."""
     import inspect
     import api.routes as routes
+
     src = inspect.getsource(routes.handle_get)
     # Verify redact_session_data is applied to the session payload
     assert "redact_session_data" in src, (
@@ -245,6 +281,7 @@ def test_api_session_redacts_messages():
 def test_api_session_redacts_title():
     """redact_session_data must redact credentials from session title field."""
     from api.helpers import redact_session_data
+
     session = {
         "session_id": "abc123",
         "title": f"session with {_FAKE_GITHUB_PAT}",
@@ -253,7 +290,7 @@ def test_api_session_redacts_title():
     }
     result = redact_session_data(session)
     assert _FAKE_GITHUB_PAT not in result["title"], (
-        f"redact_session_data must mask credentials in title field"
+        "redact_session_data must mask credentials in title field"
     )
     assert result["session_id"] == "abc123"  # safe fields preserved
 
@@ -271,6 +308,7 @@ def test_api_session_export_redacts():
     """GET /api/session/export must call redact_session_data() in _handle_session_export."""
     import inspect
     import api.routes as routes
+
     # The export handler is a separate function (_handle_session_export)
     src = inspect.getsource(routes._handle_session_export)
     assert "redact_session_data" in src, (
@@ -284,23 +322,25 @@ def test_api_memory_redacts_via_write_read(test_server):
     original = _get("/api/memory").get("memory", "")
 
     cred_content = f"GitHub PAT: {_FAKE_GITHUB_PAT}\nNormal note: hello world"
-    data, status = _post("/api/memory/write", {"section": "memory", "content": cred_content})
+    data, status = _post(
+        "/api/memory/write", {"section": "memory", "content": cred_content}
+    )
     assert status == 200, f"memory/write failed: {data}"
 
     try:
         read_back = _get("/api/memory")
         dump = json.dumps(read_back)
         _assert_no_plaintext_credentials(dump, "GET /api/memory")
-        assert "hello world" in read_back["memory"]   # non-sensitive content preserved
+        assert "hello world" in read_back["memory"]  # non-sensitive content preserved
     finally:
         _post("/api/memory/write", {"section": "memory", "content": original})
 
 
 # ── startup: fix_credential_permissions ──────────────────────────────────────
 
+
 def test_fix_credential_permissions_corrects_loose_files(tmp_path, monkeypatch):
     """fix_credential_permissions() tightens group/other read bits."""
-    import os
     from api.startup import fix_credential_permissions
 
     env_file = tmp_path / ".env"
@@ -315,8 +355,11 @@ def test_fix_credential_permissions_corrects_loose_files(tmp_path, monkeypatch):
     fix_credential_permissions()
 
     import stat
+
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600, ".env not fixed to 600"
-    assert stat.S_IMODE(google_file.stat().st_mode) == 0o600, "google_token.json not fixed to 600"
+    assert stat.S_IMODE(google_file.stat().st_mode) == 0o600, (
+        "google_token.json not fixed to 600"
+    )
 
 
 def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
@@ -328,7 +371,9 @@ def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from api.startup import fix_credential_permissions
+
     fix_credential_permissions()
 
     import stat
+
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600

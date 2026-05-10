@@ -31,6 +31,7 @@ timer and triggers rename.
 These tests guard the handler shape against regression by static-analyzing
 `static/ui.js` and by driving the patched handler through a Node VM.
 """
+
 import json
 import re
 import shutil
@@ -61,7 +62,7 @@ def _name_handler_block() -> str:
     end_marker = "el.appendChild(nameEl);"
     end = src.find(end_marker, start)
     assert end >= 0, "el.appendChild(nameEl) not found after rename tooltip"
-    return src[start:end + len(end_marker)]
+    return src[start : end + len(end_marker)]
 
 
 # ── Source-level regression locks ─────────────────────────────────────────────
@@ -103,7 +104,7 @@ class TestNameClickHandlerShape:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    body = block[start:i + 1]
+                    body = block[start : i + 1]
                     break
         assert body is not None, "could not find balanced nameEl.onclick body"
         assert "setTimeout" in body, (
@@ -173,7 +174,9 @@ class TestNameClickHandlerShape:
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _run_node_with_clicks(click_count: int, dblclick_after_first: bool, item_type: str = "file"):
+def _run_node_with_clicks(
+    click_count: int, dblclick_after_first: bool, item_type: str = "file"
+):
     """Drive a synthesized click sequence against the patched handler."""
     handler = _name_handler_block()
     payload = {
@@ -183,7 +186,9 @@ def _run_node_with_clicks(click_count: int, dblclick_after_first: bool, item_typ
         "itemType": item_type,
     }
     js = (
-        "const params = " + json.dumps(payload) + ";\n"
+        "const params = "
+        + json.dumps(payload)
+        + ";\n"
         + r"""
 const handlerBlock = params.handlerBlock;
 const clickCount = params.clickCount;
@@ -263,7 +268,9 @@ setTimeout_(() => {
     )
     r = subprocess.run(
         [NODE, "-e", js],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if r.returncode != 0:
         raise RuntimeError(f"node failed: {r.stderr}")
@@ -275,7 +282,9 @@ class TestNameClickBehavior:
 
     def test_single_click_opens_file_after_debounce(self):
         """Single click on a FILE name → after 300ms debounce → openFile fires."""
-        out = _run_node_with_clicks(click_count=1, dblclick_after_first=False, item_type="file")
+        out = _run_node_with_clicks(
+            click_count=1, dblclick_after_first=False, item_type="file"
+        )
         assert out["openFileCalled"] is True, (
             f"single click on filename must trigger openFile after debounce; got {out}"
         )
@@ -284,14 +293,18 @@ class TestNameClickBehavior:
 
     def test_single_click_toggles_dir_after_debounce(self):
         """Single click on a DIRECTORY name → expand/collapse toggle fires."""
-        out = _run_node_with_clicks(click_count=1, dblclick_after_first=False, item_type="dir")
+        out = _run_node_with_clicks(
+            click_count=1, dblclick_after_first=False, item_type="dir"
+        )
         assert out["dirToggleCalled"] is True, (
             f"single click on directory name must trigger expand/collapse toggle; got {out}"
         )
 
     def test_dblclick_cancels_pending_open_and_mounts_rename(self):
         """Click → dblclick on a file name → rename input mounts, openFile does NOT fire."""
-        out = _run_node_with_clicks(click_count=1, dblclick_after_first=True, item_type="file")
+        out = _run_node_with_clicks(
+            click_count=1, dblclick_after_first=True, item_type="file"
+        )
         assert out["renameInputMounted"] is True, (
             f"dblclick on filename must mount rename input; got {out}"
         )

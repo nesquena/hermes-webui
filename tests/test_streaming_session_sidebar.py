@@ -7,13 +7,13 @@ initial streaming turn, the session still looks like Untitled + 0-messages
 The sidebar filter must exempt actively-streaming sessions from the empty-
 Untitled rule so they remain visible while the user navigates away.
 """
+
 import pytest
 
 import api.models as models
 from api.models import (
     SESSIONS,
     STREAMS,
-    Session,
     all_sessions,
     new_session,
 )

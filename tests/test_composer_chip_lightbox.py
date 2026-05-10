@@ -14,6 +14,7 @@ delegated click handler must:
 
 It also pins the CSS cursor affordance so users discover the feature.
 """
+
 from pathlib import Path
 
 
@@ -58,9 +59,9 @@ class TestComposerChipLightboxDelegate:
         """
         src = UI.read_text(encoding="utf-8")
         # Audio chip block — uses <audio>, no .attach-thumb img
-        assert "<audio controls preload=\"metadata\"" in src
+        assert '<audio controls preload="metadata"' in src
         # Video chip block — uses <video>, no .attach-thumb img
-        assert "<video controls preload=\"metadata\"" in src
+        assert '<video controls preload="metadata"' in src
         # The .attach-thumb img tag is only generated in the image / svg branches.
         # Quick structural check: every chip-rendering line that emits
         # `class="attach-thumb"` has either `<img class="attach-thumb"` or

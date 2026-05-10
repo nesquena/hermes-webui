@@ -1,4 +1,5 @@
 """Regression coverage for issue #1908 Docker production hardening."""
+
 import pathlib
 import re
 
@@ -22,18 +23,26 @@ def test_production_dockerfile_does_not_grant_passwordless_sudo():
     """The production image must not install sudo or grant NOPASSWD root escalation."""
     packages = _dockerfile_install_packages()
     assert "sudo" not in packages, "production Dockerfile must not install sudo"
-    assert "NOPASSWD" not in DOCKERFILE, "production Dockerfile must not grant passwordless sudo"
+    assert "NOPASSWD" not in DOCKERFILE, (
+        "production Dockerfile must not grant passwordless sudo"
+    )
     assert "adduser hermeswebui sudo" not in DOCKERFILE
     assert "adduser hermeswebuitoo sudo" not in DOCKERFILE
-    assert "hermeswebuitoo" not in DOCKERFILE, "production image should not keep a sudo-capable staging user"
+    assert "hermeswebuitoo" not in DOCKERFILE, (
+        "production image should not keep a sudo-capable staging user"
+    )
 
 
 def test_init_script_does_not_depend_on_sudo_at_runtime():
     """Runtime setup may start as root, but must drop privileges without sudo."""
-    assert re.search(r"^if \[ \"A\$\{whoami\}\" == \"Aroot\" \]; then", INIT_SCRIPT, re.MULTILINE), (
+    assert re.search(
+        r"^if \[ \"A\$\{whoami\}\" == \"Aroot\" \]; then", INIT_SCRIPT, re.MULTILINE
+    ), (
         "docker_init.bash should perform privileged setup only in an explicit root init block"
     )
-    assert "sudo " not in INIT_SCRIPT, "docker_init.bash must not invoke sudo in production"
+    assert "sudo " not in INIT_SCRIPT, (
+        "docker_init.bash must not invoke sudo in production"
+    )
     assert re.search(r"\bsu\b.*\bhermeswebui\b", INIT_SCRIPT), (
         "docker_init.bash must drop from root to hermeswebui before launching the server"
     )
@@ -53,7 +62,9 @@ def test_init_script_uses_private_scratch_permissions():
 
 def test_docker_docs_explain_production_privilege_model():
     """Docs must describe the production threat model rather than hiding the tradeoff."""
-    hardening_section = DOCKER_DOCS[DOCKER_DOCS.find("## Production image security model") :]
+    hardening_section = DOCKER_DOCS[
+        DOCKER_DOCS.find("## Production image security model") :
+    ]
     assert "## Production image security model" in DOCKER_DOCS
     assert "passwordless sudo" in hardening_section
     assert "root" in hardening_section and "hermeswebui" in hardening_section

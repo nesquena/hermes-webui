@@ -17,9 +17,8 @@ restart could wipe a 1000-message conversation in a single round-trip.
 
 This test reproduces the data loss path against the on-disk session file.
 """
+
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -32,14 +31,18 @@ def temp_session_dir(tmp_path, monkeypatch):
     # api.models reads SESSION_DIR at import time; patch the module-level binding.
     import api.models as _m
     from collections import OrderedDict
+
     monkeypatch.setattr(_m, "SESSION_DIR", sd)
     monkeypatch.setattr(_m, "SESSIONS", OrderedDict())
     yield sd
 
 
-def _make_session_on_disk(session_dir, sid="s_test_1557", n_msgs=1000, with_active_stream=True):
+def _make_session_on_disk(
+    session_dir, sid="s_test_1557", n_msgs=1000, with_active_stream=True
+):
     """Write a realistic session JSON with N messages and a stale active_stream_id."""
     from api.models import Session
+
     s = Session(
         session_id=sid,
         title="A long conversation",
@@ -48,10 +51,15 @@ def _make_session_on_disk(session_dir, sid="s_test_1557", n_msgs=1000, with_acti
         model_provider="ollama-cloud",
         created_at=1.0,
         updated_at=2.0,
-        active_stream_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" if with_active_stream else None,
-        pending_user_message="What is the meaning of life?" if with_active_stream else None,
+        active_stream_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        if with_active_stream
+        else None,
+        pending_user_message="What is the meaning of life?"
+        if with_active_stream
+        else None,
         messages=[
-            {"role": "user", "content": f"prompt {i}"} if i % 2 == 0
+            {"role": "user", "content": f"prompt {i}"}
+            if i % 2 == 0
             else {"role": "assistant", "content": f"reply {i}"}
             for i in range(n_msgs)
         ],
@@ -65,15 +73,20 @@ def _make_session_on_disk(session_dir, sid="s_test_1557", n_msgs=1000, with_acti
 def test_metadata_only_save_raises_to_prevent_wipe(temp_session_dir):
     """Direct test of the #1558 guard: save() must refuse to wipe on-disk messages."""
     from api.models import get_session
+
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000)
 
     # Pre-state: on-disk file has 1000 messages.
-    raw_before = json.loads((temp_session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    raw_before = json.loads(
+        (temp_session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
     assert len(raw_before["messages"]) == 1000
 
     # Load metadata-only — synthesizes a stub with messages=[].
     s = get_session(sid, metadata_only=True)
-    assert len(s.messages) == 0, "metadata-only load synthesizes empty messages — that's its job"
+    assert len(s.messages) == 0, (
+        "metadata-only load synthesizes empty messages — that's its job"
+    )
     assert getattr(s, "_loaded_metadata_only", False) is True, (
         "load_metadata_only() must set the _loaded_metadata_only flag so save() "
         "knows to refuse this save and prevent #1558 data-loss."
@@ -86,7 +99,9 @@ def test_metadata_only_save_raises_to_prevent_wipe(temp_session_dir):
         s.save()
 
     # On-disk file MUST still have 1000 messages — the guard prevented the wipe.
-    raw_after = json.loads((temp_session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    raw_after = json.loads(
+        (temp_session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
     assert len(raw_after["messages"]) == 1000, (
         "save() raised but the file still got mutated — the guard must run BEFORE "
         "any disk write happens."
@@ -96,11 +111,13 @@ def test_metadata_only_save_raises_to_prevent_wipe(temp_session_dir):
 def test_clear_stale_stream_state_preserves_messages(temp_session_dir):
     """High-level: the production trigger from #1558 must NOT wipe messages."""
     from api.models import get_session
+
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=True)
 
     # Simulate a server restart: STREAMS is empty, but the session has a stale
     # active_stream_id on disk. This is exactly the production trigger.
     from api.config import STREAMS, STREAMS_LOCK
+
     with STREAMS_LOCK:
         STREAMS.clear()
 
@@ -108,6 +125,7 @@ def test_clear_stale_stream_state_preserves_messages(temp_session_dir):
     s = get_session(sid, metadata_only=True)
 
     from api.routes import _clear_stale_stream_state
+
     # We don't care about the return value — the post-fix path may return False
     # because _repair_stale_pending clears the stream during the metadata=False
     # reload. What we care about is the messages array surviving.
@@ -133,6 +151,7 @@ def test_clear_stale_stream_state_preserves_messages(temp_session_dir):
 def test_save_writes_bak_when_messages_shrink(temp_session_dir):
     """The backup safeguard: a save that shrinks messages must leave a .bak."""
     from api.models import Session
+
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
     # Build a fresh in-memory Session with a smaller messages array, then save —
@@ -156,13 +175,16 @@ def test_save_writes_bak_when_messages_shrink(temp_session_dir):
     assert len(bak_data["messages"]) == 1000, (
         "The .bak must contain the pre-shrink state (1000 messages), not the new state."
     )
-    live_data = json.loads((temp_session_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    live_data = json.loads(
+        (temp_session_dir / f"{sid}.json").read_text(encoding="utf-8")
+    )
     assert len(live_data["messages"]) == 500
 
 
 def test_save_does_not_write_bak_when_messages_grow(temp_session_dir):
     """No backup overhead on the normal grow-the-conversation path."""
     from api.models import Session
+
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000, with_active_stream=False)
 
     # Build a session with MORE messages than on disk — the normal grow path.
@@ -196,6 +218,7 @@ def test_recover_all_sessions_on_startup_restores_shrunken_session(temp_session_
     live_path.write_text(json.dumps(live), encoding="utf-8")
 
     from api.session_recovery import recover_all_sessions_on_startup
+
     result = recover_all_sessions_on_startup(temp_session_dir)
     assert result["restored"] == 1
     assert result["scanned"] >= 1
@@ -204,12 +227,15 @@ def test_recover_all_sessions_on_startup_restores_shrunken_session(temp_session_
     assert len(restored["messages"]) == 1000
 
 
-def test_recover_all_sessions_on_startup_is_idempotent_no_op_on_clean_state(temp_session_dir):
+def test_recover_all_sessions_on_startup_is_idempotent_no_op_on_clean_state(
+    temp_session_dir,
+):
     """A clean install (no .bak files) must not modify anything."""
     sid = _make_session_on_disk(temp_session_dir, n_msgs=1000)
     live_before = (temp_session_dir / f"{sid}.json").read_text(encoding="utf-8")
 
     from api.session_recovery import recover_all_sessions_on_startup
+
     result = recover_all_sessions_on_startup(temp_session_dir)
     assert result["restored"] == 0
 
@@ -230,14 +256,17 @@ def test_recover_all_sessions_on_startup_skips_non_session_index_json(temp_sessi
     # _index.json is the index file shape — a top-level list of metadata dicts
     index_path = temp_session_dir / "_index.json"
     index_path.write_text(
-        json.dumps([
-            {"session_id": sid, "title": "Test", "updated_at": 1.0},
-            {"session_id": "other", "title": "Other", "updated_at": 2.0},
-        ]),
+        json.dumps(
+            [
+                {"session_id": sid, "title": "Test", "updated_at": 1.0},
+                {"session_id": "other", "title": "Other", "updated_at": 2.0},
+            ]
+        ),
         encoding="utf-8",
     )
 
     from api.session_recovery import recover_all_sessions_on_startup
+
     # Before the fix, this raised AttributeError; the broad except in server.py
     # swallowed it and printed [recovery] startup recovery failed: 'list'
     # object has no attribute 'get'. Now the scanner skips _index.json
@@ -254,8 +283,8 @@ def test_recover_all_sessions_on_startup_skips_non_session_index_json(temp_sessi
 def test_msg_count_returns_neg1_for_non_dict_top_level(temp_session_dir):
     """``_msg_count`` must not raise on a JSON file whose top-level is a list."""
     from api.session_recovery import _msg_count
+
     list_shaped = temp_session_dir / "_index.json"
     list_shaped.write_text(json.dumps([{"session_id": "x"}]), encoding="utf-8")
     # Pre-fix: AttributeError. Post-fix: -1.
     assert _msg_count(list_shaped) == -1
-

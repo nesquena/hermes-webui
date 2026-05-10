@@ -20,8 +20,14 @@ def test_messages_zero_skips_effective_model_resolution():
 def test_full_message_load_updates_viewed_count_after_metadata_fast_path():
     src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
-    assert "_setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));" in src
-    assert "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));" in src
+    assert (
+        "_setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));"
+        in src
+    )
+    assert (
+        "_setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));"
+        in src
+    )
 
 
 def test_lazy_message_load_skips_model_resolution():

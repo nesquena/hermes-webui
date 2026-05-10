@@ -22,7 +22,9 @@ def test_loading_older_messages_expands_render_window_before_rendering():
     body = _function_body(SESSIONS_JS, "async function _loadOlderMessages")
 
     prepend_idx = body.index("S.messages = [...olderMsgs, ...S.messages]")
-    expand_idx = body.index("_messageRenderWindowSize=_currentMessageRenderWindowSize()")
+    expand_idx = body.index(
+        "_messageRenderWindowSize=_currentMessageRenderWindowSize()"
+    )
     render_idx = body.index("renderMessages({ preserveScroll: true });")
 
     assert prepend_idx < expand_idx < render_idx, (
@@ -51,5 +53,7 @@ def test_loading_older_messages_marks_scroll_programmatic_while_anchoring():
 
     set_idx = body.index("_programmaticScroll = true;")
     restore_idx = body.index("container.scrollTop = oldTop + addedHeight")
-    clear_idx = body.index("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+    clear_idx = body.index(
+        "requestAnimationFrame(()=>{ _programmaticScroll = false; })"
+    )
     assert set_idx < restore_idx < clear_idx

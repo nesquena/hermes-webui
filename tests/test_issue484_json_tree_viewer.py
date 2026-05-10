@@ -1,5 +1,4 @@
 """Tests for issue #484 — collapsible JSON/YAML tree viewer."""
-import pytest
 
 
 class TestTreeRenderer:
@@ -37,7 +36,14 @@ class TestTreeRenderer:
         """_buildTreeDOM should handle null, boolean, number, string, array, object."""
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        for cls in ("tree-null", "tree-bool", "tree-num", "tree-str", "tree-array", "tree-object"):
+        for cls in (
+            "tree-null",
+            "tree-bool",
+            "tree-num",
+            "tree-str",
+            "tree-array",
+            "tree-object",
+        ):
             assert cls in content, f"Missing type class: {cls}"
 
     def test_tree_collapse_support(self):
@@ -79,10 +85,23 @@ class TestTreeCSS:
     def test_tree_css_classes_exist(self):
         with open("static/style.css", "r", encoding="utf-8") as f:
             content = f.read()
-        for cls in (".code-tree-wrap", ".tree-view", ".tree-hidden", ".tree-toggle-btn",
-                    ".tree-node", ".tree-collapsible", ".tree-children", ".tree-collapsed",
-                    ".tree-key", ".tree-str", ".tree-num", ".tree-bool", ".tree-null",
-                    ".tree-comma", ".tree-item"):
+        for cls in (
+            ".code-tree-wrap",
+            ".tree-view",
+            ".tree-hidden",
+            ".tree-toggle-btn",
+            ".tree-node",
+            ".tree-collapsible",
+            ".tree-children",
+            ".tree-collapsed",
+            ".tree-key",
+            ".tree-str",
+            ".tree-num",
+            ".tree-bool",
+            ".tree-null",
+            ".tree-comma",
+            ".tree-item",
+        ):
             assert cls in content, f"Missing CSS: {cls}"
 
     def test_tree_colors_match_types(self):

@@ -15,15 +15,13 @@ Covers:
      unsupported provider when config.yaml exists
   4. The hermes_cli import failure path is safe (falls back gracefully)
 """
+
 from __future__ import annotations
 
-import os
 import pathlib
 import sys
 import types
 from unittest import mock
-
-import pytest
 
 
 def _inject_hermes_cli_auth(get_auth_status_return):
@@ -38,18 +36,25 @@ def _inject_hermes_cli_auth(get_auth_status_return):
     mock_auth.get_auth_status = mock.MagicMock(return_value=get_auth_status_return)
     mock_hermes_cli = types.ModuleType("hermes_cli")
 
-    return mock.patch.dict(sys.modules, {
-        "hermes_cli": mock_hermes_cli,
-        "hermes_cli.auth": mock_auth,
-    })
+    return mock.patch.dict(
+        sys.modules,
+        {
+            "hermes_cli": mock_hermes_cli,
+            "hermes_cli.auth": mock_auth,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
-def _call_provider_api_key_present(provider: str, cfg: dict = None, env_values: dict = None):
+
+def _call_provider_api_key_present(
+    provider: str, cfg: dict = None, env_values: dict = None
+):
     from api.onboarding import _provider_api_key_present
+
     return _provider_api_key_present(provider, cfg or {}, env_values or {})
 
 
@@ -57,22 +62,24 @@ def _call_provider_api_key_present(provider: str, cfg: dict = None, env_values: 
 # 1. _provider_api_key_present via hermes_cli fallback
 # ---------------------------------------------------------------------------
 
-class TestProviderApiKeyPresentFallback:
 
+class TestProviderApiKeyPresentFallback:
     def test_minimax_cn_logged_in_returns_true(self):
         """minimax-cn: if hermes_cli.auth.get_auth_status returns logged_in, must be True."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
+        with mock.patch(
+            "api.onboarding._SUPPORTED_PROVIDER_SETUPS",
+            {"openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}},
+        ):
             with _inject_hermes_cli_auth({"logged_in": True}):
                 result = _call_provider_api_key_present("minimax-cn")
                 assert result is True
 
     def test_unsupported_provider_logged_out_returns_false(self):
         """Unsupported provider with no key → False, no crash."""
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
+        with mock.patch(
+            "api.onboarding._SUPPORTED_PROVIDER_SETUPS",
+            {"openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}},
+        ):
             with _inject_hermes_cli_auth({"logged_in": False}):
                 result = _call_provider_api_key_present("deepseek")
                 assert result is False
@@ -80,6 +87,7 @@ class TestProviderApiKeyPresentFallback:
     def test_hermes_cli_import_failure_is_safe(self):
         """If hermes_cli is unavailable, falls back silently to False."""
         import builtins
+
         real_import = builtins.__import__
 
         def _block_hermes_cli(name, *args, **kwargs):
@@ -87,23 +95,31 @@ class TestProviderApiKeyPresentFallback:
                 raise ImportError("hermes_cli not available")
             return real_import(name, *args, **kwargs)
 
-        with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
-            "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
-        }):
+        with mock.patch(
+            "api.onboarding._SUPPORTED_PROVIDER_SETUPS",
+            {"openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}},
+        ):
             with mock.patch("builtins.__import__", side_effect=_block_hermes_cli):
                 result = _call_provider_api_key_present("minimax-cn")
                 assert result is False  # safe fallback
 
     def test_supported_provider_still_works_without_fallback(self):
         """openrouter with env key must still succeed via the original path."""
-        from api.onboarding import _provider_api_key_present, _SUPPORTED_PROVIDER_SETUPS
+        from api.onboarding import _provider_api_key_present
+
         env_values = {"OPENROUTER_API_KEY": "sk-test"}
         result = _provider_api_key_present("openrouter", {}, env_values)
         assert result is True
 
     def test_inline_api_key_in_cfg_still_works(self):
         """model.api_key in config.yaml must be recognized for any provider."""
-        cfg = {"model": {"provider": "minimax-cn", "default": "MiniMax-M2.7", "api_key": "key123"}}
+        cfg = {
+            "model": {
+                "provider": "minimax-cn",
+                "default": "MiniMax-M2.7",
+                "api_key": "key123",
+            }
+        }
         result = _call_provider_api_key_present("minimax-cn", cfg)
         assert result is True
 
@@ -112,17 +128,32 @@ class TestProviderApiKeyPresentFallback:
 # 2. _status_from_runtime: unsupported provider with key → chat_ready=True
 # ---------------------------------------------------------------------------
 
-class TestStatusFromRuntimeUnsupportedProvider:
 
-    def _run(self, provider: str, model: str, api_key_present: bool, oauth_present: bool = False):
+class TestStatusFromRuntimeUnsupportedProvider:
+    def _run(
+        self,
+        provider: str,
+        model: str,
+        api_key_present: bool,
+        oauth_present: bool = False,
+    ):
         from api.onboarding import _status_from_runtime
+
         cfg = {"model": {"provider": provider, "default": model}}
         with (
             mock.patch("api.onboarding._HERMES_FOUND", True),
             mock.patch("api.onboarding._load_env_file", return_value={}),
-            mock.patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")),
-            mock.patch("api.onboarding._provider_api_key_present", return_value=api_key_present),
-            mock.patch("api.onboarding._provider_oauth_authenticated", return_value=oauth_present),
+            mock.patch(
+                "api.onboarding._get_active_hermes_home",
+                return_value=pathlib.Path("/tmp"),
+            ),
+            mock.patch(
+                "api.onboarding._provider_api_key_present", return_value=api_key_present
+            ),
+            mock.patch(
+                "api.onboarding._provider_oauth_authenticated",
+                return_value=oauth_present,
+            ),
         ):
             return _status_from_runtime(cfg, True)
 
@@ -140,13 +171,17 @@ class TestStatusFromRuntimeUnsupportedProvider:
 
     def test_unsupported_provider_no_key_no_oauth_gives_not_ready(self):
         """No key, no oauth → provider_ready=False."""
-        result = self._run("minimax-cn", "MiniMax-M2.7", api_key_present=False, oauth_present=False)
+        result = self._run(
+            "minimax-cn", "MiniMax-M2.7", api_key_present=False, oauth_present=False
+        )
         assert result["chat_ready"] is False
         assert result["provider_ready"] is False
 
     def test_oauth_provider_still_works_via_oauth_path(self):
         """openai-codex (OAuth) with no api_key but oauth present → ready."""
-        result = self._run("openai-codex", "codex-model", api_key_present=False, oauth_present=True)
+        result = self._run(
+            "openai-codex", "codex-model", api_key_present=False, oauth_present=True
+        )
         assert result["chat_ready"] is True
 
 
@@ -154,10 +189,11 @@ class TestStatusFromRuntimeUnsupportedProvider:
 # 3. get_onboarding_status: minimax-cn fully configured → completed=True
 # ---------------------------------------------------------------------------
 
-class TestOnboardingStatusUnsupportedProvider:
 
+class TestOnboardingStatusUnsupportedProvider:
     def _make_status(self, chat_ready: bool, provider: str = "minimax-cn"):
         import api.onboarding as mod
+
         fake_config_path = pathlib.Path("/tmp/_test_572_config.yaml")
         cfg = {"model": {"provider": provider, "default": "MiniMax-M2.7"}}
         runtime = {
@@ -174,7 +210,9 @@ class TestOnboardingStatusUnsupportedProvider:
         with (
             mock.patch.object(mod, "load_settings", return_value={}),
             mock.patch.object(mod, "get_config", return_value=cfg),
-            mock.patch.object(mod, "verify_hermes_imports", return_value=(True, [], {})),
+            mock.patch.object(
+                mod, "verify_hermes_imports", return_value=(True, [], {})
+            ),
             mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
             mock.patch.object(mod, "load_workspaces", return_value=[]),
             mock.patch.object(mod, "get_last_workspace", return_value=None),

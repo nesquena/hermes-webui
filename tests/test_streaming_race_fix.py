@@ -15,6 +15,7 @@ Fixes:
 - _wireSSE: reset accumulators when (re)opening source, unless stream already finalized
 - error handler: bail if _streamFinalized (same as _terminalStateReached)
 """
+
 import pathlib
 import re
 
@@ -22,74 +23,74 @@ REPO = pathlib.Path(__file__).parent.parent
 
 
 def read(rel):
-    return (REPO / rel).read_text(encoding='utf-8')
+    return (REPO / rel).read_text(encoding="utf-8")
 
 
 class TestStreamFinalized:
     """_streamFinalized flag and rAF cancellation."""
 
     def test_stream_finalized_declared(self):
-        src = read('static/messages.js')
-        assert '_streamFinalized' in src, (
+        src = read("static/messages.js")
+        assert "_streamFinalized" in src, (
             "_streamFinalized must be declared in attachLiveStream"
         )
 
     def test_pending_raf_handle_declared(self):
-        src = read('static/messages.js')
-        assert '_pendingRafHandle' in src, (
+        src = read("static/messages.js")
+        assert "_pendingRafHandle" in src, (
             "_pendingRafHandle must be declared to enable rAF cancellation"
         )
 
     def test_schedule_render_guards_on_stream_finalized(self):
-        src = read('static/messages.js')
-        m = re.search(r'function _scheduleRender\(\)\{.*?\n  \}', src, re.DOTALL)
+        src = read("static/messages.js")
+        m = re.search(r"function _scheduleRender\(\)\{.*?\n  \}", src, re.DOTALL)
         assert m, "_scheduleRender not found"
         fn = m.group(0)
-        assert '_streamFinalized' in fn, (
+        assert "_streamFinalized" in fn, (
             "_scheduleRender must return early when _streamFinalized is true"
         )
 
     def test_raf_handle_stored_in_schedule_render(self):
-        src = read('static/messages.js')
-        assert '_pendingRafHandle=requestAnimationFrame' in src or \
-               '_pendingRafHandle = requestAnimationFrame' in src, (
-            "rAF handle must be stored in _pendingRafHandle for cancellation"
-        )
+        src = read("static/messages.js")
+        assert (
+            "_pendingRafHandle=requestAnimationFrame" in src
+            or "_pendingRafHandle = requestAnimationFrame" in src
+        ), "rAF handle must be stored in _pendingRafHandle for cancellation"
 
     def test_done_sets_stream_finalized(self):
-        src = read('static/messages.js')
+        src = read("static/messages.js")
         m = re.search(r"source\.addEventListener\('done'.*?\}\);", src, re.DOTALL)
         assert m, "'done' handler not found"
         fn = m.group(0)
-        assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
+        assert "_streamFinalized=true" in fn or "_streamFinalized = true" in fn, (
             "'done' handler must set _streamFinalized=true"
         )
-        assert 'cancelAnimationFrame' in fn, (
+        assert "cancelAnimationFrame" in fn, (
             "'done' handler must cancel any pending rAF"
         )
-        assert 'finalizeThinkingCard' in fn, (
+        assert "finalizeThinkingCard" in fn, (
             "'done' handler must call finalizeThinkingCard() to close thinking card"
         )
 
     def test_apperror_sets_stream_finalized(self):
-        src = read('static/messages.js')
+        src = read("static/messages.js")
         m = re.search(r"source\.addEventListener\('apperror'.*?\}\);", src, re.DOTALL)
         assert m, "'apperror' handler not found"
         fn = m.group(0)
-        assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
+        assert "_streamFinalized=true" in fn or "_streamFinalized = true" in fn, (
             "'apperror' handler must set _streamFinalized=true"
         )
-        assert 'cancelAnimationFrame' in fn
+        assert "cancelAnimationFrame" in fn
 
     def test_cancel_sets_stream_finalized(self):
-        src = read('static/messages.js')
+        src = read("static/messages.js")
         m = re.search(r"source\.addEventListener\('cancel'.*?\}\);", src, re.DOTALL)
         assert m, "'cancel' handler not found"
         fn = m.group(0)
-        assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
+        assert "_streamFinalized=true" in fn or "_streamFinalized = true" in fn, (
             "'cancel' handler must set _streamFinalized=true"
         )
-        assert 'cancelAnimationFrame' in fn
+        assert "cancelAnimationFrame" in fn
 
 
 class TestReconnectAccumulatorPreservation:
@@ -117,8 +118,8 @@ class TestReconnectAccumulatorPreservation:
         """Regression guard: _wireSSE must not contain a literal
         accumulator-reset statement.  Preserves pre-reconnect content so
         the user sees the full response across a drop+reconnect."""
-        src = read('static/messages.js')
-        m = re.search(r'function _wireSSE\(source\)\{.*?\n  \}', src, re.DOTALL)
+        src = read("static/messages.js")
+        m = re.search(r"function _wireSSE\(source\)\{.*?\n  \}", src, re.DOTALL)
         assert m, "_wireSSE not found"
         fn = m.group(0)
         assert "assistantText=''" not in fn and 'assistantText = ""' not in fn, (
@@ -134,15 +135,17 @@ class TestReconnectAccumulatorPreservation:
         the closure scope in attachLiveStream, not inside _wireSSE.  That
         covers the first call; reconnects must preserve whatever was
         accumulated before the drop."""
-        src = read('static/messages.js')
+        src = read("static/messages.js")
         m = re.search(
-            r'function attachLiveStream\(.*?function _closeSource',
+            r"function attachLiveStream\(.*?function _closeSource",
             src,
             re.DOTALL,
         )
         assert m, "attachLiveStream prelude not found"
         prelude = m.group(0)
-        assert "let assistantText=''" in prelude or 'let assistantText = ""' in prelude, (
+        assert (
+            "let assistantText=''" in prelude or 'let assistantText = ""' in prelude
+        ), (
             "assistantText must be initialised to '' at closure scope — "
             "this is the only legitimate reset; _wireSSE must not re-reset"
         )
@@ -151,11 +154,11 @@ class TestReconnectAccumulatorPreservation:
         """`error` must still bail out when `_streamFinalized` is true —
         otherwise a trailing network 'error' event after `done` would
         attempt a reconnect against a stream that already completed."""
-        src = read('static/messages.js')
+        src = read("static/messages.js")
         m = re.search(r"source\.addEventListener\('error'.*?\}\);", src, re.DOTALL)
         assert m, "'error' handler not found"
         fn = m.group(0)
-        assert '_streamFinalized' in fn, (
+        assert "_streamFinalized" in fn, (
             "'error' reconnect handler must bail if _streamFinalized is true"
         )
 
@@ -163,13 +166,13 @@ class TestReconnectAccumulatorPreservation:
         """Opus review Q1: _handleStreamError is called after the reconnect fails.
         It calls renderMessages() which settles the DOM. Any pending rAF must be
         cancelled before that renderMessages call — same as done/apperror/cancel."""
-        src = read('static/messages.js')
-        m = re.search(r'function _handleStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
+        src = read("static/messages.js")
+        m = re.search(r"function _handleStreamError\(\)\{.*?\n  \}", src, re.DOTALL)
         assert m, "_handleStreamError not found"
         fn = m.group(0)
-        assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
+        assert "_streamFinalized=true" in fn or "_streamFinalized = true" in fn, (
             "_handleStreamError must set _streamFinalized=true (Opus Q1 fix)"
         )
-        assert 'cancelAnimationFrame' in fn, (
+        assert "cancelAnimationFrame" in fn, (
             "_handleStreamError must cancel any pending rAF before renderMessages() runs"
         )

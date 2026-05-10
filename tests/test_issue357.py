@@ -11,6 +11,7 @@ Two problems fixed:
    bind-mount dirs created by Docker as root are unwritable by hermeswebui.
    Fix: root init mkdir/chown, then runtime verifies access without sudo.
 """
+
 import pathlib
 import re
 
@@ -21,8 +22,8 @@ INIT_SCRIPT = (REPO / "docker_init.bash").read_text(encoding="utf-8")
 
 # ── Dockerfile: uv pre-installed at build time ───────────────────────────────
 
-class TestDockerfileUvPreinstall:
 
+class TestDockerfileUvPreinstall:
     def test_dockerfile_installs_uv_at_build_time(self):
         """Dockerfile must install uv via RUN curl at build time (not only at runtime)."""
         assert "RUN curl" in DOCKERFILE and "uv/install.sh" in DOCKERFILE, (
@@ -37,10 +38,15 @@ class TestDockerfileUvPreinstall:
             (line for line in DOCKERFILE.splitlines() if "uv/install.sh" in line),
             None,
         )
-        assert uv_install_line is not None, "Could not find uv install line in Dockerfile"
+        assert uv_install_line is not None, (
+            "Could not find uv install line in Dockerfile"
+        )
         # Must either use UV_INSTALL_DIR pointing to /usr/local/bin, or run as root
         # (so the default install location is accessible to hermeswebui user)
-        has_system_dir = "/usr/local/bin" in uv_install_line or "UV_INSTALL_DIR=/usr/local/bin" in DOCKERFILE
+        has_system_dir = (
+            "/usr/local/bin" in uv_install_line
+            or "UV_INSTALL_DIR=/usr/local/bin" in DOCKERFILE
+        )
         assert has_system_dir, (
             "uv must be installed to /usr/local/bin (system-wide) so hermeswebui user "
             "can find it. Installing as hermeswebuitoo puts it in /home/hermeswebuitoo/.local/bin "
@@ -50,6 +56,7 @@ class TestDockerfileUvPreinstall:
     def test_dockerfile_uv_installed_before_copy(self):
         """uv installation must happen before COPY . /apptoo so it's in the image."""
         import re
+
         uv_pos = DOCKERFILE.find("uv/install.sh")
         # Match COPY regardless of flags (e.g. --chown=...) — only the destination matters.
         m = re.search(r"^COPY\b.*\s/apptoo\b", DOCKERFILE, re.MULTILINE)
@@ -80,8 +87,8 @@ class TestDockerfileUvPreinstall:
 
 # ── docker_init.bash: skip uv download when already present ─────────────────
 
-class TestInitScriptUvSkip:
 
+class TestInitScriptUvSkip:
     def test_init_script_checks_uv_before_download(self):
         """docker_init.bash must check 'command -v uv' before attempting download."""
         assert "command -v uv" in INIT_SCRIPT, (
@@ -92,17 +99,14 @@ class TestInitScriptUvSkip:
     def test_init_script_skips_download_if_present(self):
         """Init script must use conditional logic (if/else) around the uv download."""
         # Pattern: if command -v uv ... else ... fi
-        assert re.search(r'if\s+command\s+-v\s+uv', INIT_SCRIPT), (
+        assert re.search(r"if\s+command\s+-v\s+uv", INIT_SCRIPT), (
             "docker_init.bash must use 'if command -v uv' guard around the download"
         )
 
     def test_init_script_curl_download_in_else_branch(self):
         """The curl download must be in the else branch (only runs if uv not found)."""
         # Find the conditional block
-        m = re.search(
-            r'if\s+command\s+-v\s+uv.*?fi',
-            INIT_SCRIPT, re.DOTALL
-        )
+        m = re.search(r"if\s+command\s+-v\s+uv.*?fi", INIT_SCRIPT, re.DOTALL)
         assert m, "Could not find uv conditional block in docker_init.bash"
         block = m.group(0)
         # curl must appear after 'else' not in the 'then' branch
@@ -131,8 +135,8 @@ class TestInitScriptUvSkip:
 
 # ── docker_init.bash: workspace directory permissions ────────────────────────
 
-class TestWorkspacePermissions:
 
+class TestWorkspacePermissions:
     def test_workspace_uses_root_init_mkdir(self):
         """docker_init.bash must create missing workspaces during root init.
 
@@ -141,8 +145,9 @@ class TestWorkspacePermissions:
         ships sudo, so root init handles mkdir before dropping privileges.
         """
         root_section = INIT_SCRIPT[
-            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then'):
-            INIT_SCRIPT.find('exec su')
+            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then') : INIT_SCRIPT.find(
+                "exec su"
+            )
         ]
         assert 'mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in root_section, (
             "docker_init.bash must mkdir the workspace during root init "
@@ -156,10 +161,14 @@ class TestWorkspacePermissions:
         chown writable bind mounts, while read-only mounts continue with a warning.
         """
         root_section = INIT_SCRIPT[
-            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then'):
-            INIT_SCRIPT.find('exec su')
+            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then') : INIT_SCRIPT.find(
+                "exec su"
+            )
         ]
-        assert 'chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in root_section, (
+        assert (
+            'chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"'
+            in root_section
+        ), (
             "docker_init.bash must chown the workspace during root init "
             "so the app user can write to it when possible (#357)"
         )
@@ -167,16 +176,18 @@ class TestWorkspacePermissions:
     def test_workspace_mkdir_before_chown(self):
         """Root init mkdir must come before root init chown in docker_init.bash."""
         mkdir_pos = INIT_SCRIPT.find('mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
-        chown_pos = INIT_SCRIPT.find('chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
+        chown_pos = INIT_SCRIPT.find(
+            'chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"'
+        )
         assert mkdir_pos != -1, "root init mkdir for workspace not found"
         assert chown_pos != -1, "root init chown for workspace not found"
         assert mkdir_pos < chown_pos, "root init mkdir must come before root init chown"
 
     def test_workspace_error_exit_on_mkdir_failure(self):
         """Root init mkdir must call error_exit on failure."""
-        assert 'mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit' in INIT_SCRIPT, (
-            "workspace mkdir must call error_exit on failure"
-        )
+        assert (
+            'mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit' in INIT_SCRIPT
+        ), "workspace mkdir must call error_exit on failure"
 
     def test_workspace_write_test_is_conditional_on_writable(self):
         """Write-test must be skipped for read-only workspace mounts (#670).
@@ -196,9 +207,11 @@ class TestWorkspacePermissions:
     def test_init_script_syntax_valid(self):
         """docker_init.bash must pass bash -n syntax check."""
         import subprocess
+
         result = subprocess.run(
             ["bash", "-n", str(REPO / "docker_init.bash")],
-            capture_output=True, text=True
+            capture_output=True,
+            text=True,
         )
         assert result.returncode == 0, (
             f"docker_init.bash failed bash -n syntax check:\n{result.stderr}"

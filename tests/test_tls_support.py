@@ -3,6 +3,7 @@ Tests for optional TLS/HTTPS support (HERMES_WEBUI_TLS_CERT / TLS_KEY).
 
 Tests use a self-signed certificate generated at test time via openssl.
 """
+
 import http.client
 import json
 import os
@@ -23,23 +24,39 @@ def _gen_test_cert(tmpdir: Path) -> tuple[str, str]:
     cert = str(tmpdir / "test_cert.pem")
     key = str(tmpdir / "test_key.pem")
     subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048",
-         "-keyout", key, "-out", cert, "-days", "1", "-nodes",
-         "-subj", "/CN=localhost"],
-        check=True, capture_output=True,
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            key,
+            "-out",
+            cert,
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+        ],
+        check=True,
+        capture_output=True,
     )
     return cert, key
 
 
 def _find_free_port() -> int:
     import socket
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def _wait_for_server(host: str, port: int, use_ssl: bool = False,
-                     timeout: float = 8.0) -> bool:
+def _wait_for_server(
+    host: str, port: int, use_ssl: bool = False, timeout: float = 8.0
+) -> bool:
     """Poll until the server accepts a connection or times out."""
     ctx = None
     if use_ssl:
@@ -77,7 +94,9 @@ def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Po
     env["HERMES_WEBUI_STATE_DIR"] = str(Path(tempfile.mkdtemp()))
     proc = subprocess.Popen(
         [os.sys.executable, str(ROOT / "server.py")],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
     )
     return proc
@@ -85,8 +104,8 @@ def _start_server(port: int, cert: str = None, key: str = None) -> subprocess.Po
 
 # ── Test class ──────────────────────────────────────────────────────────────
 
-class TestTLSConfigFlag(unittest.TestCase):
 
+class TestTLSConfigFlag(unittest.TestCase):
     def test_tls_enabled_true_when_both_env_set(self):
         code = textwrap.dedent("""\
             import os
@@ -97,14 +116,19 @@ class TestTLSConfigFlag(unittest.TestCase):
         """)
         r = subprocess.run(
             [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
             cwd=str(ROOT),
         )
         self.assertEqual(r.stdout.strip(), "True")
 
     def test_tls_enabled_false_when_env_absent(self):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("HERMES_WEBUI_TLS_CERT", "HERMES_WEBUI_TLS_KEY")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("HERMES_WEBUI_TLS_CERT", "HERMES_WEBUI_TLS_KEY")
+        }
         code = textwrap.dedent("""\
             import os
             os.environ.pop('HERMES_WEBUI_TLS_CERT', None)
@@ -114,14 +138,20 @@ class TestTLSConfigFlag(unittest.TestCase):
         """)
         r = subprocess.run(
             [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(ROOT), env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(ROOT),
+            env=env,
         )
         self.assertEqual(r.stdout.strip(), "False")
 
     def test_tls_enabled_false_when_only_cert_set(self):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("HERMES_WEBUI_TLS_CERT", "HERMES_WEBUI_TLS_KEY")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("HERMES_WEBUI_TLS_CERT", "HERMES_WEBUI_TLS_KEY")
+        }
         env["HERMES_WEBUI_TLS_CERT"] = "/tmp/cert.pem"
         code = textwrap.dedent("""\
             from api.config import TLS_ENABLED
@@ -129,14 +159,16 @@ class TestTLSConfigFlag(unittest.TestCase):
         """)
         r = subprocess.run(
             [os.sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(ROOT), env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(ROOT),
+            env=env,
         )
         self.assertEqual(r.stdout.strip(), "False")
 
 
 class TestTLSEndToEnd(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         cls._tmpdir = Path(tempfile.mkdtemp())
@@ -146,6 +178,7 @@ class TestTLSEndToEnd(unittest.TestCase):
     def tearDownClass(cls):
         with suppress(Exception):
             import shutil
+
             shutil.rmtree(cls._tmpdir, ignore_errors=True)
 
     def tearDown(self):
@@ -192,7 +225,9 @@ class TestTLSEndToEnd(unittest.TestCase):
         """Bad cert paths should print a warning and start HTTP anyway."""
         port = _find_free_port()
         self._proc = _start_server(
-            port, cert="/nonexistent/cert.pem", key="/nonexistent/key.pem",
+            port,
+            cert="/nonexistent/cert.pem",
+            key="/nonexistent/key.pem",
         )
         # Server should be reachable over plain HTTP even though TLS setup failed
         self.assertTrue(
@@ -200,7 +235,6 @@ class TestTLSEndToEnd(unittest.TestCase):
             "HTTP fallback server did not start after TLS failure",
         )
         # Confirm TLS warning was printed
-        import fcntl
         os.set_blocking(self._proc.stdout.fileno(), False)
         output = ""
         try:

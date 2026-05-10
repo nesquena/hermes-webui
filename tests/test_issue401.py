@@ -8,6 +8,7 @@ The older loadSession() path rewrote message history on the client:
 
 That broke both durable logging and page refresh for valid tool runs.
 """
+
 import json
 import pathlib
 import subprocess
@@ -28,10 +29,18 @@ def test_loadsession_preserves_tool_rows():
 
 def test_loadsession_uses_session_toolcalls_only_as_fallback():
     """Session summaries are the fallback, not the primary reload source."""
-    assert ("if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length)" in SESSIONS_JS or
-            "if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length)" in SESSIONS_JS)
-    assert ("S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));" in SESSIONS_JS or
-            "S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));" in SESSIONS_JS)
+    assert (
+        "if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length)"
+        in SESSIONS_JS
+        or "if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length)"
+        in SESSIONS_JS
+    )
+    assert (
+        "S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));"
+        in SESSIONS_JS
+        or "S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));"
+        in SESSIONS_JS
+    )
     assert "S.toolCalls=[];" in SESSIONS_JS
 
 
@@ -59,7 +68,9 @@ def _run_js(script_body: str) -> dict:
 
         {script_body}
     """)
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     return json.loads(proc.stdout)
 
 

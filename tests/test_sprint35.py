@@ -13,7 +13,6 @@ Covers:
 """
 
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -23,6 +22,7 @@ def read(path):
 
 
 # ── 1. PANEL_MAX raised ──────────────────────────────────────────────────────
+
 
 def test_panel_max_raised_to_1200():
     """PANEL_MAX must be 1200 (raised from 500) for wider right panel."""
@@ -41,6 +41,7 @@ def test_panel_max_is_not_500():
 
 
 # ── 2. Responsive messages-inner ─────────────────────────────────────────────
+
 
 def test_messages_inner_has_responsive_breakpoints():
     """style.css must have @media breakpoints for .messages-inner."""
@@ -79,6 +80,7 @@ def test_messages_inner_breakpoint_values():
 
 # ── 3–6. Breadcrumb navigation ───────────────────────────────────────────────
 
+
 def test_render_file_breadcrumb_function_exists():
     """workspace.js must expose renderFileBreadcrumb()."""
     src = read("static/workspace.js")
@@ -99,7 +101,7 @@ def test_breadcrumb_has_root_segment():
     """renderFileBreadcrumb must add a root '~' segment."""
     src = read("static/workspace.js")
     idx = src.find("function renderFileBreadcrumb")
-    block = src[idx:idx + 800]
+    block = src[idx : idx + 800]
     assert "'~'" in block or '"~"' in block, (
         "renderFileBreadcrumb missing root '~' segment"
     )
@@ -119,7 +121,7 @@ def test_clear_preview_calls_render_breadcrumb():
     # Find clearPreview and check renderBreadcrumb is called nearby
     idx = src.find("function clearPreview")
     assert idx != -1, "clearPreview not found in boot.js"
-    block = src[idx:idx + 600]
+    block = src[idx : idx + 600]
     assert "renderBreadcrumb" in block, (
         "clearPreview() does not call renderBreadcrumb() — "
         "directory breadcrumb won't restore after closing file preview"
@@ -127,6 +129,7 @@ def test_clear_preview_calls_render_breadcrumb():
 
 
 # ── 7. HTML markup ───────────────────────────────────────────────────────────
+
 
 def test_breadcrumb_bar_in_index_html():
     """index.html must have the breadcrumbBar element."""
@@ -138,6 +141,7 @@ def test_breadcrumb_bar_in_index_html():
 
 
 # ── 8. Breadcrumb CSS ────────────────────────────────────────────────────────
+
 
 def test_breadcrumb_css_rules_exist():
     """style.css must have breadcrumb CSS rules."""

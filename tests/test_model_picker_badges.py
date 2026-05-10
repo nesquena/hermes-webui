@@ -3,7 +3,9 @@ from pathlib import Path
 from api import config
 
 
-def _models_with_cfg(model_cfg=None, fallback_providers=None, custom_providers=None, active_provider=None):
+def _models_with_cfg(
+    model_cfg=None, fallback_providers=None, custom_providers=None, active_provider=None
+):
     old_cfg = config.cfg
     old_mtime = config._cfg_mtime
     old_cache = config._available_models_cache
@@ -56,8 +58,12 @@ def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():
 
     root = Path(__file__).resolve().parent.parent
     src = (root / "api" / "config.py").read_text(encoding="utf-8")
-    start = src.index("def _build_configured_model_badges() -> dict[str, dict[str, str]]:")
-    end = src.index("            return badges", start) + len("            return badges")
+    start = src.index(
+        "def _build_configured_model_badges() -> dict[str, dict[str, str]]:"
+    )
+    end = src.index("            return badges", start) + len(
+        "            return badges"
+    )
     fn_src = textwrap.dedent(src[start:end])
 
     scope = {
@@ -65,8 +71,16 @@ def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():
         "default_model": "google/gemma-4-27b",
         "cfg": {"fallback_providers": []},
         "groups": [
-            {"provider": "Alpha", "provider_id": "custom:alpha", "models": [{"id": "google/gemma-4-27b"}]},
-            {"provider": "Beta", "provider_id": "custom:beta", "models": [{"id": "@custom:beta:google/gemma-4-27b"}]},
+            {
+                "provider": "Alpha",
+                "provider_id": "custom:alpha",
+                "models": [{"id": "google/gemma-4-27b"}],
+            },
+            {
+                "provider": "Beta",
+                "provider_id": "custom:beta",
+                "models": [{"id": "@custom:beta:google/gemma-4-27b"}],
+            },
         ],
         "_resolve_provider_alias": lambda provider: provider,
     }
@@ -94,7 +108,10 @@ def test_ui_badge_lookup_prefers_row_provider_for_duplicate_model_ids():
 
     assert "function _getConfiguredModelBadge(modelId,badgeMap,providerId){" in js
     assert "child.dataset&&child.dataset.provider?child.dataset.provider:''" in js
-    assert "const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);" in js
+    assert (
+        "const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);"
+        in js
+    )
 
 
 def test_configured_model_group_label_has_i18n_key():
@@ -110,7 +127,9 @@ def test_configured_model_group_label_has_i18n_key():
     )
 
 
-def test_get_available_models_cache_preserves_configured_model_badges(tmp_path, monkeypatch):
+def test_get_available_models_cache_preserves_configured_model_badges(
+    tmp_path, monkeypatch
+):
     cache_path = tmp_path / "models_cache.json"
     old_cfg = config.cfg
     old_mtime = config._cfg_mtime
@@ -129,7 +148,12 @@ def test_get_available_models_cache_preserves_configured_model_badges(tmp_path, 
         }
 
         cold = config.get_available_models()
-        assert cold.get("configured_model_badges", {}).get("@copilot:gpt-4.1", {}).get("label") == "Fallback 1"
+        assert (
+            cold.get("configured_model_badges", {})
+            .get("@copilot:gpt-4.1", {})
+            .get("label")
+            == "Fallback 1"
+        )
 
         config._available_models_cache = None
         config._available_models_cache_ts = 0.0
@@ -139,14 +163,16 @@ def test_get_available_models_cache_preserves_configured_model_badges(tmp_path, 
             "O cache persistido de /api/models não pode descartar configured_model_badges, "
             "senão o deploy/servidor reiniciado perde as TAGS do dropdown mesmo com o código novo."
         )
-        assert warm["configured_model_badges"].get("@copilot:gpt-4.1", {}).get("label") == "Fallback 1"
+        assert (
+            warm["configured_model_badges"].get("@copilot:gpt-4.1", {}).get("label")
+            == "Fallback 1"
+        )
     finally:
         config.cfg = old_cfg
         config._cfg_mtime = old_mtime
         config._available_models_cache = old_cache
         config._available_models_cache_ts = old_cache_ts
         monkeypatch.setattr(config, "_models_cache_path", old_cache_path)
-
 
 
 def test_ui_renders_model_badges_from_api_payload():
@@ -175,7 +201,10 @@ def test_ui_renders_model_badges_from_api_payload():
         "A UI deve calcular uma prioridade estável (primary -> fallback 1 -> fallback N) "
         "para renderizar os modelos configurados no topo do dropdown."
     )
-    assert "Object.entries(_badgeMap)" in js and "_normalizeConfiguredModelKey(existing.value)" in js, (
+    assert (
+        "Object.entries(_badgeMap)" in js
+        and "_normalizeConfiguredModelKey(existing.value)" in js
+    ), (
         "renderModelDropdown() deve sintetizar entradas para modelos configurados ausentes "
         "do catálogo atual, senão fallbacks locais/Ollama desaparecem da seção Configured."
     )

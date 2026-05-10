@@ -12,7 +12,6 @@ import json
 import os
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,9 @@ pytest.importorskip("mcp", reason="mcp package not installed (optional MCP serve
 
 # pytest-asyncio is also optional but always installed alongside mcp tests
 # in our local runs. If absent, importorskip the asyncio plugin gracefully.
-pytest.importorskip("pytest_asyncio", reason="pytest-asyncio required for MCP server tests")
+pytest.importorskip(
+    "pytest_asyncio", reason="pytest-asyncio required for MCP server tests"
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -58,6 +59,7 @@ _SAVED_CONSTANTS = {"captured": False}
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _fresh_state_dir():
     """Create a clean temp state dir and set HERMES_WEBUI_STATE_DIR."""
     td = tempfile.mkdtemp()
@@ -70,7 +72,6 @@ def _fresh_state_dir():
     return state_dir
 
 
-
 def _cleanup_state_dir(state_dir: Path):
     """Remove temp state dir, clear env var, and restore api.config/mcp_server
     module constants to whatever they were before the fixture started.
@@ -80,6 +81,7 @@ def _cleanup_state_dir(state_dir: Path):
     fixture's tmpdir from `api.config.STATE_DIR` and fail because the path
     no longer exists or doesn't match their pytest-managed state dir."""
     import shutil
+
     shutil.rmtree(state_dir, ignore_errors=True)
     os.environ.pop("HERMES_WEBUI_STATE_DIR", None)
 
@@ -87,6 +89,7 @@ def _cleanup_state_dir(state_dir: Path):
     saved = _SAVED_CONSTANTS
     if saved.get("captured"):
         import api.config as _cfg
+
         for attr, val in saved["api.config"].items():
             setattr(_cfg, attr, val)
         if "mcp_server" in sys.modules:
@@ -103,6 +106,7 @@ def _cleanup_state_dir(state_dir: Path):
                 os.environ.pop(env_key, None)
             else:
                 os.environ[env_key] = env_val
+
 
 def _reimport_mcp():
     """Re-point mcp_server's module-level STATE_DIR / SESSION_DIR /
@@ -128,7 +132,7 @@ def _reimport_mcp():
     that mutate those env vars during their own setup and don't restore
     them in the strict sense the active-profile path resolution needs.
     """
-    state_dir = Path(os.environ['HERMES_WEBUI_STATE_DIR'])
+    state_dir = Path(os.environ["HERMES_WEBUI_STATE_DIR"])
 
     # Sibling test files (e.g. test_profile_path_security.py) mutate
     # HERMES_BASE_HOME / HERMES_HOME but only restore sys.modules — the
@@ -157,16 +161,28 @@ def _reimport_mcp():
     if not _SAVED_CONSTANTS.get("captured"):
         _SAVED_CONSTANTS["api.config"] = {
             attr: getattr(cfg, attr)
-            for attr in ("STATE_DIR", "SESSION_DIR", "WORKSPACES_FILE",
-                         "SETTINGS_FILE", "LAST_WORKSPACE_FILE", "PROJECTS_FILE",
-                         "SESSION_INDEX_FILE")
+            for attr in (
+                "STATE_DIR",
+                "SESSION_DIR",
+                "WORKSPACES_FILE",
+                "SETTINGS_FILE",
+                "LAST_WORKSPACE_FILE",
+                "PROJECTS_FILE",
+                "SESSION_INDEX_FILE",
+            )
             if hasattr(cfg, attr)
         }
         _SAVED_CONSTANTS["mcp_server"] = {
             attr: getattr(mod, attr)
-            for attr in ("STATE_DIR", "SESSION_DIR", "PROJECTS_FILE",
-                         "SESSION_INDEX_FILE", "WEBUI_HOST", "WEBUI_PORT",
-                         "WEBUI_URL")
+            for attr in (
+                "STATE_DIR",
+                "SESSION_DIR",
+                "PROJECTS_FILE",
+                "SESSION_INDEX_FILE",
+                "WEBUI_HOST",
+                "WEBUI_PORT",
+                "WEBUI_URL",
+            )
             if hasattr(mod, attr)
         }
         if "api.models" in sys.modules:
@@ -188,7 +204,6 @@ def _reimport_mcp():
     # object as `mcp_server.get_active_profile_name`'s closure reference.
     # We need to mutate the closure-bound module so mcp_server sees our
     # _active_profile assignment.
-    import api.profiles as fresh_profiles_via_import
     # mcp_server.get_active_profile_name is bound at first-import time and
     # reads `_active_profile` from its own module's globals via closure.
     # That module is the function's __globals__["__name__"] entry in
@@ -211,6 +226,7 @@ def _reimport_mcp():
         class _ProxyModule:
             def __init__(self, globs):
                 self.__dict__ = globs
+
         fresh_profiles = _ProxyModule(bound_globals)
 
     # Re-point api.config module-level constants
@@ -220,7 +236,7 @@ def _reimport_mcp():
     cfg.SETTINGS_FILE = state_dir / "settings.json"
     cfg.LAST_WORKSPACE_FILE = state_dir / "last_workspace.txt"
     cfg.PROJECTS_FILE = state_dir / "projects.json"
-    if hasattr(cfg, 'SESSION_INDEX_FILE'):
+    if hasattr(cfg, "SESSION_INDEX_FILE"):
         cfg.SESSION_INDEX_FILE = state_dir / "sessions" / "_index.json"
 
     # Re-point mcp_server's imported aliases (they were copied at first
@@ -228,19 +244,19 @@ def _reimport_mcp():
     mod.STATE_DIR = cfg.STATE_DIR
     mod.SESSION_DIR = cfg.SESSION_DIR
     mod.PROJECTS_FILE = cfg.PROJECTS_FILE
-    if hasattr(mod, 'SESSION_INDEX_FILE'):
+    if hasattr(mod, "SESSION_INDEX_FILE"):
         mod.SESSION_INDEX_FILE = cfg.SESSION_INDEX_FILE
 
     # api.models also imports STATE_DIR / PROJECTS_FILE etc. as module
     # constants — re-point those too so load_projects() / save_projects()
     # see the fresh STATE_DIR.
-    if 'api.models' in sys.modules:
-        models_mod = sys.modules['api.models']
-        if hasattr(models_mod, 'STATE_DIR'):
+    if "api.models" in sys.modules:
+        models_mod = sys.modules["api.models"]
+        if hasattr(models_mod, "STATE_DIR"):
             models_mod.STATE_DIR = cfg.STATE_DIR
-        if hasattr(models_mod, 'PROJECTS_FILE'):
+        if hasattr(models_mod, "PROJECTS_FILE"):
             models_mod.PROJECTS_FILE = cfg.PROJECTS_FILE
-        if hasattr(models_mod, 'SESSION_DIR'):
+        if hasattr(models_mod, "SESSION_DIR"):
             models_mod.SESSION_DIR = cfg.SESSION_DIR
 
     # Re-evaluate WEBUI_URL from current env (PR #1895 made it env-aware
@@ -250,17 +266,17 @@ def _reimport_mcp():
     mod.WEBUI_PORT = os.environ.get("HERMES_WEBUI_PORT", "8787")
     mod.WEBUI_URL = f"http://{mod.WEBUI_HOST}:{mod.WEBUI_PORT}"
 
-    fresh_profiles._active_profile = 'default'
+    fresh_profiles._active_profile = "default"
 
     # Invalidate the root-profile cache (set at module load to detect
     # renamed-root profiles, but stale after sibling tests that called
     # switch_profile / list_profiles_api in their own setup).
-    if hasattr(fresh_profiles, '_invalidate_root_profile_cache'):
+    if hasattr(fresh_profiles, "_invalidate_root_profile_cache"):
         fresh_profiles._invalidate_root_profile_cache()
-    elif hasattr(fresh_profiles, '_root_profile_name_cache'):
+    elif hasattr(fresh_profiles, "_root_profile_name_cache"):
         fresh_profiles._root_profile_name_cache.clear()
-        fresh_profiles._root_profile_name_cache.add('default')
-        if hasattr(fresh_profiles, '_root_profile_name_cache_loaded'):
+        fresh_profiles._root_profile_name_cache.add("default")
+        if hasattr(fresh_profiles, "_root_profile_name_cache_loaded"):
             fresh_profiles._root_profile_name_cache_loaded = False
     return mod, fresh_profiles
 
@@ -275,6 +291,7 @@ async def _call(mod, tool_name, **kwargs):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Project CRUD
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestCreateProject:
     @pytest.fixture(autouse=True)
@@ -292,8 +309,9 @@ class TestCreateProject:
         assert result["session_count"] == 0
 
     async def test_create_with_color(self):
-        result = await _call(self.mod, "create_project",
-                             name="Colored", color="#ff6600")
+        result = await _call(
+            self.mod, "create_project", name="Colored", color="#ff6600"
+        )
         assert result["color"] == "#ff6600"
 
     async def test_create_duplicate_exact_match(self):
@@ -313,15 +331,17 @@ class TestCreateProject:
         assert "error" in result
 
     async def test_create_invalid_color(self):
-        result = await _call(self.mod, "create_project",
-                             name="Bad", color="not-a-color")
+        result = await _call(
+            self.mod, "create_project", name="Bad", color="not-a-color"
+        )
         assert "error" in result
         assert "Invalid color" in result["error"]
 
     async def test_create_valid_color_formats(self):
         for color in ["#fff", "#ff6600", "#ff6600aa"]:
-            result = await _call(self.mod, "create_project",
-                                 name=f"Color-{color}", color=color)
+            result = await _call(
+                self.mod, "create_project", name=f"Color-{color}", color=color
+            )
             assert result["color"] == color
 
 
@@ -336,29 +356,32 @@ class TestRenameProject:
     async def test_rename_basic(self):
         created = await _call(self.mod, "create_project", name="Old")
         pid = created["project_id"]
-        result = await _call(self.mod, "rename_project",
-                             project_id=pid, name="New")
+        result = await _call(self.mod, "rename_project", project_id=pid, name="New")
         assert result["name"] == "New"
         assert result["project_id"] == pid
 
     async def test_rename_with_color(self):
         created = await _call(self.mod, "create_project", name="X")
-        result = await _call(self.mod, "rename_project",
-                             project_id=created["project_id"],
-                             name="X", color="#000")
+        result = await _call(
+            self.mod,
+            "rename_project",
+            project_id=created["project_id"],
+            name="X",
+            color="#000",
+        )
         assert result["color"] == "#000"
 
     async def test_rename_not_found(self):
-        result = await _call(self.mod, "rename_project",
-                             project_id="nonexistent", name="Nope")
+        result = await _call(
+            self.mod, "rename_project", project_id="nonexistent", name="Nope"
+        )
         assert "error" in result
 
     async def test_rename_wrong_profile(self):
         created = await _call(self.mod, "create_project", name="DefaultOwned")
         pid = created["project_id"]
-        self.profiles._active_profile = 'other'
-        result = await _call(self.mod, "rename_project",
-                             project_id=pid, name="Stolen")
+        self.profiles._active_profile = "other"
+        result = await _call(self.mod, "rename_project", project_id=pid, name="Stolen")
         assert "error" in result
         assert "not found" in result["error"].lower()
 
@@ -379,14 +402,13 @@ class TestDeleteProject:
         assert result["deleted"] == "ToDelete"
 
     async def test_delete_not_found(self):
-        result = await _call(self.mod, "delete_project",
-                             project_id="nonexistent")
+        result = await _call(self.mod, "delete_project", project_id="nonexistent")
         assert "error" in result
 
     async def test_delete_wrong_profile(self):
         created = await _call(self.mod, "create_project", name="Owned")
         pid = created["project_id"]
-        self.profiles._active_profile = 'other'
+        self.profiles._active_profile = "other"
         result = await _call(self.mod, "delete_project", project_id=pid)
         assert "error" in result
 
@@ -401,6 +423,7 @@ class TestDeleteProject:
         surface a `warning` field telling the operator to set the env var.
         """
         from api.config import SESSION_DIR, SESSION_INDEX_FILE
+
         os.environ.pop("HERMES_WEBUI_PASSWORD", None)
 
         # Create project + a session JSON that points at it
@@ -418,7 +441,8 @@ class TestDeleteProject:
         # Index references the session under the project
         SESSION_INDEX_FILE.write_text(
             json.dumps([{"session_id": sid, "project_id": pid, "title": "T"}]),
-            encoding="utf-8")
+            encoding="utf-8",
+        )
         index_before = SESSION_INDEX_FILE.read_text(encoding="utf-8")
         session_before = session_path.read_text(encoding="utf-8")
 
@@ -438,6 +462,7 @@ class TestDeleteProject:
 #  Profile Scoping
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestProfileScoping:
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -455,7 +480,7 @@ class TestProfileScoping:
         await _call(self.mod, "create_project", name="DefaultProject")
 
         # Switch to other
-        self.profiles._active_profile = 'other'
+        self.profiles._active_profile = "other"
         await _call(self.mod, "create_project", name="OtherProject")
 
         # List should only show current profile's projects
@@ -465,7 +490,7 @@ class TestProfileScoping:
         assert "DefaultProject" not in names
 
         # Switch back
-        self.profiles._active_profile = 'default'
+        self.profiles._active_profile = "default"
         projects = await _call(self.mod, "list_projects")
         names = [p["name"] for p in projects]
         assert "DefaultProject" in names
@@ -474,7 +499,7 @@ class TestProfileScoping:
     async def test_cross_profile_isolation_create(self):
         """Same name in different profiles should be allowed."""
         await _call(self.mod, "create_project", name="Shared")
-        self.profiles._active_profile = 'other'
+        self.profiles._active_profile = "other"
         result = await _call(self.mod, "create_project", name="Shared")
         assert "project_id" in result
 
@@ -486,25 +511,28 @@ class TestProfileScoping:
         """
         # Manually write a legacy untagged project (pre-#1614 schema)
         import api.config as _cfg_mod
+
         PROJECTS_FILE = _cfg_mod.PROJECTS_FILE
-        legacy = [{
-            "project_id": "legacy000001",
-            "name": "LegacyUntagged",
-            "color": None,
-            "created_at": 1700000000.0,
-            # No "profile" field on purpose
-        }]
+        legacy = [
+            {
+                "project_id": "legacy000001",
+                "name": "LegacyUntagged",
+                "color": None,
+                "created_at": 1700000000.0,
+                # No "profile" field on purpose
+            }
+        ]
         PROJECTS_FILE.write_text(json.dumps(legacy), encoding="utf-8")
 
         # Non-root profile must NOT see it
-        self.profiles._active_profile = 'other'
+        self.profiles._active_profile = "other"
         projects = await _call(self.mod, "list_projects")
         names = [p["name"] for p in projects]
         assert "LegacyUntagged" not in names
 
         # Root profile still sees it (load_projects backfills `profile`
         # to 'default', so visibility is preserved for the root).
-        self.profiles._active_profile = 'default'
+        self.profiles._active_profile = "default"
         projects = await _call(self.mod, "list_projects")
         names = [p["name"] for p in projects]
         assert "LegacyUntagged" in names
@@ -512,23 +540,28 @@ class TestProfileScoping:
     async def test_legacy_untagged_rename_blocked_from_non_root(self):
         """Non-root profile cannot rename a legacy untagged project."""
         import api.config as _cfg_mod
+
         PROJECTS_FILE = _cfg_mod.PROJECTS_FILE
-        legacy = [{
-            "project_id": "legacy000002",
-            "name": "Legacy",
-            "color": None,
-            "created_at": 1700000000.0,
-        }]
+        legacy = [
+            {
+                "project_id": "legacy000002",
+                "name": "Legacy",
+                "color": None,
+                "created_at": 1700000000.0,
+            }
+        ]
         PROJECTS_FILE.write_text(json.dumps(legacy), encoding="utf-8")
-        self.profiles._active_profile = 'other'
-        result = await _call(self.mod, "rename_project",
-                             project_id="legacy000002", name="Stolen")
+        self.profiles._active_profile = "other"
+        result = await _call(
+            self.mod, "rename_project", project_id="legacy000002", name="Stolen"
+        )
         assert "error" in result
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Session listing
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestListSessions:
     @pytest.fixture(autouse=True)
@@ -555,6 +588,7 @@ class TestListSessions:
 #  Session mutations (HTTP API — basic validation only)
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class TestSessionMutations:
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -564,27 +598,25 @@ class TestSessionMutations:
         _cleanup_state_dir(self.state_dir)
 
     async def test_rename_missing_args(self):
-        result = await _call(self.mod, "rename_session",
-                             session_id="", title="")
+        result = await _call(self.mod, "rename_session", session_id="", title="")
         assert "error" in result
 
     async def test_move_missing_args(self):
-        result = await _call(self.mod, "move_session",
-                             session_id="", project_id="x")
+        result = await _call(self.mod, "move_session", session_id="", project_id="x")
         assert "error" in result
 
     async def test_move_project_not_found(self):
-        result = await _call(self.mod, "move_session",
-                             session_id="s1", project_id="nonexistent")
+        result = await _call(
+            self.mod, "move_session", session_id="s1", project_id="nonexistent"
+        )
         assert "error" in result
 
     async def test_move_target_owned_by_other_profile_rejected(self):
         """A project owned by profile A is invisible to profile B (#1614)."""
         created = await _call(self.mod, "create_project", name="ATarget")
         pid = created["project_id"]
-        self.profiles._active_profile = 'other'
-        result = await _call(self.mod, "move_session",
-                             session_id="any", project_id=pid)
+        self.profiles._active_profile = "other"
+        result = await _call(self.mod, "move_session", session_id="any", project_id=pid)
         assert "error" in result
         assert "not found" in result["error"].lower()
 
@@ -592,6 +624,7 @@ class TestSessionMutations:
 # ═══════════════════════════════════════════════════════════════════════════
 #  Auth helper
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class TestApiPassword:
     @pytest.fixture(autouse=True)
@@ -610,9 +643,10 @@ class TestApiPassword:
         """settings.json holds a hash, not a plaintext password — must NOT
         be returned as if it were a usable password."""
         from api.config import STATE_DIR as _SD
+
         (_SD / "settings.json").write_text(
-            json.dumps({"password_hash": "$2b$12$abcdefghijk"}),
-            encoding="utf-8")
+            json.dumps({"password_hash": "$2b$12$abcdefghijk"}), encoding="utf-8"
+        )
         assert self.mod._api_password() is None
 
     async def test_env_var_returned(self):
@@ -631,6 +665,7 @@ class TestApiPassword:
 # now import _profiles_match from api/profiles.py. If anyone re-introduces a
 # local copy in either module, both the identity check and the input-matrix
 # parametrize trip immediately.
+
 
 async def test_profiles_match_single_source_of_truth():
     """All three module names resolve to the same canonical object.
@@ -653,7 +688,7 @@ async def test_profiles_match_single_source_of_truth():
     # Snapshot the originals; we'll put them back at the end.
     saved_modules = {
         k: sys.modules[k]
-        for k in ('mcp_server', 'api.routes', 'api.profiles')
+        for k in ("mcp_server", "api.routes", "api.profiles")
         if k in sys.modules
     }
     # Also snapshot the attributes on the parent `api` package, because
@@ -663,23 +698,25 @@ async def test_profiles_match_single_source_of_truth():
     # bind to the fresh re-imported module even though sys.modules
     # holds the original.
     import api as _api_parent
+
     saved_api_attrs = {}
-    for sub in ('routes', 'profiles'):
+    for sub in ("routes", "profiles"):
         if hasattr(_api_parent, sub):
             saved_api_attrs[sub] = getattr(_api_parent, sub)
 
-    for k in ('mcp_server', 'api.routes', 'api.profiles'):
+    for k in ("mcp_server", "api.routes", "api.profiles"):
         sys.modules.pop(k, None)
     try:
         import api.profiles as _profiles_mod
         import api.routes as _routes_mod
         import mcp_server as _mcp_mod
+
         canonical = _profiles_mod._profiles_match
         assert _routes_mod._profiles_match is canonical
         assert _mcp_mod._profiles_match is canonical
     finally:
         # Restore so monkeypatch handles in sibling tests target the right module.
-        for k in ('mcp_server', 'api.routes', 'api.profiles'):
+        for k in ("mcp_server", "api.routes", "api.profiles"):
             sys.modules.pop(k, None)
         sys.modules.update(saved_modules)
         # Restore parent-package attributes too (see above for why).
@@ -687,21 +724,24 @@ async def test_profiles_match_single_source_of_truth():
             setattr(_api_parent, sub, mod_obj)
 
 
-@pytest.mark.parametrize("a, b", [
-    (None, None),
-    (None, ''),
-    ('', None),
-    ('', ''),
-    (None, 'default'),
-    ('default', None),
-    ('default', 'default'),
-    ('foo', 'foo'),
-    ('foo', 'bar'),
-    ('foo', None),
-    (None, 'foo'),
-    ('default', 'foo'),
-    ('foo', 'default'),
-])
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (None, None),
+        (None, ""),
+        ("", None),
+        ("", ""),
+        (None, "default"),
+        ("default", None),
+        ("default", "default"),
+        ("foo", "foo"),
+        ("foo", "bar"),
+        ("foo", None),
+        (None, "foo"),
+        ("default", "foo"),
+        ("foo", "default"),
+    ],
+)
 async def test_profiles_match_input_matrix(a, b):
     """mcp_server._profiles_match agrees with api.routes._profiles_match
     on every (row, active) pair across the visibility matrix.
@@ -712,6 +752,7 @@ async def test_profiles_match_input_matrix(a, b):
     clear and re-execute api.profiles."""
     from mcp_server import _profiles_match as mcp_match
     from api.routes import _profiles_match as routes_match
+
     assert mcp_match(a, b) == routes_match(a, b)
 
 
@@ -729,6 +770,7 @@ async def test_profiles_match_input_matrix(a, b):
 # the behaviour: setting _active_profile = 'foo' before the first list call
 # produces results filtered to 'foo', not the default.
 
+
 class TestProfileCliOrdering:
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -745,19 +787,30 @@ class TestProfileCliOrdering:
         helper had latched the profile at import time, the override here
         would be too late and the test would see 'default'-tagged rows."""
         import api.config as _cfg_mod
+
         PROJECTS_FILE = _cfg_mod.PROJECTS_FILE
         # Pre-seed two projects: one for default, one for foo.
         seeded = [
-            {"project_id": "p_default_0001", "name": "DefaultRow",
-             "color": None, "profile": "default", "created_at": 1.0},
-            {"project_id": "p_foo_0001", "name": "FooRow",
-             "color": None, "profile": "foo", "created_at": 2.0},
+            {
+                "project_id": "p_default_0001",
+                "name": "DefaultRow",
+                "color": None,
+                "profile": "default",
+                "created_at": 1.0,
+            },
+            {
+                "project_id": "p_foo_0001",
+                "name": "FooRow",
+                "color": None,
+                "profile": "foo",
+                "created_at": 2.0,
+            },
         ]
         PROJECTS_FILE.write_text(json.dumps(seeded), encoding="utf-8")
 
         # Apply the override BEFORE the first list call. This is what
         # mcp_server.py:62-64 does after argparse.
-        self.profiles._active_profile = 'foo'
+        self.profiles._active_profile = "foo"
 
         projects = await _call(self.mod, "list_projects")
         names = [p["name"] for p in projects]
@@ -783,6 +836,7 @@ import threading
 class _RecordingHandler(http.server.BaseHTTPRequestHandler):
     """Captures POST path + body, returns canned JSON. Class-level state is
     set by the fixture before each test so handlers can cross-reference."""
+
     captured = None  # populated per-test as a list of (path, body, headers)
     canned_response = None  # populated per-test: dict to be JSON-encoded
 
@@ -796,12 +850,14 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception:
             body = {"_raw": raw.decode("utf-8", errors="replace")}
-        type(self).captured.append({
-            "path": self.path,
-            "body": body,
-            "cookie": self.headers.get("Cookie"),
-            "content_type": self.headers.get("Content-Type"),
-        })
+        type(self).captured.append(
+            {
+                "path": self.path,
+                "body": body,
+                "cookie": self.headers.get("Cookie"),
+                "content_type": self.headers.get("Content-Type"),
+            }
+        )
         payload = json.dumps(type(self).canned_response or {}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -827,10 +883,8 @@ class TestApiWireFormat:
         self.port = _free_port()
         _RecordingHandler.captured = []
         _RecordingHandler.canned_response = {}
-        self.httpd = http.server.HTTPServer(("127.0.0.1", self.port),
-                                            _RecordingHandler)
-        self.thread = threading.Thread(target=self.httpd.serve_forever,
-                                       daemon=True)
+        self.httpd = http.server.HTTPServer(("127.0.0.1", self.port), _RecordingHandler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
 
         # Disable auth so _api_post() does not attempt a real /api/auth/login.
@@ -850,8 +904,9 @@ class TestApiWireFormat:
         _RecordingHandler.canned_response = {
             "session": {"session_id": "abc123", "title": "Renamed"}
         }
-        result = await _call(self.mod, "rename_session",
-                             session_id="abc123", title="Renamed")
+        result = await _call(
+            self.mod, "rename_session", session_id="abc123", title="Renamed"
+        )
         assert len(_RecordingHandler.captured) == 1
         req = _RecordingHandler.captured[0]
         assert req["path"] == "/api/session/rename"
@@ -871,10 +926,9 @@ class TestApiWireFormat:
         pid = created["project_id"]
         _RecordingHandler.canned_response = {
             "ok": True,
-            "session": {"session_id": "s1", "title": "T", "project_id": pid}
+            "session": {"session_id": "s1", "title": "T", "project_id": pid},
         }
-        result = await _call(self.mod, "move_session",
-                             session_id="s1", project_id=pid)
+        result = await _call(self.mod, "move_session", session_id="s1", project_id=pid)
         assert len(_RecordingHandler.captured) == 1
         req = _RecordingHandler.captured[0]
         assert req["path"] == "/api/session/move"
@@ -887,10 +941,10 @@ class TestApiWireFormat:
     async def test_move_session_unassign_sends_null_project_id(self):
         """Passing project_id=None must serialize as JSON null (not omitted)."""
         _RecordingHandler.canned_response = {
-            "ok": True, "session": {"session_id": "s1", "project_id": None}
+            "ok": True,
+            "session": {"session_id": "s1", "project_id": None},
         }
-        result = await _call(self.mod, "move_session",
-                             session_id="s1", project_id=None)
+        result = await _call(self.mod, "move_session", session_id="s1", project_id=None)
         assert len(_RecordingHandler.captured) == 1
         req = _RecordingHandler.captured[0]
         assert req["path"] == "/api/session/move"

@@ -5,6 +5,7 @@ session's approval/clarify event must not render over or hide the currently
 active pane's card, but the pending prompt should remain available when the user
 switches back to that session.
 """
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -81,7 +82,9 @@ def test_polling_empty_state_clears_only_the_owner_prompt():
     approval_fallback = _function_body(MESSAGES_JS, "_startApprovalFallbackPoll")
     clarify_poll = _function_body(MESSAGES_JS, "startClarifyPolling")
     clarify_fallback = _function_body(MESSAGES_JS, "_startClarifyFallbackPoll")
-    combined = "\n".join([approval_poll, approval_fallback, clarify_poll, clarify_fallback])
+    combined = "\n".join(
+        [approval_poll, approval_fallback, clarify_poll, clarify_fallback]
+    )
     assert "_clearApprovalPendingForSession(sid)" in combined
     assert "_hideApprovalCardIfOwner(sid" in combined
     assert "_clearClarifyPendingForSession(sid)" in combined
@@ -89,7 +92,10 @@ def test_polling_empty_state_clears_only_the_owner_prompt():
     assert "else { hideApprovalCard(); }" not in combined
     assert "else { hideClarifyCard(false, 'expired'); }" not in combined
     assert "stopApprovalPolling(); hideApprovalCard(true); return;" not in combined
-    assert "stopClarifyPolling(); hideClarifyCard(true, 'session'); return;" not in combined
+    assert (
+        "stopClarifyPolling(); hideClarifyCard(true, 'session'); return;"
+        not in combined
+    )
 
 
 def test_load_session_rerenders_cached_prompt_for_new_active_session():
@@ -98,7 +104,9 @@ def test_load_session_rerenders_cached_prompt_for_new_active_session():
 
 
 def test_prompt_rerender_hides_previous_session_cards_without_clearing_cache():
-    approval_body = _function_body(MESSAGES_JS, "_renderPendingApprovalForActiveSession")
+    approval_body = _function_body(
+        MESSAGES_JS, "_renderPendingApprovalForActiveSession"
+    )
     clarify_body = _function_body(MESSAGES_JS, "_renderPendingClarifyForActiveSession")
     assert "_approvalSessionId && _approvalSessionId !== sid" in approval_body
     assert "hideApprovalCard(true)" in approval_body

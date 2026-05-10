@@ -45,7 +45,13 @@ def test_probe_uses_official_dashboard_status_fingerprint(monkeypatch):
 
     def fake_urlopen(request, timeout):
         calls.append((request.full_url, timeout))
-        return _FakeResponse({"version": "0.12.0", "release_date": "2026-05-01", "hermes_home": "/tmp/hermes"})
+        return _FakeResponse(
+            {
+                "version": "0.12.0",
+                "release_date": "2026-05-01",
+                "hermes_home": "/tmp/hermes",
+            }
+        )
 
     from api import dashboard_probe
 
@@ -88,9 +94,24 @@ def test_dashboard_target_validation_allows_only_loopback_base_urls():
     from api.dashboard_probe import normalize_dashboard_url
 
     assert normalize_dashboard_url("") is None
-    assert normalize_dashboard_url("http://127.0.0.1:9120") == ("127.0.0.1", 9120, "http", "http://127.0.0.1:9120")
-    assert normalize_dashboard_url("https://localhost:9443") == ("localhost", 9443, "https", "https://localhost:9443")
-    assert normalize_dashboard_url("http://[::1]:9119") == ("::1", 9119, "http", "http://[::1]:9119")
+    assert normalize_dashboard_url("http://127.0.0.1:9120") == (
+        "127.0.0.1",
+        9120,
+        "http",
+        "http://127.0.0.1:9120",
+    )
+    assert normalize_dashboard_url("https://localhost:9443") == (
+        "localhost",
+        9443,
+        "https",
+        "https://localhost:9443",
+    )
+    assert normalize_dashboard_url("http://[::1]:9119") == (
+        "::1",
+        9119,
+        "http",
+        "http://[::1]:9119",
+    )
 
     for bad in (
         "http://example.com:9119",
@@ -121,7 +142,13 @@ def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch
     def fake_probe(host, port, timeout=0.5, scheme="http"):
         attempts.append((host, port, timeout, scheme))
         if host == "localhost":
-            return {"running": True, "host": host, "port": port, "url": "http://localhost:9119", "version": "0.12.0"}
+            return {
+                "running": True,
+                "host": host,
+                "port": port,
+                "url": "http://localhost:9119",
+                "version": "0.12.0",
+            }
         return {"running": False}
 
     monkeypatch.setattr(dashboard_probe, "probe_official_dashboard", fake_probe)
@@ -129,7 +156,10 @@ def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch
 
     assert result["running"] is True
     assert result["host"] == "localhost"
-    assert attempts == [("127.0.0.1", 9119, 0.5, "http"), ("localhost", 9119, 0.5, "http")]
+    assert attempts == [
+        ("127.0.0.1", 9119, 0.5, "http"),
+        ("localhost", 9119, 0.5, "http"),
+    ]
 
 
 def test_status_honors_never_and_strict_override(monkeypatch):
@@ -139,23 +169,27 @@ def test_status_honors_never_and_strict_override(monkeypatch):
         raise AssertionError("disabled dashboard must not probe")
 
     monkeypatch.setattr(dashboard_probe, "probe_official_dashboard", fail_probe)
-    assert dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"enabled": "never"}}}) == {
+    assert dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"enabled": "never"}}}
+    ) == {
         "running": False,
         "enabled": "never",
     }
 
-    result = dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"url": "http://example.com:9119"}}})
+    result = dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"url": "http://example.com:9119"}}}
+    )
     assert result["running"] is False
     assert "invalid" in result["error"]
-
-
 
 
 def test_status_skips_auto_probe_when_webui_bind_host_is_non_loopback(monkeypatch):
     from api import dashboard_probe
 
     def fail_probe(*args, **kwargs):
-        raise AssertionError("auto mode must not probe dashboard when WebUI binds non-loopback")
+        raise AssertionError(
+            "auto mode must not probe dashboard when WebUI binds non-loopback"
+        )
 
     monkeypatch.setenv("HERMES_WEBUI_HOST", "0.0.0.0")
     monkeypatch.setattr(dashboard_probe, "probe_official_dashboard", fail_probe)
@@ -172,7 +206,13 @@ def test_dashboard_status_route_returns_safe_payload(monkeypatch):
     monkeypatch.setattr(
         dashboard_probe,
         "get_dashboard_status",
-        lambda: {"running": True, "host": "127.0.0.1", "port": 9119, "url": "http://127.0.0.1:9119", "version": "0.12.0"},
+        lambda: {
+            "running": True,
+            "host": "127.0.0.1",
+            "port": 9119,
+            "url": "http://127.0.0.1:9119",
+            "version": "0.12.0",
+        },
     )
 
     handler = _FakeHandler()

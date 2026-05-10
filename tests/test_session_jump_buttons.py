@@ -29,9 +29,16 @@ def test_session_jump_buttons_are_opt_in_and_keep_existing_bottom_button():
     assert '"session_jump_buttons"' in CONFIG_PY
     assert "window._sessionJumpButtonsEnabled=!!s.session_jump_buttons" in BOOT_JS
     assert "window._sessionJumpButtonsEnabled=false" in BOOT_JS
-    assert "session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked" in PANELS_JS
+    assert (
+        "session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked"
+        in PANELS_JS
+    )
 
-    scroll_listener = UI_JS[UI_JS.index("el.addEventListener('scroll'") : UI_JS.index("})();", UI_JS.index("el.addEventListener('scroll'"))]
+    scroll_listener = UI_JS[
+        UI_JS.index("el.addEventListener('scroll'") : UI_JS.index(
+            "})();", UI_JS.index("el.addEventListener('scroll'")
+        )
+    ]
     assert "if(btn) btn.style.display=_scrollPinned?'none':'flex'" in scroll_listener
     assert "!_isSessionJumpButtonsEnabled()||_scrollPinned" not in UI_JS
 
@@ -42,16 +49,22 @@ def test_jump_to_session_start_button_loads_full_history_and_scrolls_top():
 
     assert 'id="jumpToSessionStartBtn"' in INDEX_HTML
     assert 'class="session-jump-btn session-jump-btn--start"' in INDEX_HTML
-    assert "data-i18n=\"session_jump_start\"" in INDEX_HTML
-    assert "data-i18n=\"session_jump_end\"" in INDEX_HTML
-    assert "data-i18n-aria-label=\"session_jump_start_label\"" in INDEX_HTML
-    assert "data-i18n-aria-label=\"session_jump_end_label\"" in INDEX_HTML
+    assert 'data-i18n="session_jump_start"' in INDEX_HTML
+    assert 'data-i18n="session_jump_end"' in INDEX_HTML
+    assert 'data-i18n-aria-label="session_jump_start_label"' in INDEX_HTML
+    assert 'data-i18n-aria-label="session_jump_end_label"' in INDEX_HTML
 
     assert "_ensureAllMessagesLoaded" in jump
-    assert "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())" in jump
+    assert (
+        "_messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount())"
+        in jump
+    )
     assert "renderMessages({ preserveScroll:true })" in jump
     assert "container.scrollTop=0" in jump
-    assert "btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none'" in update
+    assert (
+        "btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none'"
+        in update
+    )
 
 
 def test_session_jump_buttons_match_pill_layout_without_regressing_default_arrow():
@@ -59,8 +72,14 @@ def test_session_jump_buttons_match_pill_layout_without_regressing_default_arrow
     assert ".session-jump-btn--start{top:16px" in STYLE_CSS
     assert ".session-jump-btn__text{display:none" in STYLE_CSS
     assert ".messages.session-nav-enabled .scroll-to-bottom-btn" in STYLE_CSS
-    assert ".messages.session-nav-enabled .session-jump-btn__text{display:inline" in STYLE_CSS
-    assert "classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled())" in UI_JS
+    assert (
+        ".messages.session-nav-enabled .session-jump-btn__text{display:inline"
+        in STYLE_CSS
+    )
+    assert (
+        "classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled())"
+        in UI_JS
+    )
 
 
 def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
@@ -75,6 +94,8 @@ def test_session_jump_buttons_are_i18n_localized_in_text_tooltip_and_aria():
     for key in english_literals:
         assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
     for key, value in english_literals.items():
-        assert I18N_JS.count(f"{key}: '{value}'") == 1, f"non-English locale still uses English literal for {key}"
+        assert I18N_JS.count(f"{key}: '{value}'") == 1, (
+            f"non-English locale still uses English literal for {key}"
+        )
     assert "document.querySelectorAll('[data-i18n-aria-label]')" in I18N_JS
     assert "el.setAttribute('aria-label', val)" in I18N_JS

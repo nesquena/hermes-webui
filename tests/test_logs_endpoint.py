@@ -28,7 +28,8 @@ def test_logs_endpoint_tails_whitelisted_synthetic_agent_log():
         "\n".join(
             [f"2026-05-04 INFO synthetic-log-marker line {i}" for i in range(105)]
             + ["2026-05-04 ERROR synthetic-log-marker failed safely"]
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -74,7 +75,8 @@ def test_logs_endpoint_tail_selector_is_allowlisted_and_defaults_to_200():
     logs_dir = TEST_STATE_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     (logs_dir / "errors.log").write_text(
-        "\n".join(f"2026-05-04 ERROR synthetic-log-marker line {i}" for i in range(250)) + "\n",
+        "\n".join(f"2026-05-04 ERROR synthetic-log-marker line {i}" for i in range(250))
+        + "\n",
         encoding="utf-8",
     )
 

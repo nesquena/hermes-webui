@@ -60,7 +60,9 @@ def _day(ts):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
-def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeypatch, tmp_path):
+def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(
+    monkeypatch, tmp_path
+):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     two_days_ago = now - (2 * 86400)
     entries = [
@@ -115,9 +117,30 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
 def test_insights_model_breakdown_tracks_tokens_cost_and_shares(monkeypatch, tmp_path):
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
-        {"updated_at": now, "message_count": 1, "model": "cheap", "input_tokens": 200, "output_tokens": 50, "estimated_cost": 0.01},
-        {"updated_at": now, "message_count": 1, "model": "costly", "input_tokens": 100, "output_tokens": 50, "estimated_cost": "0.20"},
-        {"updated_at": now, "message_count": 1, "model": "cheap", "input_tokens": 300, "output_tokens": 150, "estimated_cost": "$0.04"},
+        {
+            "updated_at": now,
+            "message_count": 1,
+            "model": "cheap",
+            "input_tokens": 200,
+            "output_tokens": 50,
+            "estimated_cost": 0.01,
+        },
+        {
+            "updated_at": now,
+            "message_count": 1,
+            "model": "costly",
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "estimated_cost": "0.20",
+        },
+        {
+            "updated_at": now,
+            "message_count": 1,
+            "model": "cheap",
+            "input_tokens": 300,
+            "output_tokens": 150,
+            "estimated_cost": "$0.04",
+        },
     ]
 
     data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)

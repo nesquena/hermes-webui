@@ -31,11 +31,16 @@ def test_clear_preview_can_keep_preview_only_panel_open_for_directory_navigation
         "clearPreview() needs an explicit keep-open option so breadcrumb/directory "
         "navigation can leave preview-only mode without closing the workspace panel."
     )
-    assert "_workspacePanelMode==='preview'&&!keepPanelOpen" in block.replace(" ", ""), (
+    assert "_workspacePanelMode==='preview'&&!keepPanelOpen" in block.replace(
+        " ", ""
+    ), (
         "Preview-only close behavior should remain for the X button, but must be gated "
         "off when directory navigation requests keepPanelOpen."
     )
-    assert "openWorkspacePanel('browse')" in block or '_setWorkspacePanelMode("browse")' in block, (
+    assert (
+        "openWorkspacePanel('browse')" in block
+        or '_setWorkspacePanelMode("browse")' in block
+    ), (
         "When keepPanelOpen is requested from preview-only mode, clearPreview() should "
         "transition the workspace panel to browse mode so the root listing remains visible."
     )
@@ -52,7 +57,9 @@ def test_load_dir_keeps_workspace_panel_open_when_clearing_preview():
 
 def test_file_preview_breadcrumb_uses_directory_navigation_for_root():
     block = _function_block(WORKSPACE_JS, "renderFileBreadcrumb")
-    assert "loadDir('.')" in block, "The preview root breadcrumb should navigate to the workspace root."
+    assert "loadDir('.')" in block, (
+        "The preview root breadcrumb should navigate to the workspace root."
+    )
     assert "clearPreview(); loadDir('.')" not in block, (
         "The preview root breadcrumb should not do a close-style preview clear before "
         "directory navigation; loadDir() owns the keep-open preview clear."

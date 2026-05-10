@@ -16,6 +16,7 @@ This test verifies that:
 Implementation reference: api/streaming.py around line 2188 (the per-turn
 post-merge save) writes from getattr(agent, 'context_compressor', None).
 """
+
 import re
 from pathlib import Path
 
@@ -76,7 +77,9 @@ def test_session_init_accepts_context_fields():
     sig = init_match.group(1)
     assert "context_length" in sig, "Session.__init__ must accept context_length"
     assert "threshold_tokens" in sig, "Session.__init__ must accept threshold_tokens"
-    assert "last_prompt_tokens" in sig, "Session.__init__ must accept last_prompt_tokens"
+    assert "last_prompt_tokens" in sig, (
+        "Session.__init__ must accept last_prompt_tokens"
+    )
 
 
 def test_session_metadata_fields_includes_context_fields():
@@ -91,8 +94,12 @@ def test_session_metadata_fields_includes_context_fields():
     assert meta_match, "METADATA_FIELDS list not found in Session.save"
     fields = meta_match.group(1)
     assert "'context_length'" in fields, "METADATA_FIELDS must include 'context_length'"
-    assert "'threshold_tokens'" in fields, "METADATA_FIELDS must include 'threshold_tokens'"
-    assert "'last_prompt_tokens'" in fields, "METADATA_FIELDS must include 'last_prompt_tokens'"
+    assert "'threshold_tokens'" in fields, (
+        "METADATA_FIELDS must include 'threshold_tokens'"
+    )
+    assert "'last_prompt_tokens'" in fields, (
+        "METADATA_FIELDS must include 'last_prompt_tokens'"
+    )
 
 
 def test_session_compact_exposes_context_fields():
@@ -103,7 +110,7 @@ def test_session_compact_exposes_context_fields():
     assert compact_idx != -1, "Session.compact not found"
     # Look ahead for the next def or 200 lines
     end = src.find("\n    def ", compact_idx + 1)
-    body = src[compact_idx:end if end != -1 else compact_idx + 4000]
+    body = src[compact_idx : end if end != -1 else compact_idx + 4000]
 
     assert "'context_length':" in body, "compact() must include context_length"
     assert "'threshold_tokens':" in body, "compact() must include threshold_tokens"
@@ -115,9 +122,15 @@ def test_routes_session_get_returns_context_fields():
     src = ROUTES.read_text(encoding="utf-8")
     # The session-detail response builder uses getattr(s, ..., 0) or 0 pattern.
     # Look for the three keys in the same response shape.
-    assert '"context_length"' in src, "GET /api/session response must include context_length"
-    assert '"threshold_tokens"' in src, "GET /api/session response must include threshold_tokens"
-    assert '"last_prompt_tokens"' in src, "GET /api/session response must include last_prompt_tokens"
+    assert '"context_length"' in src, (
+        "GET /api/session response must include context_length"
+    )
+    assert '"threshold_tokens"' in src, (
+        "GET /api/session response must include threshold_tokens"
+    )
+    assert '"last_prompt_tokens"' in src, (
+        "GET /api/session response must include last_prompt_tokens"
+    )
 
 
 def test_session_round_trip_persists_context_fields(tmp_path, monkeypatch):
@@ -143,6 +156,12 @@ def test_session_round_trip_persists_context_fields(tmp_path, monkeypatch):
     # Reload from disk
     s2 = models.Session.load("ctxtest1")
     assert s2 is not None, "Session should reload"
-    assert s2.context_length == 200000, f"context_length lost on reload: got {s2.context_length}"
-    assert s2.threshold_tokens == 180000, f"threshold_tokens lost on reload: got {s2.threshold_tokens}"
-    assert s2.last_prompt_tokens == 45123, f"last_prompt_tokens lost on reload: got {s2.last_prompt_tokens}"
+    assert s2.context_length == 200000, (
+        f"context_length lost on reload: got {s2.context_length}"
+    )
+    assert s2.threshold_tokens == 180000, (
+        f"threshold_tokens lost on reload: got {s2.threshold_tokens}"
+    )
+    assert s2.last_prompt_tokens == 45123, (
+        f"last_prompt_tokens lost on reload: got {s2.last_prompt_tokens}"
+    )

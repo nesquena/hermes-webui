@@ -51,8 +51,8 @@ def test_html_chat_attachment_opens_sandboxed_inline_raw_file():
     body = _slice_after(UI_JS, "function _renderAttachmentHtml", 900)
     assert "_HTML_EXTS.test(fname)" in body
     assert "inline=1" in body
-    assert "target=\"_blank\"" in body
-    assert "rel=\"noopener\"" in body
+    assert 'target="_blank"' in body
+    assert 'rel="noopener"' in body
     assert "msg-file-badge--html" in body
 
 
@@ -60,8 +60,8 @@ def test_html_media_open_full_uses_inline_new_tab_not_download():
     """MEDIA: HTML preview's Open full page link should open a browser view."""
     body = _slice_after(UI_JS, "function loadHtmlInline", 1800)
     assert "'&inline=1'" in body
-    assert "target=\"_blank\"" in body
-    assert "rel=\"noopener\"" in body
+    assert 'target="_blank"' in body
+    assert 'rel="noopener"' in body
     normal_open = next(line for line in body.splitlines() if "html-open-link" in line)
     assert "download=" not in normal_open
 

@@ -14,7 +14,9 @@ def _body_between(src: str, start: str, end: str) -> str:
 
 def test_model_picker_open_waits_for_async_model_catalog_before_rendering():
     """Opening the visible picker must not render stale static <select> options."""
-    body = _body_between(UI_JS, "async function toggleModelDropdown", "function closeModelDropdown")
+    body = _body_between(
+        UI_JS, "async function toggleModelDropdown", "function closeModelDropdown"
+    )
 
     assert "window._modelDropdownReady" in body
     assert "await" in body
@@ -23,7 +25,9 @@ def test_model_picker_open_waits_for_async_model_catalog_before_rendering():
 
 def test_populate_model_dropdown_rerenders_if_picker_is_already_open():
     """If the async catalog finishes while open, refresh the visible custom rows."""
-    body = _body_between(UI_JS, "async function populateModelDropdown", "// Cache so we don't re-fetch")
+    body = _body_between(
+        UI_JS, "async function populateModelDropdown", "// Cache so we don't re-fetch"
+    )
 
     assert "composerModelDropdown" in body
     assert "classList.contains('open')" in body or 'classList.contains("open")' in body

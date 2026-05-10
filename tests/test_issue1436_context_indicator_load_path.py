@@ -28,7 +28,7 @@ Reported by @AvidFuturist in Discord (May 1 2026, "the 100 comes up way too
 often").  Confirmed live on the dev server: 23 of 75 sessions had
 `context_length=0` + `input_tokens > 128K`, all rendering >100%.
 """
-import json
+
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
@@ -46,8 +46,9 @@ class TestIssue1436BackendFallback:
     """The /api/session GET handler must resolve context_length via
     agent.model_metadata.get_model_context_length when the persisted value is 0."""
 
-    def _stub_session(self, *, context_length, model, last_prompt_tokens=0,
-                      input_tokens=0):
+    def _stub_session(
+        self, *, context_length, model, last_prompt_tokens=0, input_tokens=0
+    ):
         """Build a mock Session that mimics the persisted-session shape."""
         s = MagicMock()
         s.context_length = context_length
@@ -96,9 +97,11 @@ class TestIssue1436BackendFallback:
         parsed = urlparse("/api/session?session_id=test-1436&messages=0")
 
         # Patch import so `from agent.model_metadata import ...` resolves to our fake.
-        with patch("api.routes.get_session", return_value=session_obj), \
-             patch("api.routes.j", side_effect=fake_j), \
-             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+        with (
+            patch("api.routes.get_session", return_value=session_obj),
+            patch("api.routes.j", side_effect=fake_j),
+            patch.dict("sys.modules", {"agent.model_metadata": fake_module}),
+        ):
             routes.handle_get(handler, parsed)
         return captured
 
@@ -114,8 +117,9 @@ class TestIssue1436BackendFallback:
 
     def test_zero_context_length_falls_back_to_model_metadata(self):
         """Pre-#1318 sessions with context_length=0 must resolve via model_metadata."""
-        s = self._stub_session(context_length=0, model="claude-opus-4-7",
-                               input_tokens=1_200_000)
+        s = self._stub_session(
+            context_length=0, model="claude-opus-4-7", input_tokens=1_200_000
+        )
         result = self._invoke_get_session(s, fallback_returns=1_000_000)
         body = result["data"]["session"]
         assert body["context_length"] == 1_000_000, (
@@ -139,9 +143,11 @@ class TestIssue1436BackendFallback:
         handler = MagicMock()
         parsed = urlparse("/api/session?session_id=test-1436&messages=0")
 
-        with patch("api.routes.get_session", return_value=s), \
-             patch("api.routes.j", side_effect=fake_j), \
-             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+        with (
+            patch("api.routes.get_session", return_value=s),
+            patch("api.routes.j", side_effect=fake_j),
+            patch.dict("sys.modules", {"agent.model_metadata": fake_module}),
+        ):
             routes.handle_get(handler, parsed)
 
         # First positional arg should be the model name; second is base_url ("")
@@ -157,6 +163,7 @@ class TestIssue1436BackendFallback:
         s = self._stub_session(context_length=0, model="")
         # resolve_model=0 to skip _resolve_effective_session_model_for_display
         import api.routes as routes
+
         captured = {}
 
         def fake_j(h, data, status=200):
@@ -170,9 +177,11 @@ class TestIssue1436BackendFallback:
             "/api/session?session_id=test-1436&messages=0&resolve_model=0"
         )
 
-        with patch("api.routes.get_session", return_value=s), \
-             patch("api.routes.j", side_effect=fake_j), \
-             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+        with (
+            patch("api.routes.get_session", return_value=s),
+            patch("api.routes.j", side_effect=fake_j),
+            patch.dict("sys.modules", {"agent.model_metadata": fake_module}),
+        ):
             routes.handle_get(handler, parsed)
 
         # When model is empty, fallback either isn't called OR returns no value
@@ -187,6 +196,7 @@ class TestIssue1436BackendFallback:
         """If the fallback raises (older agent build, missing module), the route
         must still return a response — context_length just stays 0."""
         import api.routes as routes
+
         captured = {}
 
         def fake_j(h, data, status=200):
@@ -202,9 +212,11 @@ class TestIssue1436BackendFallback:
         handler = MagicMock()
         parsed = urlparse("/api/session?session_id=test-1436&messages=0")
 
-        with patch("api.routes.get_session", return_value=s), \
-             patch("api.routes.j", side_effect=fake_j), \
-             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+        with (
+            patch("api.routes.get_session", return_value=s),
+            patch("api.routes.j", side_effect=fake_j),
+            patch.dict("sys.modules", {"agent.model_metadata": fake_module}),
+        ):
             routes.handle_get(handler, parsed)  # must not raise
 
         body = captured["data"]["session"]
@@ -233,7 +245,11 @@ class TestIssue1436FrontendDefense:
             stripped = line.strip()
             if stripped.startswith("//") or stripped.startswith("*"):
                 continue
-            if "promptTok" in line and "=" in line and "usage.last_prompt_tokens" in line:
+            if (
+                "promptTok" in line
+                and "=" in line
+                and "usage.last_prompt_tokens" in line
+            ):
                 assert "usage.input_tokens" not in line, (
                     f"static/ui.js:{line_num} still falls back to cumulative "
                     f"input_tokens for promptTok — this produces the >100% indicator "

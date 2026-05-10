@@ -78,8 +78,8 @@ def test_pre_stash_regex_matches_pre_with_attributes():
     assert "<pre[^>]*>[\\s\\S]*?<\\/pre>" in src, (
         "_pre_stash regex must use <pre[^>]*> to match <pre> with any attributes "
         "(#1463/#1618). The narrow shape <pre>[\\s\\S]*?<\\/pre> misses every "
-        "<pre class=\"tree-raw-view\"> from the JSON/YAML tree-viewer (PR #484) "
-        "and <pre class=\"diff-block\"> from diff/patch — newlines inside those "
+        '<pre class="tree-raw-view"> from the JSON/YAML tree-viewer (PR #484) '
+        'and <pre class="diff-block"> from diff/patch — newlines inside those '
         "blocks fall through to paragraph wrap and become <br> tags."
     )
 
@@ -87,7 +87,7 @@ def test_pre_stash_regex_matches_pre_with_attributes():
     # be present anywhere in the _pre_stash region of the file.
     pre_stash_idx = src.find("const _pre_stash=[]")
     assert pre_stash_idx > 0, "_pre_stash declaration not found"
-    pre_stash_line = src[pre_stash_idx:pre_stash_idx + 1500]
+    pre_stash_line = src[pre_stash_idx : pre_stash_idx + 1500]
     assert "<pre>[\\s\\S]*?<\\/pre>" not in pre_stash_line, (
         "_pre_stash regex must not contain the literal-<pre>-only shape — "
         "use <pre[^>]*> to match attributes."
@@ -101,10 +101,12 @@ def test_pre_stash_still_captures_pre_header_and_optional_div():
     src = UI_JS_PATH.read_text(encoding="utf-8")
 
     pre_stash_idx = src.find("const _pre_stash=[]")
-    pre_stash_block = src[pre_stash_idx:pre_stash_idx + 1500]
+    pre_stash_block = src[pre_stash_idx : pre_stash_idx + 1500]
 
-    assert '(<div class="pre-header">[\\s\\S]*?<\\/div>)?<pre[^>]*>' in pre_stash_block, (
-        "Optional <div class=\"pre-header\"> prefix must still precede the "
+    assert (
+        '(<div class="pre-header">[\\s\\S]*?<\\/div>)?<pre[^>]*>' in pre_stash_block
+    ), (
+        'Optional <div class="pre-header"> prefix must still precede the '
         "<pre[^>]*> match"
     )
     assert '<div class="(mermaid-block|katex-block)"' in pre_stash_block, (
@@ -179,6 +181,7 @@ def _render(driver_path, markdown: str) -> str:
 def _extract_pre_inner(html: str) -> str:
     """Extract the content of the first <pre ...>...</pre> block."""
     import re
+
     m = re.search(r"<pre[^>]*>([\s\S]*?)</pre>", html)
     if not m:
         return ""
@@ -212,7 +215,7 @@ def test_yaml_block_preserves_newlines(driver_path):
     assert "\n" in pre_inner, (
         f"YAML <pre> block lost its newlines (#1463/#1618).  "
         f"<pre> inner content: {pre_inner!r}.  "
-        f"Likely cause: _pre_stash regex doesn't match <pre class=\"tree-raw-view\">, "
+        f'Likely cause: _pre_stash regex doesn\'t match <pre class="tree-raw-view">, '
         f"so the block falls through to the paragraph wrap pass which converts \\n to <br>."
     )
     assert "<br>" not in pre_inner, (
@@ -232,9 +235,7 @@ def test_json_block_preserves_newlines(driver_path):
     assert "code-tree-wrap" in out
     pre_inner = _extract_pre_inner(out)
     assert pre_inner
-    assert "\n" in pre_inner, (
-        f"JSON <pre> block lost newlines.  Inner: {pre_inner!r}"
-    )
+    assert "\n" in pre_inner, f"JSON <pre> block lost newlines.  Inner: {pre_inner!r}"
     assert "<br>" not in pre_inner
 
 
@@ -248,9 +249,7 @@ def test_diff_block_preserves_newlines(driver_path):
     assert "diff-block" in out
     pre_inner = _extract_pre_inner(out)
     assert pre_inner
-    assert "\n" in pre_inner, (
-        f"Diff <pre> block lost newlines.  Inner: {pre_inner!r}"
-    )
+    assert "\n" in pre_inner, f"Diff <pre> block lost newlines.  Inner: {pre_inner!r}"
     assert "<br>" not in pre_inner
 
 
@@ -315,7 +314,7 @@ def test_mermaid_block_unaffected_by_regex_relaxation(driver_path):
     # Mermaid block emits <div class="mermaid-block"> (no <pre>).
     assert "mermaid-block" in out
     # The mermaid div should not be wrapped in <p>...</p>.
-    assert "<p><div class=\"mermaid-block\"" not in out
+    assert '<p><div class="mermaid-block"' not in out
     # Internal newlines inside data-mermaid-id should not be relevant —
     # mermaid content is in the data-attr / esc()'d innerText. But the
     # surrounding paragraph-wrap-bypass MUST still work.

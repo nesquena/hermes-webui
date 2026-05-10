@@ -45,7 +45,16 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui'):
+def _insert_state_row(
+    conn,
+    sid,
+    *,
+    parent=None,
+    ended_at=None,
+    end_reason=None,
+    started_at=None,
+    source="webui",
+):
     conn.execute(
         """
         INSERT INTO sessions
@@ -61,20 +70,27 @@ def _save_webui_session(sid, *, title, updated_at):
     session = Session(
         session_id=sid,
         title=title,
-        messages=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
+        messages=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
         updated_at=updated_at,
     )
     session.save(touch_updated_at=False)
     return session
 
 
-def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(_isolate):
+def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
+    _isolate,
+):
     """PR #1358 can only collapse rows when /api/sessions exposes lineage keys."""
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
         _save_webui_session("lineage_api_root", title="Hermes WebUI", updated_at=t0)
-        _save_webui_session("lineage_api_tip", title="Hermes WebUI #2", updated_at=t0 + 10)
+        _save_webui_session(
+            "lineage_api_tip", title="Hermes WebUI #2", updated_at=t0 + 10
+        )
         _insert_state_row(
             conn,
             "lineage_api_root",
@@ -104,7 +120,9 @@ def test_non_compression_state_db_parent_does_not_create_sidebar_lineage(_isolat
     t0 = time.time() - 100
     try:
         _save_webui_session("lineage_api_plain_parent", title="Parent", updated_at=t0)
-        _save_webui_session("lineage_api_plain_child", title="Child", updated_at=t0 + 10)
+        _save_webui_session(
+            "lineage_api_plain_child", title="Child", updated_at=t0 + 10
+        )
         _insert_state_row(
             conn,
             "lineage_api_plain_parent",
@@ -132,7 +150,6 @@ def test_non_compression_state_db_parent_does_not_create_sidebar_lineage(_isolat
         assert "_lineage_root_id" not in child
     finally:
         conn.close()
-
 
 
 def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolate):
@@ -175,13 +192,16 @@ def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolat
         conn.close()
 
 
-
 def test_cli_close_parent_preserves_cross_surface_continuation_lineage(_isolate):
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
-        _save_webui_session("lineage_api_cli_parent", title="Hermes WebUI #8", updated_at=t0)
-        _save_webui_session("lineage_api_webui_child", title="Hermes WebUI #8", updated_at=t0 + 10)
+        _save_webui_session(
+            "lineage_api_cli_parent", title="Hermes WebUI #8", updated_at=t0
+        )
+        _save_webui_session(
+            "lineage_api_webui_child", title="Hermes WebUI #8", updated_at=t0 + 10
+        )
         _insert_state_row(
             conn,
             "lineage_api_cli_parent",
@@ -198,18 +218,30 @@ def test_cli_close_parent_preserves_cross_surface_continuation_lineage(_isolate)
 
         rows = {row["session_id"]: row for row in all_sessions()}
 
-        assert rows["lineage_api_webui_child"].get("parent_session_id") == "lineage_api_cli_parent"
-        assert rows["lineage_api_webui_child"].get("_lineage_root_id") == "lineage_api_cli_parent"
+        assert (
+            rows["lineage_api_webui_child"].get("parent_session_id")
+            == "lineage_api_cli_parent"
+        )
+        assert (
+            rows["lineage_api_webui_child"].get("_lineage_root_id")
+            == "lineage_api_cli_parent"
+        )
     finally:
         conn.close()
 
 
-def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(_isolate):
+def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(
+    _isolate,
+):
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
-        _save_webui_session("lineage_api_telegram_parent", title="Telegram parent", updated_at=t0)
-        _save_webui_session("lineage_api_webui_tip", title="WebUI tip", updated_at=t0 + 10)
+        _save_webui_session(
+            "lineage_api_telegram_parent", title="Telegram parent", updated_at=t0
+        )
+        _save_webui_session(
+            "lineage_api_webui_tip", title="WebUI tip", updated_at=t0 + 10
+        )
         _insert_state_row(
             conn,
             "lineage_api_telegram_parent",

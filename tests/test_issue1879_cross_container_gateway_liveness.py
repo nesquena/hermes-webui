@@ -299,7 +299,10 @@ def test_no_runtime_status_still_reports_unknown(monkeypatch):
     payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is None
-    assert payload["details"] == {"state": "unknown", "reason": "gateway_not_configured"}
+    assert payload["details"] == {
+        "state": "unknown",
+        "reason": "gateway_not_configured",
+    }
 
 
 # -- _runtime_status_is_fresh unit-level coverage -----------------------------
@@ -312,7 +315,9 @@ def test_runtime_status_is_fresh_unit_helper():
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=timezone.utc)
 
     # Boundary: exactly threshold = fresh.
-    on_boundary = _iso(now - timedelta(seconds=agent_health.GATEWAY_FRESHNESS_THRESHOLD_S))
+    on_boundary = _iso(
+        now - timedelta(seconds=agent_health.GATEWAY_FRESHNESS_THRESHOLD_S)
+    )
     assert agent_health._runtime_status_is_fresh(
         {"gateway_state": "running", "updated_at": on_boundary},
         now=now,

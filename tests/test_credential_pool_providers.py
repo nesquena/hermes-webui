@@ -10,7 +10,9 @@ import api.profiles as profiles
 _AMBIENT_SOURCES = {"gh_cli", "gh auth token"}
 
 
-def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_data: dict | None = None):
+def _install_fake_hermes_cli(
+    monkeypatch, *, with_load_pool: bool = False, pool_data: dict | None = None
+):
     """Stub hermes_cli modules so tests are deterministic and offline.
 
     When *with_load_pool* is True, also stubs hermes_cli.credential_pool with a
@@ -44,6 +46,7 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
 
         class _FakeEntry:
             """Minimal PooledCredential stand-in with attribute access (matching the real class)."""
+
             def __init__(self, d):
                 self.source = d.get("source", "manual")
                 self.label = d.get("label", "")
@@ -69,7 +72,9 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
         monkeypatch.setitem(sys.modules, "agent.credential_pool", fake_cp)
 
 
-def _call_get_available_models(monkeypatch, tmp_path, auth_payload, *, with_load_pool: bool = False):
+def _call_get_available_models(
+    monkeypatch, tmp_path, auth_payload, *, with_load_pool: bool = False
+):
     """Call get_available_models() with auth.json pinned to a temp Hermes home."""
     _install_fake_hermes_cli(
         monkeypatch,
@@ -126,7 +131,9 @@ def test_ollama_cloud_manual_credential_shows_group(monkeypatch, tmp_path):
     groups = _group_by_provider(result)
     assert "Ollama Cloud" in groups, f"Expected Ollama Cloud in {list(groups)}"
     model_ids = [m["id"] for m in groups["Ollama Cloud"]]
-    assert model_ids == ["@ollama-cloud:gpt-oss:20b", "@ollama-cloud:qwen3:30b-a3b"], model_ids
+    assert model_ids == ["@ollama-cloud:gpt-oss:20b", "@ollama-cloud:qwen3:30b-a3b"], (
+        model_ids
+    )
 
 
 def test_copilot_gh_cli_only_credential_hidden(monkeypatch, tmp_path):
@@ -252,7 +259,9 @@ def test_load_pool_copilot_ambient_only_remains_hidden(monkeypatch, tmp_path):
         },
     }
 
-    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    result = _call_get_available_models(
+        monkeypatch, tmp_path, auth_payload, with_load_pool=True
+    )
     groups = _group_by_provider(result)
     assert "GitHub Copilot" not in groups, (
         "GitHub Copilot must be hidden when load_pool returns no usable entries; "
@@ -260,7 +269,9 @@ def test_load_pool_copilot_ambient_only_remains_hidden(monkeypatch, tmp_path):
     )
 
 
-def test_load_pool_copilot_ambient_key_source_only_remains_hidden(monkeypatch, tmp_path):
+def test_load_pool_copilot_ambient_key_source_only_remains_hidden(
+    monkeypatch, tmp_path
+):
     """load_pool path: key_source-only ambient markers must also be suppressed."""
     auth_payload = {
         "version": 1,
@@ -280,7 +291,9 @@ def test_load_pool_copilot_ambient_key_source_only_remains_hidden(monkeypatch, t
         },
     }
 
-    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    result = _call_get_available_models(
+        monkeypatch, tmp_path, auth_payload, with_load_pool=True
+    )
     groups = _group_by_provider(result)
     assert "GitHub Copilot" not in groups, (
         "GitHub Copilot must stay hidden when load_pool entries only differ by key_source ambient markers; "
@@ -307,10 +320,14 @@ def test_load_pool_alias_provider_key_is_resolved(monkeypatch, tmp_path):
         },
     }
 
-    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    result = _call_get_available_models(
+        monkeypatch, tmp_path, auth_payload, with_load_pool=True
+    )
     groups = _group_by_provider(result)
     assert "Gemini" in groups, f"Expected Gemini in {list(groups)}"
-    assert "Google" not in groups, f"Aliased provider key should not render under raw alias name: {list(groups)}"
+    assert "Google" not in groups, (
+        f"Aliased provider key should not render under raw alias name: {list(groups)}"
+    )
 
 
 def test_load_pool_explicit_credential_shows_provider(monkeypatch, tmp_path):
@@ -339,7 +356,9 @@ def test_load_pool_explicit_credential_shows_provider(monkeypatch, tmp_path):
         },
     }
 
-    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    result = _call_get_available_models(
+        monkeypatch, tmp_path, auth_payload, with_load_pool=True
+    )
     groups = _group_by_provider(result)
     assert "GitHub Copilot" in groups, (
         f"GitHub Copilot must appear when load_pool has at least one usable entry; got {list(groups)}"
@@ -353,7 +372,10 @@ def test_apply_provider_prefix_ollama_cloud_non_active():
     """Bare ollama-cloud model ids get @ollama-cloud: prefix when not active."""
     from api.config import _apply_provider_prefix
 
-    raw = [{"id": "gpt-oss:20b", "label": "gpt-oss:20b"}, {"id": "qwen3:30b-a3b", "label": "qwen3:30b-a3b"}]
+    raw = [
+        {"id": "gpt-oss:20b", "label": "gpt-oss:20b"},
+        {"id": "qwen3:30b-a3b", "label": "qwen3:30b-a3b"},
+    ]
     result = _apply_provider_prefix(raw, "ollama-cloud", "openai-codex")
     ids = [m["id"] for m in result]
     assert ids == ["@ollama-cloud:gpt-oss:20b", "@ollama-cloud:qwen3:30b-a3b"], ids
@@ -363,7 +385,10 @@ def test_apply_provider_prefix_copilot_non_active():
     """Bare copilot model ids get @copilot: prefix when not active."""
     from api.config import _apply_provider_prefix
 
-    raw = [{"id": "gpt-5.4", "label": "GPT-5.4"}, {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"}]
+    raw = [
+        {"id": "gpt-5.4", "label": "GPT-5.4"},
+        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
+    ]
     result = _apply_provider_prefix(raw, "copilot", "openai-codex")
     ids = [m["id"] for m in result]
     assert ids == ["@copilot:gpt-5.4", "@copilot:claude-opus-4.6"], ids
@@ -458,6 +483,7 @@ def test_ollama_cloud_empty_catalog_skips_group(monkeypatch, tmp_path):
 
     # Override the stub to return empty for ollama-cloud.
     import sys as _sys
+
     _sys.modules["hermes_cli.models"].provider_model_ids = lambda pid: []
 
     auth_payload = {

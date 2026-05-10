@@ -3,7 +3,7 @@ Tests for OpenCode Zen and OpenCode Go provider support.
 Verifies provider registration in display/model catalogs and
 env-var fallback detection.
 """
-import os
+
 import sys
 import types
 import pytest
@@ -25,6 +25,7 @@ def _isolate_models_cache():
 
 
 # ── Provider registration ─────────────────────────────────────────────
+
 
 def test_opencode_zen_in_provider_display():
     assert "opencode-zen" in config._PROVIDER_DISPLAY
@@ -65,6 +66,7 @@ def test_opencode_go_in_provider_models():
 
 # ── Env-var fallback detection ────────────────────────────────────────
 
+
 def _models_with_env_key(monkeypatch, env_var, expected_provider_display):
     """Helper: fake hermes_cli unavailable, set an env var, check detection."""
     # Force the env-var fallback path by making hermes_cli import fail
@@ -101,9 +103,15 @@ def test_openai_codex_model_catalog_includes_gpt54():
     assert "openai-codex" in config._PROVIDER_MODELS
     ids = [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
     assert "gpt-5.4" in ids, f"gpt-5.4 missing from openai-codex catalog: {ids}"
-    assert "gpt-5.4-mini" in ids, f"gpt-5.4-mini missing from openai-codex catalog: {ids}"
-    assert "gpt-5.3-codex" in ids, f"gpt-5.3-codex missing from openai-codex catalog: {ids}"
-    assert "gpt-5.2-codex" in ids, f"gpt-5.2-codex missing from openai-codex catalog: {ids}"
+    assert "gpt-5.4-mini" in ids, (
+        f"gpt-5.4-mini missing from openai-codex catalog: {ids}"
+    )
+    assert "gpt-5.3-codex" in ids, (
+        f"gpt-5.3-codex missing from openai-codex catalog: {ids}"
+    )
+    assert "gpt-5.2-codex" in ids, (
+        f"gpt-5.2-codex missing from openai-codex catalog: {ids}"
+    )
 
 
 def test_openai_codex_display_name():
@@ -117,7 +125,10 @@ def test_live_models_handler_delegates_to_provider_model_ids():
     rather than maintain its own per-provider fetch logic.
     """
     import pathlib
-    routes_src = (pathlib.Path(__file__).parent.parent / "api" / "routes.py").read_text()
+
+    routes_src = (
+        pathlib.Path(__file__).parent.parent / "api" / "routes.py"
+    ).read_text()
     assert "provider_model_ids" in routes_src, (
         "_handle_live_models must call hermes_cli.models.provider_model_ids() "
         "to delegate all provider-specific live-fetch logic to the agent"
@@ -139,9 +150,13 @@ def test_live_models_ui_no_longer_skips_any_provider():
     handles them all (with graceful fallback to static lists).
     """
     import pathlib
+
     ui_src = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
     # The old exclusion list must be gone
-    assert "includes(provider)" not in ui_src or "anthropic" not in ui_src[:ui_src.find("includes(provider)")+100], (
+    assert (
+        "includes(provider)" not in ui_src
+        or "anthropic" not in ui_src[: ui_src.find("includes(provider)") + 100]
+    ), (
         "_fetchLiveModels must not skip anthropic, google, or gemini — "
         "the backend now returns live models for all providers"
     )

@@ -54,14 +54,20 @@ def test_stale_stream_cleanup_helper_exists():
 
 
 def test_session_load_clears_stale_stream_before_response():
-    load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=(not load_messages))")
+    load_pos = ROUTES_SRC.index(
+        "s = get_session(sid, metadata_only=(not load_messages))"
+    )
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", load_pos)
-    response_pos = ROUTES_SRC.index('"active_stream_id": getattr(s, "active_stream_id", None)', cleanup_pos)
+    response_pos = ROUTES_SRC.index(
+        '"active_stream_id": getattr(s, "active_stream_id", None)', cleanup_pos
+    )
     assert load_pos < cleanup_pos < response_pos
 
 
 def test_chat_start_clears_stale_pending_state_not_only_active_id():
-    stale_comment_pos = ROUTES_SRC.index("# Stale stream id from a previous run; clear and continue.")
+    stale_comment_pos = ROUTES_SRC.index(
+        "# Stale stream id from a previous run; clear and continue."
+    )
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", stale_comment_pos)
     stream_id_pos = ROUTES_SRC.index("stream_id = uuid.uuid4().hex", cleanup_pos)
     assert stale_comment_pos < cleanup_pos < stream_id_pos
@@ -117,7 +123,7 @@ def test_stale_stream_cleanup_does_not_clobber_concurrent_chat_start(monkeypatch
 def test_frontend_drops_inflight_cache_when_server_session_is_idle():
     marker = "If the server says the session is idle, discard any browser-side inflight"
     marker_pos = SESSIONS_SRC.index(marker)
-    window = SESSIONS_SRC[marker_pos:marker_pos + 500]
+    window = SESSIONS_SRC[marker_pos : marker_pos + 500]
     assert "if(!activeStreamId&&INFLIGHT[sid])" in window
     assert "delete INFLIGHT[sid]" in window
     assert "clearInflightState" in window

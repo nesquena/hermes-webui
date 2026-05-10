@@ -76,7 +76,10 @@ class FakeConn:
                 rows.append(FakeRow(status=status, assignee=assignee, n=n))
             return SimpleNamespace(fetchall=lambda: rows)
         if "SELECT DISTINCT assignee FROM tasks" in sql:
-            rows = [FakeRow(assignee=a) for a in sorted({t.assignee for t in self.tasks if t.assignee})]
+            rows = [
+                FakeRow(assignee=a)
+                for a in sorted({t.assignee for t in self.tasks if t.assignee})
+            ]
             return SimpleNamespace(fetchall=lambda: rows)
         if "FROM task_events WHERE id >" in sql:
             since, limit = params
@@ -94,7 +97,12 @@ class FakeConn:
             ][:limit]
             return SimpleNamespace(fetchall=lambda: rows)
         if sql.startswith("UPDATE tasks SET "):
-            fields = [part.strip().split(" = ")[0] for part in sql[len("UPDATE tasks SET "):].split(" WHERE id = ")[0].split(",")]
+            fields = [
+                part.strip().split(" = ")[0]
+                for part in sql[len("UPDATE tasks SET ") :]
+                .split(" WHERE id = ")[0]
+                .split(",")
+            ]
             *values, task_id = params
             task = next((task for task in self.tasks if task.id == task_id), None)
             if task:
@@ -107,7 +115,9 @@ class FakeConn:
 class FakeKanbanDB:
     def __init__(self):
         self.tasks = [
-            FakeTask("t_1", "Read-only board target", "ready", "webui-test", tenant="webui"),
+            FakeTask(
+                "t_1", "Read-only board target", "ready", "webui-test", tenant="webui"
+            ),
             FakeTask("t_2", "Blocked target", "blocked", "other", tenant="ops"),
         ]
         self.events = [FakeEvent(7, "t_1", None, "created", {"status": "ready"}, 123)]
@@ -125,7 +135,9 @@ class FakeKanbanDB:
     def connect(self, *, board=None):
         return FakeConn(self.tasks, self.events)
 
-    def list_tasks(self, conn, tenant=None, assignee=None, include_archived=False, **_kwargs):
+    def list_tasks(
+        self, conn, tenant=None, assignee=None, include_archived=False, **_kwargs
+    ):
         tasks = list(conn.tasks)
         if tenant:
             tasks = [task for task in tasks if task.tenant == tenant]
@@ -157,7 +169,9 @@ class FakeKanbanDB:
         return [child for parent, child in self.links if parent == task_id]
 
     def _event(self, task_id, kind, payload=None):
-        self.events.append(FakeEvent(self.next_event_id, task_id, None, kind, payload or {}, 456))
+        self.events.append(
+            FakeEvent(self.next_event_id, task_id, None, kind, payload or {}, 456)
+        )
         self.next_event_id += 1
 
     def create_task(self, conn, **kwargs):
@@ -236,13 +250,18 @@ class FakeKanbanDB:
 
     def worker_log_path(self, task_id):
         from pathlib import Path
+
         return Path(f"/tmp/hermes-kanban/{task_id}.log")
 
     def dispatch_once(self, conn, dry_run=False, max_spawn=8):
         return {"dry_run": dry_run, "max_spawn": max_spawn, "spawned": []}
 
     def add_comment(self, conn, task_id, author, body):
-        self.comments.append(SimpleNamespace(id=len(self.comments) + 1, task_id=task_id, author=author, body=body))
+        self.comments.append(
+            SimpleNamespace(
+                id=len(self.comments) + 1, task_id=task_id, author=author, body=body
+            )
+        )
         self._event(task_id, "commented", {"author": author})
         return len(self.comments)
 
@@ -286,7 +305,13 @@ class FakeKanbanDB:
     def list_boards(self, *, include_archived=True):
         boards = getattr(self, "boards", None)
         if boards is None:
-            self.boards = {"default": {"slug": "default", "name": "Default board", "archived": False}}
+            self.boards = {
+                "default": {
+                    "slug": "default",
+                    "name": "Default board",
+                    "archived": False,
+                }
+            }
             boards = self.boards
         out = []
         for slug, meta in boards.items():
@@ -298,7 +323,13 @@ class FakeKanbanDB:
     def create_board(self, slug, *, name=None, description=None, icon=None, color=None):
         boards = getattr(self, "boards", None)
         if boards is None:
-            self.boards = {"default": {"slug": "default", "name": "Default board", "archived": False}}
+            self.boards = {
+                "default": {
+                    "slug": "default",
+                    "name": "Default board",
+                    "archived": False,
+                }
+            }
             boards = self.boards
         normed = self._normalize_board_slug(slug)
         if not normed:
@@ -316,16 +347,23 @@ class FakeKanbanDB:
         boards[normed] = meta
         return dict(meta)
 
-    def write_board_metadata(self, slug, *, name=None, description=None, icon=None, color=None, archived=None):
+    def write_board_metadata(
+        self, slug, *, name=None, description=None, icon=None, color=None, archived=None
+    ):
         boards = getattr(self, "boards", None) or {}
         if slug not in boards:
             raise LookupError(f"board {slug!r} does not exist")
         meta = dict(boards[slug])
-        if name is not None: meta["name"] = name
-        if description is not None: meta["description"] = description
-        if icon is not None: meta["icon"] = icon
-        if color is not None: meta["color"] = color
-        if archived is not None: meta["archived"] = bool(archived)
+        if name is not None:
+            meta["name"] = name
+        if description is not None:
+            meta["description"] = description
+        if icon is not None:
+            meta["icon"] = icon
+        if color is not None:
+            meta["color"] = color
+        if archived is not None:
+            meta["archived"] = bool(archived)
         boards[slug] = meta
         return dict(meta)
 
@@ -386,7 +424,10 @@ def test_kanban_board_payload_exposes_read_only_board(monkeypatch):
     for expected in ("triage", "todo", "ready", "running", "blocked", "done"):
         assert expected in names
     all_tasks = [task for column in data["columns"] for task in column["tasks"]]
-    assert any(task["id"] == "t_1" and task["title"] == "Read-only board target" for task in all_tasks)
+    assert any(
+        task["id"] == "t_1" and task["title"] == "Read-only board target"
+        for task in all_tasks
+    )
 
 
 def test_board_pointer_drift_falls_back_to_default(monkeypatch):
@@ -402,7 +443,9 @@ def test_board_pointer_drift_falls_back_to_default(monkeypatch):
 
     assert data["current"] == "default"
     assert fake_kanban.get_current_board() == "default"
-    assert any(board["slug"] == "default" and board["is_current"] for board in data["boards"])
+    assert any(
+        board["slug"] == "default" and board["is_current"] for board in data["boards"]
+    )
 
 
 def test_kanban_task_detail_payload_exposes_comments_events_links_and_runs(monkeypatch):
@@ -420,17 +463,18 @@ def test_kanban_task_detail_payload_exposes_comments_events_links_and_runs(monke
     assert isinstance(data["runs"], list)
 
 
-
 def test_kanban_create_task_payload_writes_to_agent_kanban(monkeypatch):
     bridge = _load_bridge(monkeypatch)
 
-    data = bridge._create_task_payload({
-        "title": "Write API target",
-        "body": "Created from WebUI",
-        "assignee": "webui-test",
-        "tenant": "webui",
-        "priority": 2,
-    })
+    data = bridge._create_task_payload(
+        {
+            "title": "Write API target",
+            "body": "Created from WebUI",
+            "assignee": "webui-test",
+            "tenant": "webui",
+            "priority": 2,
+        }
+    )
 
     assert data["read_only"] is False
     assert data["task"]["title"] == "Write API target"
@@ -444,8 +488,12 @@ def test_kanban_patch_task_payload_updates_status_title_and_comment(monkeypatch)
 
     created = bridge._create_task_payload({"title": "Patch target"})
     task_id = created["task"]["id"]
-    patched = bridge._patch_task_payload(task_id, {"title": "Patched target", "status": "done"})
-    comment = bridge._comment_payload(task_id, {"author": "webui", "body": "Looks done"})
+    patched = bridge._patch_task_payload(
+        task_id, {"title": "Patched target", "status": "done"}
+    )
+    comment = bridge._comment_payload(
+        task_id, {"author": "webui", "body": "Looks done"}
+    )
     detail = bridge._task_detail_payload(task_id)
 
     assert patched["read_only"] is False
@@ -463,8 +511,14 @@ def test_kanban_link_payload_adds_parent_child_relationship(monkeypatch):
     linked = bridge._link_tasks_payload({"parent_id": parent, "child_id": child})
     detail = bridge._task_detail_payload(child)
 
-    assert linked == {"ok": True, "parent_id": parent, "child_id": child, "read_only": False}
+    assert linked == {
+        "ok": True,
+        "parent_id": parent,
+        "child_id": child,
+        "read_only": False,
+    }
     assert detail["links"]["parents"] == [parent]
+
 
 def test_kanban_board_since_returns_lightweight_unchanged_payload(monkeypatch):
     bridge = _load_bridge(monkeypatch)
@@ -483,7 +537,9 @@ def test_kanban_events_payload_matches_polling_shape(monkeypatch):
     assert events["latest_event_id"] == 7
     assert events["read_only"] is False
     assert events["events"][0]["task_id"] == "t_1"
-    assert {"id", "task_id", "run_id", "kind", "payload", "created_at"} <= set(events["events"][0])
+    assert {"id", "task_id", "run_id", "kind", "payload", "created_at"} <= set(
+        events["events"][0]
+    )
 
 
 def test_routes_dispatches_api_kanban_get_to_bridge():
@@ -498,33 +554,46 @@ def test_routes_dispatches_api_kanban_post_to_bridge():
     assert "handle_kanban_post(handler, parsed, body)" in src
 
 
-
 def test_kanban_dashboard_core_api_exposes_stats_assignees_config_and_logs(monkeypatch):
     bridge = _load_bridge(monkeypatch)
 
     stats = bridge._stats_payload()
     assignees = bridge._assignees_payload()
     config = bridge._config_payload()
-    log = bridge._task_log_payload(_parsed(path="/api/kanban/tasks/t_1/log", query="tail=64"), "t_1")
+    log = bridge._task_log_payload(
+        _parsed(path="/api/kanban/tasks/t_1/log", query="tail=64"), "t_1"
+    )
 
     assert stats["by_status"]["ready"] == 1
     assert "webui-test" in assignees["assignees"]
     assert config["columns"]
-    assert {"default_tenant", "lane_by_profile", "include_archived_by_default", "render_markdown", "assignees"} <= set(config)
+    assert {
+        "default_tenant",
+        "lane_by_profile",
+        "include_archived_by_default",
+        "render_markdown",
+        "assignees",
+    } <= set(config)
     assert log["task_id"] == "t_1"
     assert log["content"] == "worker log for t_1"
 
 
 def test_kanban_only_mine_bulk_dispatch_and_block_unblock(monkeypatch):
     bridge = _load_bridge(monkeypatch)
-    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "webui-test", raising=False)
+    monkeypatch.setattr(
+        "api.profiles.get_active_profile_name", lambda: "webui-test", raising=False
+    )
 
     mine = bridge._board_payload(_parsed(query="only_mine=1"))
     visible_ids = [task["id"] for col in mine["columns"] for task in col["tasks"]]
-    bulk = bridge._bulk_tasks_payload({"ids": ["t_1", "t_2"], "status": "done", "priority": 3})
+    bulk = bridge._bulk_tasks_payload(
+        {"ids": ["t_1", "t_2"], "status": "done", "priority": 3}
+    )
     blocked = bridge._task_action_payload("t_1", {"reason": "waiting"}, "block")
     unblocked = bridge._task_action_payload("t_1", {}, "unblock")
-    dispatch = bridge._dispatch_payload(_parsed(path="/api/kanban/dispatch", query="dry_run=1&max=2"))
+    dispatch = bridge._dispatch_payload(
+        _parsed(path="/api/kanban/dispatch", query="dry_run=1&max=2")
+    )
 
     assert visible_ids == ["t_1"]
     assert [row["ok"] for row in bulk["results"]] == [True, True]
@@ -532,7 +601,6 @@ def test_kanban_only_mine_bulk_dispatch_and_block_unblock(monkeypatch):
     assert unblocked["task"]["status"] == "ready"
     assert dispatch["dry_run"] is True
     assert dispatch["max_spawn"] == 2
-
 
 
 def test_routes_dispatches_canonical_kanban_patch_and_delete_verbs():
@@ -558,7 +626,7 @@ def test_patch_status_running_is_rejected_to_protect_dispatcher_contract(monkeyp
     reject this transition.
     """
     bridge = _load_bridge(monkeypatch)
-    bridge._OAUTH_FLOWS = getattr(bridge, '_OAUTH_FLOWS', {})  # no-op safe
+    bridge._OAUTH_FLOWS = getattr(bridge, "_OAUTH_FLOWS", {})  # no-op safe
     # The fake board includes t_1 (ready) — try to PATCH it to 'running'
     try:
         bridge._patch_task_payload("t_1", {"status": "running"})
@@ -615,7 +683,8 @@ def test_handle_kanban_get_returns_503_when_hermes_cli_missing(monkeypatch):
     bridge = _load_bridge(monkeypatch)
     # Force _kb() to raise ImportError as if hermes_cli was uninstalled
     monkeypatch.setattr(
-        bridge, "_kb",
+        bridge,
+        "_kb",
         lambda: (_ for _ in ()).throw(ImportError("No module named 'hermes_cli'")),
     )
 
@@ -646,7 +715,8 @@ def test_handle_kanban_post_returns_503_when_hermes_cli_missing(monkeypatch):
     """Same fallback contract for POST verb."""
     bridge = _load_bridge(monkeypatch)
     monkeypatch.setattr(
-        bridge, "_kb",
+        bridge,
+        "_kb",
         lambda: (_ for _ in ()).throw(ImportError("hermes_cli missing")),
     )
     captured = {}
@@ -671,7 +741,8 @@ def test_handle_kanban_patch_returns_503_when_hermes_cli_missing(monkeypatch):
     """Same fallback contract for PATCH verb."""
     bridge = _load_bridge(monkeypatch)
     monkeypatch.setattr(
-        bridge, "_kb",
+        bridge,
+        "_kb",
         lambda: (_ for _ in ()).throw(ImportError("hermes_cli missing")),
     )
     captured = {}
@@ -718,9 +789,11 @@ def test_board_counts_returns_empty_for_nonexistent_board(monkeypatch):
     fake_kanban = FakeKanbanDB()
     connect_calls = []
     orig_connect = fake_kanban.connect
+
     def tracking_connect(*, board=None):
         connect_calls.append(("connect", board))
         return orig_connect(board=board)
+
     fake_kanban.connect = tracking_connect
 
     fake_hermes_cli = types.ModuleType("hermes_cli")
@@ -728,6 +801,7 @@ def test_board_counts_returns_empty_for_nonexistent_board(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
     import api.kanban_bridge as bridge
+
     bridge = importlib.reload(bridge)
 
     counts = bridge._board_counts_for_slug("no-such-board")
@@ -746,13 +820,18 @@ def test_board_counts_returns_real_counts_for_populated_board(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", fake_kanban)
     import api.kanban_bridge as bridge
+
     bridge = importlib.reload(bridge)
 
     # Patch FakeConn.execute to handle the board-counts SQL:
     #   SELECT status, COUNT(*) AS n FROM tasks WHERE status != 'archived' GROUP BY status
     orig_execute = FakeConn.execute
+
     def patched_execute(self, sql, params=()):
-        if "SELECT status, COUNT(*) AS n FROM tasks" in sql and "GROUP BY status" in sql:
+        if (
+            "SELECT status, COUNT(*) AS n FROM tasks" in sql
+            and "GROUP BY status" in sql
+        ):
             rows = []
             grouped = {}
             for task in self.tasks:
@@ -763,6 +842,7 @@ def test_board_counts_returns_real_counts_for_populated_board(monkeypatch):
                 rows.append(FakeRow(status=status, n=n))
             return SimpleNamespace(fetchall=lambda: rows)
         return orig_execute(self, sql, params)
+
     FakeConn.execute = patched_execute
 
     try:
@@ -778,14 +858,16 @@ def test_create_board_payload_creates_and_optionally_switches(monkeypatch):
     """POST /boards must create a board and, when ``switch=true``, also set
     it as the active board so subsequent requests resolve to it."""
     bridge = _load_bridge(monkeypatch)
-    payload = bridge._create_board_payload({
-        "slug": "experiments",
-        "name": "Experiments",
-        "description": "Research backlog",
-        "icon": "🧪",
-        "color": "#7aa2ff",
-        "switch": True,
-    })
+    payload = bridge._create_board_payload(
+        {
+            "slug": "experiments",
+            "name": "Experiments",
+            "description": "Research backlog",
+            "icon": "🧪",
+            "color": "#7aa2ff",
+            "switch": True,
+        }
+    )
     assert payload["board"]["slug"] == "experiments"
     assert payload["board"]["name"] == "Experiments"
     assert payload["current"] == "experiments"  # switch=true honoured
@@ -808,11 +890,14 @@ def test_update_board_payload_renames_metadata_only(monkeypatch):
     and re-pointing every saved active-board pointer."""
     bridge = _load_bridge(monkeypatch)
     bridge._create_board_payload({"slug": "experiments", "name": "Experiments"})
-    res = bridge._update_board_payload("experiments", {
-        "name": "R&D Experiments",
-        "description": "All ongoing research",
-        "icon": "🔬",
-    })
+    res = bridge._update_board_payload(
+        "experiments",
+        {
+            "name": "R&D Experiments",
+            "description": "All ongoing research",
+            "icon": "🔬",
+        },
+    )
     assert res["board"]["name"] == "R&D Experiments"
     assert res["board"]["description"] == "All ongoing research"
     assert res["board"]["icon"] == "🔬"
@@ -953,13 +1038,15 @@ def test_handle_kanban_post_routes_create_board_and_switch(monkeypatch):
     monkeypatch.setattr(bridge, "j", fake_j)
     # Create
     bridge.handle_kanban_post(
-        FakeHandler(), _parsed(path="/api/kanban/boards"),
+        FakeHandler(),
+        _parsed(path="/api/kanban/boards"),
         {"slug": "experiments", "name": "Experiments"},
     )
     assert "board" in captured[0]
     # Switch
     bridge.handle_kanban_post(
-        FakeHandler(), _parsed(path="/api/kanban/boards/experiments/switch"),
+        FakeHandler(),
+        _parsed(path="/api/kanban/boards/experiments/switch"),
         {},
     )
     assert captured[1]["current"] == "experiments"
@@ -1001,7 +1088,8 @@ def test_handle_kanban_patch_routes_update_board(monkeypatch):
     monkeypatch.setattr(bridge, "j", fake_j)
     bridge._create_board_payload({"slug": "experiments", "name": "x"})
     bridge.handle_kanban_patch(
-        FakeHandler(), _parsed(path="/api/kanban/boards/experiments"),
+        FakeHandler(),
+        _parsed(path="/api/kanban/boards/experiments"),
         {"name": "Renamed"},
     )
     assert captured[0]["board"]["name"] == "Renamed"
@@ -1213,9 +1301,14 @@ def test_sse_emits_id_lines_so_browser_can_resume_via_last_event_id(monkeypatch)
             self.headers = {}
             self.responses = []
 
-        def send_response(self, code): self.responses.append(code)
-        def send_header(self, k, v): pass
-        def end_headers(self): pass
+        def send_response(self, code):
+            self.responses.append(code)
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
 
     handler = FakeHandler()
     done = threading.Event()
@@ -1269,9 +1362,14 @@ def test_sse_honours_last_event_id_header_when_since_absent(monkeypatch):
             self.headers = {"Last-Event-ID": "42"}
             self.responses = []
 
-        def send_response(self, code): self.responses.append(code)
-        def send_header(self, k, v): pass
-        def end_headers(self): pass
+        def send_response(self, code):
+            self.responses.append(code)
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
 
     handler = FakeHandler()
     done = threading.Event()

@@ -1,5 +1,4 @@
 """Tests for inline HTML preview in workspace panel (issue #779)."""
-import pytest
 
 
 def _get_routes_content():
@@ -54,6 +53,7 @@ def test_sandbox_allows_scripts_only():
     content = _get_index_html()
     # Find the sandbox attribute value
     import re
+
     sandboxes = re.findall(r'sandbox="([^"]*)"', content)
     preview_sandboxes = [s for s in sandboxes if "allow" in s]
     for sb in preview_sandboxes:
@@ -67,6 +67,7 @@ def test_mime_map_includes_html_and_htm():
     falls back to application/octet-stream and browsers refuse to render the
     response inside the preview iframe (issue #779 follow-up: PR #1070)."""
     from api.config import MIME_MAP
+
     assert MIME_MAP.get(".html") == "text/html", (
         "MIME_MAP['.html'] must be 'text/html' for the workspace HTML preview iframe"
     )
@@ -90,15 +91,15 @@ def test_inline_html_response_sets_csp_sandbox():
     # Find the html_inline_ok block in _handle_file_raw
     idx = content.find("html_inline_ok")
     assert idx != -1, "html_inline_ok block not found"
-    block = content[idx:idx + 2500]
+    block = content[idx : idx + 2500]
     assert "Content-Security-Policy" in block, (
         "_handle_file_raw must set Content-Security-Policy header on inline HTML responses"
     )
-    assert "sandbox" in block, (
-        "CSP must include the sandbox directive"
-    )
+    assert "sandbox" in block, "CSP must include the sandbox directive"
     # Must NOT have allow-same-origin in the sandbox directive
-    csp_sections = [line for line in block.splitlines() if "sandbox" in line and "Policy" in line]
+    csp_sections = [
+        line for line in block.splitlines() if "sandbox" in line and "Policy" in line
+    ]
     for line in csp_sections:
         # The line setting the CSP header — make sure it doesn't grant same-origin
         if "send_header" in line:

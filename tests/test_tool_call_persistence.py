@@ -1,4 +1,5 @@
 """Tests for backend tool-call summary extraction used by WebUI session persistence."""
+
 import json
 import pathlib
 import sys
@@ -15,10 +16,12 @@ def test_extract_tool_calls_from_openai_message_linkage():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{
-                "id": "call-1",
-                "function": {"name": "terminal", "arguments": '{"command":"ls"}'},
-            }],
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "terminal", "arguments": '{"command":"ls"}'},
+                }
+            ],
         },
         {
             "role": "tool",
@@ -99,7 +102,9 @@ def test_extract_tool_calls_falls_back_to_live_progress_when_ids_missing():
         {"role": "assistant", "content": ""},
     ]
     live_tool_calls = [{"name": "write_file", "args": {"path": "/tmp/SPEC.md"}}]
-    result = _extract_tool_calls_from_messages(messages, live_tool_calls=live_tool_calls)
+    result = _extract_tool_calls_from_messages(
+        messages, live_tool_calls=live_tool_calls
+    )
     assert len(result) == 1
     assert result[0]["name"] == "write_file"
     assert result[0]["assistant_msg_idx"] == 1
@@ -112,7 +117,12 @@ def test_extract_tool_calls_preserves_mixed_linked_and_fallback_results():
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [{"id": "call-1", "function": {"name": "terminal", "arguments": '{"command":"pwd"}'}}],
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {"name": "terminal", "arguments": '{"command":"pwd"}'},
+                }
+            ],
         },
         {"role": "tool", "tool_call_id": "call-1", "content": '{"output":"/tmp"}'},
         {"role": "assistant", "content": "Next"},
@@ -122,7 +132,9 @@ def test_extract_tool_calls_preserves_mixed_linked_and_fallback_results():
         {"name": "terminal", "args": {"command": "pwd"}},
         {"name": "write_file", "args": {"path": "/tmp/out.txt"}},
     ]
-    result = _extract_tool_calls_from_messages(messages, live_tool_calls=live_tool_calls)
+    result = _extract_tool_calls_from_messages(
+        messages, live_tool_calls=live_tool_calls
+    )
     assert len(result) == 2
     assert result[0]["name"] == "terminal"
     assert result[1]["name"] == "write_file"

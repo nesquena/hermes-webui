@@ -14,11 +14,10 @@ Fixes:
   5. static/i18n.js: new i18n keys for config_yaml and not_configured hints
 """
 
-import re
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -27,8 +26,12 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 # Helper: build a fake hermes_cli.auth module so tests work without the dep
 # ---------------------------------------------------------------------------
 
-def _make_fake_auth(logged_in: bool, error: str | None = None, key_source: str = "oauth"):
+
+def _make_fake_auth(
+    logged_in: bool, error: str | None = None, key_source: str = "oauth"
+):
     mod = types.ModuleType("hermes_cli.auth")
+
     def get_auth_status(pid):
         if logged_in:
             return {"logged_in": True, "key_source": key_source}
@@ -36,6 +39,7 @@ def _make_fake_auth(logged_in: bool, error: str | None = None, key_source: str =
         if error:
             result["error"] = error
         return result
+
     mod.get_auth_status = get_auth_status
     return mod
 
@@ -43,6 +47,7 @@ def _make_fake_auth(logged_in: bool, error: str | None = None, key_source: str =
 # ---------------------------------------------------------------------------
 # Tests for api/providers.py OAuth block
 # ---------------------------------------------------------------------------
+
 
 class TestGetProvidersOauthBlock:
     """Unit tests for the OAuth override block in get_providers()."""
@@ -55,10 +60,16 @@ class TestGetProvidersOauthBlock:
         import api.providers as prov_mod
 
         # Patch _provider_has_key to return our desired value
-        with patch.object(prov_mod, "_provider_has_key", return_value=has_key_in_config), \
-             patch.object(prov_mod, "_provider_is_oauth", side_effect=lambda pid: pid in ("openai-codex", "nous", "copilot")), \
-             patch.dict(sys.modules, {"hermes_cli.auth": fake_auth_module}), \
-             patch.object(prov_mod, "get_config", return_value={}):
+        with (
+            patch.object(prov_mod, "_provider_has_key", return_value=has_key_in_config),
+            patch.object(
+                prov_mod,
+                "_provider_is_oauth",
+                side_effect=lambda pid: pid in ("openai-codex", "nous", "copilot"),
+            ),
+            patch.dict(sys.modules, {"hermes_cli.auth": fake_auth_module}),
+            patch.object(prov_mod, "get_config", return_value={}),
+        ):
             result = prov_mod.get_providers()
 
         providers = {p["id"]: p for p in result["providers"]}
@@ -77,7 +88,7 @@ class TestGetProvidersOauthBlock:
         REGRESSION TEST (#1202 Bug 1):
         When _provider_has_key() returns True (token in config.yaml) but
         get_auth_status() returns logged_in=False, has_key must remain True.
-        
+
         Before the fix: has_key was overwritten to False, hiding the working token.
         """
         auth = _make_fake_auth(logged_in=False)
@@ -126,14 +137,22 @@ class TestGetProvidersOauthBlock:
 
         # Use a module that raises ImportError
         bad_mod = types.ModuleType("hermes_cli.auth")
+
         def bad_get_auth_status(pid):
             raise ImportError("hermes_cli not installed")
+
         bad_mod.get_auth_status = bad_get_auth_status
 
-        with patch.object(prov_mod, "_provider_has_key", return_value=True), \
-             patch.object(prov_mod, "_provider_is_oauth", side_effect=lambda pid: pid in ("openai-codex", "nous", "copilot")), \
-             patch.dict(sys.modules, {"hermes_cli.auth": bad_mod}), \
-             patch.object(prov_mod, "get_config", return_value={}):
+        with (
+            patch.object(prov_mod, "_provider_has_key", return_value=True),
+            patch.object(
+                prov_mod,
+                "_provider_is_oauth",
+                side_effect=lambda pid: pid in ("openai-codex", "nous", "copilot"),
+            ),
+            patch.dict(sys.modules, {"hermes_cli.auth": bad_mod}),
+            patch.object(prov_mod, "get_config", return_value={}),
+        ):
             result = prov_mod.get_providers()
 
         providers = {p["id"]: p for p in result["providers"]}
@@ -147,10 +166,13 @@ class TestGetProvidersOauthBlock:
     def test_auth_error_field_present_on_all_oauth_providers(self):
         """Every provider dict must include auth_error (may be None)."""
         import api.providers as prov_mod
+
         auth = _make_fake_auth(logged_in=False)
-        with patch.object(prov_mod, "_provider_has_key", return_value=False), \
-             patch.dict(sys.modules, {"hermes_cli.auth": auth}), \
-             patch.object(prov_mod, "get_config", return_value={}):
+        with (
+            patch.object(prov_mod, "_provider_has_key", return_value=False),
+            patch.dict(sys.modules, {"hermes_cli.auth": auth}),
+            patch.object(prov_mod, "get_config", return_value={}),
+        ):
             result = prov_mod.get_providers()
 
         for p in result["providers"]:
@@ -163,6 +185,7 @@ class TestGetProvidersOauthBlock:
 # Tests for static/panels.js isOauth detection
 # ---------------------------------------------------------------------------
 
+
 class TestBuildProviderCardJs:
     """Static-analysis tests for the JS card rendering."""
 
@@ -173,7 +196,8 @@ class TestBuildProviderCardJs:
         assert idx != -1, "_buildProviderCard not found in panels.js"
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
-            if ch == "{": depth += 1
+            if ch == "{":
+                depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
@@ -190,7 +214,7 @@ class TestBuildProviderCardJs:
         fn = self._get_fn()
         isOauth_line_idx = fn.find("const isOauth=")
         assert isOauth_line_idx != -1, "isOauth not found in _buildProviderCard"
-        isOauth_line = fn[isOauth_line_idx: isOauth_line_idx + 150]
+        isOauth_line = fn[isOauth_line_idx : isOauth_line_idx + 150]
         assert "p.is_oauth" in isOauth_line, (
             "REGRESSION: isOauth does not use p.is_oauth from the backend. "
             "OAuth providers may not render the OAuth card correctly."
@@ -228,6 +252,7 @@ class TestBuildProviderCardJs:
 # Tests for i18n.js new keys
 # ---------------------------------------------------------------------------
 
+
 class TestI18nNewKeys:
     """Verify new i18n keys exist in the English locale."""
 
@@ -244,7 +269,6 @@ class TestI18nNewKeys:
             "Missing i18n key: providers_oauth_not_configured_hint."
         )
 
-
     def test_is_oauth_field_true_for_oauth_providers(self):
         """
         REGRESSION TEST (#1202 — Opus blocking issue):
@@ -253,10 +277,13 @@ class TestI18nNewKeys:
         providers from the Settings panel entirely (configurable=False for OAuth).
         """
         import api.providers as prov_mod
+
         auth = _make_fake_auth(logged_in=False)
-        with patch.object(prov_mod, "_provider_has_key", return_value=False), \
-             patch.dict(sys.modules, {"hermes_cli.auth": auth}), \
-             patch.object(prov_mod, "get_config", return_value={}):
+        with (
+            patch.object(prov_mod, "_provider_has_key", return_value=False),
+            patch.dict(sys.modules, {"hermes_cli.auth": auth}),
+            patch.object(prov_mod, "get_config", return_value={}),
+        ):
             result = prov_mod.get_providers()
 
         providers = {p["id"]: p for p in result["providers"]}
@@ -273,7 +300,9 @@ class TestI18nNewKeys:
 class TestProviderListFilter:
     """Test that the JS filter includes OAuth providers."""
 
-    JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
+    JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(
+        encoding="utf-8"
+    )
 
     def test_providers_filter_includes_is_oauth(self):
         """

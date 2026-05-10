@@ -1,10 +1,11 @@
 """Regression tests for the Simplified tool calling setting."""
 
-import importlib
 import json
 
 
-def test_simplified_tool_calling_defaults_enabled_and_round_trips(monkeypatch, tmp_path):
+def test_simplified_tool_calling_defaults_enabled_and_round_trips(
+    monkeypatch, tmp_path
+):
     import api.config as config
 
     settings_path = tmp_path / "settings.json"
@@ -15,7 +16,10 @@ def test_simplified_tool_calling_defaults_enabled_and_round_trips(monkeypatch, t
 
     saved = config.save_settings({"simplified_tool_calling": False})
     assert saved["simplified_tool_calling"] is False
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["simplified_tool_calling"] is False
+    assert (
+        json.loads(settings_path.read_text(encoding="utf-8"))["simplified_tool_calling"]
+        is False
+    )
 
     saved = config.save_settings({"simplified_tool_calling": True})
     assert saved["simplified_tool_calling"] is True

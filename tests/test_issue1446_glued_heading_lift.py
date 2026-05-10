@@ -136,11 +136,7 @@ def test_intentional_block_final_bold_with_no_glue_unchanged():
 
 def test_chain_of_glued_headings_all_lifted():
     """Chained glued-heading paragraphs should all lift — common LLM thinking-mode shape."""
-    src = (
-        "First text.**Heading A**\n\n"
-        "Second text.**Heading B**\n\n"
-        "Third text.\n"
-    )
+    src = "First text.**Heading A**\n\nSecond text.**Heading B**\n\nThird text.\n"
     out = render_md(src)
     assert "<p>First text.</p>" in out, out
     assert "<p><strong>Heading A</strong></p>" in out, out
@@ -160,7 +156,7 @@ def test_lift_pass_present_in_ui_js_at_correct_position():
     (which are stashed as \x00R / \x00P / \x00F tokens at this point and don't
     match the lift regex).
     """
-    lift_idx = UI_JS.find(r'(/([.!?])\*\*([^*\n]{1,80})\*\*\n\n/g')
+    lift_idx = UI_JS.find(r"(/([.!?])\*\*([^*\n]{1,80})\*\*\n\n/g")
     assert lift_idx > 0, "Glued-bold-heading lift regex not found in static/ui.js"
     raw_pre_restore = UI_JS.find("rawPreStash[+i]")
     fence_restore = UI_JS.find("fence_stash[+i]")
@@ -285,11 +281,7 @@ def test_real_renderer_preserves_mid_paragraph_emphasis(driver_path):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_real_renderer_chain_of_glued_headings(driver_path):
     """Chain of glued headings — verifies the regex's `g` flag fires multiple times."""
-    src = (
-        "First text.**Heading A**\n\n"
-        "Second text.**Heading B**\n\n"
-        "Third text.\n"
-    )
+    src = "First text.**Heading A**\n\nSecond text.**Heading B**\n\nThird text.\n"
     out = _render(driver_path, src)
     assert "<p>First text.</p>" in out, out
     assert "<p><strong>Heading A</strong></p>" in out, out

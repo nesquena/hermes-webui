@@ -40,8 +40,14 @@ def test_workspace_panel_has_show_hidden_files_toggle():
 def test_file_tree_filters_common_cruft_by_default():
     """macOS/Windows/VCS/cache noise should not render by default."""
     assert "WORKSPACE_HIDDEN_FILE_NAMES" in UI_JS
-    for name in [".DS_Store", "Thumbs.db", "Desktop.ini", ".git",
-                 "__pycache__", "node_modules"]:
+    for name in [
+        ".DS_Store",
+        "Thumbs.db",
+        "Desktop.ini",
+        ".git",
+        "__pycache__",
+        "node_modules",
+    ]:
         assert name in UI_JS
     assert "_visibleWorkspaceEntries" in UI_JS
     assert "S.showHiddenWorkspaceFiles" in UI_JS
@@ -95,7 +101,7 @@ def test_panel_heading_has_hidden_files_indicator():
     """
     assert 'id="workspaceHiddenIndicator"' in INDEX_HTML
     # The indicator opens the same menu when clicked (no separate code path)
-    block = INDEX_HTML[INDEX_HTML.index('id="workspaceHiddenIndicator"'):]
+    block = INDEX_HTML[INDEX_HTML.index('id="workspaceHiddenIndicator"') :]
     block = block[: block.index("</span>") + 7]
     assert "toggleWorkspacePrefsMenu" in block
     # Default-hidden so the chip doesn't clutter normal state

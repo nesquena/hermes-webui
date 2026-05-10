@@ -33,7 +33,6 @@ STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
 class TestContextMenuBackground:
-
     def test_panel_variable_not_defined_in_stylesheet(self):
         """`--panel` is not defined as a CSS custom property anywhere — so
         any rule using `var(--panel)` falls back to `transparent`, which is
@@ -54,7 +53,7 @@ class TestContextMenuBackground:
         idx = SESSIONS_JS.find("project-ctx-menu")
         assert idx >= 0, "project-ctx-menu className not found in sessions.js"
         # Look at the surrounding 800 chars where the cssText is set
-        window = SESSIONS_JS[idx: idx + 1200]
+        window = SESSIONS_JS[idx : idx + 1200]
         assert "background:var(--surface)" in window, (
             "Project context menu must use background:var(--surface) for an "
             "opaque surface — var(--panel) is undefined and falls back to "
@@ -73,7 +72,7 @@ class TestContextMenuBackground:
         # Find the rule and confirm it uses --surface
         idx = STYLE_CSS.find(".session-action-menu")
         assert idx >= 0
-        rule = STYLE_CSS[idx: idx + 400]
+        rule = STYLE_CSS[idx : idx + 400]
         assert "var(--surface)" in rule, (
             ".session-action-menu should use var(--surface) — kept here as "
             "the canonical reference for opaque popover surfaces."
@@ -84,12 +83,11 @@ class TestContextMenuBackground:
 
 
 class TestProjectCreateInputWidth:
-
     def test_no_hardcoded_100px_width(self):
         """The fixed `width: 100px` on .project-create-input is gone."""
         idx = STYLE_CSS.find(".project-create-input{")
         assert idx >= 0, ".project-create-input rule not found in style.css"
-        rule = STYLE_CSS[idx: idx + 400]
+        rule = STYLE_CSS[idx : idx + 400]
         assert "width:100px" not in rule and "width: 100px" not in rule, (
             "Fixed 100px width must be replaced with min-width/max-width/"
             "width:auto so the input grows with its content."
@@ -98,7 +96,7 @@ class TestProjectCreateInputWidth:
     def test_min_and_max_width_present(self):
         """Both min-width and max-width must be set on .project-create-input."""
         idx = STYLE_CSS.find(".project-create-input{")
-        rule = STYLE_CSS[idx: idx + 400]
+        rule = STYLE_CSS[idx : idx + 400]
         assert "min-width:40px" in rule, (
             f"min-width:40px not found in .project-create-input rule: {rule}"
         )
@@ -125,13 +123,14 @@ class TestResizeProjectInputHelper:
         via getComputedStyle so the sizer stays calibrated if CSS changes."""
         idx = SESSIONS_JS.find("function _resizeProjectInput(")
         assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 900]
+        body = SESSIONS_JS[idx : idx + 900]
         assert "position:absolute" in body and "visibility:hidden" in body, (
             "_resizeProjectInput should use a hidden absolute span to "
             "measure the value's rendered width."
         )
         assert "getComputedStyle(inp)" in body, (
-            "_resizeProjectInput should use getComputedStyle to read font "            "properties so the sizer stays calibrated if CSS changes."
+            "_resizeProjectInput should use getComputedStyle to read font "
+            "properties so the sizer stays calibrated if CSS changes."
         )
         assert "Math.min(180" in body, (
             "max bound (180) not applied in _resizeProjectInput"
@@ -145,7 +144,7 @@ class TestResizeProjectInputHelper:
         creation and again on every input event."""
         idx = SESSIONS_JS.find("function _startProjectRename(")
         assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 1200]
+        body = SESSIONS_JS[idx : idx + 1200]
         assert "_resizeProjectInput(inp)" in body, (
             "_startProjectRename must call _resizeProjectInput so the "
             "input width matches the existing project name."
@@ -159,7 +158,7 @@ class TestResizeProjectInputHelper:
         """Same for `_startProjectCreate` (new-project entry field)."""
         idx = SESSIONS_JS.find("function _startProjectCreate(")
         assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 1200]
+        body = SESSIONS_JS[idx : idx + 1200]
         assert "_resizeProjectInput(inp)" in body, (
             "_startProjectCreate must call _resizeProjectInput on focus"
         )

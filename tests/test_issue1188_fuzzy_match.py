@@ -17,6 +17,7 @@ Tests below run the live ``_findModelInDropdown`` function via Node so
 the real regex/normalization rules are exercised — drift between this
 test and the JS would be caught by behavioural mismatch.
 """
+
 import shutil
 import subprocess
 
@@ -62,10 +63,17 @@ def driver_path(tmp_path_factory):
 
 def _find(driver_path, model_id: str, options: list[str]):
     import json
+
     result = subprocess.run(
-        [NODE, driver_path, str(UI_JS_PATH),
-         json.dumps({"modelId": model_id, "options": options})],
-        capture_output=True, text=True, timeout=10,
+        [
+            NODE,
+            driver_path,
+            str(UI_JS_PATH),
+            json.dumps({"modelId": model_id, "options": options}),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -85,9 +93,7 @@ class TestNoFalseSiblingVersionMatch:
             "gpt-5.5",
             ["@nous:openai/gpt-5.4-mini", "@nous:anthropic/claude-opus-4.6"],
         )
-        assert got is None, (
-            "gpt-5.5 must not fuzzy-match gpt-5.4-mini (#1188)"
-        )
+        assert got is None, "gpt-5.5 must not fuzzy-match gpt-5.4-mini (#1188)"
 
     def test_claude_opus_4_7_does_not_match_claude_opus_4_6(self, driver_path):
         """Same shape: a different minor version must not be a fuzzy hit."""
@@ -96,9 +102,7 @@ class TestNoFalseSiblingVersionMatch:
             "claude-opus-4.7",
             ["@nous:anthropic/claude-opus-4.6"],
         )
-        assert got is None, (
-            "claude-opus-4.7 must not fuzzy-match claude-opus-4.6"
-        )
+        assert got is None, "claude-opus-4.7 must not fuzzy-match claude-opus-4.6"
 
 
 # ── Things that should still match (no regression for legit fuzzy use) ─────
@@ -125,17 +129,13 @@ class TestPreservedFuzzyMatches:
         assert got == "@nous:openai/gpt-5.4-mini"
 
     def test_bare_root_claude_matches(self, driver_path):
-        got = _find(
-            driver_path, "claude", ["@nous:anthropic/claude-opus-4.6"]
-        )
+        got = _find(driver_path, "claude", ["@nous:anthropic/claude-opus-4.6"])
         assert got == "@nous:anthropic/claude-opus-4.6"
 
     def test_target_without_version_suffix_still_matches(self, driver_path):
         """claude-opus has no trailing version → base === target → useBase
         path → still finds claude-opus-4.6 via prefix."""
-        got = _find(
-            driver_path, "claude-opus", ["@nous:anthropic/claude-opus-4.6"]
-        )
+        got = _find(driver_path, "claude-opus", ["@nous:anthropic/claude-opus-4.6"])
         assert got == "@nous:anthropic/claude-opus-4.6"
 
     def test_exact_match_short_circuits(self, driver_path):
@@ -147,7 +147,5 @@ class TestPreservedFuzzyMatches:
         assert got == "@nous:openai/gpt-5.4-mini"
 
     def test_unrelated_target_returns_null(self, driver_path):
-        got = _find(
-            driver_path, "mistral-large", ["@nous:openai/gpt-5.4-mini"]
-        )
+        got = _find(driver_path, "mistral-large", ["@nous:openai/gpt-5.4-mini"])
         assert got is None

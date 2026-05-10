@@ -17,10 +17,10 @@ This test pins the invariant: a partial assistant message with
 `_partial_tool_calls` set must produce ZERO `tool_calls` after
 sanitize-for-API.
 """
+
 import pathlib
 import sys
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
@@ -80,7 +80,7 @@ def test_legitimate_tool_calls_are_preserved_for_completed_turns():
                 {
                     "id": "call_abc",
                     "type": "function",
-                    "function": {"name": "web_search", "arguments": '{"query":"x"}'}
+                    "function": {"name": "web_search", "arguments": '{"query":"x"}'},
                 },
             ],
         },

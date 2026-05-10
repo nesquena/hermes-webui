@@ -152,7 +152,10 @@ def test_context_compaction_branch_precedes_user_bubble_branch():
     assert context_idx != -1, "context compaction render branch not found"
     assert user_idx != -1, "normal user bubble render branch not found"
     assert context_idx < user_idx
-    assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in render_prefix
+    assert (
+        "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)"
+        in render_prefix
+    )
 
 
 def test_preserved_task_list_skips_normal_visible_message_path():
@@ -164,7 +167,9 @@ def test_preserved_task_list_skips_normal_visible_message_path():
     assert visible_filter_end != -1, "empty state update after visible filter not found"
     visible_filter = src[visible_filter_start:visible_filter_end]
     assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
-    assert "if(_isPreservedCompressionTaskListMessage(m)) return false;" in visible_filter
+    assert (
+        "if(_isPreservedCompressionTaskListMessage(m)) return false;" in visible_filter
+    )
 
     vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
     assert vis_idx_start != -1, "raw message index loop not found"
@@ -187,7 +192,7 @@ def test_preserved_task_list_renders_through_compression_card_path():
     assert "_compressionStatusCardHtml" in helper
     assert "preserved_task_list_label" in helper
     assert "tool-card-compress-reference" in helper
-    assert "data-compression-card=\"1\"" in helper
+    assert 'data-compression-card="1"' in helper
     assert "li('list-todo',13)" in helper
     assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in src
 
@@ -197,12 +202,24 @@ def test_preserved_task_list_attaches_once_per_render():
 
     assert "function _latestPreservedCompressionTaskListMessages" in src
     assert ".reverse().find(m=>_isPreservedCompressionTaskListMessage(m))" in src
-    assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
+    assert (
+        "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);"
+        in src
+    )
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
     assert "let preservedCompressionTaskCardsAttached=!!referenceNode;" in src
-    assert "const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;" in src
-    assert "if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;" in src
-    assert "(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)" in src
+    assert (
+        "const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;"
+        in src
+    )
+    assert (
+        "if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;"
+        in src
+    )
+    assert (
+        "(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)"
+        in src
+    )
 
 
 def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():
@@ -216,7 +233,10 @@ def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_
     assert "if(payload&&Array.isArray(payload.todos)) return payload.todos;" in helpers
     assert "function _hasActiveTodoItems" in helpers
     assert "status==='pending'||status==='in_progress'" in helpers
-    assert "if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];" in helpers
+    assert (
+        "if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];"
+        in helpers
+    )
 
 
 def test_preserved_task_list_rendering_does_not_mutate_history():

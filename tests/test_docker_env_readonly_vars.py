@@ -25,6 +25,7 @@ These tests pin:
   - The optional ``export`` prefix on those names is also caught
   - Non-readonly KEY=value lines in .env still load
 """
+
 import re
 import shutil
 import subprocess
@@ -116,7 +117,9 @@ class TestStartShReadonlyEnvFilterBehavioral:
         assert m is not None, "could not locate .env loader block in start.sh"
         return m.group(1)
 
-    def _run_loader(self, env_contents: str, tmp_path: Path) -> subprocess.CompletedProcess:
+    def _run_loader(
+        self, env_contents: str, tmp_path: Path
+    ) -> subprocess.CompletedProcess:
         """Write ``env_contents`` to a tmp .env and run start.sh's loader against it."""
         env_file = tmp_path / ".env"
         env_file.write_text(env_contents, encoding="utf-8")
@@ -152,12 +155,10 @@ class TestStartShReadonlyEnvFilterBehavioral:
         """)
         result = self._run_loader(env_contents, tmp_path)
         assert "EXIT_OK" in result.stdout, (
-            f"loader crashed on .env with readonly UID/GID. "
-            f"stderr: {result.stderr!r}"
+            f"loader crashed on .env with readonly UID/GID. stderr: {result.stderr!r}"
         )
         assert "readonly variable" not in result.stderr, (
-            f".env loader still triggered readonly-variable crash: "
-            f"{result.stderr!r}"
+            f".env loader still triggered readonly-variable crash: {result.stderr!r}"
         )
         # Non-readonly keys must still load.
         assert "PORT=8888" in result.stdout
@@ -186,9 +187,7 @@ class TestStartShReadonlyEnvFilterBehavioral:
             HERMES_WEBUI_PORT=7777
         """)
         result = self._run_loader(env_contents, tmp_path)
-        assert "EXIT_OK" in result.stdout, (
-            f"loader crashed; stderr: {result.stderr!r}"
-        )
+        assert "EXIT_OK" in result.stdout, f"loader crashed; stderr: {result.stderr!r}"
         assert "readonly variable" not in result.stderr
         assert "PORT=7777" in result.stdout
 

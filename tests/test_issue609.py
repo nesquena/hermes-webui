@@ -11,7 +11,6 @@ Two independent bugs were fixed:
      Docker volume mount outside the user's home directory.  Any path under
      the boot-time default should be trusted automatically.
 """
-from pathlib import Path
 
 import pytest
 
@@ -19,6 +18,7 @@ from api.workspace import resolve_trusted_workspace
 
 
 # ── Fix 2: trust paths under DEFAULT_WORKSPACE ───────────────────────────────
+
 
 def test_subdir_of_boot_default_is_trusted(monkeypatch, tmp_path):
     """A subdirectory of BOOT_DEFAULT_WORKSPACE must be trusted without being in

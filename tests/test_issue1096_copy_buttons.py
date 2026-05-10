@@ -1,4 +1,5 @@
 """Tests for #1096 — copy buttons work via Permissions-Policy + fallback."""
+
 import re
 
 
@@ -21,8 +22,9 @@ class TestClipboardPermissions:
         # Match the Permissions-Policy value string (may span lines)
         m = re.search(r"Permissions-Policy',\s*'(.*?)'", src, re.DOTALL)
         assert m, "Permissions-Policy header value must exist"
-        assert "clipboard-write=(self)" in m.group(1), \
+        assert "clipboard-write=(self)" in m.group(1), (
             "Permissions-Policy must include clipboard-write=(self)"
+        )
 
 
 class TestCopyTextFunction:
@@ -31,26 +33,30 @@ class TestCopyTextFunction:
     def test_copyText_uses_clipboard_api(self):
         """_copyText must call navigator.clipboard.writeText."""
         src = _src("ui.js")
-        assert "navigator.clipboard.writeText(text)" in src, \
+        assert "navigator.clipboard.writeText(text)" in src, (
             "_copyText must use Clipboard API"
+        )
 
     def test_copyText_has_fallback(self):
         """_copyText must fall back to execCommand if clipboard API fails."""
         src = _src("ui.js")
-        assert "function _fallbackCopy" in src, \
+        assert "function _fallbackCopy" in src, (
             "Must have a separate _fallbackCopy function"
+        )
         # Clipboard API call must .catch() to fallback
         m = re.search(r"navigator\.clipboard\.writeText\(text\)", src)
         assert m, "Must call clipboard API"
-        after = src[m.start():m.start() + 300]
-        assert "_fallbackCopy" in after, \
+        after = src[m.start() : m.start() + 300]
+        assert "_fallbackCopy" in after, (
             "clipboard.writeText must .catch() → _fallbackCopy"
+        )
 
     def test_fallbackCopy_uses_execCommand(self):
         """_fallbackCopy must use document.execCommand('copy')."""
         src = _src("ui.js")
-        assert "document.execCommand('copy')" in src, \
+        assert "document.execCommand('copy')" in src, (
             "_fallbackCopy must use execCommand('copy')"
+        )
 
     def test_fallbackCopy_focuses_textarea(self):
         """_fallbackCopy must explicitly focus textarea before select()."""
@@ -58,25 +64,25 @@ class TestCopyTextFunction:
         # Find _fallbackCopy function
         m = re.search(r"function _fallbackCopy", src)
         assert m, "_fallbackCopy function must exist"
-        fn = src[m.start():m.start() + 600]
-        assert "ta.focus()" in fn, \
-            "Must call .focus() on textarea before .select()"
+        fn = src[m.start() : m.start() + 600]
+        assert "ta.focus()" in fn, "Must call .focus() on textarea before .select()"
 
     def test_fallbackCopy_not_offscreen(self):
         """_fallbackCopy textarea must NOT be positioned at -9999px (fails in some browsers)."""
         src = _src("ui.js")
         m = re.search(r"function _fallbackCopy", src)
-        fn = src[m.start():m.start() + 600]
-        assert "-9999" not in fn, \
+        fn = src[m.start() : m.start() + 600]
+        assert "-9999" not in fn, (
             "Textarea must not be positioned at -9999px (offscreen select fails)"
+        )
 
     def test_copyMsg_copies_raw_text(self):
         """copyMsg must extract text from data-raw-text attribute."""
         src = _src("ui.js")
-        assert "closest('[data-raw-text]')" in src, \
+        assert "closest('[data-raw-text]')" in src, (
             "copyMsg must find nearest element with data-raw-text"
-        assert "dataset.rawText" in src, \
-            "copyMsg must read rawText from dataset"
+        )
+        assert "dataset.rawText" in src, "copyMsg must read rawText from dataset"
 
 
 class TestCodeCopyButton:
@@ -88,11 +94,11 @@ class TestCodeCopyButton:
         # Find addCopyButtons function
         m = re.search(r"function addCopyButtons", src)
         assert m, "addCopyButtons must exist"
-        fn = src[m.start():m.start() + 1000]
-        assert "_copyText" in fn, \
-            "Code copy button must use _copyText function"
-        assert "codeEl.textContent" in fn, \
+        fn = src[m.start() : m.start() + 1000]
+        assert "_copyText" in fn, "Code copy button must use _copyText function"
+        assert "codeEl.textContent" in fn, (
             "Code copy must copy the code element's textContent"
+        )
 
     def test_code_copy_button_is_idempotent_for_header_blocks(self):
         """Repeated post-render passes must not append duplicate header buttons.
@@ -105,15 +111,19 @@ class TestCodeCopyButton:
         src = _src("ui.js")
         m = re.search(r"function addCopyButtons", src)
         assert m, "addCopyButtons must exist"
-        fn = src[m.start():m.start() + 1200]
+        fn = src[m.start() : m.start() + 1200]
         assert "const header=pre.previousElementSibling;" in fn
         assert "header.querySelector('.code-copy-btn')" in fn
-        assert fn.index("header.querySelector('.code-copy-btn')") < fn.index("document.createElement('button')")
+        assert fn.index("header.querySelector('.code-copy-btn')") < fn.index(
+            "document.createElement('button')"
+        )
+
 
 class TestCopyFailedI18n:
-
     def test_copy_failed_in_all_locales(self):
         """copy_failed key must exist in all locale blocks (currently 7 with Korean)."""
-        i18n = _src('i18n.js')
-        count = i18n.count('copy_failed')
-        assert count >= 6, f'Expected copy_failed in at least 6 locale blocks, found {count}'
+        i18n = _src("i18n.js")
+        count = i18n.count("copy_failed")
+        assert count >= 6, (
+            f"Expected copy_failed in at least 6 locale blocks, found {count}"
+        )

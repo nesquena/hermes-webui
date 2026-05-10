@@ -54,7 +54,7 @@ def _extract_tags(html, class_filter=None):
 def _has_attr(attrs_str, attr_name):
     """Check if a bare attribute name is present in the attrs string.
     Handles both attr_name and attr_name="..."."""
-    return bool(re.search(r'\b' + re.escape(attr_name) + r'(?:=|\s|>)', attrs_str))
+    return bool(re.search(r"\b" + re.escape(attr_name) + r"(?:=|\s|>)", attrs_str))
 
 
 def _get_attr(attrs_str, attr_name):
@@ -64,7 +64,7 @@ def _get_attr(attrs_str, attr_name):
     'data-i18n-title' or similar prefixed attributes.
     """
     # Preceding char must be whitespace or start-of-string — not a letter/hyphen.
-    m = re.search(r'(?<![a-zA-Z\-])' + re.escape(attr_name) + r'="([^"]*)"', attrs_str)
+    m = re.search(r"(?<![a-zA-Z\-])" + re.escape(attr_name) + r'="([^"]*)"', attrs_str)
     return m.group(1) if m else None
 
 
@@ -90,7 +90,8 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for btn in rail_btns:
             cls_val = _get_attr(btn["attrs"], "class")
             self.assertIn(
-                "has-tooltip", cls_val,
+                "has-tooltip",
+                cls_val,
                 f".rail-btn missing has-tooltip class: ...{cls_val[:120]}",
             )
 
@@ -107,7 +108,7 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for btn in self._find("rail-btn"):
             self.assertIsNone(
                 _get_attr(btn["attrs"], "title"),
-                ".rail-btn still has native title=\"\" — should use data-tooltip",
+                '.rail-btn still has native title="" — should use data-tooltip',
             )
 
     # -- sidebar-nav .nav-tab ------------------------------------------------
@@ -118,7 +119,9 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
             self.html,
             re.DOTALL,
         )
-        self.assertIsNotNone(m, "Could not find <div class=\"sidebar-nav\"> in index.html")
+        self.assertIsNotNone(
+            m, 'Could not find <div class="sidebar-nav"> in index.html'
+        )
         return m.group(1)
 
     def test_sidebar_nav_tabs_have_tooltip_class(self):
@@ -129,7 +132,8 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for tab in nav_tabs:
             cls_val = _get_attr(tab["attrs"], "class")
             self.assertIn(
-                "has-tooltip", cls_val,
+                "has-tooltip",
+                cls_val,
                 f"sidebar-nav .nav-tab missing has-tooltip: ...{cls_val[:120]}",
             )
 
@@ -148,7 +152,7 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for tab in _extract_tags(section, class_filter=["nav-tab"]):
             self.assertIsNone(
                 _get_attr(tab["attrs"], "title"),
-                "sidebar-nav .nav-tab still has native title=\"\" — should use data-tooltip",
+                'sidebar-nav .nav-tab still has native title="" — should use data-tooltip',
             )
 
     # -- panel-head-btn ------------------------------------------------------
@@ -159,7 +163,8 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for btn in btns:
             cls_val = _get_attr(btn["attrs"], "class")
             self.assertIn(
-                "has-tooltip", cls_val,
+                "has-tooltip",
+                cls_val,
                 f".panel-head-btn missing has-tooltip class: ...{cls_val[:120]}",
             )
 
@@ -176,7 +181,7 @@ class TestIndexHTMLTooltipCoverage(unittest.TestCase):
         for btn in self._find("panel-head-btn"):
             self.assertIsNone(
                 _get_attr(btn["attrs"], "title"),
-                ".panel-head-btn still has native title=\"\" — should use data-tooltip",
+                '.panel-head-btn still has native title="" — should use data-tooltip',
             )
 
     # -- has-tooltip ↔ data-tooltip consistency -----------------------------
@@ -204,7 +209,8 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
     def test_has_tooltip_class_defined(self):
         """The .has-tooltip base class must be defined."""
         self.assertRegex(
-            self.css, r'\.has-tooltip\s*\{',
+            self.css,
+            r"\.has-tooltip\s*\{",
             ".has-tooltip class not found in CSS",
         )
 
@@ -212,14 +218,15 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
         """.has-tooltip::after must use content:attr(data-tooltip)."""
         self.assertRegex(
             self.css,
-            r'\.has-tooltip::after\s*\{[^}]*content:\s*attr\(data-tooltip\)',
+            r"\.has-tooltip::after\s*\{[^}]*content:\s*attr\(data-tooltip\)",
             ".has-tooltip::after does not use content:attr(data-tooltip)",
         )
 
     def test_has_tooltip_bottom_defined(self):
         """The .has-tooltip--bottom modifier class must be defined."""
         self.assertRegex(
-            self.css, r'\.has-tooltip--bottom\s*(?:::[\w-]+)?\s*\{',
+            self.css,
+            r"\.has-tooltip--bottom\s*(?:::[\w-]+)?\s*\{",
             ".has-tooltip--bottom class not found in CSS",
         )
 
@@ -227,26 +234,30 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
         """Both :hover and :focus-visible must trigger opacity on ::after."""
         # Look for a rule that combines both selectors
         hover_match = re.search(
-            r'\.has-tooltip:hover::after\s*\{[^}]*opacity',
+            r"\.has-tooltip:hover::after\s*\{[^}]*opacity",
             self.css,
         )
         focus_match = re.search(
-            r'\.has-tooltip:focus-visible::after\s*\{[^}]*opacity',
+            r"\.has-tooltip:focus-visible::after\s*\{[^}]*opacity",
             self.css,
         )
         # Also accept combined selectors: .has-tooltip:hover::after,.has-tooltip:focus-visible::after
         if not hover_match:
             combined = re.search(
-                r'\.has-tooltip:hover::after\s*,\s*\.has-tooltip:focus-visible::after\s*\{[^}]*opacity',
+                r"\.has-tooltip:hover::after\s*,\s*\.has-tooltip:focus-visible::after\s*\{[^}]*opacity",
                 self.css,
             )
             self.assertTrue(
                 combined,
                 ":hover does not trigger opacity on .has-tooltip::after",
             )
-        if not focus_match and not (hover_match and re.search(
-            r'\.has-tooltip:focus-visible::after', self.css,
-        )):
+        if not focus_match and not (
+            hover_match
+            and re.search(
+                r"\.has-tooltip:focus-visible::after",
+                self.css,
+            )
+        ):
             self.fail(
                 ":focus-visible does not trigger opacity on .has-tooltip::after",
             )
@@ -255,7 +266,7 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
         """A prefers-reduced-motion media query must exist for .has-tooltip."""
         self.assertRegex(
             self.css,
-            r'@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{[^}]*\.has-tooltip',
+            r"@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{[^}]*\.has-tooltip",
             "No prefers-reduced-motion media query found for .has-tooltip",
         )
 
@@ -405,7 +416,9 @@ class RailTooltipCascadeTests(unittest.TestCase):
             # whitespace, this is the unscoped bug form.
             # Trim to the part after the last selector-list separator.
             last_sep = max(prefix.rfind("}"), prefix.rfind("\n"), prefix.rfind(","))
-            scope_text = prefix[last_sep + 1:].strip() if last_sep >= 0 else prefix.strip()
+            scope_text = (
+                prefix[last_sep + 1 :].strip() if last_sep >= 0 else prefix.strip()
+            )
             self.assertTrue(
                 scope_text,
                 "Found unscoped `.nav-tab:hover::after { content: attr(data-label) }` "
@@ -435,31 +448,35 @@ class RailTooltipCascadeTests(unittest.TestCase):
             html,
             re.DOTALL,
         )
-        self.assertIsNotNone(rail_match, "Could not locate <nav class='rail'> in index.html")
+        self.assertIsNotNone(
+            rail_match, "Could not locate <nav class='rail'> in index.html"
+        )
         rail_block = rail_match.group(1)
 
         rail_btn_count = 0
         missing = []
-        for m in re.finditer(r'<button\b([^>]*?)>', rail_block):
+        for m in re.finditer(r"<button\b([^>]*?)>", rail_block):
             attrs = m.group(1)
-            if 'rail-btn' not in attrs:
+            if "rail-btn" not in attrs:
                 continue
             rail_btn_count += 1
-            if 'has-tooltip' not in attrs:
-                missing.append(('class missing has-tooltip', attrs[:120]))
+            if "has-tooltip" not in attrs:
+                missing.append(("class missing has-tooltip", attrs[:120]))
                 continue
             tooltip_attr = re.search(r'data-tooltip="([^"]*)"', attrs)
             if not tooltip_attr or not tooltip_attr.group(1).strip():
-                missing.append(('missing or empty data-tooltip', attrs[:120]))
+                missing.append(("missing or empty data-tooltip", attrs[:120]))
 
         self.assertGreaterEqual(
-            rail_btn_count, 10,
+            rail_btn_count,
+            10,
             f"Expected ≥10 rail buttons (found {rail_btn_count}). Test selector wrong?",
         )
         self.assertEqual(
-            missing, [],
-            f"Rail buttons without working tooltip markup:\n  " +
-            "\n  ".join(f"{reason}: {attrs}" for reason, attrs in missing),
+            missing,
+            [],
+            "Rail buttons without working tooltip markup:\n  "
+            + "\n  ".join(f"{reason}: {attrs}" for reason, attrs in missing),
         )
 
 
@@ -484,14 +501,19 @@ class BottomRightTooltipVariantTests(unittest.TestCase):
         self.assertIsNotNone(rule, "`.has-tooltip--bottom-right::after` rule missing")
         body = rule.group(1)
         # Must anchor right edge.
-        self.assertRegex(body, r"right\s*:\s*0",
-                         "--bottom-right variant must set right:0")
+        self.assertRegex(
+            body, r"right\s*:\s*0", "--bottom-right variant must set right:0"
+        )
         # Must clear the inherited `left:` so it doesn't fight with the base rule.
-        self.assertRegex(body, r"left\s*:\s*auto",
-                         "--bottom-right variant must clear left:auto")
+        self.assertRegex(
+            body, r"left\s*:\s*auto", "--bottom-right variant must clear left:auto"
+        )
         # Must clear the inherited transform (otherwise translateX(-50%) shifts it).
-        self.assertRegex(body, r"transform\s*:\s*none",
-                         "--bottom-right variant must reset transform:none")
+        self.assertRegex(
+            body,
+            r"transform\s*:\s*none",
+            "--bottom-right variant must reset transform:none",
+        )
 
     def test_btn_new_chat_uses_bottom_right_variant(self):
         """`#btnNewChat` sits flush with the chat-panel right edge; its tooltip
@@ -512,7 +534,7 @@ class BottomRightTooltipVariantTests(unittest.TestCase):
         # Must NOT also carry the old --bottom (would conflict).
         self.assertNotRegex(
             attrs,
-            r'has-tooltip--bottom(?!-)',
+            r"has-tooltip--bottom(?!-)",
             "#btnNewChat carries both --bottom and --bottom-right; pick one. "
             "The plain --bottom variant centers on left:50% and overflows.",
         )

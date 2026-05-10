@@ -9,6 +9,7 @@ Pins the wiring for the three modes (queue / interrupt / steer):
 
 Issue: #720 (configurable busy-input behaviour)
 """
+
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -24,6 +25,7 @@ I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 # ── Backend: setting registration + enum validation ─────────────────────
 
+
 class TestBusyInputModeSetting:
     """The new setting key must be registered with a default and enum validator."""
 
@@ -38,13 +40,14 @@ class TestBusyInputModeSetting:
         # Find the entry inside the enum dict (a set literal as the value)
         idx = CONFIG_PY.find('"busy_input_mode": {')
         assert idx >= 0, "busy_input_mode entry missing from _SETTINGS_ENUM_KEYS"
-        block = CONFIG_PY[idx:idx + 200]
+        block = CONFIG_PY[idx : idx + 200]
         assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block, (
             "busy_input_mode enum must contain {queue, interrupt, steer}"
         )
 
 
 # ── Frontend: slash commands ─────────────────────────────────────────────
+
 
 class TestSlashCommandRegistration:
     """The three new slash commands must be registered in COMMANDS array."""
@@ -67,7 +70,7 @@ class TestSlashCommandRegistration:
         for name in ("queue", "interrupt", "steer"):
             idx = COMMANDS_JS.find(f"name:'{name}'")
             assert idx >= 0, f"{name} not registered"
-            block = COMMANDS_JS[idx:idx + 250]
+            block = COMMANDS_JS[idx : idx + 250]
             assert "noEcho:true" in block, (
                 f"/{name} registration must set noEcho:true — "
                 "without it the command text is echoed as a user bubble, causing duplicates"
@@ -83,15 +86,23 @@ class TestSlashCommandHandlers:
         idle-send path rather than the queue path."""
         idx = COMMANDS_JS.find("async function cmdQueue(")
         assert idx >= 0
-        body = COMMANDS_JS[idx:idx + 600]
-        assert "if(!S.busy)" in body, "/queue must have an if(!S.busy) guard that routes to send()"
+        body = COMMANDS_JS[idx : idx + 600]
+        assert "if(!S.busy)" in body, (
+            "/queue must have an if(!S.busy) guard that routes to send()"
+        )
 
     def test_cmd_interrupt_calls_cancel_stream(self):
         idx = COMMANDS_JS.find("async function cmdInterrupt(")
         assert idx >= 0
-        body = COMMANDS_JS[idx:idx + 1300]  # expanded: idle-fallback block added before the busy path
-        assert "queueSessionMessage" in body, "/interrupt must queue the new message before cancelling"
-        assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
+        body = COMMANDS_JS[
+            idx : idx + 1300
+        ]  # expanded: idle-fallback block added before the busy path
+        assert "queueSessionMessage" in body, (
+            "/interrupt must queue the new message before cancelling"
+        )
+        assert "cancelStream" in body, (
+            "/interrupt must call cancelStream() so the drain re-sends"
+        )
 
     def test_cmd_steer_delegates_to_try_steer(self):
         """/steer delegates to _trySteer which calls /api/chat/steer with
@@ -99,21 +110,22 @@ class TestSlashCommandHandlers:
         in test_real_steer.py — this test just pins the delegation."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
-        body = COMMANDS_JS[idx:idx + 800]
+        body = COMMANDS_JS[idx : idx + 800]
         # cmdSteer now delegates to _trySteer; the fallback (queueSessionMessage
         # + cancelStream) lives inside _trySteer.
-        assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
+        assert "_trySteer" in body, (
+            "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
+        )
         # The shared helper must contain the fallback path
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
-        helper_body = COMMANDS_JS[helper_idx:helper_idx + 1500]
+        helper_body = COMMANDS_JS[helper_idx : helper_idx + 1500]
         assert "queueSessionMessage" in helper_body
         assert "cancelStream" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
         assert "cmd_steer_fallback" in helper_body or "steer_fallback" in helper_body
 
-
-# ── send() busy branch ───────────────────────────────────────────────────
+    # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
         """All three busy command handlers must clear S.pendingFiles (directly
@@ -129,7 +141,7 @@ class TestSlashCommandHandlers:
         for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
-            body = COMMANDS_JS[idx:idx + 800]
+            body = COMMANDS_JS[idx : idx + 800]
             assert "S.pendingFiles=[]" in body, (
                 f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
             )
@@ -139,7 +151,7 @@ class TestSlashCommandHandlers:
         # cmdSteer delegates to _trySteer; that helper clears pendingFiles
         idx_try = COMMANDS_JS.find("function _trySteer(")
         assert idx_try >= 0, "_trySteer not found"
-        try_body = COMMANDS_JS[idx_try:idx_try + 1200]
+        try_body = COMMANDS_JS[idx_try : idx_try + 1200]
         assert "S.pendingFiles=[]" in try_body, (
             "_trySteer must clear S.pendingFiles in its fallback path — "
             "without this, files are lost on steer→interrupt fallback"
@@ -155,7 +167,7 @@ class TestBusySendButton:
     def test_update_send_btn_uses_single_primary_action_button(self):
         idx = UI_JS.find("function updateSendBtn()")
         assert idx >= 0, "updateSendBtn() not found"
-        body = UI_JS[idx:UI_JS.find("function setBusy", idx)]
+        body = UI_JS[idx : UI_JS.find("function setBusy", idx)]
         assert "getComposerPrimaryAction()" in body, (
             "updateSendBtn must derive icon/color/enabled state from one composer-primary action helper"
         )
@@ -172,12 +184,20 @@ class TestBusySendButton:
     def test_composer_primary_action_accounts_for_all_busy_input_modes(self):
         idx = UI_JS.find("function getComposerPrimaryAction()")
         assert idx >= 0, "getComposerPrimaryAction() not found"
-        body = UI_JS[idx:UI_JS.find("function _setComposerPrimaryButtonIcon", idx)]
+        body = UI_JS[idx : UI_JS.find("function _setComposerPrimaryButtonIcon", idx)]
         assert "return 'stop'" in body, "busy/no-draft + active stream must map to stop"
-        assert "return 'queue'" in body, "queue mode and unavailable steer/interrupt fallbacks must map to queue"
-        assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
-        assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
-        assert "window._busyInputMode||'queue'" in body, "helper must respect the Busy input mode setting"
+        assert "return 'queue'" in body, (
+            "queue mode and unavailable steer/interrupt fallbacks must map to queue"
+        )
+        assert "return 'interrupt'" in body, (
+            "interrupt mode with an active stream must map to interrupt"
+        )
+        assert "return 'steer'" in body, (
+            "steer mode with active stream support must map to steer"
+        )
+        assert "window._busyInputMode||'queue'" in body, (
+            "helper must respect the Busy input mode setting"
+        )
         assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
             "explicit /queue, /interrupt, and /steer drafts must override the Busy input mode for button visuals"
         )
@@ -185,7 +205,7 @@ class TestBusySendButton:
     def test_explicit_busy_commands_override_button_visual_action(self):
         idx = UI_JS.find("function _getExplicitBusyCommandAction(")
         assert idx >= 0, "_getExplicitBusyCommandAction() not found"
-        body = UI_JS[idx:UI_JS.find("function getComposerPrimaryAction", idx)]
+        body = UI_JS[idx : UI_JS.find("function getComposerPrimaryAction", idx)]
         assert "name==='queue'" in body and "return 'queue'" in body, (
             "typing /queue <message> should show the queue/list-end button even in another busy mode"
         )
@@ -216,14 +236,14 @@ class TestSendBusyBranchDispatch:
         send_idx = MESSAGES_JS.find("async function send(")
         assert send_idx >= 0
         # Look in the first ~3000 chars of send() for the busy mode read
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        send_body = MESSAGES_JS[send_idx : send_idx + 3000]
         assert "_busyInputMode" in send_body, (
             "send() must read window._busyInputMode in the S.busy branch"
         )
 
     def test_send_calls_cancel_stream_on_interrupt(self):
         send_idx = MESSAGES_JS.find("async function send(")
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        send_body = MESSAGES_JS[send_idx : send_idx + 3000]
         # The interrupt branch must call cancelStream
         assert "cancelStream" in send_body
         # And queue before cancel (otherwise the drain has nothing to pick up)
@@ -236,7 +256,6 @@ class TestSendBusyBranchDispatch:
             "queueSessionMessage must run before cancelStream so the drain "
             "after setBusy(false) picks up the queued message"
         )
-
 
     def test_slash_commands_intercepted_before_busymode_routing(self):
         """The three busy-control slash commands (/steer /interrupt /queue) must be
@@ -308,6 +327,7 @@ class TestSendBusyBranchDispatch:
 
 # ── Boot init + settings panel wiring ───────────────────────────────────
 
+
 class TestBootAndPanelsWiring:
     def test_boot_init_default_path(self):
         """Boot success path initialises window._busyInputMode from settings."""
@@ -320,7 +340,9 @@ class TestBootAndPanelsWiring:
 
     def test_panels_load_save_apply(self):
         assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
-        assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
+        assert "body.busy_input_mode" in PANELS_JS, (
+            "saveSettings must include busy_input_mode in body"
+        )
         assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
             "_applySavedSettingsUi must propagate busy_input_mode to the global"
         )
@@ -328,13 +350,14 @@ class TestBootAndPanelsWiring:
     def test_index_html_dropdown_has_three_options(self):
         idx = INDEX_HTML.find('id="settingsBusyInputMode"')
         assert idx >= 0
-        block = INDEX_HTML[idx:idx + 800]
+        block = INDEX_HTML[idx : idx + 800]
         assert 'value="queue"' in block
         assert 'value="interrupt"' in block
         assert 'value="steer"' in block
 
 
 # ── i18n locale coverage ─────────────────────────────────────────────────
+
 
 class TestI18nKeys:
     """All 17 new keys must appear in each of the 6 locale blocks."""
@@ -370,6 +393,4 @@ class TestI18nKeys:
     def test_key_count_total(self):
         """17 keys × 6 locales = 102 minimum occurrences across the file."""
         total = sum(I18N_JS.count(f"{key}:") for key in self.REQUIRED_KEYS)
-        assert total >= 17 * 6, (
-            f"Total i18n occurrences = {total}; expected ≥ {17*6}"
-        )
+        assert total >= 17 * 6, f"Total i18n occurrences = {total}; expected ≥ {17 * 6}"

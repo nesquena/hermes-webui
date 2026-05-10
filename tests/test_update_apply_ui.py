@@ -1,4 +1,5 @@
 """Frontend regression coverage for Update Now apply failures (#1321)."""
+
 from pathlib import Path
 import re
 
@@ -28,7 +29,10 @@ def test_update_apply_structured_server_errors_still_use_json_message_path():
     show_error_call = src.index("_showUpdateError(target,res);", apply_start)
     reset_button = src.index("resetApplyButton(0);", show_error_call)
     assert show_error_call < reset_button
-    assert "const msg='Update failed ('+target+'): '+(res.message||'unknown error');" in src
+    assert (
+        "const msg='Update failed ('+target+'): '+(res.message||'unknown error');"
+        in src
+    )
 
 
 def test_update_apply_network_error_classifier_ignores_http_status_errors():
@@ -39,7 +43,9 @@ def test_update_apply_network_error_classifier_ignores_http_status_errors():
     body = src[fn_start:fn_end]
     compact = re.sub(r"\s+", "", body)
     assert "if(error&&error.status)returnfalse;" in compact
-    assert body.index("error.status") < body.index("/Failed to fetch|NetworkError|Load failed/i")
+    assert body.index("error.status") < body.index(
+        "/Failed to fetch|NetworkError|Load failed/i"
+    )
     assert "Failed to fetch|NetworkError|Load failed" in body
 
 

@@ -1,4 +1,5 @@
 """Tests for fix #477: KaTeX font-src CSP fix."""
+
 import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent

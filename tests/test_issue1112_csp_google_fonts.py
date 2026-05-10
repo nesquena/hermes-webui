@@ -1,4 +1,5 @@
 """Tests for #1112 — CSP allows Google Fonts stylesheet and font files."""
+
 import re
 
 
@@ -13,24 +14,28 @@ class TestCSPGoogleFonts:
     def test_style_src_includes_google_fonts(self):
         """style-src must include https://fonts.googleapis.com for Google Fonts CSS."""
         src = _helpers_src()
-        assert "https://fonts.googleapis.com" in src, \
+        assert "https://fonts.googleapis.com" in src, (
             "style-src must allow fonts.googleapis.com (Google Fonts stylesheets)"
+        )
         # Must be in the style-src directive, not accidentally elsewhere
         style_match = re.search(r"style-src\s+([^;]+);", src)
         assert style_match, "style-src directive must exist"
-        assert "fonts.googleapis.com" in style_match.group(1), \
+        assert "fonts.googleapis.com" in style_match.group(1), (
             "fonts.googleapis.com must be in style-src directive"
+        )
 
     def test_font_src_includes_fonts_gstatic(self):
         """font-src must include https://fonts.gstatic.com for Google Font files."""
         src = _helpers_src()
-        assert "https://fonts.gstatic.com" in src, \
+        assert "https://fonts.gstatic.com" in src, (
             "font-src must allow fonts.gstatic.com (Google Font WOFF2/WOFF files)"
+        )
         # Must be in the font-src directive
         font_match = re.search(r"font-src\s+([^;]+);", src)
         assert font_match, "font-src directive must exist"
-        assert "fonts.gstatic.com" in font_match.group(1), \
+        assert "fonts.gstatic.com" in font_match.group(1), (
             "fonts.gstatic.com must be in font-src directive"
+        )
 
     def test_existing_csp_directives_preserved(self):
         """All pre-existing CSP directives must still be present after the fix."""

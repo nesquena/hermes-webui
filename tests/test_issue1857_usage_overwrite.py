@@ -7,7 +7,9 @@ from unittest import mock
 _MISSING = object()
 
 
-def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_test_sessions):
+def test_stream_completion_overwrites_session_usage_with_latest_turn(
+    cleanup_test_sessions,
+):
     """#1857: completed turns must not add prompt tokens to stale session totals."""
     import api.streaming as streaming
 
@@ -143,11 +145,17 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
     _saved = {k: sys.modules.get(k, _MISSING) for k in _injected}
     sys.modules.update(_injected)
     try:
-        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
-             mock.patch.object(streaming, "_get_ai_agent", return_value=UsageAgent), \
-             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai", None)), \
-             mock.patch("api.config.get_config", return_value={}), \
-             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+        with (
+            mock.patch.object(streaming, "get_session", return_value=fake_session),
+            mock.patch.object(streaming, "_get_ai_agent", return_value=UsageAgent),
+            mock.patch.object(
+                streaming,
+                "resolve_model_provider",
+                return_value=("gpt-5.4", "openai", None),
+            ),
+            mock.patch("api.config.get_config", return_value={}),
+            mock.patch("api.config._resolve_cli_toolsets", return_value=[]),
+        ):
             streaming.STREAMS[fake_stream_id] = fake_queue
             streaming._run_agent_streaming(
                 session_id=fake_session.session_id,

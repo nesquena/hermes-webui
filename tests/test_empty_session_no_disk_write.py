@@ -18,15 +18,14 @@ Crash-safety: if the process exits between create and first message, the
 session is lost. There were no messages to lose, so this is an explicit
 trade-off documented in ``new_session``'s docstring.
 """
+
 import json
-import time
 
 import pytest
 
 import api.models as models
 from api.models import (
     SESSIONS,
-    Session,
     all_sessions,
     get_session,
     new_session,
@@ -124,7 +123,9 @@ def test_repeated_new_session_creates_no_disk_files(_isolate, tmp_path):
     session_dir = tmp_path / "sessions"
     for _ in range(5):
         new_session()
-    on_disk_jsons = [p for p in session_dir.glob("*.json") if not p.name.startswith("_")]
+    on_disk_jsons = [
+        p for p in session_dir.glob("*.json") if not p.name.startswith("_")
+    ]
     assert on_disk_jsons == [], (
         f"new_session() produced disk files: {[p.name for p in on_disk_jsons]}"
     )

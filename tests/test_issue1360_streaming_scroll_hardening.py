@@ -18,7 +18,7 @@ def _extract_function(src: str, name: str) -> str:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return src[idx:i + 1]
+                return src[idx : i + 1]
     raise AssertionError(f"Could not extract {name}")
 
 
@@ -40,20 +40,22 @@ def test_queue_card_measurement_does_not_force_repin_during_streaming():
     fn = _extract_function(UI_JS, "_renderQueueChips")
     measurement_idx = fn.find("setTimeout(()=>")
     assert measurement_idx != -1, "queue card measurement timeout not found"
-    measurement_block = fn[measurement_idx:measurement_idx + 500]
+    measurement_block = fn[measurement_idx : measurement_idx + 500]
 
     assert "S.activeStreamId" in measurement_block
     assert "scrollIfPinned()" in measurement_block
     assert "!S.activeStreamId" in measurement_block
     assert "scrollToBottom()" in measurement_block
-    assert measurement_block.find("scrollIfPinned()") < measurement_block.find("scrollToBottom()")
+    assert measurement_block.find("scrollIfPinned()") < measurement_block.find(
+        "scrollToBottom()"
+    )
 
 
 def test_queue_pill_click_does_not_force_repin_during_streaming():
     fn = _extract_function(UI_JS, "_updateQueuePill")
     click_idx = fn.find("pill.onclick=()=>")
     assert click_idx != -1, "queue pill click handler not found"
-    click_block = fn[click_idx:click_idx + 700]
+    click_block = fn[click_idx : click_idx + 700]
 
     assert "S.activeStreamId" in click_block
     assert "scrollIfPinned()" in click_block

@@ -19,7 +19,6 @@ import pathlib
 import tempfile
 import unittest.mock
 
-import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 from tests._pytest_port import BASE
@@ -27,7 +26,10 @@ from tests._pytest_port import BASE
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _make_auth_json(provider_id: str, tokens: dict, tmp_dir: pathlib.Path) -> pathlib.Path:
+
+def _make_auth_json(
+    provider_id: str, tokens: dict, tmp_dir: pathlib.Path
+) -> pathlib.Path:
     """Write an auth.json with the given tokens for provider_id into tmp_dir."""
     store = {"providers": {provider_id: tokens}}
     auth_path = tmp_dir / "auth.json"
@@ -51,12 +53,14 @@ def _make_auth_json_with_credential_pool(
 
 # ── 1–3. _provider_oauth_authenticated unit tests ────────────────────────────
 
+
 class TestProviderOAuthAuthenticated:
     """Unit tests for the new _provider_oauth_authenticated() helper."""
 
     def _call(self, provider: str, hermes_home: pathlib.Path) -> bool:
         # Import fresh so we don't get a stale module reference
         from api.onboarding import _provider_oauth_authenticated
+
         return _provider_oauth_authenticated(provider, hermes_home)
 
     def test_returns_false_when_auth_json_absent(self, tmp_path):
@@ -124,12 +128,14 @@ class TestProviderOAuthAuthenticated:
 
 # ── 4–5. _status_from_runtime integration ────────────────────────────────────
 
+
 class TestStatusFromRuntimeOAuth:
     """_status_from_runtime should treat OAuth providers with tokens as ready."""
 
     def _call(self, provider: str, model: str, hermes_home: pathlib.Path) -> dict:
         from api.onboarding import _status_from_runtime
         import api.onboarding as _ob
+
         orig_home = _ob._get_active_hermes_home
         orig_found = _ob._HERMES_FOUND
         _ob._get_active_hermes_home = lambda: hermes_home
@@ -169,7 +175,6 @@ class TestStatusFromRuntimeOAuth:
         We mock hermes_cli.auth to be unavailable so the function falls through
         to the auth.json path.  With no auth.json the result must be False.
         """
-        import unittest.mock
 
         # Prevent the hermes_cli fast path from finding real credentials
         with unittest.mock.patch(
@@ -211,6 +216,7 @@ class TestStatusFromRuntimeOAuth:
 
 # ── 6. API endpoint reflects OAuth-ready state ───────────────────────────────
 
+
 class TestOnboardingStatusApiOAuth:
     """
     The /api/onboarding/status endpoint should report provider_ready=True
@@ -219,6 +225,7 @@ class TestOnboardingStatusApiOAuth:
 
     def test_status_endpoint_returns_200(self):
         import urllib.request
+
         with urllib.request.urlopen(BASE + "/api/onboarding/status", timeout=10) as r:
             assert r.status == 200
             data = json.loads(r.read())
@@ -227,6 +234,7 @@ class TestOnboardingStatusApiOAuth:
 
     def test_onboarding_status_has_chat_ready_field(self):
         import urllib.request
+
         with urllib.request.urlopen(BASE + "/api/onboarding/status", timeout=10) as r:
             data = json.loads(r.read())
         assert "chat_ready" in data["system"]
@@ -234,6 +242,7 @@ class TestOnboardingStatusApiOAuth:
     def test_status_setup_state_valid_values(self):
         """setup_state must be one of the known string values."""
         import urllib.request
+
         with urllib.request.urlopen(BASE + "/api/onboarding/status", timeout=10) as r:
             data = json.loads(r.read())
         valid = {"ready", "provider_incomplete", "needs_provider", "agent_unavailable"}
@@ -244,23 +253,32 @@ class TestOnboardingStatusApiOAuth:
 
 # ── Control Center: section reset on close ─────────────────────────────────
 
+
 def test_control_center_resets_active_section_on_close():
     """Closing the control center must reset _settingsSection to 'conversation'."""
-    src = open(pathlib.Path(__file__).parent.parent / 'static' / 'panels.js').read()
-    assert '_settingsSection' in src, '_settingsSection state variable missing from panels.js'
-    assert "_settingsSection = 'conversation'" in src or "_settingsSection='conversation'" in src, \
-        'Control center does not reset section to conversation on close'
+    src = open(pathlib.Path(__file__).parent.parent / "static" / "panels.js").read()
+    assert "_settingsSection" in src, (
+        "_settingsSection state variable missing from panels.js"
+    )
+    assert (
+        "_settingsSection = 'conversation'" in src
+        or "_settingsSection='conversation'" in src
+    ), "Control center does not reset section to conversation on close"
 
 
 def test_control_center_tab_highlight_on_open():
     """The settings left-rail menu must have a CSS rule that highlights the active section."""
-    css = open(pathlib.Path(__file__).parent.parent / 'static' / 'style.css').read()
-    assert 'side-menu-item' in css, 'side-menu-item CSS class for left-rail nav missing from style.css'
-    assert '.side-menu-item.active' in css or 'side-menu-item.active' in css, \
-        'No active-state style for .side-menu-item — sidebar section highlight missing'
+    css = open(pathlib.Path(__file__).parent.parent / "static" / "style.css").read()
+    assert "side-menu-item" in css, (
+        "side-menu-item CSS class for left-rail nav missing from style.css"
+    )
+    assert ".side-menu-item.active" in css or "side-menu-item.active" in css, (
+        "No active-state style for .side-menu-item — sidebar section highlight missing"
+    )
 
 
 # ── apply_onboarding_setup: unsupported/OAuth providers complete gracefully ──
+
 
 class TestApplyOnboardingSetupUnsupportedProvider:
     """PR #323 / Issue #322: apply_onboarding_setup must not raise ValueError for
@@ -269,7 +287,9 @@ class TestApplyOnboardingSetupUnsupportedProvider:
     """
 
     def _call(self, provider: str) -> dict:
-        import sys, pathlib, unittest.mock, tempfile, os
+        import sys
+        import pathlib
+
         repo = pathlib.Path(__file__).parent.parent
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
@@ -277,14 +297,24 @@ class TestApplyOnboardingSetupUnsupportedProvider:
         from api.onboarding import apply_onboarding_setup
 
         with tempfile.TemporaryDirectory() as tmp:
-            with unittest.mock.patch("api.onboarding._get_active_hermes_home",
-                                     return_value=pathlib.Path(tmp)), \
-                 unittest.mock.patch("api.onboarding._get_config_path",
-                                     return_value=pathlib.Path(tmp) / "config.yaml"), \
-                 unittest.mock.patch("api.onboarding.save_settings") as mock_save, \
-                 unittest.mock.patch("api.onboarding.get_onboarding_status",
-                                     return_value={"completed": True, "system": {}}):
-                result = apply_onboarding_setup({"provider": provider, "model": "", "api_key": ""})
+            with (
+                unittest.mock.patch(
+                    "api.onboarding._get_active_hermes_home",
+                    return_value=pathlib.Path(tmp),
+                ),
+                unittest.mock.patch(
+                    "api.onboarding._get_config_path",
+                    return_value=pathlib.Path(tmp) / "config.yaml",
+                ),
+                unittest.mock.patch("api.onboarding.save_settings") as mock_save,
+                unittest.mock.patch(
+                    "api.onboarding.get_onboarding_status",
+                    return_value={"completed": True, "system": {}},
+                ),
+            ):
+                result = apply_onboarding_setup(
+                    {"provider": provider, "model": "", "api_key": ""}
+                )
                 return result, mock_save
 
     def test_openai_codex_does_not_raise(self):
@@ -306,11 +336,13 @@ class TestApplyOnboardingSetupUnsupportedProvider:
         """apply_onboarding_setup with an unsupported provider must save onboarding_completed=True."""
         _, mock_save = self._call("openai-codex")
         calls = [str(c) for c in mock_save.call_args_list]
-        assert any("onboarding_completed" in c for c in calls), \
+        assert any("onboarding_completed" in c for c in calls), (
             "save_settings must be called with onboarding_completed=True for unsupported providers"
+        )
 
     def test_unsupported_provider_returns_status_dict(self):
         """apply_onboarding_setup with an unsupported provider must return a status dict (not raise)."""
         result, _ = self._call("openai-codex")
-        assert isinstance(result, dict), \
+        assert isinstance(result, dict), (
             "apply_onboarding_setup must return a dict for unsupported providers, not raise"
+        )

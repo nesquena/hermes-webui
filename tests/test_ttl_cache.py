@@ -8,6 +8,7 @@ Validates:
   - copy.deepcopy() isolation (mutating returned dict doesn't pollute cache)
   - invalidate_models_cache() direct invalidation
 """
+
 import time
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ def _reset_cache():
 
 
 # ── 1. test_cache_hit_within_ttl ──────────────────────────────────────────
+
 
 def test_cache_hit_within_ttl():
     """Call get_available_models() twice within the TTL window.
@@ -38,7 +40,9 @@ def test_cache_hit_within_ttl():
         call_count += 1
         return original_reload()
 
-    with patch.object(config, "reload_config", wraps=original_reload, side_effect=_counting_reload):
+    with patch.object(
+        config, "reload_config", wraps=original_reload, side_effect=_counting_reload
+    ):
         saved_mtime = config._cfg_mtime
         try:
             # Force mtime mismatch so the first call triggers reload_config + cache fill
@@ -49,7 +53,9 @@ def test_cache_hit_within_ttl():
             # Sync _cfg_mtime to the actual file so the second call doesn't
             # re-trigger reload_config via mtime mismatch — we want it to hit the TTL cache.
             try:
-                config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+                config._cfg_mtime = (
+                    config.Path(config._get_config_path()).stat().st_mtime
+                )
             except OSError:
                 config._cfg_mtime = 0.0
 
@@ -71,6 +77,7 @@ def test_cache_hit_within_ttl():
 
 
 # ── 2. test_ttl_expiry ───────────────────────────────────────────────────
+
 
 def test_ttl_expiry():
     """Populate the cache, then advance time.monotonic() past 60s.
@@ -95,7 +102,9 @@ def test_ttl_expiry():
     original_monotonic = time.monotonic
     offset = config._AVAILABLE_MODELS_CACHE_TTL + 10.0  # 70s past the real monotonic
 
-    with patch.object(time, "monotonic", side_effect=lambda: original_monotonic() + offset):
+    with patch.object(
+        time, "monotonic", side_effect=lambda: original_monotonic() + offset
+    ):
         result2 = config.get_available_models()
 
     # The cache should have been refreshed — the timestamp must be newer
@@ -107,6 +116,7 @@ def test_ttl_expiry():
 
 
 # ── 3. test_mtime_invalidation ───────────────────────────────────────────
+
 
 def test_mtime_invalidation():
     """Populate the cache, then change _cfg_mtime to simulate a config file
@@ -148,6 +158,7 @@ def test_mtime_invalidation():
 
 # ── 4. test_deepcopy_isolation ────────────────────────────────────────────
 
+
 def test_deepcopy_isolation():
     """Mutating the returned dict from get_available_models() must not
     affect the cache or subsequent return values.
@@ -174,9 +185,9 @@ def test_deepcopy_isolation():
 
     # The mutated keys must not appear in the second result
     assert result2["active_provider"] != "HACKED", "Mutation leaked into cache"
-    assert not any(
-        g.get("provider") == "FAKE" for g in result2["groups"]
-    ), "Fake provider leaked into cache"
+    assert not any(g.get("provider") == "FAKE" for g in result2["groups"]), (
+        "Fake provider leaked into cache"
+    )
 
     # If there were groups originally, the first group's models should not be empty
     # (unless it genuinely had no models, which is unlikely)
@@ -190,6 +201,7 @@ def test_deepcopy_isolation():
 
 
 # ── 5. test_invalidate_models_cache_direct ───────────────────────────────
+
 
 def test_invalidate_models_cache_direct():
     """Call invalidate_models_cache() after populating the cache.

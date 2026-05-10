@@ -1,4 +1,5 @@
 """Regression coverage for #1697: multi-image clipboard paste attachments."""
+
 import json
 import shutil
 import subprocess
@@ -42,7 +43,9 @@ def _run_node(source: str) -> str:
         check=False,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"node driver failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
+        raise RuntimeError(
+            f"node driver failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
     return result.stdout.strip()
 
 
@@ -117,8 +120,7 @@ def test_one_clipboard_paste_with_two_image_items_adds_two_attachment_chips():
         "screenshot-1700000000000-2.png",
     ]
     assert result["lastStatus"] == (
-        "Image pasted: screenshot-1700000000000-1.png, "
-        "screenshot-1700000000000-2.png"
+        "Image pasted: screenshot-1700000000000-1.png, screenshot-1700000000000-2.png"
     )
 
 
@@ -136,7 +138,18 @@ def test_file_picker_and_drop_paths_still_pass_real_file_names_to_addfiles():
     boot = _read_js(BOOT_JS_PATH)
     panels = _read_js(PANELS_JS_PATH)
 
-    assert "$('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};" in boot
+    assert (
+        "$('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};"
+        in boot
+    )
     assert "const files=Array.from(e.dataTransfer.files);" in panels
     assert "if(files.length){addFiles(files);$('msg').focus();}" in panels
-    assert "screenshot-" not in panels[panels.find("document.addEventListener('drop'") : panels.find("document.addEventListener('drop'") + 900]
+    assert (
+        "screenshot-"
+        not in panels[
+            panels.find("document.addEventListener('drop'") : panels.find(
+                "document.addEventListener('drop'"
+            )
+            + 900
+        ]
+    )

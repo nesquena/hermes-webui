@@ -12,6 +12,7 @@ Root causes fixed:
      custom_providers entries exist in config.yaml — the live enrichment
      step never added those models.
 """
+
 import pathlib
 import re
 import sys
@@ -40,6 +41,7 @@ def _isolate_models_cache():
     mocks.  Clearing the cache around each test breaks that linkage.
     """
     import api.config as c
+
     try:
         c.invalidate_models_cache()
     except Exception:
@@ -52,6 +54,7 @@ def _isolate_models_cache():
 
 
 # ── api/config.py — active_provider normalization ─────────────────────────────
+
 
 class TestActiveProviderNormalization:
     """get_available_models() must normalize active_provider aliases before lookup."""
@@ -72,6 +75,7 @@ class TestActiveProviderNormalization:
         fake_prov.return_value = []
         try:
             import hermes_cli.models as hm
+
             monkeypatch.setattr(hm, "list_available_providers", fake_prov)
         except Exception:
             pass
@@ -112,6 +116,7 @@ class TestActiveProviderNormalization:
 
 
 # ── api/routes.py — /api/models/live provider normalization ───────────────────
+
 
 class TestLiveModelsProviderNormalization:
     """_handle_live_models must normalize the provider query param."""
@@ -155,23 +160,25 @@ class TestLiveModelsProviderNormalization:
         The WebUI ships its own _PROVIDER_ALIASES table; the agent's table
         is merged only when available."""
         import api.config as c
+
         # Core CLI aliases from #815's bug report
-        assert c._resolve_provider_alias('z.ai') == 'zai'
-        assert c._resolve_provider_alias('x.ai') == 'xai'
-        assert c._resolve_provider_alias('google') == 'gemini'
-        assert c._resolve_provider_alias('grok') == 'xai'
+        assert c._resolve_provider_alias("z.ai") == "zai"
+        assert c._resolve_provider_alias("x.ai") == "xai"
+        assert c._resolve_provider_alias("google") == "gemini"
+        assert c._resolve_provider_alias("grok") == "xai"
         # Case / whitespace insensitive
-        assert c._resolve_provider_alias('  Z.AI  ') == 'zai'
+        assert c._resolve_provider_alias("  Z.AI  ") == "zai"
         # Canonical names pass through unchanged
-        assert c._resolve_provider_alias('openrouter') == 'openrouter'
-        assert c._resolve_provider_alias('anthropic') == 'anthropic'
-        assert c._resolve_provider_alias('custom') == 'custom'
+        assert c._resolve_provider_alias("openrouter") == "openrouter"
+        assert c._resolve_provider_alias("anthropic") == "anthropic"
+        assert c._resolve_provider_alias("custom") == "custom"
         # Empty / None pass through
-        assert c._resolve_provider_alias('') == ''
+        assert c._resolve_provider_alias("") == ""
         assert c._resolve_provider_alias(None) is None
 
 
 # ── api/routes.py — /api/models/live custom_providers fallback ────────────────
+
 
 class TestLiveModelsCustomProviderFallback:
     """When provider='custom' and provider_model_ids() returns [],
@@ -214,18 +221,20 @@ class TestLiveModelsCustomProviderFallback:
         # Mock handler and parsed URL
         handler = mock.MagicMock()
         responses = []
+
         def fake_j(h, data, **kw):
             responses.append(data)
             return True
+
         monkeypatch.setattr(r, "j", fake_j)
 
-        from urllib.parse import urlparse
         parsed = mock.MagicMock()
         parsed.query = "provider=custom"
 
         # Mock provider_model_ids to return [] (simulating no live endpoint)
         try:
             import hermes_cli.models as hm
+
             monkeypatch.setattr(hm, "provider_model_ids", lambda p: [])
         except Exception:
             pass
@@ -244,6 +253,7 @@ class TestLiveModelsCustomProviderFallback:
 
 # ── Regression: known-good providers still work ───────────────────────────────
 
+
 class TestKnownProvidersUnaffected:
     """Normalization must not break providers whose names are already canonical."""
 
@@ -260,6 +270,7 @@ class TestKnownProvidersUnaffected:
         """'custom' is not in _PROVIDER_ALIASES so normalization is a no-op."""
         try:
             from hermes_cli.models import _PROVIDER_ALIASES
+
             assert "custom" not in _PROVIDER_ALIASES, (
                 "'custom' must not be aliased to anything — it's a special sentinel"
             )
@@ -268,6 +279,7 @@ class TestKnownProvidersUnaffected:
 
 
 # ── Source-level: active_provider returned to browser is canonical ─────────────
+
 
 class TestProviderIdInGroupResponse:
     """get_available_models() must include provider_id on every group so the JS
@@ -285,10 +297,14 @@ class TestProviderIdInGroupResponse:
         c.reload_config()
         try:
             import hermes_cli.models as hm
-            monkeypatch.setattr(hm, "list_available_providers", lambda: [
-                {"id": "zai", "authenticated": True}
-            ])
+
+            monkeypatch.setattr(
+                hm,
+                "list_available_providers",
+                lambda: [{"id": "zai", "authenticated": True}],
+            )
             import hermes_cli.auth as ha
+
             monkeypatch.setattr(ha, "get_auth_status", lambda p: {"key_source": "env"})
         except Exception:
             pass
@@ -310,24 +326,25 @@ class TestProviderIdInGroupResponse:
     def test_fetch_live_models_prefers_data_provider_match(self):
         src = read("static/ui.js")
         # Live model optgroup matching was extracted to _addLiveModelsToSelect (#872)
-        m = re.search(r'function _addLiveModelsToSelect\b.*?\n\}', src, re.DOTALL)
+        m = re.search(r"function _addLiveModelsToSelect\b.*?\n\}", src, re.DOTALL)
         if not m:
-            m = re.search(r'function _fetchLiveModels\b.*?\n\}', src, re.DOTALL)
+            m = re.search(r"function _fetchLiveModels\b.*?\n\}", src, re.DOTALL)
         assert m, "_addLiveModelsToSelect or _fetchLiveModels not found"
         fn = m.group(0)
-        assert 'og.dataset.provider' in fn, (
+        assert "og.dataset.provider" in fn, (
             "_addLiveModelsToSelect must check og.dataset.provider===provider before "
             "falling back to label substring match"
         )
         # The data-provider check must come before the label.includes check
-        dp_pos = fn.index('og.dataset.provider')
-        label_pos = fn.index('og.label')
+        dp_pos = fn.index("og.dataset.provider")
+        label_pos = fn.index("og.label")
         assert dp_pos < label_pos, (
             "data-provider exact match must be attempted before label substring match"
         )
 
 
 # ── Opus-identified edge case: 'ollama' normalizes to 'custom' ────────────────
+
 
 class TestOllamaAliasEdgeCase:
     """Opus review found: 'ollama' -> 'custom' via _PROVIDER_ALIASES.
@@ -339,6 +356,7 @@ class TestOllamaAliasEdgeCase:
         intended behavior post-normalization (not a silent breakage)."""
         try:
             from hermes_cli.models import _PROVIDER_ALIASES
+
             # 'ollama' -> 'custom' means ollama users hit the custom_providers path
             # This is fine — ollama models appear via base_url auto-detection (step 3)
             # in get_available_models, not via _PROVIDER_MODELS lookup.
@@ -367,6 +385,7 @@ class TestGetAvailableModelsReturnsCanonicalProvider:
         c.reload_config()
         try:
             import hermes_cli.models as hm
+
             monkeypatch.setattr(hm, "list_available_providers", lambda: [])
         except Exception:
             pass

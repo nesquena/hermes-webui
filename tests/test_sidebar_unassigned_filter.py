@@ -121,9 +121,10 @@ def test_empty_state_message_for_unassigned_filter():
     assert "'No unassigned sessions.'" in js, (
         "Empty-state copy must be specific when the Unassigned filter is active"
     )
-    assert "_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.'" in js, (
-        "Empty-state copy must branch on the active filter"
-    )
+    assert (
+        "_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.'"
+        in js
+    ), "Empty-state copy must branch on the active filter"
 
 
 def test_all_chip_clear_clears_unassigned_filter_too():
@@ -139,7 +140,9 @@ def test_all_chip_clear_clears_unassigned_filter_too():
     js = _js()
     # Find the "All" chip handler. It must clear _activeProject to null and
     # NOT preserve any unassigned-flag state.
-    assert "allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};" in js, (
+    assert (
+        "allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};" in js
+    ), (
         "The All chip handler must reset _activeProject to null. If a parallel "
         "_showNoneProject boolean is reintroduced, this test will catch it because "
         "the handler will need additional state to reset."

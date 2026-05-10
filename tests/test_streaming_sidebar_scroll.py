@@ -1,4 +1,5 @@
 """Regression tests for #1784: sidebar scroll remains independent while streaming."""
+
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,4 +49,7 @@ def test_scroll_if_pinned_skips_during_recent_non_message_scroll():
 
 def test_session_list_has_its_own_scroll_boundary():
     """The session list is its own scroll surface, not chained to the chat/body scroller."""
-    assert ".session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;}" in STYLE_CSS
+    assert (
+        ".session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;}"
+        in STYLE_CSS
+    )

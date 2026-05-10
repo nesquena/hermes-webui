@@ -3,6 +3,7 @@
 These are static source-level checks that will catch any future regression where
 a developer accidentally reverts the platform kwarg back to 'cli'.
 """
+
 import pathlib
 import re
 
@@ -18,7 +19,9 @@ def _load_source(relative_path: str) -> str:
 
 
 def _count_platform_kwargs(source: str, platform: str) -> int:
-    return len(re.findall(PLATFORM_KWARG_RE.format(platform=re.escape(platform)), source))
+    return len(
+        re.findall(PLATFORM_KWARG_RE.format(platform=re.escape(platform)), source)
+    )
 
 
 def test_streaming_uses_webui_platform():

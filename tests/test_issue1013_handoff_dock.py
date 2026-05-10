@@ -77,37 +77,60 @@ def test_handoff_dock_reserves_transcript_space_like_terminal_dock():
 
 
 def test_handoff_dock_width_aligns_with_existing_slide_up_panels():
-    assert ".handoff-hint-container{position:absolute;left:0;right:0;bottom:-2px;width:min(calc(100% - 112px),560px);" in STYLE_CSS
+    assert (
+        ".handoff-hint-container{position:absolute;left:0;right:0;bottom:-2px;width:min(calc(100% - 112px),560px);"
+        in STYLE_CSS
+    )
     assert ".handoff-hint-container{bottom:-2px;width:calc(100% - 28px);}" in STYLE_CSS
     start = STYLE_CSS.find(".handoff-hint-container")
     assert start != -1
     end = STYLE_CSS.find("}", start)
     assert end != -1
-    handoff_hint_rule = STYLE_CSS[start:end+1]
+    handoff_hint_rule = STYLE_CSS[start : end + 1]
     assert "width:min(calc(100% - 112px),560px)" in handoff_hint_rule
     assert "border-bottom:none;border-radius:13px 13px 0 0" in STYLE_CSS
     assert "padding:7px 12px 9px" in STYLE_CSS
-    assert ".handoff-hint-text{min-width:0;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700;line-height:1.2;" in STYLE_CSS
-    assert ".handoff-hint-action,.handoff-hint-dismiss{border:none;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:700;line-height:1.2;" in STYLE_CSS
-    assert ".handoff-hint-dot{width:7px;height:7px;border-radius:999px;background:var(--success);" in STYLE_CSS
+    assert (
+        ".handoff-hint-text{min-width:0;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700;line-height:1.2;"
+        in STYLE_CSS
+    )
+    assert (
+        ".handoff-hint-action,.handoff-hint-dismiss{border:none;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:700;line-height:1.2;"
+        in STYLE_CSS
+    )
+    assert (
+        ".handoff-hint-dot{width:7px;height:7px;border-radius:999px;background:var(--success);"
+        in STYLE_CSS
+    )
 
 
 def test_handoff_summary_fallback_displays_clear_user_note():
     assert "const isFallback=!!state.fallback;" in UI_JS
-    assert "class=\"handoff-summary-fallback-note\"" in UI_JS
-    assert "Fallback summary generated from recent turns; no model-based rewrite was used." in UI_JS
+    assert 'class="handoff-summary-fallback-note"' in UI_JS
+    assert (
+        "Fallback summary generated from recent turns; no model-based rewrite was used."
+        in UI_JS
+    )
 
 
 def test_handoff_delete_clears_local_storage_markers():
     assert "function _clearHandoffStorageForSession(sid) {" in SESSIONS_JS
-    assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);" in SESSIONS_JS
-    assert "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);" in SESSIONS_JS
+    assert (
+        "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);"
+        in SESSIONS_JS
+    )
+    assert (
+        "_setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);"
+        in SESSIONS_JS
+    )
     assert "_clearHandoffStorageForSession(sid);" in SESSIONS_JS
     assert "ids.forEach(_clearHandoffStorageForSession);" in SESSIONS_JS
 
 
 def test_handoff_summary_renders_as_transcript_card_not_dock_card():
-    assert "function setHandoffUi" in SESSIONS_JS or "function setHandoffUi" in (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "function setHandoffUi" in SESSIONS_JS or "function setHandoffUi" in (
+        ROOT / "static" / "ui.js"
+    ).read_text(encoding="utf-8")
     ui_js = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     assert "_handoffCardsNode" in ui_js
     assert "data-handoff-card" in ui_js
@@ -115,7 +138,10 @@ def test_handoff_summary_renders_as_transcript_card_not_dock_card():
     assert 'class="tool-card-result handoff-summary-body"' in ui_js
     assert "renderMd(detail)" in ui_js
     assert "_insertCompressionLikeNode(handoffState?_handoffCardsNode" in ui_js
-    assert "window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid)" in ui_js
+    assert (
+        "window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid)"
+        in ui_js
+    )
     assert "!hasTransientTranscriptUi" in ui_js
     assert "handoff-summary-card" not in SESSIONS_JS
     assert "handoff-summary-card" not in STYLE_CSS
@@ -159,11 +185,15 @@ def test_handoff_summary_prompt_uses_you_and_你():
 def test_generating_handoff_summary_marks_session_as_handled():
     """Summary success uses a max(dismissed/handled) baseline for future checks."""
     generate_start = SESSIONS_JS.index("async function _generateHandoffSummary")
-    resolve_start = SESSIONS_JS.index("function _resolveSessionModelForDisplaySoon", generate_start)
+    resolve_start = SESSIONS_JS.index(
+        "function _resolveSessionModelForDisplaySoon", generate_start
+    )
     generate_body = SESSIONS_JS[generate_start:resolve_start]
 
     dismiss_start = SESSIONS_JS.index("function _dismissHandoffHint")
-    generate_start_after_dismiss = SESSIONS_JS.index("async function _generateHandoffSummary", dismiss_start)
+    generate_start_after_dismiss = SESSIONS_JS.index(
+        "async function _generateHandoffSummary", dismiss_start
+    )
     dismiss_body = SESSIONS_JS[dismiss_start:generate_start_after_dismiss]
 
     assert "_getHandoffSince(sid)" in generate_body
@@ -200,23 +230,38 @@ def test_no_api_key_handoff_summary_persists_fallback_summary(monkeypatch):
 
     # Force API-path validation to focus on fallback behavior only.
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
 
     persisted = []
     monkeypatch.setattr(
         routes,
         "_persist_handoff_summary",
-        lambda sid, summary, channel, rounds, fallback=False: persisted.append({
-            "sid": sid,
-            "summary": summary,
-            "channel": channel,
-            "rounds": rounds,
-            "fallback": fallback,
-        }) or {"ok": True},
+        lambda sid, summary, channel, rounds, fallback=False: (
+            persisted.append(
+                {
+                    "sid": sid,
+                    "summary": summary,
+                    "channel": channel,
+                    "rounds": rounds,
+                    "fallback": fallback,
+                }
+            )
+            or {"ok": True}
+        ),
     )
 
-    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
     monkeypatch.setattr(
         models,
         "get_cli_session_messages",
@@ -225,17 +270,27 @@ def test_no_api_key_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "I'll help you", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None: ("gpt-test", "openrouter", None),
+    )
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
-    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {"api_key": "", "provider": "openrouter", "base_url": None}
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
+        "api_key": "",
+        "provider": "openrouter",
+        "base_url": None,
+    }
     fake_hermes_cli = types.ModuleType("hermes_cli")
     fake_hermes_cli.__path__ = []
     fake_hermes_cli.runtime_provider = fake_runtime_module
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
 
-    response = routes._handle_handoff_summary(object(), {"session_id": "session-without-api-key"})
+    response = routes._handle_handoff_summary(
+        object(), {"session_id": "session-without-api-key"}
+    )
 
     assert response["ok"] is True
     assert response["fallback"] is True
@@ -255,23 +310,38 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     import api.models as models
 
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
 
     persisted = []
     monkeypatch.setattr(
         routes,
         "_persist_handoff_summary",
-        lambda sid, summary, channel, rounds, fallback=False: persisted.append({
-            "sid": sid,
-            "summary": summary,
-            "channel": channel,
-            "rounds": rounds,
-            "fallback": fallback,
-        }) or {"ok": True},
+        lambda sid, summary, channel, rounds, fallback=False: (
+            persisted.append(
+                {
+                    "sid": sid,
+                    "summary": summary,
+                    "channel": channel,
+                    "rounds": rounds,
+                    "fallback": fallback,
+                }
+            )
+            or {"ok": True}
+        ),
     )
 
-    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
     monkeypatch.setattr(
         models,
         "get_cli_session_messages",
@@ -280,7 +350,11 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
             {"role": "assistant", "content": "Sure, I can help", "timestamp": 2.0},
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None: ("gpt-test", "openrouter", None),
+    )
 
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = lambda requested=None: {
@@ -326,7 +400,9 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     fake_run_agent.AIAgent = _FailingAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
-    response = routes._handle_handoff_summary(object(), {"session_id": "session-with-exception"})
+    response = routes._handle_handoff_summary(
+        object(), {"session_id": "session-with-exception"}
+    )
 
     assert response["ok"] is True
     assert response["fallback"] is True
@@ -347,34 +423,65 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
     import api.models as models
 
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
 
     persisted = []
     monkeypatch.setattr(
         routes,
         "_persist_handoff_summary",
-        lambda sid, summary, channel, rounds, fallback=False: persisted.append({
-            "sid": sid,
-            "summary": summary,
-            "channel": channel,
-            "rounds": rounds,
-            "fallback": fallback,
-        }) or {"ok": True},
+        lambda sid, summary, channel, rounds, fallback=False: (
+            persisted.append(
+                {
+                    "sid": sid,
+                    "summary": summary,
+                    "channel": channel,
+                    "rounds": rounds,
+                    "fallback": fallback,
+                }
+            )
+            or {"ok": True}
+        ),
     )
 
-    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
     monkeypatch.setattr(
         models,
         "get_cli_session_messages",
         lambda sid: [
-            {"role": "user", "content": "Can we switch to a different method?", "timestamp": 1.0},
-            {"role": "assistant", "content": "Sure, here is the outline.", "timestamp": 2.0},
+            {
+                "role": "user",
+                "content": "Can we switch to a different method?",
+                "timestamp": 1.0,
+            },
+            {
+                "role": "assistant",
+                "content": "Sure, here is the outline.",
+                "timestamp": 2.0,
+            },
             {"role": "user", "content": "Keep going.", "timestamp": 3.0},
-            {"role": "assistant", "content": "Step 1 is done, step 2 is pending.", "timestamp": 4.0},
+            {
+                "role": "assistant",
+                "content": "Step 1 is done, step 2 is pending.",
+                "timestamp": 4.0,
+            },
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None: ("gpt-test", "openrouter", None),
+    )
 
     completion_calls = []
 
@@ -388,15 +495,26 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
         class completions:
             @staticmethod
             def create(*args, **kwargs):
-                max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+                max_tokens = kwargs.get("max_tokens") or kwargs.get(
+                    "max_completion_tokens"
+                )
                 completion_calls.append(max_tokens)
                 if len(completion_calls) == 1:
-                    return types.SimpleNamespace(choices=[
-                        _choice("- You can do step A, B, and C", finish_reason="length")
-                    ])
-                return types.SimpleNamespace(choices=[
-                    _choice("- You should continue with step D.\n- You can then review results.", finish_reason="stop")
-                ])
+                    return types.SimpleNamespace(
+                        choices=[
+                            _choice(
+                                "- You can do step A, B, and C", finish_reason="length"
+                            )
+                        ]
+                    )
+                return types.SimpleNamespace(
+                    choices=[
+                        _choice(
+                            "- You should continue with step D.\n- You can then review results.",
+                            finish_reason="stop",
+                        )
+                    ]
+                )
 
     class _Chat:
         completions = _Client.completions
@@ -436,7 +554,9 @@ def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
 
-    response = routes._handle_handoff_summary(object(), {"session_id": "session-length-retry"})
+    response = routes._handle_handoff_summary(
+        object(), {"session_id": "session-length-retry"}
+    )
 
     assert response["ok"] is True
     assert response["fallback"] is False
@@ -454,47 +574,76 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
     import api.models as models
 
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
 
     persisted = []
     monkeypatch.setattr(
         routes,
         "_persist_handoff_summary",
-        lambda sid, summary, channel, rounds, fallback=False: persisted.append({
-            "sid": sid,
-            "summary": summary,
-            "channel": channel,
-            "rounds": rounds,
-            "fallback": fallback,
-        }) or {"ok": True},
+        lambda sid, summary, channel, rounds, fallback=False: (
+            persisted.append(
+                {
+                    "sid": sid,
+                    "summary": summary,
+                    "channel": channel,
+                    "rounds": rounds,
+                    "fallback": fallback,
+                }
+            )
+            or {"ok": True}
+        ),
     )
 
-    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(
+        models,
+        "count_conversation_rounds",
+        lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD,
+    )
     monkeypatch.setattr(
         models,
         "get_cli_session_messages",
         lambda sid: [
             {"role": "user", "content": "Could you plan next moves?", "timestamp": 1.0},
-            {"role": "assistant", "content": "Let's draft a schedule.", "timestamp": 2.0},
+            {
+                "role": "assistant",
+                "content": "Let's draft a schedule.",
+                "timestamp": 2.0,
+            },
             {"role": "user", "content": "Anything else?", "timestamp": 3.0},
-            {"role": "assistant", "content": "Yes, one more check is needed.", "timestamp": 4.0},
+            {
+                "role": "assistant",
+                "content": "Yes, one more check is needed.",
+                "timestamp": 4.0,
+            },
         ],
     )
-    monkeypatch.setattr(cfg, "resolve_model_provider", lambda resolved_model=None: ("gpt-test", "openrouter", None))
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda resolved_model=None: ("gpt-test", "openrouter", None),
+    )
 
     class _Client:
         class completions:
             @staticmethod
             def create(*args, **kwargs):
-                return types.SimpleNamespace(choices=[
-                    types.SimpleNamespace(
-                        message=types.SimpleNamespace(
-                            content="I can help summarize this but",
+                return types.SimpleNamespace(
+                    choices=[
+                        types.SimpleNamespace(
+                            message=types.SimpleNamespace(
+                                content="I can help summarize this but",
                             ),
-                        finish_reason="length",
-                    )
-                ])
+                            finish_reason="length",
+                        )
+                    ]
+                )
 
     class _Chat:
         completions = _Client.completions
@@ -531,7 +680,9 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
 
-    response = routes._handle_handoff_summary(object(), {"session_id": "session-length-fallback"})
+    response = routes._handle_handoff_summary(
+        object(), {"session_id": "session-length-fallback"}
+    )
 
     assert response["ok"] is True
     assert response["fallback"] is True
@@ -542,7 +693,9 @@ def test_handoff_summary_falls_back_when_retry_still_incomplete(monkeypatch):
     assert persisted[0]["sid"] == "session-length-fallback"
 
 
-def test_handoff_summary_persistence_targets_both_backends_for_messaging_session(tmp_path, monkeypatch):
+def test_handoff_summary_persistence_targets_both_backends_for_messaging_session(
+    tmp_path, monkeypatch
+):
     """Messaging sessions should persist handoff summary markers into both local JSON and state.db."""
     import api.routes as routes
     import api.models as models
@@ -580,7 +733,9 @@ def test_handoff_summary_persistence_targets_both_backends_for_messaging_session
         session.source_label = "Telegram"
         session.save(touch_updated_at=False)
 
-        routes._persist_handoff_summary(sid, "Please handoff after context", "telegram", 2, False)
+        routes._persist_handoff_summary(
+            sid, "Please handoff after context", "telegram", 2, False
+        )
 
         saved = models.Session.load(sid)
         assert len(saved.messages) == 2
@@ -607,7 +762,9 @@ def test_handoff_summary_persistence_targets_both_backends_for_messaging_session
         conn.close()
 
 
-def test_persisted_handoff_summary_deduplicates_identical_tail_markers(tmp_path, monkeypatch):
+def test_persisted_handoff_summary_deduplicates_identical_tail_markers(
+    tmp_path, monkeypatch
+):
     """When the tail already contains the same handoff marker, repeated generation should be idempotent."""
     import api.routes as routes
     import api.models as models
@@ -631,7 +788,9 @@ def test_persisted_handoff_summary_deduplicates_identical_tail_markers(tmp_path,
         )
         conn.commit()
 
-        marker = routes._build_handoff_summary_tool_message(sid, "Repeat me", "telegram", 3, False)
+        marker = routes._build_handoff_summary_tool_message(
+            sid, "Repeat me", "telegram", 3, False
+        )
         session = models.Session(
             session_id=sid,
             title="Imported Messaging Session",
@@ -669,7 +828,9 @@ def test_persisted_handoff_summary_deduplicates_identical_tail_markers(tmp_path,
         conn.close()
 
 
-def test_persist_handoff_summary_falls_back_when_local_session_file_missing(tmp_path, monkeypatch):
+def test_persist_handoff_summary_falls_back_when_local_session_file_missing(
+    tmp_path, monkeypatch
+):
     """Messaging session IDs should still persist to state.db when no local WebUI session exists."""
     import api.routes as routes
     import api.profiles as profiles
@@ -684,7 +845,9 @@ def test_persist_handoff_summary_falls_back_when_local_session_file_missing(tmp_
     # Force messaging classification while keeping the local shell absent.
     monkeypatch.setattr(routes, "_is_messaging_session_id", lambda _sid: True)
     try:
-        routes._persist_handoff_summary(sid, "Persist without local shell", "telegram", 1, True)
+        routes._persist_handoff_summary(
+            sid, "Persist without local shell", "telegram", 1, True
+        )
         rows = conn.execute(
             "SELECT role, content FROM messages WHERE session_id = ? ORDER BY rowid ASC",
             (sid,),

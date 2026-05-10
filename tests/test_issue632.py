@@ -9,6 +9,7 @@ Covers:
   locally executed built-in command
 - boot.js uses the async slash autocomplete helper while typing
 """
+
 import pathlib
 
 
@@ -23,12 +24,15 @@ def test_subarg_registry_exists_and_reasoning_is_promoted_to_builtin():
     assert "const SLASH_SUBARG_SOURCES=" in COMMANDS_JS
     # /reasoning is now a proper builtin command with a fn: handler (cmdReasoning)
     # so it is in the COMMANDS array, not SLASH_SUBARG_SOURCES
-    assert "{name:'reasoning'" in COMMANDS_JS, \
+    assert "{name:'reasoning'" in COMMANDS_JS, (
         "/reasoning must be registered as a local built-in command with fn: handler"
-    assert "fn:cmdReasoning" in COMMANDS_JS, \
+    )
+    assert "fn:cmdReasoning" in COMMANDS_JS, (
         "/reasoning entry must reference cmdReasoning function"
-    assert "function cmdReasoning" in COMMANDS_JS, \
+    )
+    assert "function cmdReasoning" in COMMANDS_JS, (
         "cmdReasoning function must be defined"
+    )
     # source:'subarg-command' is still used for model/personality in SLASH_SUBARG_SOURCES
     assert "source:'subarg-command'" in COMMANDS_JS
 
@@ -55,5 +59,6 @@ def test_subarg_dropdown_has_distinct_parent_and_argument_styling():
     assert ".cmd-item-subarg" in STYLE_CSS
     assert ".cmd-item.selected{background:var(--accent-bg);" in STYLE_CSS
     assert "_cmdSelectedIdx=matches.length?0:-1;" in COMMANDS_JS
-    assert "getSlashAutocompleteMatches(nextValue).then(matches=>" in COMMANDS_JS, \
+    assert "getSlashAutocompleteMatches(nextValue).then(matches=>" in COMMANDS_JS, (
         "selecting a first-level command with sub-args should immediately open second-level suggestions"
+    )

@@ -17,7 +17,6 @@ Fix:
 import json
 import threading
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -31,26 +30,26 @@ def test_ensure_cron_project_creates_per_profile(tmp_path, monkeypatch):
     import api.models as models
     import api.profiles as profiles
 
-    projects_file = tmp_path / 'projects.json'
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, '_projects_migrated', True)
-    monkeypatch.setattr(models, '_CRON_PROJECT_LOCK', threading.Lock())
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    monkeypatch.setattr(models, "_CRON_PROJECT_LOCK", threading.Lock())
     profiles._invalidate_root_profile_cache()
-    monkeypatch.setattr(profiles, 'list_profiles_api', lambda: [])
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
 
-    monkeypatch.setattr(profiles, '_active_profile', 'haku')
+    monkeypatch.setattr(profiles, "_active_profile", "haku")
     pid_haku = models.ensure_cron_project()
-    monkeypatch.setattr(profiles, '_active_profile', 'kinni')
+    monkeypatch.setattr(profiles, "_active_profile", "kinni")
     pid_kinni = models.ensure_cron_project()
 
     assert pid_haku != pid_kinni, "Per-profile cron projects must have distinct ids"
 
     # Verify on disk
     saved = json.loads(projects_file.read_text())
-    cron_rows = [p for p in saved if p['name'] == 'Cron Jobs']
+    cron_rows = [p for p in saved if p["name"] == "Cron Jobs"]
     assert len(cron_rows) == 2
-    assert {r['profile'] for r in cron_rows} == {'haku', 'kinni'}
+    assert {r["profile"] for r in cron_rows} == {"haku", "kinni"}
 
 
 def test_ensure_cron_project_idempotent_per_profile(tmp_path, monkeypatch):
@@ -59,14 +58,14 @@ def test_ensure_cron_project_idempotent_per_profile(tmp_path, monkeypatch):
     import api.models as models
     import api.profiles as profiles
 
-    projects_file = tmp_path / 'projects.json'
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, '_projects_migrated', True)
-    monkeypatch.setattr(models, '_CRON_PROJECT_LOCK', threading.Lock())
+    projects_file = tmp_path / "projects.json"
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    monkeypatch.setattr(models, "_CRON_PROJECT_LOCK", threading.Lock())
     profiles._invalidate_root_profile_cache()
-    monkeypatch.setattr(profiles, 'list_profiles_api', lambda: [])
-    monkeypatch.setattr(profiles, '_active_profile', 'haku')
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(profiles, "_active_profile", "haku")
 
     pid1 = models.ensure_cron_project()
     pid2 = models.ensure_cron_project()
@@ -80,24 +79,37 @@ def test_ensure_cron_project_back_tags_legacy_untagged(tmp_path, monkeypatch):
     import api.models as models
     import api.profiles as profiles
 
-    projects_file = tmp_path / 'projects.json'
-    legacy_pid = 'legacy123abc'
-    projects_file.write_text(json.dumps([
-        {'project_id': legacy_pid, 'name': 'Cron Jobs', 'color': '#6366f1', 'created_at': 1.0}
-    ]))
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, '_projects_migrated', True)  # skip the load_projects auto-migration
-    monkeypatch.setattr(models, '_CRON_PROJECT_LOCK', threading.Lock())
+    projects_file = tmp_path / "projects.json"
+    legacy_pid = "legacy123abc"
+    projects_file.write_text(
+        json.dumps(
+            [
+                {
+                    "project_id": legacy_pid,
+                    "name": "Cron Jobs",
+                    "color": "#6366f1",
+                    "created_at": 1.0,
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(
+        models, "_projects_migrated", True
+    )  # skip the load_projects auto-migration
+    monkeypatch.setattr(models, "_CRON_PROJECT_LOCK", threading.Lock())
     profiles._invalidate_root_profile_cache()
-    monkeypatch.setattr(profiles, 'list_profiles_api', lambda: [])
-    monkeypatch.setattr(profiles, '_active_profile', 'haku')
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(profiles, "_active_profile", "haku")
 
     returned = models.ensure_cron_project()
     assert returned == legacy_pid
 
     saved = json.loads(projects_file.read_text())
-    assert saved[0]['profile'] == 'haku', "Legacy untagged cron project must be back-tagged"
+    assert saved[0]["profile"] == "haku", (
+        "Legacy untagged cron project must be back-tagged"
+    )
 
 
 def test_ensure_cron_project_renamed_root_matches_default(tmp_path, monkeypatch):
@@ -108,22 +120,35 @@ def test_ensure_cron_project_renamed_root_matches_default(tmp_path, monkeypatch)
     import api.models as models
     import api.profiles as profiles
 
-    projects_file = tmp_path / 'projects.json'
-    pid = 'crondefault1'
-    projects_file.write_text(json.dumps([
-        {'project_id': pid, 'name': 'Cron Jobs', 'color': '#6366f1',
-         'profile': 'default', 'created_at': 1.0}
-    ]))
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, '_projects_migrated', True)
-    monkeypatch.setattr(models, '_CRON_PROJECT_LOCK', threading.Lock())
+    projects_file = tmp_path / "projects.json"
+    pid = "crondefault1"
+    projects_file.write_text(
+        json.dumps(
+            [
+                {
+                    "project_id": pid,
+                    "name": "Cron Jobs",
+                    "color": "#6366f1",
+                    "profile": "default",
+                    "created_at": 1.0,
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    monkeypatch.setattr(models, "_CRON_PROJECT_LOCK", threading.Lock())
 
-    monkeypatch.setattr(profiles, 'list_profiles_api', lambda: [
-        {'name': 'kinni', 'is_default': True, 'path': str(tmp_path)},
-    ])
+    monkeypatch.setattr(
+        profiles,
+        "list_profiles_api",
+        lambda: [
+            {"name": "kinni", "is_default": True, "path": str(tmp_path)},
+        ],
+    )
     profiles._invalidate_root_profile_cache()
-    monkeypatch.setattr(profiles, '_active_profile', 'kinni')
+    monkeypatch.setattr(profiles, "_active_profile", "kinni")
 
     returned = models.ensure_cron_project()
     assert returned == pid, "Renamed root must reuse the 'default'-tagged cron project"
@@ -137,39 +162,66 @@ def test_load_projects_backfills_from_session_index(tmp_path, monkeypatch):
     import api.config as cfg
     import api.models as models
 
-    projects_file = tmp_path / 'projects.json'
-    index_file = tmp_path / '_index.json'
+    projects_file = tmp_path / "projects.json"
+    index_file = tmp_path / "_index.json"
 
-    projects_file.write_text(json.dumps([
-        {'project_id': 'abc111', 'name': 'My Project', 'created_at': 1.0},
-        {'project_id': 'def222', 'name': 'Other', 'created_at': 2.0},
-        {'project_id': 'tagged3', 'name': 'Already Tagged',
-         'profile': 'haku', 'created_at': 3.0},
-    ]))
-    index_file.write_text(json.dumps([
-        {'session_id': 's1', 'project_id': 'abc111', 'profile': 'haku', 'message_count': 1},
-        {'session_id': 's2', 'project_id': 'def222', 'profile': 'kinni', 'message_count': 2},
-        {'session_id': 's3', 'project_id': 'tagged3', 'profile': 'haku', 'message_count': 0},
-    ]))
+    projects_file.write_text(
+        json.dumps(
+            [
+                {"project_id": "abc111", "name": "My Project", "created_at": 1.0},
+                {"project_id": "def222", "name": "Other", "created_at": 2.0},
+                {
+                    "project_id": "tagged3",
+                    "name": "Already Tagged",
+                    "profile": "haku",
+                    "created_at": 3.0,
+                },
+            ]
+        )
+    )
+    index_file.write_text(
+        json.dumps(
+            [
+                {
+                    "session_id": "s1",
+                    "project_id": "abc111",
+                    "profile": "haku",
+                    "message_count": 1,
+                },
+                {
+                    "session_id": "s2",
+                    "project_id": "def222",
+                    "profile": "kinni",
+                    "message_count": 2,
+                },
+                {
+                    "session_id": "s3",
+                    "project_id": "tagged3",
+                    "profile": "haku",
+                    "message_count": 0,
+                },
+            ]
+        )
+    )
 
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(cfg, 'SESSION_INDEX_FILE', index_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', index_file)
-    monkeypatch.setattr(models, '_projects_migrated', False)
-    monkeypatch.setattr(models, '_PROJECTS_MIGRATION_LOCK', threading.Lock())
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(cfg, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index_file)
+    monkeypatch.setattr(models, "_projects_migrated", False)
+    monkeypatch.setattr(models, "_PROJECTS_MIGRATION_LOCK", threading.Lock())
 
     out = models.load_projects()
-    by_id = {p['project_id']: p for p in out}
-    assert by_id['abc111']['profile'] == 'haku', "abc111 had a haku session"
-    assert by_id['def222']['profile'] == 'kinni', "def222 had a kinni session"
-    assert by_id['tagged3']['profile'] == 'haku', "Already-tagged unchanged"
+    by_id = {p["project_id"]: p for p in out}
+    assert by_id["abc111"]["profile"] == "haku", "abc111 had a haku session"
+    assert by_id["def222"]["profile"] == "kinni", "def222 had a kinni session"
+    assert by_id["tagged3"]["profile"] == "haku", "Already-tagged unchanged"
 
     # Persisted to disk
     saved = json.loads(projects_file.read_text())
-    saved_by_id = {p['project_id']: p for p in saved}
-    assert saved_by_id['abc111']['profile'] == 'haku'
-    assert saved_by_id['def222']['profile'] == 'kinni'
+    saved_by_id = {p["project_id"]: p for p in saved}
+    assert saved_by_id["abc111"]["profile"] == "haku"
+    assert saved_by_id["def222"]["profile"] == "kinni"
 
 
 def test_load_projects_backfills_to_default_when_no_sessions(tmp_path, monkeypatch):
@@ -177,21 +229,25 @@ def test_load_projects_backfills_to_default_when_no_sessions(tmp_path, monkeypat
     import api.config as cfg
     import api.models as models
 
-    projects_file = tmp_path / 'projects.json'
-    projects_file.write_text(json.dumps([
-        {'project_id': 'orphan1', 'name': 'Orphan', 'created_at': 1.0},
-    ]))
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text(
+        json.dumps(
+            [
+                {"project_id": "orphan1", "name": "Orphan", "created_at": 1.0},
+            ]
+        )
+    )
 
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
     # Index doesn't exist
-    monkeypatch.setattr(cfg, 'SESSION_INDEX_FILE', tmp_path / 'no-index.json')
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', tmp_path / 'no-index.json')
-    monkeypatch.setattr(models, '_projects_migrated', False)
-    monkeypatch.setattr(models, '_PROJECTS_MIGRATION_LOCK', threading.Lock())
+    monkeypatch.setattr(cfg, "SESSION_INDEX_FILE", tmp_path / "no-index.json")
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "no-index.json")
+    monkeypatch.setattr(models, "_projects_migrated", False)
+    monkeypatch.setattr(models, "_PROJECTS_MIGRATION_LOCK", threading.Lock())
 
     out = models.load_projects()
-    assert out[0]['profile'] == 'default'
+    assert out[0]["profile"] == "default"
 
 
 def test_load_projects_idempotent_after_first_migrate(tmp_path, monkeypatch):
@@ -199,15 +255,23 @@ def test_load_projects_idempotent_after_first_migrate(tmp_path, monkeypatch):
     import api.config as cfg
     import api.models as models
 
-    projects_file = tmp_path / 'projects.json'
-    projects_file.write_text(json.dumps([
-        {'project_id': 'abc111', 'name': 'My Project',
-         'profile': 'haku', 'created_at': 1.0},
-    ]))
-    monkeypatch.setattr(cfg, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, 'PROJECTS_FILE', projects_file)
-    monkeypatch.setattr(models, '_projects_migrated', False)
-    monkeypatch.setattr(models, '_PROJECTS_MIGRATION_LOCK', threading.Lock())
+    projects_file = tmp_path / "projects.json"
+    projects_file.write_text(
+        json.dumps(
+            [
+                {
+                    "project_id": "abc111",
+                    "name": "My Project",
+                    "profile": "haku",
+                    "created_at": 1.0,
+                },
+            ]
+        )
+    )
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects_file)
+    monkeypatch.setattr(models, "_projects_migrated", False)
+    monkeypatch.setattr(models, "_PROJECTS_MIGRATION_LOCK", threading.Lock())
 
     mtime_before = projects_file.stat().st_mtime_ns
     models.load_projects()
@@ -226,23 +290,25 @@ def test_profile_field_on_project_dict_default_create(monkeypatch):
     instead we pin the file-level invariant: the create handler now stamps
     `profile` on the created dict.
     """
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
+    src = (Path(__file__).parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     # The create handler must now include get_active_profile_name() for the new dict
     create_idx = src.find('"/api/projects/create"')
     assert create_idx > 0
     next_handler_idx = src.find('"/api/projects/rename"', create_idx)
     create_block = src[create_idx:next_handler_idx]
-    assert '"profile": get_active_profile_name() or \'default\'' in create_block, (
+    assert "\"profile\": get_active_profile_name() or 'default'" in create_block, (
         "Project create must stamp the active profile (#1614)"
     )
 
 
 def test_project_rename_rejects_cross_profile():
     """Source-string check that rename's active-profile guard is in place."""
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
+    src = (Path(__file__).parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     rename_idx = src.find('"/api/projects/rename"')
     assert rename_idx > 0
@@ -254,12 +320,13 @@ def test_project_rename_rejects_cross_profile():
 
 
 def test_project_delete_rejects_cross_profile():
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
+    src = (Path(__file__).parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     delete_idx = src.find('"/api/projects/delete"')
     assert delete_idx > 0
-    delete_block = src[delete_idx:delete_idx + 1500]
+    delete_block = src[delete_idx : delete_idx + 1500]
     assert '_profiles_match(proj.get("profile"), active_profile)' in delete_block, (
         "Delete must check active-profile ownership"
     )
@@ -267,12 +334,13 @@ def test_project_delete_rejects_cross_profile():
 
 def test_session_move_rejects_cross_profile_project():
     """/api/session/move must refuse moves into a project from another profile."""
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
+    src = (Path(__file__).parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     move_idx = src.find('"/api/session/move"')
     assert move_idx > 0
-    move_block = src[move_idx:move_idx + 2000]
+    move_block = src[move_idx : move_idx + 2000]
     assert '_profiles_match(target.get("profile"), active_profile)' in move_block, (
         "session/move must check target project's active-profile ownership"
     )
@@ -285,6 +353,7 @@ def test_session_move_rejects_cross_profile_project():
 def _reset_profile_state():
     import api.profiles as profiles
     import api.models as models
+
     profiles._invalidate_root_profile_cache()
     # Reset migration flag so each test starts fresh
     models._projects_migrated = False

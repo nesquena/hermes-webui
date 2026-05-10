@@ -14,9 +14,11 @@ COMPACT_STYLE = re.sub(r"\s+", "", STYLE)
 def test_kanban_has_native_sidebar_rail_and_mobile_tab():
     assert 'data-panel="kanban"' in INDEX
     assert 'data-i18n-title="tab_kanban"' in INDEX
-    assert 'onclick="switchPanel(\'kanban\')"' in INDEX
+    assert "onclick=\"switchPanel('kanban')\"" in INDEX
     assert 'data-label="Kanban"' in INDEX
-    kanban_section = INDEX[INDEX.find('id="mainKanban"'):INDEX.find('id="mainWorkspaces"')]
+    kanban_section = INDEX[
+        INDEX.find('id="mainKanban"') : INDEX.find('id="mainWorkspaces"')
+    ]
     assert "<iframe" not in kanban_section.lower()
 
 
@@ -33,7 +35,9 @@ def test_kanban_has_sidebar_panel_and_main_board_mounts():
 
 
 def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
-    assert "'kanban'" in re.search(r"\[[^\]]+\]\.forEach\(p => \{\s*mainEl\.classList", PANELS).group(0)
+    assert "'kanban'" in re.search(
+        r"\[[^\]]+\]\.forEach\(p => \{\s*mainEl\.classList", PANELS
+    ).group(0)
     assert "if (nextPanel === 'kanban') await loadKanban();" in PANELS
     assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
 
@@ -59,8 +63,14 @@ def test_kanban_task_detail_renders_read_only_sections():
         "kanban-detail-runs",
     ):
         assert section_class in PANELS
-    assert "method: 'POST'" not in PANELS[PANELS.find("async function loadKanbanTask"):PANELS.find("function loadTodos")]
-
+    assert (
+        "method: 'POST'"
+        not in PANELS[
+            PANELS.find("async function loadKanbanTask") : PANELS.find(
+                "function loadTodos"
+            )
+        ]
+    )
 
 
 def test_kanban_write_mvp_has_native_controls_and_api_calls():
@@ -93,7 +103,7 @@ def test_kanban_new_task_header_button_opens_modal():
     """
     # 1. Header "+" button is wired to openKanbanCreate(), NOT createKanbanTask().
     assert 'id="kanbanNewTaskBtn"' in INDEX
-    btn_html = INDEX[INDEX.find('id="kanbanNewTaskBtn"'):]
+    btn_html = INDEX[INDEX.find('id="kanbanNewTaskBtn"') :]
     btn_html = btn_html[: btn_html.find("</button>") + len("</button>")]
     assert 'onclick="openKanbanCreate()"' in btn_html, (
         "Panel-head '+' button must call openKanbanCreate() (modal), not "
@@ -103,7 +113,10 @@ def test_kanban_new_task_header_button_opens_modal():
     # 2. The create-task modal markup exists in index.html, with all the field
     #    ids the JS / API contract expects.
     assert 'id="kanbanTaskModal"' in INDEX
-    assert 'class="kanban-modal-overlay"' in INDEX[INDEX.find('id="kanbanTaskModal"') - 80:]
+    assert (
+        'class="kanban-modal-overlay"'
+        in INDEX[INDEX.find('id="kanbanTaskModal"') - 80 :]
+    )
     for field_id in (
         "kanbanTaskModalTitleInput",
         "kanbanTaskModalBody",
@@ -123,9 +136,7 @@ def test_kanban_new_task_header_button_opens_modal():
     # 4. openKanbanCreate() unhides the modal, focuses the title field, populates
     #    assignee/tenant datalists, binds keydown listener.
     assert "function openKanbanCreate()" in PANELS
-    open_fn = re.search(
-        r"function openKanbanCreate\(\)\{(.*?)\n\}", PANELS, re.DOTALL
-    )
+    open_fn = re.search(r"function openKanbanCreate\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
     assert open_fn, "openKanbanCreate() not found"
     body = open_fn.group(1)
     assert "modal.hidden = false" in body
@@ -201,9 +212,9 @@ def test_kanban_task_detail_has_edit_button_and_modal_supports_edit_mode():
     )
     assert render_match, "_kanbanRenderTaskDetail() not found"
     render_body = render_match.group(1)
-    assert 'class="kanban-edit-btn"' in render_body or "kanban-edit-btn" in render_body, (
-        "Task detail view must include the Edit button (.kanban-edit-btn)."
-    )
+    assert (
+        'class="kanban-edit-btn"' in render_body or "kanban-edit-btn" in render_body
+    ), "Task detail view must include the Edit button (.kanban-edit-btn)."
     assert "openKanbanEdit(" in render_body, (
         "Edit button must invoke openKanbanEdit(taskId)."
     )
@@ -314,22 +325,26 @@ def test_kanban_assignee_dropdown_uses_select_not_freetext():
     sel_idx = INDEX.find('id="kanbanTaskModalAssignee"')
     assert sel_idx != -1, "kanbanTaskModalAssignee element not found"
     # Walk back to find the opening tag — it must be a <select>, not <input>.
-    start = INDEX.rfind('<', 0, sel_idx)
-    tag_open = INDEX[start:sel_idx + 60]
-    assert tag_open.startswith('<select'), (
+    start = INDEX.rfind("<", 0, sel_idx)
+    tag_open = INDEX[start : sel_idx + 60]
+    assert tag_open.startswith("<select"), (
         f"kanbanTaskModalAssignee must be a <select> element, got: {tag_open[:80]!r}"
     )
 
     # Hint element exists and references the dispatcher claim contract.
     assert 'id="kanbanTaskModalAssigneeHint"' in INDEX
     hint_idx = INDEX.find('id="kanbanTaskModalAssigneeHint"')
-    hint_block = INDEX[hint_idx:hint_idx + 400]
-    assert "Hermes profile" in hint_block or "data-i18n=\"kanban_assignee_hint\"" in hint_block
+    hint_block = INDEX[hint_idx : hint_idx + 400]
+    assert (
+        "Hermes profile" in hint_block
+        or 'data-i18n="kanban_assignee_hint"' in hint_block
+    )
 
     # The populator function loads from /api/profiles and groups options.
     pop_match = re.search(
         r"async function _kanbanPopulateAssigneeSelect\([^)]*\)\{(.*?)\n\}",
-        PANELS, re.DOTALL,
+        PANELS,
+        re.DOTALL,
     )
     assert pop_match, "_kanbanPopulateAssigneeSelect() not found"
     pop_body = pop_match.group(1)
@@ -387,8 +402,8 @@ def test_kanban_run_dispatcher_button_exists_and_is_distinct_from_preview():
     btn_idx = INDEX.find('id="btnKanbanRunDispatcher"')
     # Search backward to the opening `<button` and forward to `</button>` to
     # capture the full element (class= attribute precedes id= in the markup).
-    btn_start = INDEX.rfind('<button', 0, btn_idx)
-    btn_end = INDEX.find('</button>', btn_idx) + len('</button>')
+    btn_start = INDEX.rfind("<button", 0, btn_idx)
+    btn_end = INDEX.find("</button>", btn_idx) + len("</button>")
     btn_html = INDEX[btn_start:btn_end]
     assert 'onclick="runKanbanDispatcher()"' in btn_html
     # Distinct visual class so users can tell it apart from the preview button.
@@ -397,7 +412,7 @@ def test_kanban_run_dispatcher_button_exists_and_is_distinct_from_preview():
     # 4. The sidebar bulk bar also has a Run dispatcher button alongside the
     # existing Preview button, so users in the filter pane can also run.
     bulk_idx = INDEX.find("kanbanBulkBar")
-    bulk_html = INDEX[bulk_idx:bulk_idx + 1500]
+    bulk_html = INDEX[bulk_idx : bulk_idx + 1500]
     assert 'onclick="runKanbanDispatcher()"' in bulk_html, (
         "Sidebar bulk bar must also expose Run dispatcher."
     )
@@ -405,13 +420,13 @@ def test_kanban_run_dispatcher_button_exists_and_is_distinct_from_preview():
     assert "function _kanbanFormatDispatchResult" in PANELS
     fmt_match = re.search(
         r"function _kanbanFormatDispatchResult\([^)]*\)\{(.*?)\n\}",
-        PANELS, re.DOTALL,
+        PANELS,
+        re.DOTALL,
     )
     assert fmt_match
     fmt_body = fmt_match.group(1)
     for token in ("spawned", "skipped_unassigned", "skipped_nonspawnable", "promoted"):
         assert token in fmt_body, f"dispatch summary missing field: {token}"
-
 
 
 def test_kanban_board_has_native_css_classes():
@@ -435,11 +450,15 @@ def test_kanban_main_view_scrolls_when_task_preview_is_tall():
     assert re.search(
         r"main\.main\.showing-kanban\s*>\s*#mainKanban\s*\{[^}]*display:flex;[^}]*overflow-y:auto;",
         COMPACT_STYLE,
-    ), "Kanban main view must expose a vertical scrollbar when detail content is taller than the viewport"
+    ), (
+        "Kanban main view must expose a vertical scrollbar when detail content is taller than the viewport"
+    )
 
 
 def test_kanban_i18n_keys_exist_in_every_locale_block():
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    locale_blocks = re.findall(
+        r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S
+    )
     assert len(locale_blocks) >= 8
     required_keys = [
         "tab_kanban",
@@ -472,7 +491,6 @@ def test_kanban_i18n_keys_exist_in_every_locale_block():
     assert missing == []
 
 
-
 def test_kanban_dashboard_parity_core_controls_are_native():
     assert 'id="kanbanOnlyMine"' in INDEX
     assert 'id="kanbanBulkBar"' in INDEX
@@ -495,16 +513,17 @@ def test_kanban_dashboard_parity_core_controls_are_native():
     # the new SSE /api/kanban/events/stream subscription must be present.
     # The multi-board PR replaced setInterval with EventSource as the
     # default, falling back to setInterval after repeated SSE failures.
-    assert (
-        "setInterval(refreshKanbanEvents" in PANELS
-        or "new EventSource" in PANELS
-    ), "Kanban must subscribe to live events via SSE or polling"
+    assert "setInterval(refreshKanbanEvents" in PANELS or "new EventSource" in PANELS, (
+        "Kanban must subscribe to live events via SSE or polling"
+    )
     assert "prompt(" not in PANELS
     assert "confirm(" not in PANELS
 
 
 def test_kanban_dashboard_parity_i18n_keys_exist():
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    locale_blocks = re.findall(
+        r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S
+    )
     required_keys = [
         "kanban_only_mine",
         "kanban_bulk_action",
@@ -524,7 +543,6 @@ def test_kanban_dashboard_parity_i18n_keys_exist():
     assert missing == []
 
 
-
 def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes():
     for symbol in (
         "function _kanbanRenderProfileLanes",
@@ -542,12 +560,12 @@ def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes(
         "kanban-card-actions",
         "kanban-card-id",
         "kanban-card-assignee",
-        "draggable=\"true\"",
-        "ondrop=\"dropKanbanTask",
+        'draggable="true"',
+        'ondrop="dropKanbanTask',
         "onkeydown=\"if(event.key==='Enter'||event.key===' ')",
     ):
         assert token in PANELS
-    assert "target=\"_blank\" rel=\"noopener noreferrer\"" in PANELS
+    assert 'target="_blank" rel="noopener noreferrer"' in PANELS
     assert "javascript:" not in PANELS.lower()
 
 
@@ -575,8 +593,16 @@ def test_kanban_ui_parity_polish_css_and_i18n_exist():
         ".hermes-kanban-md",
     ):
         assert selector in STYLE
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
-    required_keys = ["kanban_lanes_by_profile", "kanban_card_complete", "kanban_card_archive", "kanban_unassigned", "kanban_work_queue_hint"]
+    locale_blocks = re.findall(
+        r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S
+    )
+    required_keys = [
+        "kanban_lanes_by_profile",
+        "kanban_card_complete",
+        "kanban_card_archive",
+        "kanban_unassigned",
+        "kanban_work_queue_hint",
+    ]
     missing = [
         f"{locale}:{key}"
         for locale, body in locale_blocks
@@ -584,7 +610,6 @@ def test_kanban_ui_parity_polish_css_and_i18n_exist():
         if re.search(rf"\b{re.escape(key)}\s*:", body) is None
     ]
     assert missing == []
-
 
 
 def test_kanban_review_feedback_static_ui_fixes_exist():
@@ -603,6 +628,7 @@ def test_kanban_review_feedback_static_ui_fixes_exist():
 def test_kanban_task_detail_renderer_executes_with_log_and_formats_feedback():
     import json
     import subprocess
+
     script = """
 const fs = require('fs');
 const vm = require('vm');
@@ -640,7 +666,9 @@ const html = vm.runInContext(`_kanbanRenderTaskDetail({
 })`, context);
 console.log(JSON.stringify({html}));
 """
-    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     html = json.loads(result.stdout)["html"]
     assert "worker log" in html
     assert "kanban-back-btn" in html
@@ -656,6 +684,7 @@ def test_kanban_readonly_banner_starts_hidden_and_is_toggled_on_load():
     label is misleading when the kanban_db is fully writable.
     """
     import os
+
     here = os.path.dirname(os.path.abspath(__file__))
     index_path = os.path.join(here, "..", "static", "index.html")
     with open(index_path, "r", encoding="utf-8") as f:
@@ -665,8 +694,11 @@ def test_kanban_readonly_banner_starts_hidden_and_is_toggled_on_load():
     assert 'data-i18n="kanban_read_only"' in html
     # The banner element must have inline style="display:none" (default-hidden)
     # A naive substring check is sufficient — there is exactly one such element.
-    banner_block = html[html.find('class="kanban-readonly"'):html.find('class="kanban-readonly"') + 200]
-    assert 'display:none' in banner_block, (
+    banner_block = html[
+        html.find('class="kanban-readonly"') : html.find('class="kanban-readonly"')
+        + 200
+    ]
+    assert "display:none" in banner_block, (
         "Read-only banner must default to display:none in HTML to avoid "
         "flashing the wrong message before loadKanban() resolves the actual "
         "read_only flag from the API."
@@ -685,6 +717,7 @@ def test_kanban_readonly_banner_starts_hidden_and_is_toggled_on_load():
 
 # ── Multi-board switcher UI tests ───────────────────────────────────────────
 
+
 def test_kanban_board_switcher_markup_in_index():
     """The board switcher next to the Board title must be in index.html so
     it loads on first paint without a JS round-trip."""
@@ -695,7 +728,7 @@ def test_kanban_board_switcher_markup_in_index():
     # Switcher must be hidden by default — only revealed when ≥1 non-default
     # board exists, otherwise it would clutter single-board deployments.
     assert 'id="kanbanBoardSwitcher"' in INDEX
-    assert 'hidden>' in INDEX or 'hidden ' in INDEX  # presence of hidden attr
+    assert "hidden>" in INDEX or "hidden " in INDEX  # presence of hidden attr
 
 
 def test_kanban_board_modal_markup_in_index():
@@ -776,12 +809,13 @@ def test_kanban_archive_board_uses_showConfirmDialog():
     arch_idx = PANELS.find("async function archiveKanbanBoard")
     assert arch_idx > 0
     # Look at the next 800 chars
-    archive_block = PANELS[arch_idx:arch_idx + 800]
+    archive_block = PANELS[arch_idx : arch_idx + 800]
     assert "showConfirmDialog" in archive_block
     assert "danger: true" in archive_block
 
 
 # ── SSE event stream UI tests ───────────────────────────────────────────────
+
 
 def test_kanban_sse_eventsource_subscription_is_default():
     """The Kanban panel must subscribe to /api/kanban/events/stream via
@@ -835,6 +869,7 @@ def test_kanban_board_color_is_validated_against_css_injection():
     """
     import json
     import subprocess
+
     script = """
 const fs = require('fs');
 const src = fs.readFileSync('static/panels.js', 'utf8');
@@ -866,7 +901,9 @@ const results = cases.map(([input, expected]) => ({
 }));
 console.log(JSON.stringify(results));
 """
-    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     results = json.loads(result.stdout)
     failures = [r for r in results if r["actual"] != r["expected"]]
     assert not failures, f"_kanbanSafeColor mismatches: {failures}"

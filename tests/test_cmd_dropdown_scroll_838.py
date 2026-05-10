@@ -1,5 +1,6 @@
 """Tests for #838 — slash command dropdown keyboard navigation keeps the
 selected item in view."""
+
 import os
 import re
 
@@ -18,10 +19,10 @@ class TestNavigateCmdDropdownScroll:
 
     def test_navigate_calls_scroll_into_view(self):
         js = _read("static/commands.js")
-        m = re.search(r'function navigateCmdDropdown\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function navigateCmdDropdown\(.*?\n\}", js, re.DOTALL)
         assert m, "navigateCmdDropdown not found"
         fn = m.group(0)
-        assert 'scrollIntoView' in fn, (
+        assert "scrollIntoView" in fn, (
             "navigateCmdDropdown must call scrollIntoView on the newly "
             "selected item so ↓/↑ keeps the highlight visible (#838)"
         )
@@ -31,7 +32,7 @@ class TestNavigateCmdDropdownScroll:
         needed, minimum distance — won't jump the list around on every
         arrow-key press when the item is already in view."""
         js = _read("static/commands.js")
-        m = re.search(r'function navigateCmdDropdown\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function navigateCmdDropdown\(.*?\n\}", js, re.DOTALL)
         assert m
         fn = m.group(0)
         assert "block:'nearest'" in fn or 'block: "nearest"' in fn, (
@@ -43,7 +44,7 @@ class TestNavigateCmdDropdownScroll:
         """The scroll call must come AFTER adding the .selected class so
         the correct item is targeted."""
         js = _read("static/commands.js")
-        m = re.search(r'function navigateCmdDropdown\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function navigateCmdDropdown\(.*?\n\}", js, re.DOTALL)
         assert m
         fn = m.group(0)
         selected_pos = fn.find("classList.add('selected')")
@@ -59,11 +60,15 @@ class TestNavigateCmdDropdownScroll:
         (or similar) so scrollIntoView finds it as the scroll ancestor
         rather than bubbling up to the viewport."""
         css = _read("static/style.css")
-        m = re.search(r'\.cmd-dropdown\s*\{[^}]+\}', css)
+        m = re.search(r"\.cmd-dropdown\s*\{[^}]+\}", css)
         assert m, ".cmd-dropdown rule not found"
         block = m.group(0)
-        assert 'overflow-y:auto' in block or 'overflow-y: auto' in block or \
-               'overflow:auto' in block or 'overflow: auto' in block, (
+        assert (
+            "overflow-y:auto" in block
+            or "overflow-y: auto" in block
+            or "overflow:auto" in block
+            or "overflow: auto" in block
+        ), (
             ".cmd-dropdown must have overflow-y:auto so scrollIntoView "
             "scrolls within the dropdown, not the whole page"
         )

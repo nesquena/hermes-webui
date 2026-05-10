@@ -26,6 +26,7 @@ from api.config import resolve_model_provider, model_with_provider_context
 def _set_config_provider(provider: str, default_model: str = "claude-sonnet-4.6"):
     """Temporarily set the model config provider for testing."""
     import api.config as cfg_mod
+
     old = dict(cfg_mod.cfg.get("model", {}))
     cfg_mod.cfg["model"] = {"provider": provider, "default": default_model}
     return old, cfg_mod
@@ -39,15 +40,23 @@ def _restore_config(old, cfg_mod):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 def test_openrouter_free_suffix_survives_provider_qualification():
     """tencent/hy3-preview:free must resolve correctly when qualified."""
     import api.config as cfg_mod
+
     old, cfg_mod = _set_config_provider("anthropic")
     try:
-        qualified = model_with_provider_context("tencent/hy3-preview:free", "openrouter")
+        qualified = model_with_provider_context(
+            "tencent/hy3-preview:free", "openrouter"
+        )
         model, provider, _ = resolve_model_provider(qualified)
-        assert provider == "openrouter", f"expected provider='openrouter', got '{provider}'"
-        assert model == "tencent/hy3-preview:free", f"expected model='tencent/hy3-preview:free', got '{model}'"
+        assert provider == "openrouter", (
+            f"expected provider='openrouter', got '{provider}'"
+        )
+        assert model == "tencent/hy3-preview:free", (
+            f"expected model='tencent/hy3-preview:free', got '{model}'"
+        )
     finally:
         _restore_config(old, cfg_mod)
 
@@ -55,9 +64,12 @@ def test_openrouter_free_suffix_survives_provider_qualification():
 def test_openrouter_free_suffix_nvidia():
     """nvidia/nemotron-3-super-120b-a12b:free — same bug class."""
     import api.config as cfg_mod
+
     old, cfg_mod = _set_config_provider("anthropic")
     try:
-        qualified = model_with_provider_context("nvidia/nemotron-3-super-120b-a12b:free", "openrouter")
+        qualified = model_with_provider_context(
+            "nvidia/nemotron-3-super-120b-a12b:free", "openrouter"
+        )
         model, provider, _ = resolve_model_provider(qualified)
         assert provider == "openrouter"
         assert model == "nvidia/nemotron-3-super-120b-a12b:free"
@@ -68,9 +80,12 @@ def test_openrouter_free_suffix_nvidia():
 def test_openrouter_free_suffix_arcee():
     """arcee-ai/trinity-large-preview:free — same bug class."""
     import api.config as cfg_mod
+
     old, cfg_mod = _set_config_provider("anthropic")
     try:
-        qualified = model_with_provider_context("arcee-ai/trinity-large-preview:free", "openrouter")
+        qualified = model_with_provider_context(
+            "arcee-ai/trinity-large-preview:free", "openrouter"
+        )
         model, provider, _ = resolve_model_provider(qualified)
         assert provider == "openrouter"
         assert model == "arcee-ai/trinity-large-preview:free"
@@ -81,6 +96,7 @@ def test_openrouter_free_suffix_arcee():
 def test_openrouter_thinking_suffix():
     """Models ending in :thinking should also be preserved."""
     import api.config as cfg_mod
+
     old, cfg_mod = _set_config_provider("anthropic")
     try:
         qualified = model_with_provider_context("some/model:thinking", "openrouter")
@@ -95,7 +111,9 @@ def test_custom_provider_rsplit_still_works():
     """custom:my-key:model must still parse correctly via rsplit."""
     qualified = "@custom:my-key:some-model"
     model, provider, _ = resolve_model_provider(qualified)
-    assert provider == "custom:my-key", f"expected provider='custom:my-key', got '{provider}'"
+    assert provider == "custom:my-key", (
+        f"expected provider='custom:my-key', got '{provider}'"
+    )
     assert model == "some-model", f"expected model='some-model', got '{model}'"
 
 
@@ -132,12 +150,17 @@ def test_known_provider_anthropic():
 # it back so the model becomes "<b>:<c>".
 # ---------------------------------------------------------------------------
 
+
 def test_custom_provider_free_suffix_1776():
     """@custom:my-key:some-model:free → custom:my-key + some-model:free (#1776)."""
     qualified = "@custom:my-key:some-model:free"
     model, provider, _ = resolve_model_provider(qualified)
-    assert provider == "custom:my-key", f"expected provider='custom:my-key', got '{provider}'"
-    assert model == "some-model:free", f"expected model='some-model:free', got '{model}'"
+    assert provider == "custom:my-key", (
+        f"expected provider='custom:my-key', got '{provider}'"
+    )
+    assert model == "some-model:free", (
+        f"expected model='some-model:free', got '{model}'"
+    )
 
 
 def test_custom_provider_beta_suffix_1776():

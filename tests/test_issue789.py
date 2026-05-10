@@ -13,6 +13,7 @@ from the sidebar **regardless of age** — no grace window. The button guard
 out of typing into a fresh session, but the sidebar list never surfaces empty
 ones. These tests reflect the new contract.
 """
+
 import json
 import time
 
@@ -72,6 +73,7 @@ def _make_titled_session(age_seconds, session_id=None):
 
 # ── Test 1: Untitled 0-message sessions are hidden regardless of age (#1171) ─
 
+
 def test_new_untitled_session_is_hidden_from_sidebar():
     """A brand-new (0 s old) Untitled 0-message session must NOT appear (#1171).
 
@@ -102,6 +104,7 @@ def test_recent_untitled_session_under_60s_is_hidden():
 
 # ── Test 2: old Untitled 0-message session is still filtered ─────────────────
 
+
 def test_old_untitled_session_over_60s_is_filtered():
     """A ghost session (Untitled, 0 messages, >60 s old) must be hidden."""
     old_session = _make_untitled_session(age_seconds=120)
@@ -127,6 +130,7 @@ def test_session_exactly_at_boundary_is_filtered():
 
 
 # ── Test 3: session with messages is always visible regardless of age ─────────
+
 
 def test_session_with_messages_always_visible_new():
     """A session with messages (even Untitled) is always visible when new."""
@@ -185,6 +189,7 @@ def test_titled_session_with_no_messages_old_is_visible():
 
 
 # ── Test 4: mixed bag — only old Untitled empty sessions are filtered ─────────
+
 
 def test_mixed_sessions_correct_visibility():
     """With a mix of sessions, only sessions with messages OR titled sessions

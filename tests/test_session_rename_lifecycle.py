@@ -68,7 +68,7 @@ def test_session_rename_failure_restores_state_and_surfaces_error():
     block = _session_rename_block()
     catch_pos = block.find("}catch(err){")
     assert catch_pos >= 0, "session rename save path must handle API failures"
-    catch_block = block[catch_pos:block.find("}finally{", catch_pos)]
+    catch_block = block[catch_pos : block.find("}finally{", catch_pos)]
     assert "applyTitle(oldTitle,false);" in catch_block, (
         "failed session rename must restore the cached/active title instead of "
         "silently appearing successful"

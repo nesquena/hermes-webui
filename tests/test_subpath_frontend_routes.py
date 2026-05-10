@@ -1,4 +1,5 @@
 """Regression tests for frontend routing under subpath mounts like /hermes/."""
+
 from pathlib import Path
 
 
@@ -32,7 +33,9 @@ def test_server_auth_redirect_uses_relative_login_path_with_encoded_next():
     src = read("api/auth.py")
     assert "handler.send_header('Location', 'login?next=' + _next)" in src
     assert "handler.send_header('Location', '/login?next='" not in src
-    assert "safe='/'" in src, "the relative redirect must keep the existing next= encoding fix"
+    assert "safe='/'" in src, (
+        "the relative redirect must keep the existing next= encoding fix"
+    )
 
 
 def test_direct_frontend_fetches_are_relative_to_current_mount():

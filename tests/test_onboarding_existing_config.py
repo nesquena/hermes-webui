@@ -9,6 +9,7 @@ Covers:
   (c) apply_onboarding_setup refuses to overwrite an existing config without
       confirm_overwrite=True
 """
+
 from __future__ import annotations
 
 import json
@@ -23,19 +24,23 @@ import pytest
 # Skip tests that call apply_onboarding_setup → _save_yaml_config when PyYAML is missing
 try:
     import yaml as _yaml
+
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
-_needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
+_needs_yaml = pytest.mark.skipif(
+    not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it"
+)
 
 # ---------------------------------------------------------------------------
 # Unit tests — no live server needed, test logic directly via imports
 # ---------------------------------------------------------------------------
 
 
-def _make_status(*, config_exists: bool, chat_ready: bool, onboarding_done: bool = False):
+def _make_status(
+    *, config_exists: bool, chat_ready: bool, onboarding_done: bool = False
+):
     """Call get_onboarding_status() with a controlled filesystem + settings."""
-    import importlib
 
     # Import fresh copies each call so module-level state doesn't bleed across
     import api.onboarding as mod
@@ -107,7 +112,9 @@ class TestOnboardingGate:
 
     def test_onboarding_done_flag_always_respected(self):
         """If user already completed onboarding in settings, never show wizard."""
-        result = _make_status(config_exists=False, chat_ready=False, onboarding_done=True)
+        result = _make_status(
+            config_exists=False, chat_ready=False, onboarding_done=True
+        )
         assert result["completed"] is True
 
     def test_config_exists_always_exposed_in_system(self):
@@ -123,6 +130,7 @@ class TestOnboardingGate:
         signal so the user isn't blocked from using the UI.
         """
         import api.onboarding as mod
+
         settings = {"onboarding_completed": False}
         runtime = {
             "chat_ready": True,
@@ -140,7 +148,9 @@ class TestOnboardingGate:
         with (
             mock.patch.object(mod, "load_settings", return_value=settings),
             mock.patch.object(mod, "get_config", return_value={}),
-            mock.patch.object(mod, "verify_hermes_imports", return_value=(True, [], {})),
+            mock.patch.object(
+                mod, "verify_hermes_imports", return_value=(True, [], {})
+            ),
             mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
             mock.patch.object(mod, "load_workspaces", return_value=[]),
             mock.patch.object(mod, "get_last_workspace", return_value=None),
@@ -205,7 +215,9 @@ class TestApplyOnboardingSetupGuard:
                 # Without patching Path.exists, use a non-existent path so it won't block.
                 # Also redirect _get_active_hermes_home so .env writes go to the temp dir,
                 # never to the real ~/.hermes/.env.
-                with mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path):
+                with mock.patch.object(
+                    mod, "_get_active_hermes_home", return_value=tmp_home_path
+                ):
                     result = mod.apply_onboarding_setup(
                         {
                             "provider": "openrouter",
@@ -236,8 +248,12 @@ class TestApplyOnboardingSetupGuard:
                 # Redirect both config path and hermes home so writes stay in /tmp,
                 # never touching the real ~/.hermes/.env.
                 with (
-                    mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
-                    mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path),
+                    mock.patch.object(
+                        mod, "_get_config_path", return_value=fake_config_path
+                    ),
+                    mock.patch.object(
+                        mod, "_get_active_hermes_home", return_value=tmp_home_path
+                    ),
                 ):
                     result = mod.apply_onboarding_setup(
                         {
@@ -282,7 +298,12 @@ def _server_hermes_home() -> pathlib.Path:
     env_path = data.get("system", {}).get("env_path", "")
     if env_path:
         return pathlib.Path(env_path).parent
-    return pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test")))
+    return pathlib.Path(
+        os.environ.get(
+            "HERMES_WEBUI_TEST_STATE_DIR",
+            str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"),
+        )
+    )
 
 
 def _server_reachable() -> bool:
@@ -343,7 +364,12 @@ class TestOnboardingGateIntegration:
 
         hermes_home = _server_hermes_home()
         # Write a real config.yaml
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         (hermes_home / "config.yaml").write_text(
             yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
         )
@@ -371,13 +397,19 @@ class TestOnboardingGateIntegration:
             (hermes_home / "config.yaml").unlink(missing_ok=True)
             (hermes_home / ".env").unlink(missing_ok=True)
             _http_post("/api/settings", {"onboarding_completed": False})
+
     @_needs_yaml
     def test_setup_blocked_for_existing_config(self):
         """POST /api/onboarding/setup must return config_exists error if config.yaml exists."""
         import yaml
 
         hermes_home = _server_hermes_home()
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         (hermes_home / "config.yaml").write_text(
             yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
         )
@@ -402,7 +434,12 @@ class TestOnboardingGateIntegration:
         import yaml
 
         hermes_home = _server_hermes_home()
-        cfg = {"model": {"provider": "openrouter", "default": "anthropic/claude-sonnet-4.6"}}
+        cfg = {
+            "model": {
+                "provider": "openrouter",
+                "default": "anthropic/claude-sonnet-4.6",
+            }
+        }
         (hermes_home / "config.yaml").write_text(
             yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
         )

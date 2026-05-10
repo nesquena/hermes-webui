@@ -5,11 +5,10 @@ hardcoded allowlist. This fix extracts hostnames from custom_providers config
 and adds them to the trusted set, so user-explicitly configured local endpoints
 (ollama, llama.cpp, vLLM, TabbyAPI, etc.) are not blocked.
 """
-import os
-import pytest
 
 
 # ---------- Source-code analysis tests ----------
+
 
 def test_ssrf_trusted_hosts_variable_exists():
     """The _ssrf_trusted_hosts set must be built from custom_providers config."""
@@ -53,10 +52,11 @@ def test_ssrf_block_still_present():
     """SSRF ValueError must still be raised for unknown private IPs."""
     with open("api/config.py") as f:
         src = f.read()
-    assert 'SSRF: resolved hostname to private IP' in src
+    assert "SSRF: resolved hostname to private IP" in src
 
 
 # ---------- Functional tests (mocked socket) ----------
+
 
 def test_custom_provider_hostname_added_to_trusted():
     """A hostname from custom_providers base_url is added to trusted set."""
@@ -66,20 +66,29 @@ def test_custom_provider_hostname_added_to_trusted():
 
     old_cfg = dict(config.cfg)
     try:
-        config.cfg.update({
-            "model": {"model": "my-model", "base_url": "http://my-llama-server:8080/v1"},
-            "custom_providers": [
-                {"name": "my-llama", "base_url": "http://my-llama-server:8080/v1", "model": "llama-3"}
-            ],
-            "providers": {},
-        })
+        config.cfg.update(
+            {
+                "model": {
+                    "model": "my-model",
+                    "base_url": "http://my-llama-server:8080/v1",
+                },
+                "custom_providers": [
+                    {
+                        "name": "my-llama",
+                        "base_url": "http://my-llama-server:8080/v1",
+                        "model": "llama-3",
+                    }
+                ],
+                "providers": {},
+            }
+        )
         config.invalidate_models_cache()
 
         # Mock socket.getaddrinfo to return a private IP for my-llama-server
         private_addr = ("192.168.1.100", None)
-        mock_getaddrinfo = MagicMock(return_value=[
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", private_addr)
-        ])
+        mock_getaddrinfo = MagicMock(
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", private_addr)]
+        )
 
         # Mock urllib to prevent actual HTTP call
         mock_urlopen = MagicMock()
@@ -87,8 +96,10 @@ def test_custom_provider_hostname_added_to_trusted():
         mock_urlopen.__enter__ = MagicMock(return_value=mock_urlopen)
         mock_urlopen.__exit__ = MagicMock(return_value=False)
 
-        with patch("socket.getaddrinfo", mock_getaddrinfo), \
-             patch("urllib.request.urlopen", mock_urlopen):
+        with (
+            patch("socket.getaddrinfo", mock_getaddrinfo),
+            patch("urllib.request.urlopen", mock_urlopen),
+        ):
             # Should NOT raise ValueError (SSRF) because hostname is in trusted set
             result = config.get_available_models()
 
@@ -115,20 +126,29 @@ def test_unknown_private_ip_still_blocked():
 
     old_cfg = dict(config.cfg)
     try:
-        config.cfg.update({
-            "model": {"model": "test", "base_url": "http://unknown-local-server:9999/v1"},
-            "custom_providers": [
-                {"name": "other", "base_url": "http://other-server:8080/v1", "model": "x"}
-            ],
-            "providers": {},
-        })
+        config.cfg.update(
+            {
+                "model": {
+                    "model": "test",
+                    "base_url": "http://unknown-local-server:9999/v1",
+                },
+                "custom_providers": [
+                    {
+                        "name": "other",
+                        "base_url": "http://other-server:8080/v1",
+                        "model": "x",
+                    }
+                ],
+                "providers": {},
+            }
+        )
         config.invalidate_models_cache()
 
         # Mock socket.getaddrinfo to return a private IP for unknown-local-server
         private_addr = ("10.0.0.50", None)
-        mock_getaddrinfo = MagicMock(return_value=[
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", private_addr)
-        ])
+        mock_getaddrinfo = MagicMock(
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", private_addr)]
+        )
 
         with patch("socket.getaddrinfo", mock_getaddrinfo):
             # Should NOT crash (ValueError is caught internally)

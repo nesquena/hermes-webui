@@ -9,8 +9,8 @@ Tests are ordered TDD-style:
   5. Watcher detects new sessions inserted into state.db
   6. Settings UI has renamed label
 """
+
 import json
-import os
 import pathlib
 import sqlite3
 import time
@@ -28,8 +28,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                  headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -51,12 +52,13 @@ def _get_test_state_dir():
     """
     # Use _pytest_port which applies the same auto-derivation as conftest.py
     from tests._pytest_port import TEST_STATE_DIR as _ptsd
+
     return _ptsd
 
 
 def _get_state_db_path():
     """Return path to the test state.db."""
-    return _get_test_state_dir() / 'state.db'
+    return _get_test_state_dir() / "state.db"
 
 
 def _ensure_state_db():
@@ -87,35 +89,57 @@ def _ensure_state_db():
         );
     """)
     for column, ddl in (
-        ('user_id', 'ALTER TABLE sessions ADD COLUMN user_id TEXT'),
-        ('chat_id', 'ALTER TABLE sessions ADD COLUMN chat_id TEXT'),
-        ('chat_type', 'ALTER TABLE sessions ADD COLUMN chat_type TEXT'),
-        ('thread_id', 'ALTER TABLE sessions ADD COLUMN thread_id TEXT'),
-        ('session_key', 'ALTER TABLE sessions ADD COLUMN session_key TEXT'),
-        ('origin_chat_id', 'ALTER TABLE sessions ADD COLUMN origin_chat_id TEXT'),
-        ('origin_user_id', 'ALTER TABLE sessions ADD COLUMN origin_user_id TEXT'),
-        ('platform', 'ALTER TABLE sessions ADD COLUMN platform TEXT'),
-        ('parent_session_id', 'ALTER TABLE sessions ADD COLUMN parent_session_id TEXT'),
-        ('ended_at', 'ALTER TABLE sessions ADD COLUMN ended_at REAL'),
-        ('end_reason', 'ALTER TABLE sessions ADD COLUMN end_reason TEXT'),
+        ("user_id", "ALTER TABLE sessions ADD COLUMN user_id TEXT"),
+        ("chat_id", "ALTER TABLE sessions ADD COLUMN chat_id TEXT"),
+        ("chat_type", "ALTER TABLE sessions ADD COLUMN chat_type TEXT"),
+        ("thread_id", "ALTER TABLE sessions ADD COLUMN thread_id TEXT"),
+        ("session_key", "ALTER TABLE sessions ADD COLUMN session_key TEXT"),
+        ("origin_chat_id", "ALTER TABLE sessions ADD COLUMN origin_chat_id TEXT"),
+        ("origin_user_id", "ALTER TABLE sessions ADD COLUMN origin_user_id TEXT"),
+        ("platform", "ALTER TABLE sessions ADD COLUMN platform TEXT"),
+        ("parent_session_id", "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT"),
+        ("ended_at", "ALTER TABLE sessions ADD COLUMN ended_at REAL"),
+        ("end_reason", "ALTER TABLE sessions ADD COLUMN end_reason TEXT"),
     ):
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
         if column not in existing:
             conn.execute(ddl)
     conn.commit()
     return conn
 
 
-def _insert_gateway_session(conn, session_id='20260401_120000_abcdefgh', source='telegram',
-                             title='Telegram Chat', model='anthropic/claude-sonnet-4-5',
-                             started_at=None, message_count=2, user_id=None, chat_id=None,
-                             chat_type=None, thread_id=None, session_key=None, origin_chat_id=None,
-                             origin_user_id=None, platform=None):
+def _insert_gateway_session(
+    conn,
+    session_id="20260401_120000_abcdefgh",
+    source="telegram",
+    title="Telegram Chat",
+    model="anthropic/claude-sonnet-4-5",
+    started_at=None,
+    message_count=2,
+    user_id=None,
+    chat_id=None,
+    chat_type=None,
+    thread_id=None,
+    session_key=None,
+    origin_chat_id=None,
+    origin_user_id=None,
+    platform=None,
+):
     """Insert a gateway session into state.db."""
     conn.execute(
         "INSERT OR REPLACE INTO sessions (id, source, user_id, title, model, started_at, message_count) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (session_id, source, user_id, title, model, started_at or time.time(), message_count)
+        (
+            session_id,
+            source,
+            user_id,
+            title,
+            model,
+            started_at or time.time(),
+            message_count,
+        ),
     )
     updates = []
     params = []
@@ -134,18 +158,18 @@ def _insert_gateway_session(conn, session_id='20260401_120000_abcdefgh', source=
     if updates:
         conn.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
-            [*params, session_id]
+            [*params, session_id],
         )
     # Delete any existing messages for this session (idempotent re-insert)
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     # Insert some messages
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'user', ?, ?)",
-        (session_id, 'Hello from Telegram', started_at or time.time())
+        (session_id, "Hello from Telegram", started_at or time.time()),
     )
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)",
-        (session_id, 'Hi there!', (started_at or time.time()) + 1)
+        (session_id, "Hi there!", (started_at or time.time()) + 1),
     )
     conn.commit()
 
@@ -153,9 +177,9 @@ def _insert_gateway_session(conn, session_id='20260401_120000_abcdefgh', source=
 def _insert_agent_session_row(
     conn,
     session_id,
-    source='weixin',
-    title='Agent Session',
-    model='openai/gpt-5',
+    source="weixin",
+    title="Agent Session",
+    model="openai/gpt-5",
     started_at=None,
     parent_session_id=None,
     ended_at=None,
@@ -186,8 +210,8 @@ def _insert_agent_session_row(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
             (
                 session_id,
-                'user' if i % 2 == 0 else 'assistant',
-                f'{title} message {i + 1}',
+                "user" if i % 2 == 0 else "assistant",
+                f"{title} message {i + 1}",
                 started_at + i,
             ),
         )
@@ -205,7 +229,11 @@ def _remove_test_sessions(conn, *session_ids):
 def _cleanup_state_db():
     """Remove state.db if it exists (only used for tests that need a blank slate)."""
     db_path = _get_state_db_path()
-    for p in [db_path, db_path.parent / 'state.db-wal', db_path.parent / 'state.db-shm']:
+    for p in [
+        db_path,
+        db_path.parent / "state.db-wal",
+        db_path.parent / "state.db-shm",
+    ]:
         try:
             p.unlink(missing_ok=True)
         except Exception:
@@ -221,83 +249,90 @@ def _insert_message(conn, sid, role, content, timestamp):
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 
+
 def test_gateway_sessions_appear_when_enabled():
     """Gateway sessions from state.db appear in /api/sessions when show_cli_sessions is on."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_test_tg_001', source='telegram', title='TG Test Chat')
+        _insert_gateway_session(
+            conn, session_id="gw_test_tg_001", source="telegram", title="TG Test Chat"
+        )
 
         # Enable the setting
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        gw_ids = [s['session_id'] for s in sessions if s.get('session_id') == 'gw_test_tg_001']
-        assert len(gw_ids) == 1, f"Expected gateway session gw_test_tg_001, got {[s['session_id'] for s in sessions]}"
+        sessions = data.get("sessions", [])
+        gw_ids = [
+            s["session_id"] for s in sessions if s.get("session_id") == "gw_test_tg_001"
+        ]
+        assert len(gw_ids) == 1, (
+            f"Expected gateway session gw_test_tg_001, got {[s['session_id'] for s in sessions]}"
+        )
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_test_tg_001')
+            _remove_test_sessions(conn, "gw_test_tg_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enabled():
     """Regression: WebUI-origin rows in state.db can recover missing JSON sidecars."""
     conn = _ensure_state_db()
-    sid = 'webui_state_only_001'
+    sid = "webui_state_only_001"
     try:
         _insert_agent_session_row(
             conn,
             session_id=sid,
-            source='webui',
-            title='Recovered WebUI Session',
-            model='openai/gpt-5',
+            source="webui",
+            title="Recovered WebUI Session",
+            model="openai/gpt-5",
             messages=2,
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        recovered = [s for s in sessions if s.get('session_id') == sid]
+        sessions = data.get("sessions", [])
+        recovered = [s for s in sessions if s.get("session_id") == sid]
         assert len(recovered) == 1, (
             "WebUI-origin sessions that exist in state.db but have no JSON sidecar "
             "should be surfaced through the agent-session bridge for recovery."
         )
-        assert recovered[0].get('source_tag') == 'webui'
-        assert recovered[0].get('is_cli_session') is True
+        assert recovered[0].get("source_tag") == "webui"
+        assert recovered[0].get("is_cli_session") is True
     finally:
         try:
             _remove_test_sessions(conn, sid)
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_sessions_without_messages_are_hidden_from_sidebar():
     """Regression: empty agent session rows must not appear as broken sidebar entries."""
     conn = _ensure_state_db()
-    empty_sid = 'gw_empty_no_messages_001'
+    empty_sid = "gw_empty_no_messages_001"
     try:
         conn.execute(
             "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (empty_sid, 'cron', 'Cron Session', 'openai/gpt-5', time.time(), 0),
+            (empty_sid, "cron", "Cron Session", "openai/gpt-5", time.time(), 0),
         )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (empty_sid,))
         conn.commit()
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        assert empty_sid not in {s.get('session_id') for s in sessions}, (
+        sessions = data.get("sessions", [])
+        assert empty_sid not in {s.get("session_id") for s in sessions}, (
             "Agent sessions with no readable message rows should be filtered before "
             "they reach the sidebar; otherwise clicking them fails during import."
         )
@@ -307,40 +342,47 @@ def test_gateway_sessions_without_messages_are_hidden_from_sidebar():
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_watcher_hides_sessions_without_messages(monkeypatch):
     """Regression: SSE watcher must use the same importable-agent filter."""
     conn = _ensure_state_db()
-    empty_sid = 'gw_empty_watcher_001'
-    live_sid = 'gw_live_watcher_001'
+    empty_sid = "gw_empty_watcher_001"
+    live_sid = "gw_live_watcher_001"
     try:
         conn.execute(
             "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (empty_sid, 'telegram', 'Empty Telegram Session', 'openai/gpt-5', time.time(), 0),
+            (
+                empty_sid,
+                "telegram",
+                "Empty Telegram Session",
+                "openai/gpt-5",
+                time.time(),
+                0,
+            ),
         )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (empty_sid,))
         _insert_gateway_session(
             conn,
             session_id=live_sid,
-            source='telegram',
-            title='Live Telegram Session',
+            source="telegram",
+            title="Live Telegram Session",
             message_count=0,
         )
 
         import api.gateway_watcher as gateway_watcher
 
-        monkeypatch.setattr(gateway_watcher, '_get_state_db_path', _get_state_db_path)
+        monkeypatch.setattr(gateway_watcher, "_get_state_db_path", _get_state_db_path)
 
         sessions = gateway_watcher._get_agent_sessions_from_db()
-        ids = {s.get('session_id') for s in sessions}
-        live = next((s for s in sessions if s.get('session_id') == live_sid), None)
+        ids = {s.get("session_id") for s in sessions}
+        live = next((s for s in sessions if s.get("session_id") == live_sid), None)
 
         assert empty_sid not in ids
         assert live is not None
-        assert live.get('message_count') == 2, (
+        assert live.get("message_count") == 2, (
             "Watcher should fall back to actual message rows when stored "
             "message_count is zero, matching the sidebar route."
         )
@@ -355,235 +397,255 @@ def test_gateway_watcher_hides_sessions_without_messages(monkeypatch):
 def test_compression_chain_collapses_to_latest_tip_in_sidebar():
     """Show one logical agent conversation for a compression continuation chain."""
     conn = _ensure_state_db()
-    ids_to_remove = ('chain_root_001', 'chain_empty_mid_001', 'chain_tip_001')
+    ids_to_remove = ("chain_root_001", "chain_empty_mid_001", "chain_tip_001")
     t0 = time.time() - 600
     try:
         _insert_agent_session_row(
             conn,
-            'chain_root_001',
-            title='Magazine Style PPT Skill',
+            "chain_root_001",
+            title="Magazine Style PPT Skill",
             started_at=t0,
             ended_at=t0 + 100,
-            end_reason='compression',
+            end_reason="compression",
             messages=3,
         )
         _insert_agent_session_row(
             conn,
-            'chain_empty_mid_001',
-            title='Magazine Style PPT Skill #2',
+            "chain_empty_mid_001",
+            title="Magazine Style PPT Skill #2",
             started_at=t0 + 101,
-            parent_session_id='chain_root_001',
+            parent_session_id="chain_root_001",
             ended_at=t0 + 200,
-            end_reason='compression',
+            end_reason="compression",
             messages=0,
         )
         _insert_agent_session_row(
             conn,
-            'chain_tip_001',
-            title='Magazine Style PPT Skill #3',
+            "chain_tip_001",
+            title="Magazine Style PPT Skill #3",
             started_at=t0 + 201,
-            parent_session_id='chain_empty_mid_001',
+            parent_session_id="chain_empty_mid_001",
             messages=2,
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s.get('session_id') for s in data.get('sessions', [])}
-        tip = next((s for s in data.get('sessions', []) if s.get('session_id') == 'chain_tip_001'), None)
+        ids = {s.get("session_id") for s in data.get("sessions", [])}
+        tip = next(
+            (
+                s
+                for s in data.get("sessions", [])
+                if s.get("session_id") == "chain_tip_001"
+            ),
+            None,
+        )
 
-        assert 'chain_tip_001' in ids
-        assert 'chain_root_001' not in ids
-        assert 'chain_empty_mid_001' not in ids
+        assert "chain_tip_001" in ids
+        assert "chain_root_001" not in ids
+        assert "chain_empty_mid_001" not in ids
         assert tip is not None
-        assert tip.get('title') == 'Magazine Style PPT Skill'
-        assert tip.get('message_count') == 2
+        assert tip.get("title") == "Magazine Style PPT Skill"
+        assert tip.get("message_count") == 2
         # created_at = the chain head's started_at (preserves original conversation date)
-        assert abs(tip.get('created_at') - t0) < 0.01
+        assert abs(tip.get("created_at") - t0) < 0.01
         # updated_at = the tip's last message timestamp so the sidebar entry
         # bubbles to the top by true recency, not by the root's stale activity.
         # tip messages are at t0+201 and t0+202, so last_activity = t0 + 202.
-        assert abs(tip.get('updated_at') - (t0 + 202)) < 0.01
-        assert tip.get('_lineage_root_id') == 'chain_root_001'
-        assert tip.get('_lineage_tip_id') == 'chain_tip_001'
-        assert tip.get('_compression_segment_count') == 3
+        assert abs(tip.get("updated_at") - (t0 + 202)) < 0.01
+        assert tip.get("_lineage_root_id") == "chain_root_001"
+        assert tip.get("_lineage_tip_id") == "chain_tip_001"
+        assert tip.get("_compression_segment_count") == 3
 
         from api.agent_sessions import read_importable_agent_session_rows
 
         rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
-        projected_tip = next((row for row in rows if row.get('id') == 'chain_tip_001'), None)
+        projected_tip = next(
+            (row for row in rows if row.get("id") == "chain_tip_001"), None
+        )
         assert projected_tip is not None
-        assert projected_tip.get('title') == 'Magazine Style PPT Skill'
-        assert projected_tip.get('_lineage_root_id') == 'chain_root_001'
-        assert projected_tip.get('_lineage_tip_id') == 'chain_tip_001'
-        assert projected_tip.get('_compression_segment_count') == 3
+        assert projected_tip.get("title") == "Magazine Style PPT Skill"
+        assert projected_tip.get("_lineage_root_id") == "chain_root_001"
+        assert projected_tip.get("_lineage_tip_id") == "chain_tip_001"
+        assert projected_tip.get("_compression_segment_count") == 3
     finally:
         try:
             _remove_test_sessions(conn, *ids_to_remove)
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_compression_chain_with_empty_latest_tip_falls_back_to_latest_importable_segment():
     """Empty latest tips should not make the whole conversation disappear."""
     conn = _ensure_state_db()
-    ids_to_remove = ('empty_tip_root_001', 'empty_tip_001')
+    ids_to_remove = ("empty_tip_root_001", "empty_tip_001")
     t0 = time.time() - 500
     try:
         _insert_agent_session_row(
             conn,
-            'empty_tip_root_001',
-            title='Long Conversation',
+            "empty_tip_root_001",
+            title="Long Conversation",
             started_at=t0,
             ended_at=t0 + 100,
-            end_reason='compression',
+            end_reason="compression",
             messages=2,
         )
         _insert_agent_session_row(
             conn,
-            'empty_tip_001',
-            title='Long Conversation #2',
+            "empty_tip_001",
+            title="Long Conversation #2",
             started_at=t0 + 101,
-            parent_session_id='empty_tip_root_001',
+            parent_session_id="empty_tip_root_001",
             messages=0,
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        ids = {s.get("session_id") for s in data.get("sessions", [])}
 
-        assert 'empty_tip_root_001' in ids
-        assert 'empty_tip_001' not in ids
-        root = next((s for s in data.get('sessions', []) if s.get('session_id') == 'empty_tip_root_001'), None)
-        assert root and root.get('title') == 'Long Conversation'
+        assert "empty_tip_root_001" in ids
+        assert "empty_tip_001" not in ids
+        root = next(
+            (
+                s
+                for s in data.get("sessions", [])
+                if s.get("session_id") == "empty_tip_root_001"
+            ),
+            None,
+        )
+        assert root and root.get("title") == "Long Conversation"
     finally:
         try:
             _remove_test_sessions(conn, *ids_to_remove)
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_compression_chain_with_all_empty_segments_is_hidden():
     """A compression chain with no importable segment should not appear."""
     conn = _ensure_state_db()
-    ids_to_remove = ('all_empty_root_001', 'all_empty_tip_001')
+    ids_to_remove = ("all_empty_root_001", "all_empty_tip_001")
     t0 = time.time() - 450
     try:
         _insert_agent_session_row(
             conn,
-            'all_empty_root_001',
-            title='Empty Long Conversation',
+            "all_empty_root_001",
+            title="Empty Long Conversation",
             started_at=t0,
             ended_at=t0 + 100,
-            end_reason='compression',
+            end_reason="compression",
             messages=0,
         )
         _insert_agent_session_row(
             conn,
-            'all_empty_tip_001',
-            title='Empty Long Conversation #2',
+            "all_empty_tip_001",
+            title="Empty Long Conversation #2",
             started_at=t0 + 101,
-            parent_session_id='all_empty_root_001',
+            parent_session_id="all_empty_root_001",
             messages=0,
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        ids = {s.get("session_id") for s in data.get("sessions", [])}
 
-        assert 'all_empty_root_001' not in ids
-        assert 'all_empty_tip_001' not in ids
+        assert "all_empty_root_001" not in ids
+        assert "all_empty_tip_001" not in ids
     finally:
         try:
             _remove_test_sessions(conn, *ids_to_remove)
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_default_title_cli_compression_chain_is_kept_by_lineage():
     """Default-titled CLI compression chains are meaningful even with a short tip."""
     conn = _ensure_state_db()
-    ids_to_remove = ('cli_default_compress_root_001', 'cli_default_compress_tip_001')
+    ids_to_remove = ("cli_default_compress_root_001", "cli_default_compress_tip_001")
     t0 = time.time() - 430
     try:
         _insert_agent_session_row(
             conn,
-            'cli_default_compress_root_001',
-            source='cli',
-            title='Cli Session',
+            "cli_default_compress_root_001",
+            source="cli",
+            title="Cli Session",
             started_at=t0,
             ended_at=t0 + 100,
-            end_reason='compression',
+            end_reason="compression",
             messages=1,
         )
         _insert_agent_session_row(
             conn,
-            'cli_default_compress_tip_001',
-            source='cli',
-            title='Cli Session',
+            "cli_default_compress_tip_001",
+            source="cli",
+            title="Cli Session",
             started_at=t0 + 101,
-            parent_session_id='cli_default_compress_root_001',
+            parent_session_id="cli_default_compress_root_001",
             messages=1,
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        ids = {s.get("session_id") for s in data.get("sessions", [])}
 
-        assert 'cli_default_compress_tip_001' in ids
-        assert 'cli_default_compress_root_001' not in ids
-        tip = next(s for s in data.get('sessions', []) if s.get('session_id') == 'cli_default_compress_tip_001')
-        assert tip.get('_compression_segment_count') == 2
-        assert tip.get('_lineage_root_id') == 'cli_default_compress_root_001'
+        assert "cli_default_compress_tip_001" in ids
+        assert "cli_default_compress_root_001" not in ids
+        tip = next(
+            s
+            for s in data.get("sessions", [])
+            if s.get("session_id") == "cli_default_compress_tip_001"
+        )
+        assert tip.get("_compression_segment_count") == 2
+        assert tip.get("_lineage_root_id") == "cli_default_compress_root_001"
     finally:
         try:
             _remove_test_sessions(conn, *ids_to_remove)
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_non_compression_child_is_not_collapsed_into_parent():
     """Parent/child relationships that are not compression continuations stay flat."""
     conn = _ensure_state_db()
-    ids_to_remove = ('branch_parent_001', 'branch_child_001')
+    ids_to_remove = ("branch_parent_001", "branch_child_001")
     t0 = time.time() - 400
     try:
         _insert_agent_session_row(
             conn,
-            'branch_parent_001',
-            title='Branch Parent',
+            "branch_parent_001",
+            title="Branch Parent",
             started_at=t0,
             ended_at=t0 + 100,
-            end_reason='branched',
+            end_reason="branched",
             messages=2,
         )
         _insert_agent_session_row(
             conn,
-            'branch_child_001',
-            title='Branch Child',
+            "branch_child_001",
+            title="Branch Child",
             started_at=t0 + 101,
-            parent_session_id='branch_parent_001',
+            parent_session_id="branch_parent_001",
             messages=2,
         )
 
         from api.agent_sessions import read_importable_agent_session_rows
 
         rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
-        ids = {row.get('id') for row in rows}
+        ids = {row.get("id") for row in rows}
 
-        assert 'branch_parent_001' in ids
-        assert 'branch_child_001' in ids
+        assert "branch_parent_001" in ids
+        assert "branch_child_001" in ids
     finally:
         try:
             _remove_test_sessions(conn, *ids_to_remove)
@@ -595,25 +657,25 @@ def test_non_compression_child_is_not_collapsed_into_parent():
 def test_agent_session_limit_applies_after_compression_projection():
     """A long raw chain should count as one logical sidebar row before limiting."""
     conn = _ensure_state_db()
-    chain_ids = [f'limit_chain_{i:03d}' for i in range(8)]
-    standalone_id = 'limit_standalone_001'
+    chain_ids = [f"limit_chain_{i:03d}" for i in range(8)]
+    standalone_id = "limit_standalone_001"
     t0 = time.time() - 300
     try:
         for i, sid in enumerate(chain_ids):
             _insert_agent_session_row(
                 conn,
                 sid,
-                title=f'Limit Chain #{i + 1}',
+                title=f"Limit Chain #{i + 1}",
                 started_at=t0 + i,
                 parent_session_id=chain_ids[i - 1] if i else None,
                 ended_at=t0 + i + 0.5 if i < len(chain_ids) - 1 else None,
-                end_reason='compression' if i < len(chain_ids) - 1 else None,
+                end_reason="compression" if i < len(chain_ids) - 1 else None,
                 messages=1,
             )
         _insert_agent_session_row(
             conn,
             standalone_id,
-            title='Limit Standalone',
+            title="Limit Standalone",
             started_at=t0 + 20,
             messages=1,
         )
@@ -621,16 +683,16 @@ def test_agent_session_limit_applies_after_compression_projection():
         from api.agent_sessions import read_importable_agent_session_rows
 
         rows = read_importable_agent_session_rows(_get_state_db_path(), limit=2)
-        ids = [row.get('id') for row in rows]
+        ids = [row.get("id") for row in rows]
 
         assert len(rows) == 2
         assert chain_ids[-1] in ids
         assert standalone_id in ids
         assert not any(sid in ids for sid in chain_ids[:-1])
-        chain = next(row for row in rows if row.get('id') == chain_ids[-1])
-        assert chain.get('title') == 'Limit Chain #1'
-        assert chain.get('_lineage_root_id') == chain_ids[0]
-        assert chain.get('_compression_segment_count') == len(chain_ids)
+        chain = next(row for row in rows if row.get("id") == chain_ids[-1])
+        assert chain.get("title") == "Limit Chain #1"
+        assert chain.get("_lineage_root_id") == chain_ids[0]
+        assert chain.get("_compression_segment_count") == len(chain_ids)
     finally:
         try:
             _remove_test_sessions(conn, *(chain_ids + [standalone_id]))
@@ -650,7 +712,7 @@ def test_compression_chain_bubbles_to_top_by_tip_activity():
     recency. This regression test pins the override.
     """
     conn = _ensure_state_db()
-    ids_to_remove = ('bubble_root_001', 'bubble_tip_001', 'bubble_standalone_001')
+    ids_to_remove = ("bubble_root_001", "bubble_tip_001", "bubble_standalone_001")
     now = time.time()
     # Root started long ago; tip is being edited "now" (very recent message)
     root_started = now - 30 * 86400
@@ -664,62 +726,68 @@ def test_compression_chain_bubbles_to_top_by_tip_activity():
     try:
         _insert_agent_session_row(
             conn,
-            'bubble_root_001',
-            title='Bubble Root',
+            "bubble_root_001",
+            title="Bubble Root",
             started_at=root_started,
             ended_at=root_ended,
-            end_reason='compression',
+            end_reason="compression",
             messages=2,
         )
         # Override message timestamps so root's last_activity is genuinely old.
         conn.execute("DELETE FROM messages WHERE session_id = 'bubble_root_001'")
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            ('bubble_root_001', 'user', 'old root msg', root_started + 60),
+            ("bubble_root_001", "user", "old root msg", root_started + 60),
         )
         _insert_agent_session_row(
             conn,
-            'bubble_tip_001',
-            title='Bubble Tip',
+            "bubble_tip_001",
+            title="Bubble Tip",
             started_at=tip_started,
-            parent_session_id='bubble_root_001',
+            parent_session_id="bubble_root_001",
             messages=1,
         )
         conn.execute("DELETE FROM messages WHERE session_id = 'bubble_tip_001'")
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            ('bubble_tip_001', 'user', 'fresh tip msg', tip_latest_msg),
+            ("bubble_tip_001", "user", "fresh tip msg", tip_latest_msg),
         )
         _insert_agent_session_row(
             conn,
-            'bubble_standalone_001',
-            title='Bubble Standalone',
+            "bubble_standalone_001",
+            title="Bubble Standalone",
             started_at=now - 2 * 86400 - 60,
             messages=1,
         )
         conn.execute("DELETE FROM messages WHERE session_id = 'bubble_standalone_001'")
         conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            ('bubble_standalone_001', 'user', 'standalone msg', standalone_msg),
+            ("bubble_standalone_001", "user", "standalone msg", standalone_msg),
         )
         conn.commit()
 
         from api.agent_sessions import read_importable_agent_session_rows
 
         rows = read_importable_agent_session_rows(_get_state_db_path(), limit=200)
-        ids = [row.get('id') for row in rows]
+        ids = [row.get("id") for row in rows]
         # Filter out unrelated rows from the shared DB
-        ids = [i for i in ids if i in ('bubble_root_001', 'bubble_tip_001', 'bubble_standalone_001')]
+        ids = [
+            i
+            for i in ids
+            if i in ("bubble_root_001", "bubble_tip_001", "bubble_standalone_001")
+        ]
 
-        assert 'bubble_tip_001' in ids, (
+        assert "bubble_tip_001" in ids, (
             f"Compression tip must appear in projected output. ids={ids}"
         )
-        assert 'bubble_root_001' not in ids, (
+        assert "bubble_root_001" not in ids, (
             "Compression root row must be hidden once the tip is the active row."
         )
 
-        tip_pos = ids.index('bubble_tip_001')
-        standalone_pos = ids.index('bubble_standalone_001') if 'bubble_standalone_001' in ids else -1
+        tip_pos = ids.index("bubble_tip_001")
+        standalone_pos = (
+            ids.index("bubble_standalone_001") if "bubble_standalone_001" in ids else -1
+        )
         assert standalone_pos == -1 or tip_pos < standalone_pos, (
             f"Active compression tip (last msg 5s ago) must sort BEFORE standalone "
             f"session (last msg 2d ago). Got order: {ids}. "
@@ -727,8 +795,8 @@ def test_compression_chain_bubbles_to_top_by_tip_activity():
             f"not the tip's recent value."
         )
 
-        tip_row = next(r for r in rows if r['id'] == 'bubble_tip_001')
-        assert abs(tip_row['last_activity'] - tip_latest_msg) < 0.01, (
+        tip_row = next(r for r in rows if r["id"] == "bubble_tip_001")
+        assert abs(tip_row["last_activity"] - tip_latest_msg) < 0.01, (
             f"Projected tip's last_activity must equal the tip's most recent "
             f"message timestamp ({tip_latest_msg}), not the root's "
             f"({root_started + 60}). Got: {tip_row['last_activity']}"
@@ -745,19 +813,23 @@ def test_gateway_sessions_excluded_when_disabled():
     """Gateway sessions are NOT returned when show_cli_sessions is off."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_test_dc_001', source='discord', title='DC Test Chat')
+        _insert_gateway_session(
+            conn, session_id="gw_test_dc_001", source="discord", title="DC Test Chat"
+        )
 
         # Ensure setting is off
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        gw_ids = [s['session_id'] for s in sessions if s.get('session_id') == 'gw_test_dc_001']
+        sessions = data.get("sessions", [])
+        gw_ids = [
+            s["session_id"] for s in sessions if s.get("session_id") == "gw_test_dc_001"
+        ]
         assert len(gw_ids) == 0, "Gateway session should not appear when setting is off"
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_test_dc_001')
+            _remove_test_sessions(conn, "gw_test_dc_001")
             conn.close()
         except Exception:
             pass
@@ -767,28 +839,34 @@ def test_gateway_session_has_correct_metadata():
     """Gateway sessions include legacy source fields and normalized source metadata."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_meta_001', source='telegram', title='Meta Test')
+        _insert_gateway_session(
+            conn, session_id="gw_meta_001", source="telegram", title="Meta Test"
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        gw = next((s for s in sessions if s['session_id'] == 'gw_meta_001'), None)
+        sessions = data.get("sessions", [])
+        gw = next((s for s in sessions if s["session_id"] == "gw_meta_001"), None)
         assert gw is not None, "Gateway session not found"
-        assert gw.get('source_tag') == 'telegram', f"Expected source_tag=telegram, got {gw.get('source_tag')}"
-        assert gw.get('raw_source') == 'telegram'
-        assert gw.get('session_source') == 'messaging'
-        assert gw.get('source_label') == 'Telegram'
-        assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
-        assert gw.get('title') == 'Meta Test'
+        assert gw.get("source_tag") == "telegram", (
+            f"Expected source_tag=telegram, got {gw.get('source_tag')}"
+        )
+        assert gw.get("raw_source") == "telegram"
+        assert gw.get("session_source") == "messaging"
+        assert gw.get("source_label") == "Telegram"
+        assert gw.get("is_cli_session") is True, (
+            "is_cli_session should be True for agent sessions"
+        )
+        assert gw.get("title") == "Meta Test"
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_meta_001')
+            _remove_test_sessions(conn, "gw_meta_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_agent_session_source_normalization_contract():
@@ -796,29 +874,31 @@ def test_agent_session_source_normalization_contract():
     from api.agent_sessions import normalize_agent_session_source
 
     cases = {
-        'cli': ('cli', 'CLI'),
-        'weixin': ('messaging', 'Weixin'),
-        'telegram': ('messaging', 'Telegram'),
-        'discord': ('messaging', 'Discord'),
-        'slack': ('messaging', 'Slack'),
-        'cron': ('cron', 'Cron'),
-        'tool': ('tool', 'Tool'),
-        'api_server': ('api', 'API'),
-        'something_new': ('other', 'Something New'),
-        None: ('other', 'Agent'),
+        "cli": ("cli", "CLI"),
+        "weixin": ("messaging", "Weixin"),
+        "telegram": ("messaging", "Telegram"),
+        "discord": ("messaging", "Discord"),
+        "slack": ("messaging", "Slack"),
+        "cron": ("cron", "Cron"),
+        "tool": ("tool", "Tool"),
+        "api_server": ("api", "API"),
+        "something_new": ("other", "Something New"),
+        None: ("other", "Agent"),
     }
 
     for raw_source, (session_source, source_label) in cases.items():
         normalized = normalize_agent_session_source(raw_source)
-        assert normalized['session_source'] == session_source
-        assert normalized['source_label'] == source_label
+        assert normalized["session_source"] == session_source
+        assert normalized["source_label"] == source_label
         if raw_source:
-            assert normalized['raw_source'] == raw_source
+            assert normalized["raw_source"] == raw_source
         else:
-            assert normalized['raw_source'] is None
+            assert normalized["raw_source"] is None
 
 
-def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
+def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(
+    cleanup_test_sessions,
+):
     """A WebUI continuation from a messaging parent must keep WebUI metadata.
 
     Regression for a production case where a WebUI session continued from a
@@ -828,43 +908,45 @@ def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_t
     from api.agent_sessions import read_importable_agent_session_rows
 
     conn = _ensure_state_db()
-    root_sid = 'gw_tg_cross_source_root_001'
-    webui_sid = 'webui_cross_source_tip_001'
+    root_sid = "gw_tg_cross_source_root_001"
+    webui_sid = "webui_cross_source_tip_001"
     now = time.time()
     cleanup_test_sessions.extend([root_sid, webui_sid])
     try:
         _insert_agent_session_row(
             conn,
             session_id=root_sid,
-            source='telegram',
-            title='Old Telegram Root',
+            source="telegram",
+            title="Old Telegram Root",
             started_at=now - 20,
             ended_at=now - 10,
-            end_reason='compression',
+            end_reason="compression",
             messages=2,
         )
         _insert_agent_session_row(
             conn,
             session_id=webui_sid,
-            source='webui',
-            title='Current WebUI Work',
+            source="webui",
+            title="Current WebUI Work",
             started_at=now - 9,
             parent_session_id=root_sid,
             messages=2,
         )
 
-        rows = read_importable_agent_session_rows(_get_state_db_path(), exclude_sources=None)
-        by_id = {row['id']: row for row in rows}
+        rows = read_importable_agent_session_rows(
+            _get_state_db_path(), exclude_sources=None
+        )
+        by_id = {row["id"]: row for row in rows}
 
         assert webui_sid in by_id
         assert root_sid in by_id
         webui = by_id[webui_sid]
-        assert webui.get('title') == 'Current WebUI Work'
-        assert webui.get('source') == 'webui'
-        assert webui.get('session_source') == 'webui'
-        assert webui.get('source_label') == 'WebUI'
-        assert webui.get('relationship_type') == 'child_session'
-        assert webui.get('parent_title') == 'Old Telegram Root'
+        assert webui.get("title") == "Current WebUI Work"
+        assert webui.get("source") == "webui"
+        assert webui.get("session_source") == "webui"
+        assert webui.get("source_label") == "WebUI"
+        assert webui.get("relationship_type") == "child_session"
+        assert webui.get("parent_title") == "Old Telegram Root"
     finally:
         try:
             _remove_test_sessions(conn, root_sid, webui_sid)
@@ -877,22 +959,29 @@ def test_gateway_watcher_uses_normalized_source_metadata(monkeypatch):
     """SSE snapshots use the same normalized source contract as /api/sessions."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_watcher_source_001', source='weixin', title='Weixin Chat')
+        _insert_gateway_session(
+            conn,
+            session_id="gw_watcher_source_001",
+            source="weixin",
+            title="Weixin Chat",
+        )
 
         import api.gateway_watcher as gateway_watcher
 
-        monkeypatch.setattr(gateway_watcher, '_get_state_db_path', _get_state_db_path)
+        monkeypatch.setattr(gateway_watcher, "_get_state_db_path", _get_state_db_path)
         sessions = gateway_watcher._get_agent_sessions_from_db()
-        gw = next((s for s in sessions if s['session_id'] == 'gw_watcher_source_001'), None)
+        gw = next(
+            (s for s in sessions if s["session_id"] == "gw_watcher_source_001"), None
+        )
 
         assert gw is not None
-        assert gw.get('source') == 'weixin'
-        assert gw.get('raw_source') == 'weixin'
-        assert gw.get('session_source') == 'messaging'
-        assert gw.get('source_label') == 'Weixin'
+        assert gw.get("source") == "weixin"
+        assert gw.get("raw_source") == "weixin"
+        assert gw.get("session_source") == "messaging"
+        assert gw.get("source_label") == "Weixin"
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_watcher_source_001')
+            _remove_test_sessions(conn, "gw_watcher_source_001")
             conn.close()
         except Exception:
             pass
@@ -902,45 +991,49 @@ def test_imported_cli_session_metadata_survives_compact(cleanup_test_sessions):
     """Imported agent sessions should remain distinguishable in compact sidebar payloads."""
     from api.models import Session
 
-    sid = 'gw_imported_metadata_001'
+    sid = "gw_imported_metadata_001"
     cleanup_test_sessions.append(sid)
     s = Session(
         session_id=sid,
-        title='Imported Telegram Chat',
-        messages=[{'role': 'user', 'content': 'hello from telegram', 'timestamp': time.time()}],
-        model='openai/gpt-5',
+        title="Imported Telegram Chat",
+        messages=[
+            {"role": "user", "content": "hello from telegram", "timestamp": time.time()}
+        ],
+        model="openai/gpt-5",
     )
     s.is_cli_session = True
-    s.source_tag = 'telegram'
-    s.session_source = 'messaging'
-    s.source_label = 'Telegram'
+    s.source_tag = "telegram"
+    s.session_source = "messaging"
+    s.source_label = "Telegram"
     s.save(touch_updated_at=False)
 
     loaded = Session.load_metadata_only(sid)
     compact = loaded.compact()
 
-    assert compact['is_cli_session'] is True
-    assert compact['source_tag'] == 'telegram'
-    assert compact['session_source'] == 'messaging'
-    assert compact['source_label'] == 'Telegram'
+    assert compact["is_cli_session"] is True
+    assert compact["source_tag"] == "telegram"
+    assert compact["session_source"] == "messaging"
+    assert compact["source_label"] == "Telegram"
 
 
 def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
     """Importing a messaging agent session should keep source metadata for WebUI policy."""
     conn = _ensure_state_db()
-    sid = 'gw_import_weixin_meta_001'
+    sid = "gw_import_weixin_meta_001"
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _insert_gateway_session(
+            conn, session_id=sid, source="weixin", title="Weixin Session"
+        )
 
-        data, status = post('/api/session/import_cli', {'session_id': sid})
+        data, status = post("/api/session/import_cli", {"session_id": sid})
         assert status == 200
-        session = data.get('session', {})
-        assert session.get('is_cli_session') is True
-        assert session.get('source_tag') == 'weixin'
-        assert session.get('raw_source') == 'weixin'
-        assert session.get('session_source') == 'messaging'
-        assert session.get('source_label') == 'Weixin'
+        session = data.get("session", {})
+        assert session.get("is_cli_session") is True
+        assert session.get("source_tag") == "weixin"
+        assert session.get("raw_source") == "weixin"
+        assert session.get("session_source") == "messaging"
+        assert session.get("source_label") == "Weixin"
     finally:
         try:
             _remove_test_sessions(conn, sid)
@@ -949,122 +1042,154 @@ def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
             pass
 
 
-def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_test_sessions):
+def test_sessions_response_backfills_imported_messaging_source_metadata(
+    cleanup_test_sessions,
+):
     """Old imported messaging sessions should still expose source metadata in /api/sessions."""
     from api.models import Session
 
     conn = _ensure_state_db()
-    sid = 'gw_legacy_import_weixin_001'
+    sid = "gw_legacy_import_weixin_001"
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _insert_gateway_session(
+            conn, session_id=sid, source="weixin", title="Weixin Session"
+        )
         s = Session(
             session_id=sid,
-            title='Legacy Imported Weixin',
-            messages=[{'role': 'user', 'content': 'hello', 'timestamp': time.time()}],
-            model='openai/gpt-5',
+            title="Legacy Imported Weixin",
+            messages=[{"role": "user", "content": "hello", "timestamp": time.time()}],
+            model="openai/gpt-5",
         )
         s.is_cli_session = True
         s.save(touch_updated_at=False)
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
-        assert session.get('source_tag') == 'weixin'
-        assert session.get('raw_source') == 'weixin'
-        assert session.get('session_source') == 'messaging'
-        assert session.get('source_label') == 'Weixin'
+        session = next(
+            item for item in data.get("sessions", []) if item.get("session_id") == sid
+        )
+        assert session.get("source_tag") == "weixin"
+        assert session.get("raw_source") == "weixin"
+        assert session.get("session_source") == "messaging"
+        assert session.get("source_label") == "Weixin"
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid)
             conn.close()
         except Exception:
             pass
 
 
-def test_sessions_response_keeps_only_latest_messaging_session_per_source(cleanup_test_sessions):
+def test_sessions_response_keeps_only_latest_messaging_session_per_source(
+    cleanup_test_sessions,
+):
     """Sidebar should keep messaging sessions by stable identity, not source-wide."""
     from api.models import Session
 
     conn = _ensure_state_db()
-    old_sid = 'gw_old_weixin_visible_001'
-    new_sid = 'gw_new_weixin_visible_001'
+    old_sid = "gw_old_weixin_visible_001"
+    new_sid = "gw_new_weixin_visible_001"
     cleanup_test_sessions.extend([old_sid, new_sid])
     try:
-        _insert_gateway_session(conn, session_id=old_sid, source='weixin', title='Old Weixin', started_at=time.time() - 100)
-        _insert_gateway_session(conn, session_id=new_sid, source='weixin', title='New Weixin', started_at=time.time())
+        _insert_gateway_session(
+            conn,
+            session_id=old_sid,
+            source="weixin",
+            title="Old Weixin",
+            started_at=time.time() - 100,
+        )
+        _insert_gateway_session(
+            conn,
+            session_id=new_sid,
+            source="weixin",
+            title="New Weixin",
+            started_at=time.time(),
+        )
 
         old = Session(
             session_id=old_sid,
-            title='Old Imported Weixin',
-            messages=[{'role': 'user', 'content': 'old', 'timestamp': time.time() - 100}],
-            model='openai/gpt-5',
+            title="Old Imported Weixin",
+            messages=[
+                {"role": "user", "content": "old", "timestamp": time.time() - 100}
+            ],
+            model="openai/gpt-5",
         )
         old.is_cli_session = True
         old.save(touch_updated_at=False)
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {item.get('session_id') for item in data.get('sessions', [])}
+        ids = {item.get("session_id") for item in data.get("sessions", [])}
         assert new_sid in ids
         assert old_sid not in ids
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, old_sid, new_sid)
             conn.close()
         except Exception:
             pass
 
 
-def test_sessions_response_keeps_distinct_messaging_sessions_for_distinct_users(cleanup_test_sessions):
+def test_sessions_response_keeps_distinct_messaging_sessions_for_distinct_users(
+    cleanup_test_sessions,
+):
     """Messaging collapse should survive for different users on the same platform."""
     conn = _ensure_state_db()
-    sid_a = 'gw_tg_distinct_user_a'
-    sid_b = 'gw_tg_distinct_user_b'
+    sid_a = "gw_tg_distinct_user_a"
+    sid_b = "gw_tg_distinct_user_b"
     cleanup_test_sessions.extend([sid_a, sid_b])
     try:
         _insert_gateway_session(
             conn,
             session_id=sid_a,
-            source='telegram',
-            title='TG User A',
-            user_id='1143399746',
+            source="telegram",
+            title="TG User A",
+            user_id="1143399746",
             started_at=time.time() - 20,
         )
         _insert_gateway_session(
             conn,
             session_id=sid_b,
-            source='telegram',
-            title='TG User B',
-            user_id='9988776655',
+            source="telegram",
+            title="TG User B",
+            user_id="9988776655",
             started_at=time.time(),
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_a, sid_b}}
-        assert ids == {sid_a, sid_b}, f"Expected both Telegram sessions to remain, got {ids}"
+        ids = {
+            s["session_id"]
+            for s in data.get("sessions", [])
+            if s.get("session_id") in {sid_a, sid_b}
+        }
+        assert ids == {sid_a, sid_b}, (
+            f"Expected both Telegram sessions to remain, got {ids}"
+        )
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid_a, sid_b)
             conn.close()
         except Exception:
             pass
 
 
-def test_sessions_response_distinguishes_same_user_different_chat_identity_from_gateway_metadata(cleanup_test_sessions):
+def test_sessions_response_distinguishes_same_user_different_chat_identity_from_gateway_metadata(
+    cleanup_test_sessions,
+):
     """Same user_id sessions should stay separate when gateway metadata exposes chat identity."""
     conn = _ensure_state_db()
-    sid_dm = 'gw_tg_same_user_dm'
-    sid_group = 'gw_tg_same_user_group'
+    sid_dm = "gw_tg_same_user_dm"
+    sid_group = "gw_tg_same_user_group"
     cleanup_test_sessions.extend([sid_dm, sid_group])
-    sessions_file = _get_test_state_dir() / 'sessions' / 'sessions.json'
+    sessions_file = _get_test_state_dir() / "sessions" / "sessions.json"
     original_sessions_json = None
     if sessions_file.exists():
         original_sessions_json = sessions_file.read_text()
@@ -1092,23 +1217,43 @@ def test_sessions_response_distinguishes_same_user_different_chat_identity_from_
         },
     }
     try:
-        sessions_file.write_text(json.dumps(sessions_payload), encoding='utf-8')
-        _insert_gateway_session(conn, session_id=sid_dm, source='telegram', title='DM Same User', user_id='1143399746', started_at=time.time() - 40)
-        _insert_gateway_session(conn, session_id=sid_group, source='telegram', title='Group Same User', user_id='1143399746', started_at=time.time())
+        sessions_file.write_text(json.dumps(sessions_payload), encoding="utf-8")
+        _insert_gateway_session(
+            conn,
+            session_id=sid_dm,
+            source="telegram",
+            title="DM Same User",
+            user_id="1143399746",
+            started_at=time.time() - 40,
+        )
+        _insert_gateway_session(
+            conn,
+            session_id=sid_group,
+            source="telegram",
+            title="Group Same User",
+            user_id="1143399746",
+            started_at=time.time(),
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_dm, sid_group}}
-        assert ids == {sid_dm, sid_group}, f"Expected both DM/group Telegram sessions, got {ids}"
+        ids = {
+            s["session_id"]
+            for s in data.get("sessions", [])
+            if s.get("session_id") in {sid_dm, sid_group}
+        }
+        assert ids == {sid_dm, sid_group}, (
+            f"Expected both DM/group Telegram sessions, got {ids}"
+        )
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid_dm, sid_group)
             if original_sessions_json is None:
                 sessions_file.unlink(missing_ok=True)
             else:
-                sessions_file.write_text(original_sessions_json, encoding='utf-8')
+                sessions_file.write_text(original_sessions_json, encoding="utf-8")
             conn.close()
         except Exception:
             pass
@@ -1231,7 +1376,9 @@ def test_messaging_projection_keeps_distinct_active_gateway_conversations(monkey
     assert ids == {"telegram_dm_sid", "telegram_group_sid"}
 
 
-def test_messaging_projection_does_not_aggressively_hide_without_gateway_metadata(monkeypatch):
+def test_messaging_projection_does_not_aggressively_hide_without_gateway_metadata(
+    monkeypatch,
+):
     """Without sessions.json as source of truth, keep fallback behavior."""
     from api import routes
 
@@ -1252,109 +1399,127 @@ def test_messaging_projection_does_not_aggressively_hide_without_gateway_metadat
     assert [session.get("session_id") for session in kept] == ["weixin_reset_sid"]
 
 
-def test_sessions_response_distinguishes_same_platform_same_group_chat_different_users_without_session_key(cleanup_test_sessions):
+def test_sessions_response_distinguishes_same_platform_same_group_chat_different_users_without_session_key(
+    cleanup_test_sessions,
+):
     """Group sessions with same chat_id but different users should not collapse without session_key."""
     conn = _ensure_state_db()
-    sid_u1 = 'gw_tg_group_chat_001'
-    sid_u2 = 'gw_tg_group_chat_002'
+    sid_u1 = "gw_tg_group_chat_001"
+    sid_u2 = "gw_tg_group_chat_002"
     cleanup_test_sessions.extend([sid_u1, sid_u2])
     try:
         _insert_gateway_session(
             conn,
             session_id=sid_u1,
-            source='telegram',
-            title='TG Group Same Chat User1',
-            user_id='2001001',
-            chat_id='tg_group_42',
-            chat_type='group',
+            source="telegram",
+            title="TG Group Same Chat User1",
+            user_id="2001001",
+            chat_id="tg_group_42",
+            chat_type="group",
             started_at=time.time() - 20,
         )
         _insert_gateway_session(
             conn,
             session_id=sid_u2,
-            source='telegram',
-            title='TG Group Same Chat User2',
-            user_id='2001002',
-            chat_id='tg_group_42',
-            chat_type='group',
+            source="telegram",
+            title="TG Group Same Chat User2",
+            user_id="2001002",
+            chat_id="tg_group_42",
+            chat_type="group",
             started_at=time.time(),
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_u1, sid_u2}}
+        ids = {
+            s["session_id"]
+            for s in data.get("sessions", [])
+            if s.get("session_id") in {sid_u1, sid_u2}
+        }
         assert ids == {sid_u1, sid_u2}, (
             f"Expected both group sessions in same chat to stay visible without session_key, got {ids}"
         )
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid_u1, sid_u2)
             conn.close()
         except Exception:
             pass
 
 
-def test_sessions_response_distinguishes_same_user_different_thread_without_session_key(cleanup_test_sessions):
+def test_sessions_response_distinguishes_same_user_different_thread_without_session_key(
+    cleanup_test_sessions,
+):
     """Same user_id but different thread context should remain separate without session_key."""
     conn = _ensure_state_db()
-    sid_t1 = 'gw_tg_thread_001'
-    sid_t2 = 'gw_tg_thread_002'
+    sid_t1 = "gw_tg_thread_001"
+    sid_t2 = "gw_tg_thread_002"
     cleanup_test_sessions.extend([sid_t1, sid_t2])
     try:
         _insert_gateway_session(
             conn,
             session_id=sid_t1,
-            source='telegram',
-            title='TG Thread A',
-            user_id='5550007',
-            chat_id='tg_group_42',
-            chat_type='thread',
-            thread_id='thread_a',
+            source="telegram",
+            title="TG Thread A",
+            user_id="5550007",
+            chat_id="tg_group_42",
+            chat_type="thread",
+            thread_id="thread_a",
             started_at=time.time() - 20,
         )
         _insert_gateway_session(
             conn,
             session_id=sid_t2,
-            source='telegram',
-            title='TG Thread B',
-            user_id='5550007',
-            chat_id='tg_group_42',
-            chat_type='thread',
-            thread_id='thread_b',
+            source="telegram",
+            title="TG Thread B",
+            user_id="5550007",
+            chat_id="tg_group_42",
+            chat_type="thread",
+            thread_id="thread_b",
             started_at=time.time(),
         )
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200
-        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_t1, sid_t2}}
+        ids = {
+            s["session_id"]
+            for s in data.get("sessions", [])
+            if s.get("session_id") in {sid_t1, sid_t2}
+        }
         assert ids == {sid_t1, sid_t2}, (
             f"Expected both thread-scoped Telegram sessions to stay visible without session_key, got {ids}"
         )
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid_t1, sid_t2)
             conn.close()
         except Exception:
             pass
 
 
-def test_archiving_raw_messaging_session_imports_without_erasing_agent_memory(cleanup_test_sessions):
+def test_archiving_raw_messaging_session_imports_without_erasing_agent_memory(
+    cleanup_test_sessions,
+):
     """Archive should be the safe hide path for raw messaging sessions."""
     conn = _ensure_state_db()
-    sid = 'gw_archive_weixin_001'
+    sid = "gw_archive_weixin_001"
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _insert_gateway_session(
+            conn, session_id=sid, source="weixin", title="Weixin Session"
+        )
 
-        data, status = post('/api/session/archive', {'session_id': sid, 'archived': True})
+        data, status = post(
+            "/api/session/archive", {"session_id": sid, "archived": True}
+        )
         assert status == 200
-        session = data.get('session', {})
-        assert session.get('archived') is True
-        assert session.get('session_source') == 'messaging'
+        session = data.get("session", {})
+        assert session.get("archived") is True
+        assert session.get("session_source") == "messaging"
 
         remaining = conn.execute(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?",
@@ -1369,17 +1534,21 @@ def test_archiving_raw_messaging_session_imports_without_erasing_agent_memory(cl
             pass
 
 
-def test_delete_imported_messaging_session_preserves_agent_memory(cleanup_test_sessions):
+def test_delete_imported_messaging_session_preserves_agent_memory(
+    cleanup_test_sessions,
+):
     """WebUI delete must not delete Hermes Agent memory for external channels."""
     conn = _ensure_state_db()
-    sid = 'gw_delete_weixin_safe_001'
+    sid = "gw_delete_weixin_safe_001"
     cleanup_test_sessions.append(sid)
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
-        _, import_status = post('/api/session/import_cli', {'session_id': sid})
+        _insert_gateway_session(
+            conn, session_id=sid, source="weixin", title="Weixin Session"
+        )
+        _, import_status = post("/api/session/import_cli", {"session_id": sid})
         assert import_status == 200
 
-        _, delete_status = post('/api/session/delete', {'session_id': sid})
+        _, delete_status = post("/api/session/delete", {"session_id": sid})
         assert delete_status == 200
 
         remaining = conn.execute(
@@ -1399,66 +1568,86 @@ def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sess
     """Cron sessions already imported into the WebUI store should stay hidden from the sidebar."""
     from api.models import Session
 
-    sid = 'cron_imported_20260427'
+    sid = "cron_imported_20260427"
     cleanup_test_sessions.append(sid)
     s = Session(
         session_id=sid,
-        title='Hourly Cron Import',
-        messages=[{'role': 'user', 'content': 'run hourly job', 'timestamp': time.time()}],
-        model='openai/gpt-5',
+        title="Hourly Cron Import",
+        messages=[
+            {"role": "user", "content": "run hourly job", "timestamp": time.time()}
+        ],
+        model="openai/gpt-5",
     )
     s.is_cli_session = True
     s.save(touch_updated_at=False)
 
-    data, status = get('/api/sessions')
+    data, status = get("/api/sessions")
     assert status == 200
-    assert sid not in {session.get('session_id') for session in data.get('sessions', [])}
+    assert sid not in {
+        session.get("session_id") for session in data.get("sessions", [])
+    }
 
 
 def test_cron_sessions_hidden_from_sidebar_by_default():
     """Cron-run sessions are background/internal and should not appear in the default sidebar list."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='cron_job123_20260427', source='cron', title='Nightly Cleanup')
-        _insert_gateway_session(conn, session_id='gw_noncron_001', source='telegram', title='Visible Chat')
+        _insert_gateway_session(
+            conn,
+            session_id="cron_job123_20260427",
+            source="cron",
+            title="Nightly Cleanup",
+        )
+        _insert_gateway_session(
+            conn, session_id="gw_noncron_001", source="telegram", title="Visible Chat"
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        ids = {s['session_id'] for s in sessions}
-        assert 'gw_noncron_001' in ids, "Non-cron agent session should still appear"
-        assert 'cron_job123_20260427' not in ids, "Cron session should be hidden by default"
+        sessions = data.get("sessions", [])
+        ids = {s["session_id"] for s in sessions}
+        assert "gw_noncron_001" in ids, "Non-cron agent session should still appear"
+        assert "cron_job123_20260427" not in ids, (
+            "Cron session should be hidden by default"
+        )
     finally:
         try:
-            _remove_test_sessions(conn, 'cron_job123_20260427', 'gw_noncron_001')
+            _remove_test_sessions(conn, "cron_job123_20260427", "gw_noncron_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_importable_agent_rows_can_opt_into_cron_source():
     """Diagnostic callers can opt out of the default cron exclusion explicitly."""
     conn = _ensure_state_db()
     try:
-        _insert_agent_session_row(conn, session_id='cron_diag_20260427', source='cron', title='Cron Diagnostic')
+        _insert_agent_session_row(
+            conn,
+            session_id="cron_diag_20260427",
+            source="cron",
+            title="Cron Diagnostic",
+        )
 
         from api.agent_sessions import read_importable_agent_session_rows
 
-        default_rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
-        assert 'cron_diag_20260427' not in {row.get('id') for row in default_rows}
+        default_rows = read_importable_agent_session_rows(
+            _get_state_db_path(), limit=None
+        )
+        assert "cron_diag_20260427" not in {row.get("id") for row in default_rows}
 
         diagnostic_rows = read_importable_agent_session_rows(
             _get_state_db_path(),
             limit=None,
             exclude_sources=None,
         )
-        assert 'cron_diag_20260427' in {row.get('id') for row in diagnostic_rows}
+        assert "cron_diag_20260427" in {row.get("id") for row in diagnostic_rows}
     finally:
         try:
-            _remove_test_sessions(conn, 'cron_diag_20260427')
+            _remove_test_sessions(conn, "cron_diag_20260427")
             conn.close()
         except Exception:
             pass
@@ -1468,78 +1657,102 @@ def test_gateway_session_has_message_count():
     """Gateway sessions report correct message_count from state.db."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_msg_001', source='discord', title='Msg Count Test', message_count=5)
+        _insert_gateway_session(
+            conn,
+            session_id="gw_msg_001",
+            source="discord",
+            title="Msg Count Test",
+            message_count=5,
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        gw = next((s for s in sessions if s['session_id'] == 'gw_msg_001'), None)
+        sessions = data.get("sessions", [])
+        gw = next((s for s in sessions if s["session_id"] == "gw_msg_001"), None)
         assert gw is not None
-        assert gw.get('message_count') == 5, f"Expected message_count=5, got {gw.get('message_count')}"
+        assert gw.get("message_count") == 5, (
+            f"Expected message_count=5, got {gw.get('message_count')}"
+        )
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_msg_001')
+            _remove_test_sessions(conn, "gw_msg_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_sessions_multiple_sources():
     """Sessions from multiple gateway sources (telegram, discord, slack) all appear."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_multi_tg', source='telegram', title='TG Chat')
-        _insert_gateway_session(conn, session_id='gw_multi_dc', source='discord', title='DC Chat')
-        _insert_gateway_session(conn, session_id='gw_multi_sl', source='slack', title='SL Chat')
+        _insert_gateway_session(
+            conn, session_id="gw_multi_tg", source="telegram", title="TG Chat"
+        )
+        _insert_gateway_session(
+            conn, session_id="gw_multi_dc", source="discord", title="DC Chat"
+        )
+        _insert_gateway_session(
+            conn, session_id="gw_multi_sl", source="slack", title="SL Chat"
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        gw_ids = {s['session_id'] for s in sessions if s.get('session_id') in ('gw_multi_tg', 'gw_multi_dc', 'gw_multi_sl')}
-        assert len(gw_ids) == 3, f"Expected 3 gateway sessions, got {len(gw_ids)}: {gw_ids}"
+        sessions = data.get("sessions", [])
+        gw_ids = {
+            s["session_id"]
+            for s in sessions
+            if s.get("session_id") in ("gw_multi_tg", "gw_multi_dc", "gw_multi_sl")
+        }
+        assert len(gw_ids) == 3, (
+            f"Expected 3 gateway sessions, got {len(gw_ids)}: {gw_ids}"
+        )
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_multi_tg', 'gw_multi_dc', 'gw_multi_sl')
+            _remove_test_sessions(conn, "gw_multi_tg", "gw_multi_dc", "gw_multi_sl")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_session_messages_readable():
     """Gateway session messages can be loaded via /api/session."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='gw_read_001', source='telegram', title='Readable')
+        _insert_gateway_session(
+            conn, session_id="gw_read_001", source="telegram", title="Readable"
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get(f'/api/session?session_id=gw_read_001')
+        data, status = get("/api/session?session_id=gw_read_001")
         assert status == 200
-        msgs = data.get('session', {}).get('messages', [])
+        msgs = data.get("session", {}).get("messages", [])
         assert len(msgs) >= 2, f"Expected at least 2 messages, got {len(msgs)}"
-        assert msgs[0].get('role') == 'user'
-        assert msgs[0].get('content') == 'Hello from Telegram'
+        assert msgs[0].get("role") == "user"
+        assert msgs[0].get("content") == "Hello from Telegram"
     finally:
         try:
-            _remove_test_sessions(conn, 'gw_read_001')
+            _remove_test_sessions(conn, "gw_read_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
-def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_test_sessions):
+def test_session_prefers_state_db_messages_over_stale_local_snapshot(
+    cleanup_test_sessions,
+):
     """Stale local JSON for messaging sessions should not mask newer state.db messages."""
     from api.models import Session
 
     conn = _ensure_state_db()
-    sid = 'gw_masking_regression_001'
+    sid = "gw_masking_regression_001"
     cleanup_test_sessions.append(sid)
     base_ts = time.time() - 120
     stale_messages = [
@@ -1558,8 +1771,8 @@ def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_tes
         _insert_gateway_session(
             conn,
             session_id=sid,
-            source='telegram',
-            title='Regression Telegram Chat',
+            source="telegram",
+            title="Regression Telegram Chat",
             message_count=expected_total,
             started_at=base_ts + 1,
         )
@@ -1576,26 +1789,30 @@ def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_tes
 
         s = Session(
             session_id=sid,
-            title='Legacy Local Telegram Snapshot',
-            workspace=str(pathlib.Path.home() / '.hermes'),
-            model='openai/gpt-5',
-            messages=[{"role": r, "content": c, "timestamp": t} for r, c, t in stale_messages],
+            title="Legacy Local Telegram Snapshot",
+            workspace=str(pathlib.Path.home() / ".hermes"),
+            model="openai/gpt-5",
+            messages=[
+                {"role": r, "content": c, "timestamp": t} for r, c, t in stale_messages
+            ],
         )
         s.is_cli_session = True
-        s.session_source = 'messaging'
-        s.source_tag = 'telegram'
-        s.raw_source = 'telegram'
-        s.source_label = 'Telegram'
+        s.session_source = "messaging"
+        s.source_tag = "telegram"
+        s.raw_source = "telegram"
+        s.source_label = "Telegram"
         s.save(touch_updated_at=False)
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get(f'/api/session?session_id={sid}')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get(f"/api/session?session_id={sid}")
         assert status == 200, data
-        session = data.get('session', {})
-        msgs = session.get('messages', [])
-        assert len(msgs) == expected_total, f"Expected {expected_total} messages, got {len(msgs)}"
-        assert msgs[-1].get('content') == expected_tail
-        assert session.get('message_count') == expected_total
+        session = data.get("session", {})
+        msgs = session.get("messages", [])
+        assert len(msgs) == expected_total, (
+            f"Expected {expected_total} messages, got {len(msgs)}"
+        )
+        assert msgs[-1].get("content") == expected_tail
+        assert session.get("message_count") == expected_total
     finally:
         try:
             _remove_test_sessions(conn, sid)
@@ -1603,15 +1820,17 @@ def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_tes
         except Exception:
             pass
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
         except Exception:
             pass
 
 
-def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_sessions):
+def test_sessions_prefers_state_db_metadata_for_messaging_overlap(
+    cleanup_test_sessions,
+):
     """Sidebar metadata for messaging sessions should come from state.db, not local JSON snapshots."""
     conn = _ensure_state_db()
-    sid = 'gw_sidebar_metadata_regression_001'
+    sid = "gw_sidebar_metadata_regression_001"
     cleanup_test_sessions.append(sid)
     now = time.time()
     rows = [
@@ -1620,7 +1839,14 @@ def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_s
         ("user", "Need details", now - 5),
     ]
     try:
-        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Live metadata chat', message_count=len(rows), started_at=now - 30)
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source="weixin",
+            title="Live metadata chat",
+            message_count=len(rows),
+            started_at=now - 30,
+        )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
         for role, content, ts in rows:
             _insert_message(conn, sid, role, content, ts)
@@ -1631,29 +1857,32 @@ def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_s
             {"role": "assistant", "content": "stale two", "timestamp": now - 99},
         ]
         from api.models import Session
+
         local = Session(
             session_id=sid,
-            title='Stale Sidebar',
+            title="Stale Sidebar",
             messages=stale,
-            model='openai/gpt-4',
+            model="openai/gpt-4",
         )
         local.is_cli_session = True
-        local.session_source = 'messaging'
-        local.source_tag = 'weixin'
-        local.raw_source = 'weixin'
-        local.source_label = 'Weixin'
+        local.session_source = "messaging"
+        local.source_tag = "weixin"
+        local.raw_source = "weixin"
+        local.source_label = "Weixin"
         local.save(touch_updated_at=False)
 
-        post('/api/settings', {'show_cli_sessions': True})
-        data, status = get('/api/sessions')
+        post("/api/settings", {"show_cli_sessions": True})
+        data, status = get("/api/sessions")
         assert status == 200, data
-        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
-        assert session.get('message_count') == len(rows)
+        session = next(
+            item for item in data.get("sessions", []) if item.get("session_id") == sid
+        )
+        assert session.get("message_count") == len(rows)
         expected_updated = max(ts for _, _, ts in rows)
-        assert abs(float(session.get('updated_at') or 0) - expected_updated) < 1.0
+        assert abs(float(session.get("updated_at") or 0) - expected_updated) < 1.0
     finally:
         try:
-            post('/api/settings', {'show_cli_sessions': False})
+            post("/api/settings", {"show_cli_sessions": False})
             _remove_test_sessions(conn, sid)
             conn.close()
         except Exception:
@@ -1665,22 +1894,24 @@ def test_archiving_messaging_session_keeps_state_db_history(cleanup_test_session
     from api.models import Session
 
     conn = _ensure_state_db()
-    sid = 'gw_archive_metadata_only_001'
+    sid = "gw_archive_metadata_only_001"
     cleanup_test_sessions.append(sid)
     try:
         _insert_gateway_session(
             conn,
             session_id=sid,
-            source='discord',
-            title='Archive Safe',
+            source="discord",
+            title="Archive Safe",
             message_count=2,
             started_at=time.time() - 20,
         )
         # Do not create a local session first; archive should create minimal metadata only.
-        data, status = post('/api/session/archive', {'session_id': sid, 'archived': True})
+        data, status = post(
+            "/api/session/archive", {"session_id": sid, "archived": True}
+        )
         assert status == 200, data
-        archived = data.get('session', {})
-        assert archived.get('archived') is True
+        archived = data.get("session", {})
+        assert archived.get("archived") is True
         remaining = conn.execute(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?",
             (sid,),
@@ -1689,13 +1920,15 @@ def test_archiving_messaging_session_keeps_state_db_history(cleanup_test_session
 
         local = Session.load(sid)
         assert local is not None
-        assert local.messages == [], "Archive should not import historical messages into local JSON"
+        assert local.messages == [], (
+            "Archive should not import historical messages into local JSON"
+        )
         assert local.archived is True
 
-        session_data, session_status = get(f'/api/session?session_id={sid}')
+        session_data, session_status = get(f"/api/session?session_id={sid}")
         assert session_status == 200, session_data
-        assert session_data.get('session', {}).get('archived') is True
-        assert session_data.get('session', {}).get('message_count') == 2
+        assert session_data.get("session", {}).get("archived") is True
+        assert session_data.get("session", {}).get("message_count") == 2
     finally:
         try:
             _remove_test_sessions(conn, sid)
@@ -1708,40 +1941,50 @@ def test_importing_older_gateway_session_preserves_original_timestamps_and_order
     """Importing an older gateway session should not bump it above newer WebUI sessions."""
     conn = _ensure_state_db()
     older_started_at = time.time() - 1800
-    imported_sid = 'gw_import_old_001'
+    imported_sid = "gw_import_old_001"
     newer_webui_sid = None
     try:
-        newer_webui, status = post('/api/session/new', {'model': 'openai/gpt-5'})
+        newer_webui, status = post("/api/session/new", {"model": "openai/gpt-5"})
         assert status == 200, newer_webui
-        newer_webui_sid = newer_webui['session']['session_id']
+        newer_webui_sid = newer_webui["session"]["session_id"]
 
         rename, rename_status = post(
-            '/api/session/rename',
-            {'session_id': newer_webui_sid, 'title': 'Newer WebUI Session'},
+            "/api/session/rename",
+            {"session_id": newer_webui_sid, "title": "Newer WebUI Session"},
         )
         assert rename_status == 200, rename
 
         _insert_gateway_session(
             conn,
             session_id=imported_sid,
-            source='discord',
-            title='Older imported gateway session',
+            source="discord",
+            title="Older imported gateway session",
             started_at=older_started_at,
         )
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        imported, imported_status = post('/api/session/import_cli', {'session_id': imported_sid})
+        imported, imported_status = post(
+            "/api/session/import_cli", {"session_id": imported_sid}
+        )
         assert imported_status == 200, imported
-        imported_session = imported['session']
-        assert abs(imported_session['created_at'] - older_started_at) < 2, imported_session
-        assert abs(imported_session['updated_at'] - older_started_at) < 5, imported_session
+        imported_session = imported["session"]
+        assert abs(imported_session["created_at"] - older_started_at) < 2, (
+            imported_session
+        )
+        assert abs(imported_session["updated_at"] - older_started_at) < 5, (
+            imported_session
+        )
 
-        sessions_payload, sessions_status = get('/api/sessions')
+        sessions_payload, sessions_status = get("/api/sessions")
         assert sessions_status == 200, sessions_payload
-        ordered_ids = [item['session_id'] for item in sessions_payload.get('sessions', [])]
+        ordered_ids = [
+            item["session_id"] for item in sessions_payload.get("sessions", [])
+        ]
         assert newer_webui_sid in ordered_ids, ordered_ids
         assert imported_sid in ordered_ids, ordered_ids
-        assert ordered_ids.index(newer_webui_sid) < ordered_ids.index(imported_sid), ordered_ids
+        assert ordered_ids.index(newer_webui_sid) < ordered_ids.index(imported_sid), (
+            ordered_ids
+        )
     finally:
         try:
             _remove_test_sessions(conn, imported_sid)
@@ -1750,76 +1993,83 @@ def test_importing_older_gateway_session_preserves_original_timestamps_and_order
             pass
         if imported_sid:
             try:
-                post('/api/session/delete', {'session_id': imported_sid})
+                post("/api/session/delete", {"session_id": imported_sid})
             except Exception:
                 pass
         if newer_webui_sid:
             try:
-                post('/api/session/delete', {'session_id': newer_webui_sid})
+                post("/api/session/delete", {"session_id": newer_webui_sid})
             except Exception:
                 pass
-        post('/api/settings', {'show_cli_sessions': False})
-
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_sse_stream_endpoint_exists():
     """GET /api/sessions/gateway/stream returns a response (200 or 200-range)."""
     # The SSE endpoint requires show_cli_sessions to be enabled
-    post('/api/settings', {'show_cli_sessions': True})
+    post("/api/settings", {"show_cli_sessions": True})
     try:
-        req = urllib.request.Request(BASE + '/api/sessions/gateway/stream')
+        req = urllib.request.Request(BASE + "/api/sessions/gateway/stream")
         with urllib.request.urlopen(req, timeout=5) as r:
             assert r.status in (200, 204), f"Expected 200/204, got {r.status}"
             # SSE should have content-type text/event-stream
-            ctype = r.headers.get('Content-Type', '')
-            assert 'text/event-stream' in ctype, f"Expected text/event-stream, got {ctype}"
+            ctype = r.headers.get("Content-Type", "")
+            assert "text/event-stream" in ctype, (
+                f"Expected text/event-stream, got {ctype}"
+            )
     except Exception as e:
         # Timeout is acceptable — means the connection is held open (SSE behavior)
-        if 'timed out' in str(e).lower() or 'timeout' in str(e).lower():
+        if "timed out" in str(e).lower() or "timeout" in str(e).lower():
             pass  # Good: SSE keeps the connection open
         else:
             raise
     finally:
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_sse_stream_probe_reports_status():
     """Probe mode returns JSON watcher status instead of holding open an SSE stream."""
-    post('/api/settings', {'show_cli_sessions': True})
+    post("/api/settings", {"show_cli_sessions": True})
     try:
-        req = urllib.request.Request(BASE + '/api/sessions/gateway/stream?probe=1')
+        req = urllib.request.Request(BASE + "/api/sessions/gateway/stream?probe=1")
         with urllib.request.urlopen(req, timeout=5) as r:
             assert r.status == 200, f"Expected 200, got {r.status}"
-            ctype = r.headers.get('Content-Type', '')
-            assert 'application/json' in ctype, f"Expected application/json, got {ctype}"
-            data = json.loads(r.read().decode('utf-8'))
-            assert data['enabled'] is True
-            assert 'watcher_running' in data
-            assert data['fallback_poll_ms'] == 30000
+            ctype = r.headers.get("Content-Type", "")
+            assert "application/json" in ctype, (
+                f"Expected application/json, got {ctype}"
+            )
+            data = json.loads(r.read().decode("utf-8"))
+            assert data["enabled"] is True
+            assert "watcher_running" in data
+            assert data["fallback_poll_ms"] == 30000
     finally:
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_webui_sessions_not_duplicated():
     """If a session_id exists both in WebUI store and state.db, it's not duplicated."""
     # Create a WebUI session with a known ID
     body = {}
-    d, _ = post('/api/session/new', body)
-    webui_sid = d['session']['session_id']
+    d, _ = post("/api/session/new", body)
+    webui_sid = d["session"]["session_id"]
 
     try:
         # Insert the same session_id into state.db as a gateway session
         conn = _ensure_state_db()
-        _insert_gateway_session(conn, session_id=webui_sid, source='telegram', title='Dup Test')
+        _insert_gateway_session(
+            conn, session_id=webui_sid, source="telegram", title="Dup Test"
+        )
         conn.close()
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        matching = [s for s in sessions if s['session_id'] == webui_sid]
-        assert len(matching) == 1, f"Expected 1 entry for {webui_sid}, got {len(matching)}"
+        sessions = data.get("sessions", [])
+        matching = [s for s in sessions if s["session_id"] == webui_sid]
+        assert len(matching) == 1, (
+            f"Expected 1 entry for {webui_sid}, got {len(matching)}"
+        )
     finally:
         try:
             conn2 = sqlite3.connect(str(_get_state_db_path()))
@@ -1827,45 +2077,55 @@ def test_gateway_webui_sessions_not_duplicated():
             conn2.close()
         except Exception:
             pass
-        post('/api/session/delete', {'session_id': webui_sid})
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/session/delete", {"session_id": webui_sid})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_gateway_sessions_no_state_db():
     """When state.db doesn't exist, /api/sessions works fine (no gateway sessions)."""
     _cleanup_state_db()
 
-    post('/api/settings', {'show_cli_sessions': True})
+    post("/api/settings", {"show_cli_sessions": True})
     try:
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
         # Should succeed with just webui sessions (or empty)
-        assert 'sessions' in data
+        assert "sessions" in data
     finally:
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 def test_cli_sessions_still_work():
     """CLI sessions (source='cli') still appear alongside gateway sessions."""
     conn = _ensure_state_db()
     try:
-        _insert_gateway_session(conn, session_id='cli_legacy_001', source='cli', title='CLI Legacy')
-        _insert_gateway_session(conn, session_id='gw_new_001', source='telegram', title='GW New')
+        _insert_gateway_session(
+            conn, session_id="cli_legacy_001", source="cli", title="CLI Legacy"
+        )
+        _insert_gateway_session(
+            conn, session_id="gw_new_001", source="telegram", title="GW New"
+        )
 
-        post('/api/settings', {'show_cli_sessions': True})
+        post("/api/settings", {"show_cli_sessions": True})
 
-        data, status = get('/api/sessions')
+        data, status = get("/api/sessions")
         assert status == 200
-        sessions = data.get('sessions', [])
-        agent_ids = {s['session_id'] for s in sessions if s.get('session_id') in ('cli_legacy_001', 'gw_new_001')}
-        assert len(agent_ids) == 2, f"Expected 2 agent sessions (cli + gateway), got {len(agent_ids)}"
+        sessions = data.get("sessions", [])
+        agent_ids = {
+            s["session_id"]
+            for s in sessions
+            if s.get("session_id") in ("cli_legacy_001", "gw_new_001")
+        }
+        assert len(agent_ids) == 2, (
+            f"Expected 2 agent sessions (cli + gateway), got {len(agent_ids)}"
+        )
     finally:
         try:
-            _remove_test_sessions(conn, 'cli_legacy_001', 'gw_new_001')
+            _remove_test_sessions(conn, "cli_legacy_001", "gw_new_001")
             conn.close()
         except Exception:
             pass
-        post('/api/settings', {'show_cli_sessions': False})
+        post("/api/settings", {"show_cli_sessions": False})
 
 
 # ── Unit tests for _gateway_sse_probe_payload ────────────────────────────────
@@ -1874,62 +2134,72 @@ def test_cli_sessions_still_work():
 
 import sys
 import threading
+
 sys.path.insert(0, str(REPO_ROOT))
 from api.routes import _gateway_sse_probe_payload
 
 
 def test_probe_payload_when_disabled():
     """Probe returns 404 when show_cli_sessions is False."""
-    body, status = _gateway_sse_probe_payload({'show_cli_sessions': False}, watcher=None)
+    body, status = _gateway_sse_probe_payload(
+        {"show_cli_sessions": False}, watcher=None
+    )
     assert status == 404
-    assert body['ok'] is False
-    assert body['enabled'] is False
-    assert body['watcher_running'] is False
-    assert body['error'] == 'agent sessions not enabled'
-    assert body['fallback_poll_ms'] == 30000
+    assert body["ok"] is False
+    assert body["enabled"] is False
+    assert body["watcher_running"] is False
+    assert body["error"] == "agent sessions not enabled"
+    assert body["fallback_poll_ms"] == 30000
 
 
 def test_probe_payload_when_watcher_missing():
     """Probe returns 503 when enabled but no watcher instance."""
-    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=None)
+    body, status = _gateway_sse_probe_payload({"show_cli_sessions": True}, watcher=None)
     assert status == 503
-    assert body['ok'] is False
-    assert body['enabled'] is True
-    assert body['watcher_running'] is False
-    assert body['error'] == 'watcher not started'
-    assert body['fallback_poll_ms'] == 30000
+    assert body["ok"] is False
+    assert body["enabled"] is True
+    assert body["watcher_running"] is False
+    assert body["error"] == "watcher not started"
+    assert body["fallback_poll_ms"] == 30000
 
 
 def test_probe_payload_when_watcher_instance_no_thread():
     """Probe returns 503 when watcher exists but _thread attribute is missing/None."""
+
     class _FakeWatcher:
         _thread = None
-    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=_FakeWatcher())
+
+    body, status = _gateway_sse_probe_payload(
+        {"show_cli_sessions": True}, watcher=_FakeWatcher()
+    )
     assert status == 503
-    assert body['watcher_running'] is False
+    assert body["watcher_running"] is False
 
 
 def test_probe_payload_when_watcher_thread_alive():
     """Probe returns 200 when enabled and watcher thread is alive."""
+
     class _FakeWatcher:
         pass
+
     w = _FakeWatcher()
     t = threading.Thread(target=lambda: None)
     t.daemon = True
     t.start()
     w._thread = t
     # Thread may finish fast — loop-start a live daemon thread for reliability
-    import time as _time
     done = threading.Event()
     live = threading.Thread(target=done.wait, daemon=True)
     live.start()
     w._thread = live
     try:
-        body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=w)
+        body, status = _gateway_sse_probe_payload(
+            {"show_cli_sessions": True}, watcher=w
+        )
         assert status == 200
-        assert body['ok'] is True
-        assert body['watcher_running'] is True
-        assert body['fallback_poll_ms'] == 30000
+        assert body["ok"] is True
+        assert body["watcher_running"] is True
+        assert body["fallback_poll_ms"] == 30000
     finally:
         done.set()
         live.join(timeout=1)
@@ -1937,23 +2207,26 @@ def test_probe_payload_when_watcher_thread_alive():
 
 def test_probe_payload_when_watcher_thread_dead():
     """Probe returns 503 when watcher instance exists but thread has exited."""
+
     class _FakeWatcher:
         pass
+
     w = _FakeWatcher()
     t = threading.Thread(target=lambda: None)
     t.start()
     t.join()  # wait for it to finish
     w._thread = t
-    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=w)
+    body, status = _gateway_sse_probe_payload({"show_cli_sessions": True}, watcher=w)
     assert status == 503
-    assert body['watcher_running'] is False
-    assert body['ok'] is False
+    assert body["watcher_running"] is False
+    assert body["ok"] is False
 
 
 def test_gateway_watcher_is_alive_public_method():
     """GatewayWatcher.is_alive() is the public API the probe uses. Cover all
     three states: before start(), while running, after stop()."""
     from api.gateway_watcher import GatewayWatcher
+
     w = GatewayWatcher()
     # Before start(): no thread
     assert w.is_alive() is False, "is_alive() must be False before start()"
@@ -1974,16 +2247,17 @@ def test_probe_payload_prefers_public_is_alive():
 
     class _WatcherWithPublicApi:
         def is_alive(self):
-            calls.append('is_alive')
+            calls.append("is_alive")
             return True
+
         # _thread is deliberately absent — must not be accessed.
 
     body, status = _gateway_sse_probe_payload(
-        {'show_cli_sessions': True},
+        {"show_cli_sessions": True},
         watcher=_WatcherWithPublicApi(),
     )
     assert status == 200
-    assert body['watcher_running'] is True
-    assert calls == ['is_alive'], (
+    assert body["watcher_running"] is True
+    assert calls == ["is_alive"], (
         "probe must prefer the public is_alive() method over poking _thread"
     )

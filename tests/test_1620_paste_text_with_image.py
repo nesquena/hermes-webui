@@ -16,12 +16,13 @@ The fix:
 These tests guard the handler shape against regression by static-analyzing
 `static/boot.js`. They follow the same pattern as `test_issue1095_pasted_images.py`.
 """
+
 import os
 import re
 
 
 def _read_boot_js() -> str:
-    with open(os.path.join('static', 'boot.js')) as f:
+    with open(os.path.join("static", "boot.js")) as f:
         return f.read()
 
 
@@ -35,12 +36,12 @@ def _paste_handler_body() -> str:
     depth = 0
     for i in range(start, len(src)):
         c = src[i]
-        if c == '{':
+        if c == "{":
             depth += 1
-        elif c == '}':
+        elif c == "}":
             depth -= 1
             if depth == 0:
-                return src[start:i + 1]
+                return src[start : i + 1]
     raise AssertionError("Unbalanced braces in #msg paste handler")
 
 
@@ -51,9 +52,11 @@ class TestPasteHandlerTextWithImage:
         """Handler must inspect string items for text/plain or text/html so it can
         defer to the browser's default text-paste behavior when text is present."""
         body = _paste_handler_body()
-        assert "kind==='string'" in body or 'kind === "string"' in body or "kind === 'string'" in body, (
-            "paste handler must check items[].kind === 'string' to detect text payload"
-        )
+        assert (
+            "kind==='string'" in body
+            or 'kind === "string"' in body
+            or "kind === 'string'" in body
+        ), "paste handler must check items[].kind === 'string' to detect text payload"
         assert "'text/plain'" in body, "paste handler must check for text/plain"
         assert "'text/html'" in body, "paste handler must check for text/html"
 
@@ -81,9 +84,15 @@ class TestPasteHandlerTextWithImage:
         """Pure-screenshot paste (image-only clipboard) must still call preventDefault()
         and route through addFiles() so the screenshot attaches as a file."""
         body = _paste_handler_body()
-        assert 'e.preventDefault()' in body, "handler must still preventDefault on image-only paste"
-        assert 'addFiles(files)' in body, "handler must still call addFiles(files) for screenshots"
-        assert 'screenshot-' in body, "handler must still synthesize screenshot-<ts> filename"
+        assert "e.preventDefault()" in body, (
+            "handler must still preventDefault on image-only paste"
+        )
+        assert "addFiles(files)" in body, (
+            "handler must still call addFiles(files) for screenshots"
+        )
+        assert "screenshot-" in body, (
+            "handler must still synthesize screenshot-<ts> filename"
+        )
 
     def test_handler_does_not_use_loose_image_check(self):
         """The pre-fix loose check `i.type.startsWith('image/')` (without kind==='file')

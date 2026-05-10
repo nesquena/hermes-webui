@@ -6,4 +6,3 @@ def test_only_latest_user_message_gets_edit_button():
     assert "let lastUserRawIdx=-1;" in src
     assert "const isEditableUser=isUser&&rawIdx===lastUserRawIdx;" in src
     assert "const editBtn  = isEditableUser ?" in src
-

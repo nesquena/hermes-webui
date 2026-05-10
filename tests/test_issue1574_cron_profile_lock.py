@@ -15,8 +15,12 @@ def _install_fake_cron(monkeypatch, run_job, events):
     cron_jobs.CRON_DIR = cron_jobs.HERMES_DIR / "cron"
     cron_jobs.JOBS_FILE = cron_jobs.CRON_DIR / "jobs.json"
     cron_jobs.OUTPUT_DIR = cron_jobs.CRON_DIR / "output"
-    cron_jobs.save_job_output = lambda job_id, output: events.append(("save", job_id, output))
-    cron_jobs.mark_job_run = lambda job_id, success, error=None: events.append(("mark", job_id, success, error))
+    cron_jobs.save_job_output = lambda job_id, output: events.append(
+        ("save", job_id, output)
+    )
+    cron_jobs.mark_job_run = lambda job_id, success, error=None: events.append(
+        ("mark", job_id, success, error)
+    )
 
     cron_scheduler = types.ModuleType("cron.scheduler")
     cron_scheduler._hermes_home = Path("/tmp/hermes")
@@ -28,7 +32,6 @@ def _install_fake_cron(monkeypatch, run_job, events):
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
     return cron_jobs, cron_scheduler
-
 
 
 def _write_spawn_fake_agent(root: Path, *, run_job_body: str):
@@ -65,11 +68,11 @@ def _activate_spawn_fake_agent(fake_agent_root: Path):
         for p in existing.split(os.pathsep)
         if p and ("hermes-agent" not in p or p == fake_path)
     ]
-    os.environ["PYTHONPATH"] = os.pathsep.join([fake_path, *[p for p in parts if p != fake_path]])
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        [fake_path, *[p for p in parts if p != fake_path]]
+    )
     sys.path[:] = [
-        p
-        for p in sys.path
-        if not p or "hermes-agent" not in p or p == fake_path
+        p for p in sys.path if not p or "hermes-agent" not in p or p == fake_path
     ]
     if fake_path not in sys.path:
         sys.path.insert(0, fake_path)
@@ -107,6 +110,7 @@ def _real_hermes_agent_editable_install_present() -> bool:
     """
     try:
         import importlib.util
+
         spec = importlib.util.find_spec("cron.scheduler")
     except Exception:
         return False
@@ -116,7 +120,11 @@ def _real_hermes_agent_editable_install_present() -> bool:
     # Tests write fake cron.scheduler under tmp_path; tmp paths shouldn't
     # count as a "real" competing install. Treat anything outside common tmp
     # roots as a real install that will out-resolve the fake.
-    tmp_prefixes = ("/tmp/", "/var/folders/", os.path.expandvars("$TMPDIR/") if os.environ.get("TMPDIR") else "")
+    tmp_prefixes = (
+        "/tmp/",
+        "/var/folders/",
+        os.path.expandvars("$TMPDIR/") if os.environ.get("TMPDIR") else "",
+    )
     return not any(p and origin.startswith(p) for p in tmp_prefixes)
 
 
@@ -126,15 +134,16 @@ def _large_cron_payload_runner(profile_home, result_queue):
         _write_spawn_fake_agent(
             fake_agent_root,
             run_job_body=(
-                "    payload = 'x' * 200_000\n"
-                "    return True, payload, payload, None\n"
+                "    payload = 'x' * 200_000\n    return True, payload, payload, None\n"
             ),
         )
         _activate_spawn_fake_agent(fake_agent_root)
         import api.routes as routes
 
-        success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
-            {"id": "large-payload"}, Path(profile_home)
+        success, output, final_response, error = (
+            routes._run_cron_job_in_profile_subprocess(
+                {"id": "large-payload"}, Path(profile_home)
+            )
         )
         result_queue.put(("ok", success, len(output), len(final_response), error))
     except BaseException as exc:  # pragma: no cover - surfaced in parent process
@@ -156,8 +165,10 @@ def _selected_profile_home_runner(profile_home, result_queue):
         _activate_spawn_fake_agent(fake_agent_root)
         import api.routes as routes
 
-        success, output, final_response, error = routes._run_cron_job_in_profile_subprocess(
-            {"id": "job1574"}, Path(profile_home)
+        success, output, final_response, error = (
+            routes._run_cron_job_in_profile_subprocess(
+                {"id": "job1574"}, Path(profile_home)
+            )
         )
         result_queue.put(("ok", success, output, final_response, error))
     except BaseException as exc:  # pragma: no cover - surfaced in parent process
@@ -168,9 +179,9 @@ def _selected_profile_home_runner(profile_home, result_queue):
 
 def test_manual_cron_subprocess_uses_spawn_context():
     """Manual cron subprocesses must avoid fork-from-threaded-WebUI hazards."""
-    routes_src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(
-        encoding="utf-8"
-    )
+    routes_src = (
+        Path(__file__).resolve().parent.parent / "api" / "routes.py"
+    ).read_text(encoding="utf-8")
     start = routes_src.find("def _run_cron_job_in_profile_subprocess")
     assert start != -1, "_run_cron_job_in_profile_subprocess not found"
     body = routes_src[start : start + 1200]
@@ -248,6 +259,7 @@ def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     """A >100 KB result must not deadlock the parent before it can persist output."""
     if _real_hermes_agent_editable_install_present():
         import pytest as _pytest
+
         _pytest.skip(
             "skipped on dev machines with an editable hermes-agent install — "
             "the spawn child resolves the real cron.scheduler first instead of "
@@ -287,7 +299,9 @@ def test_manual_cron_subprocess_drains_large_result_before_join(tmp_path):
     assert error is None
 
 
-def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, monkeypatch):
+def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(
+    tmp_path, monkeypatch
+):
     """A long manual run must not freeze unrelated cron/profile operations.
 
     The parent WebUI process still needs the cron profile lock for short metadata
@@ -307,8 +321,12 @@ def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, m
         assert release_run.wait(2), "test timed out waiting to release fake cron run"
         return True, "output", "final", None
 
-    _install_fake_cron(monkeypatch, lambda job: (True, "unused", "unused", None), events)
-    monkeypatch.setattr(routes, "_run_cron_job_in_profile_subprocess", fake_run_job_subprocess)
+    _install_fake_cron(
+        monkeypatch, lambda job: (True, "unused", "unused", None), events
+    )
+    monkeypatch.setattr(
+        routes, "_run_cron_job_in_profile_subprocess", fake_run_job_subprocess
+    )
 
     job_home = tmp_path / "owner"
     exec_home = tmp_path / "exec"
@@ -349,9 +367,12 @@ def test_manual_cron_run_does_not_hold_profile_lock_for_job_duration(tmp_path, m
     assert routes._is_cron_running("job1574") == (False, 0.0)
 
 
-def test_cron_job_subprocess_executes_under_selected_profile_home(tmp_path, monkeypatch):
+def test_cron_job_subprocess_executes_under_selected_profile_home(
+    tmp_path, monkeypatch
+):
     if _real_hermes_agent_editable_install_present():
         import pytest as _pytest
+
         _pytest.skip(
             "skipped on dev machines with an editable hermes-agent install — "
             "the spawn child resolves the real cron.scheduler first instead of "
@@ -371,7 +392,9 @@ def test_cron_job_subprocess_executes_under_selected_profile_home(tmp_path, monk
         runner.join(5)
         result_queue.close()
         result_queue.join_thread()
-        raise AssertionError("manual cron subprocess did not finish selected-profile probe")
+        raise AssertionError(
+            "manual cron subprocess did not finish selected-profile probe"
+        )
 
     try:
         result = result_queue.get(timeout=2)

@@ -61,19 +61,23 @@ def _function_body(src: str, name: str) -> str:
             depth -= 1
         i += 1
     assert depth == 0, f"{name}() body did not close"
-    return src[brace + 1:i - 1]
+    return src[brace + 1 : i - 1]
 
 
 def test_logs_tab_is_wired_between_insights_and_settings_in_rail_and_mobile_nav():
-    rail = INDEX[INDEX.index('data-panel="insights"'):INDEX.index('<div class="rail-spacer"')]
+    rail = INDEX[
+        INDEX.index('data-panel="insights"') : INDEX.index('<div class="rail-spacer"')
+    ]
     assert 'data-panel="logs"' in rail
     assert rail.index('data-panel="insights"') < rail.index('data-panel="logs"')
 
     mobile_start = INDEX.index('class="sidebar-nav"')
-    mobile_end = INDEX.index('<!-- Settings button mirrored here for mobile')
+    mobile_end = INDEX.index("<!-- Settings button mirrored here for mobile")
     mobile_nav = INDEX[mobile_start:mobile_end]
     assert 'data-panel="logs"' in mobile_nav
-    assert mobile_nav.index('data-panel="insights"') < mobile_nav.index('data-panel="logs"')
+    assert mobile_nav.index('data-panel="insights"') < mobile_nav.index(
+        'data-panel="logs"'
+    )
 
     assert 'id="panelLogs"' in INDEX
     assert 'id="mainLogs"' in INDEX
@@ -120,7 +124,12 @@ def test_logs_severity_coloring_and_monospace_wrap_css_are_present():
     assert ".logs-output{" in css_min
     assert "font-family" in css_min and "monospace" in css_min
     assert ".logs-output.wrap" in css_min and "white-space:pre-wrap" in css_min
-    for cls in ("log-line-error", "log-line-warning", "log-line-info", "log-line-debug"):
+    for cls in (
+        "log-line-error",
+        "log-line-warning",
+        "log-line-info",
+        "log-line-debug",
+    ):
         assert f".{cls}" in css_min
 
 

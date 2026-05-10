@@ -1,7 +1,7 @@
 """Regression tests for session sidecar repair logic."""
+
 import json
 import queue
-import os
 import sys
 import threading
 import time
@@ -16,7 +16,6 @@ from api.models import (
     _get_profile_home,
     _apply_core_sync_or_error_marker,
     _repair_stale_pending,
-    _active_stream_ids,
 )
 import api.config as config
 import api.streaming as streaming
@@ -24,6 +23,7 @@ import api.profiles as profiles
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _isolate_session_dir(tmp_path, monkeypatch):
@@ -85,7 +85,9 @@ def _make_session(session_id="test_sid", messages=None, **kwargs):
     return Session(**defaults)
 
 
-def _make_stale_session(session_id="stale_sid", pending_msg="Hello hermes", stream_id="stream_1"):
+def _make_stale_session(
+    session_id="stale_sid", pending_msg="Hello hermes", stream_id="stream_1"
+):
     """Helper to create a session in stale-pending state (messages empty, pending set)."""
     s = _make_session(session_id=session_id, messages=[])
     s.pending_user_message = pending_msg
@@ -131,7 +133,9 @@ class TestRepairStalePendingNoDeadlock:
         finally:
             lock.release()
 
-    def test_no_deadlock_when_get_session_triggers_repair(self, hermes_home, monkeypatch):
+    def test_no_deadlock_when_get_session_triggers_repair(
+        self, hermes_home, monkeypatch
+    ):
         """Simulate the real deadlock scenario: a caller holds the per-session
         lock and then calls get_session(), which evicts the session from cache
         and re-loads it, triggering _repair_stale_pending.
@@ -191,7 +195,9 @@ class TestRepairStalePendingNoDeadlock:
             f"Worker raised exception: {worker_exc[0] if worker_exc else 'none'}"
         )
 
-    def test_lock_contended_skip_retries_on_next_cache_miss(self, hermes_home, monkeypatch):
+    def test_lock_contended_skip_retries_on_next_cache_miss(
+        self, hermes_home, monkeypatch
+    ):
         """A lock-contended repair skip should not become stuck forever.
 
         The first get_session() call happens while the per-session lock is held,
@@ -224,7 +230,10 @@ class TestRepairStalePendingNoDeadlock:
         repaired = models.get_session(sid)
         assert repaired.pending_user_message is None
         assert repaired.active_stream_id is None
-        assert [m["content"] for m in repaired.messages] == ["Recover me", "Recovered answer"]
+        assert [m["content"] for m in repaired.messages] == [
+            "Recover me",
+            "Recovered answer",
+        ]
         assert models.SESSIONS.get(sid) is repaired
 
 
@@ -244,7 +253,9 @@ class TestDraftRecovery:
 
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
-            result = _apply_core_sync_or_error_marker(s, core_path, stream_id_for_recheck="stream_1")
+            result = _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1"
+            )
 
         assert result is True
         # Find the recovered user turn
@@ -264,7 +275,9 @@ class TestDraftRecovery:
 
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
-            _apply_core_sync_or_error_marker(s, core_path, stream_id_for_recheck="stream_1")
+            _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1"
+            )
 
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
@@ -282,11 +295,15 @@ class TestDraftRecovery:
 
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
-            _apply_core_sync_or_error_marker(s, core_path, stream_id_for_recheck="stream_1")
+            _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1"
+            )
 
         user_msgs = [m for m in s.messages if m.get("role") == "user"]
         assert len(user_msgs) == 1
-        assert user_msgs[0].get("attachments") == [{"type": "image", "name": "photo.png"}]
+        assert user_msgs[0].get("attachments") == [
+            {"type": "image", "name": "photo.png"}
+        ]
 
     def test_pending_fields_cleared_after_recovery(self, hermes_home, monkeypatch):
         """After recovery, all pending fields are cleared."""
@@ -297,7 +314,9 @@ class TestDraftRecovery:
 
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
-            _apply_core_sync_or_error_marker(s, core_path, stream_id_for_recheck="stream_1")
+            _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1"
+            )
 
         assert s.pending_user_message is None
         assert s.pending_attachments == []
@@ -321,7 +340,9 @@ class TestStreamIdRecheck:
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_old",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_old",
             )
 
         assert result is False, "Should bail when stream_id rotated"
@@ -339,7 +360,9 @@ class TestStreamIdRecheck:
             with lock:
                 core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
                 result = _apply_core_sync_or_error_marker(
-                    s, core_path, stream_id_for_recheck="stream_alive",
+                    s,
+                    core_path,
+                    stream_id_for_recheck="stream_alive",
                 )
 
             assert result is False, "Should bail when stream is still alive"
@@ -356,7 +379,9 @@ class TestStreamIdRecheck:
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_dead",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_dead",
             )
 
         assert result is True
@@ -461,7 +486,9 @@ class TestEmptyMessagesGuard:
     session.messages is non-empty, while still recovering the pending user turn
     before clearing stale stream runtime fields."""
 
-    def test_pending_cleared_when_messages_nonempty_direct(self, hermes_home, monkeypatch):
+    def test_pending_cleared_when_messages_nonempty_direct(
+        self, hermes_home, monkeypatch
+    ):
         """When _apply_core_sync_or_error_marker is called on a session with
         non-empty messages and pending set, it recovers the pending user turn,
         clears the pending fields, and appends an error marker."""
@@ -473,7 +500,9 @@ class TestEmptyMessagesGuard:
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_1",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_1",
             )
 
         assert result is True
@@ -499,7 +528,9 @@ class TestEmptyMessagesGuard:
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_1",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_1",
             )
 
         assert result is False
@@ -512,7 +543,9 @@ class TestEmptyMessagesGuard:
         with lock:
             core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_1",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_1",
             )
 
         assert result is True
@@ -561,7 +594,9 @@ class TestNonEmptyMessagesPendingCleared:
         assert len(recovered_msgs) == 1
         assert recovered_msgs[0]["role"] == "user"
         assert recovered_msgs[0]["content"] == "Stuck draft"
-        assert recovered_msgs[0]["attachments"] == [{"type": "image", "name": "screenshot.png"}]
+        assert recovered_msgs[0]["attachments"] == [
+            {"type": "image", "name": "screenshot.png"}
+        ]
 
         # Exactly one error marker
         error_msgs = [m for m in s.messages if m.get("_error")]
@@ -604,7 +639,9 @@ class TestLastResortSyncDelegation:
         assert len(called) == 1, "_get_profile_home should have been called once"
         assert called[0] == s.profile
 
-    def test_uses_shared_apply_core_sync_or_error_marker(self, hermes_home, monkeypatch):
+    def test_uses_shared_apply_core_sync_or_error_marker(
+        self, hermes_home, monkeypatch
+    ):
         """_last_resort_sync_from_core delegates to _apply_core_sync_or_error_marker
         instead of duplicating the logic."""
         s = _make_stale_session()
@@ -624,7 +661,9 @@ class TestLastResortSyncDelegation:
             _register_active_stream("stream_1")
             streaming._last_resort_sync_from_core(s, "stream_1", agent_lock)
 
-        assert len(called) == 1, "_apply_core_sync_or_error_marker should have been called"
+        assert len(called) == 1, (
+            "_apply_core_sync_or_error_marker should have been called"
+        )
         assert called[0][0] == s.session_id
         assert called[0][1] == "stream_1"
         assert called[0][2] == {"require_stream_dead": False}
@@ -664,6 +703,7 @@ class TestCheckpointOrdering:
         _run_agent_streaming: checkpoint stop appears before
         _last_resort_sync_from_core."""
         import inspect
+
         source = inspect.getsource(streaming._run_agent_streaming)
 
         # Find the finally block
@@ -677,7 +717,9 @@ class TestCheckpointOrdering:
         recovery_pos = finally_block.find("_last_resort_sync_from_core")
 
         assert ckpt_pos != -1, "Could not find _checkpoint_stop in finally block"
-        assert recovery_pos != -1, "Could not find _last_resort_sync_from_core in finally block"
+        assert recovery_pos != -1, (
+            "Could not find _last_resort_sync_from_core in finally block"
+        )
         assert ckpt_pos < recovery_pos, (
             f"_checkpoint_stop (pos {ckpt_pos}) must appear BEFORE "
             f"_last_resort_sync_from_core (pos {recovery_pos}) in finally block"
@@ -685,6 +727,7 @@ class TestCheckpointOrdering:
 
 
 # ── Integration: _repair_stale_pending end-to-end ────────────────────────────
+
 
 class TestRepairStalePendingIntegration:
     """End-to-end tests for _repair_stale_pending (cache-miss repair path)."""
@@ -734,7 +777,10 @@ class TestRepairStalePendingIntegration:
 
         result = _repair_stale_pending(s)
         assert result is True
-        assert [m["content"] for m in s.messages if m["role"] == "user"] == ["hi", "more"]
+        assert [m["content"] for m in s.messages if m["role"] == "user"] == [
+            "hi",
+            "more",
+        ]
         assert s.messages[1].get("_recovered") is True
         assert any(m.get("_error") for m in s.messages)
 
@@ -764,6 +810,7 @@ class TestRepairStalePendingIntegration:
 
 # ── Core sync with metadata fields ───────────────────────────────────────────
 
+
 class TestCoreSyncMetadata:
     """When syncing from core transcript, token/cost metadata is carried over."""
 
@@ -778,13 +825,19 @@ class TestCoreSyncMetadata:
             {"role": "assistant", "content": "World"},
         ]
         core_path = _write_core_transcript(
-            hermes_home, s.session_id, core_messages,
-            input_tokens=100, output_tokens=50, estimated_cost=0.05,
+            hermes_home,
+            s.session_id,
+            core_messages,
+            input_tokens=100,
+            output_tokens=50,
+            estimated_cost=0.05,
         )
 
         with lock:
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_1",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_1",
             )
 
         assert result is True
@@ -792,7 +845,9 @@ class TestCoreSyncMetadata:
         assert s.output_tokens == 50
         assert s.estimated_cost == 0.05
 
-    def test_core_empty_messages_falls_through_to_recovery(self, hermes_home, monkeypatch):
+    def test_core_empty_messages_falls_through_to_recovery(
+        self, hermes_home, monkeypatch
+    ):
         """If core transcript exists but messages is empty, the recovery path
         (restoring pending user message + error marker) is taken instead."""
         s = _make_stale_session(pending_msg="My question")
@@ -803,7 +858,9 @@ class TestCoreSyncMetadata:
 
         with lock:
             result = _apply_core_sync_or_error_marker(
-                s, core_path, stream_id_for_recheck="stream_1",
+                s,
+                core_path,
+                stream_id_for_recheck="stream_1",
             )
 
         assert result is True

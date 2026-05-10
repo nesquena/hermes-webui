@@ -29,6 +29,7 @@ INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def extract_fn(src, name, *, brace_depth=1):
     """Return the text of a JS function starting from `function <name>` to its
     closing brace.  Works for both standalone and closure-local functions.
@@ -81,13 +82,14 @@ def extract_attach_live_stream_prelude(src):
     if not m:
         return None
     # Find the first nested function definition inside the closure
-    inner = re.search(r"\bfunction _isActiveSession\b", src[m.start():])
+    inner = re.search(r"\bfunction _isActiveSession\b", src[m.start() :])
     if not inner:
-        return src[m.start(): m.start() + 5000]
-    return src[m.start(): m.start() + inner.start()]
+        return src[m.start() : m.start() + 5000]
+    return src[m.start() : m.start() + inner.start()]
 
 
 # ── 1. index.html: smd script tag ─────────────────────────────────────────────
+
 
 class TestIndexHtmlSmdScript:
     """streaming-markdown must be loaded in index.html before messages.js uses it."""
@@ -104,7 +106,7 @@ class TestIndexHtmlSmdScript:
 
     def test_smd_loaded_as_module(self):
         assert 'type="module"' in INDEX_HTML or "type='module'" in INDEX_HTML, (
-            "streaming-markdown must be loaded with type=\"module\" (it is an ES module)"
+            'streaming-markdown must be loaded with type="module" (it is an ES module)'
         )
 
     def test_smd_vendor_import_is_mount_agnostic(self):
@@ -134,6 +136,7 @@ class TestIndexHtmlSmdScript:
 
 
 # ── 2. Closure variable declarations ─────────────────────────────────────────
+
 
 class TestClosureVariables:
     """_smdParser, _smdWrittenLen and _smdReconnect must be declared in the
@@ -181,6 +184,7 @@ class TestClosureVariables:
 
 # ── 3. Helper functions ───────────────────────────────────────────────────────
 
+
 class TestSmdHelpers:
     """_smdNewParser, _smdEndParser and _smdWrite must exist and have the right shape."""
 
@@ -190,9 +194,9 @@ class TestSmdHelpers:
 
     def test_smd_new_parser_resets_written_len(self):
         fn = extract_fn(MESSAGES_JS, "_smdNewParser")
-        assert fn and (
-            "_smdWrittenLen=0" in fn or "_smdWrittenLen = 0" in fn
-        ), "_smdNewParser must reset _smdWrittenLen to 0"
+        assert fn and ("_smdWrittenLen=0" in fn or "_smdWrittenLen = 0" in fn), (
+            "_smdNewParser must reset _smdWrittenLen to 0"
+        )
 
     def test_smd_new_parser_calls_default_renderer(self):
         fn = extract_fn(MESSAGES_JS, "_smdNewParser")
@@ -202,9 +206,9 @@ class TestSmdHelpers:
 
     def test_smd_new_parser_calls_parser(self):
         fn = extract_fn(MESSAGES_JS, "_smdNewParser")
-        assert fn and (
-            "window.smd.parser(" in fn or "smd.parser(" in fn
-        ), "_smdNewParser must call smd.parser(renderer) to create a parser"
+        assert fn and ("window.smd.parser(" in fn or "smd.parser(" in fn), (
+            "_smdNewParser must call smd.parser(renderer) to create a parser"
+        )
 
     def test_smd_new_parser_guards_on_window_smd(self):
         fn = extract_fn(MESSAGES_JS, "_smdNewParser")
@@ -224,15 +228,15 @@ class TestSmdHelpers:
 
     def test_smd_end_parser_nulls_parser(self):
         fn = extract_fn(MESSAGES_JS, "_smdEndParser")
-        assert fn and (
-            "_smdParser=null" in fn or "_smdParser = null" in fn
-        ), "_smdEndParser must set _smdParser to null after flushing"
+        assert fn and ("_smdParser=null" in fn or "_smdParser = null" in fn), (
+            "_smdEndParser must set _smdParser to null after flushing"
+        )
 
     def test_smd_end_parser_resets_written_len(self):
         fn = extract_fn(MESSAGES_JS, "_smdEndParser")
-        assert fn and (
-            "_smdWrittenLen=0" in fn or "_smdWrittenLen = 0" in fn
-        ), "_smdEndParser must reset _smdWrittenLen to 0"
+        assert fn and ("_smdWrittenLen=0" in fn or "_smdWrittenLen = 0" in fn), (
+            "_smdEndParser must reset _smdWrittenLen to 0"
+        )
 
     def test_smd_write_exists(self):
         fn = extract_fn(MESSAGES_JS, "_smdWrite")
@@ -270,6 +274,7 @@ class TestSmdHelpers:
 
 
 # ── 4. _scheduleRender: smd path vs fallback ──────────────────────────────────
+
 
 class TestScheduleRenderSmdPath:
     """_scheduleRender must use smd when available and fall back to renderMd."""
@@ -341,6 +346,7 @@ class TestScheduleRenderSmdPath:
 
 # ── 5. tool event: smd parser finalised between segments ──────────────────────
 
+
 class TestToolEventSmdEnd:
     """When a tool call is received, the current smd parser must be ended so
     the next text segment gets a fresh parser bound to the new assistantBody."""
@@ -357,6 +363,7 @@ class TestToolEventSmdEnd:
 
 
 # ── 6. done event: smd parser finalized + post-finalize highlighting ──────────
+
 
 class TestDoneEventSmd:
     """The 'done' handler must end the smd parser and trigger Prism/KaTeX/copy."""
@@ -399,7 +406,7 @@ class TestDoneEventSmd:
         fn = self.get_fn()
         assert fn, "'done' handler not found"
         # Strip single-line comments to avoid matching 'renderMessages(' inside comments
-        fn_no_comments = re.sub(r'//[^\n]*', '', fn)
+        fn_no_comments = re.sub(r"//[^\n]*", "", fn)
         # Find the rAF that contains highlightCode
         raf_pos = fn_no_comments.find("requestAnimationFrame")
         render_messages_pos = fn_no_comments.find("renderMessages(")
@@ -440,8 +447,11 @@ class TestDoneEventSmd:
             "Follow intent must be captured before renderMessages() replaces the "
             "live transcript DOM."
         )
-        after_render = fn[render_idx:render_idx + 500]
-        assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
+        after_render = fn[render_idx : render_idx + 500]
+        assert (
+            "if(shouldFollowOnDone" in after_render
+            and "scrollToBottom()" in after_render
+        ), (
             "After final render, done handler must call scrollToBottom() when the "
             "user was pinned/near-bottom before DOM replacement."
         )
@@ -452,6 +462,7 @@ class TestDoneEventSmd:
 
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────
+
 
 class TestAppErrorSmd:
     """The 'apperror' handler must call _smdEndParser to avoid leaking state."""
@@ -468,6 +479,7 @@ class TestAppErrorSmd:
 
 # ── 8. cancel event: smd parser ends cleanly ─────────────────────────────────
 
+
 class TestCancelSmd:
     """The 'cancel' handler must call _smdEndParser to avoid leaking state."""
 
@@ -482,6 +494,7 @@ class TestCancelSmd:
 
 
 # ── 9. Regression: existing streaming guards still intact ─────────────────────
+
 
 class TestExistingStreamingGuardsIntact:
     """The smd integration must not break pre-existing correctness properties."""
@@ -519,19 +532,20 @@ class TestExistingStreamingGuardsIntact:
 
     def test_segment_start_still_tracked(self):
         src = MESSAGES_JS
-        assert "segmentStart=assistantText.length" in src or \
-               "segmentStart = assistantText.length" in src, (
-            "segmentStart must still be advanced on tool events"
-        )
+        assert (
+            "segmentStart=assistantText.length" in src
+            or "segmentStart = assistantText.length" in src
+        ), "segmentStart must still be advanced on tool events"
 
     def test_fresh_segment_flag_still_set_on_tool(self):
         fn = extract_event_handler(MESSAGES_JS, "tool")
-        assert fn and (
-            "_freshSegment=true" in fn or "_freshSegment = true" in fn
-        ), "_freshSegment must still be set on tool events"
+        assert fn and ("_freshSegment=true" in fn or "_freshSegment = true" in fn), (
+            "_freshSegment must still be set on tool events"
+        )
 
 
 # ── XSS: smd does NOT sanitize URL schemes — we must do it ourselves ──────────
+
 
 class TestSmdUrlSchemeSanitization:
     """streaming-markdown@0.2.15 preserves `javascript:`, `vbscript:`, and dangerous
@@ -560,6 +574,7 @@ class TestSmdUrlSchemeSanitization:
         )
         # Find the regex definition
         import re as _re
+
         m = _re.search(r"_SMD_SAFE_URL_RE\s*=\s*/([^/]+)/i?", MESSAGES_JS)
         assert m, "_SMD_SAFE_URL_RE regex literal not found in messages.js"
         pattern = m.group(1)

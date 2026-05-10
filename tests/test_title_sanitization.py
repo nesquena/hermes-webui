@@ -11,7 +11,9 @@ from api.streaming import (
 class TestGeneratedTitleSanitization(unittest.TestCase):
     def test_strips_session_title_markdown_prefix(self):
         self.assertEqual(
-            _sanitize_generated_title("**Session Title:** Clarifying Topic for Discussion"),
+            _sanitize_generated_title(
+                "**Session Title:** Clarifying Topic for Discussion"
+            ),
             "Clarifying Topic for Discussion",
         )
 
@@ -65,4 +67,6 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
 
     def test_title_generation_source_has_no_cjk_literals(self):
         src = Path("api/streaming.py").read_text(encoding="utf-8")
-        self.assertNotRegex(src, r"[\u4e00-\u9fff]", "title generation code should stay English-only")
+        self.assertNotRegex(
+            src, r"[\u4e00-\u9fff]", "title generation code should stay English-only"
+        )

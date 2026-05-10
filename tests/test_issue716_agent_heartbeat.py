@@ -75,14 +75,18 @@ def _runtime_status(**overrides):
     return payload
 
 
-def test_agent_health_uses_root_gateway_state_when_hermes_home_is_profile(monkeypatch, tmp_path):
+def test_agent_health_uses_root_gateway_state_when_hermes_home_is_profile(
+    monkeypatch, tmp_path
+):
     from api import agent_health
 
     root_home = tmp_path / "root-home"
     profile_home = root_home / "profiles" / "troubleshooting"
     profile_home.mkdir(parents=True)
     (root_home / "gateway.pid").write_text(json.dumps({"pid": 98765}), encoding="utf-8")
-    (root_home / "gateway_state.json").write_text(json.dumps(_runtime_status()), encoding="utf-8")
+    (root_home / "gateway_state.json").write_text(
+        json.dumps(_runtime_status()), encoding="utf-8"
+    )
     fake_gateway_status = _PathSensitiveGatewayStatus(root_home)
 
     monkeypatch.setenv("HERMES_HOME", str(profile_home))
@@ -91,7 +95,9 @@ def test_agent_health_uses_root_gateway_state_when_hermes_home_is_profile(monkey
         "hermes_constants",
         types.SimpleNamespace(get_default_hermes_root=lambda: root_home),
     )
-    monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: fake_gateway_status)
+    monkeypatch.setattr(
+        agent_health, "_gateway_status_module", lambda: fake_gateway_status
+    )
 
     payload = agent_health.build_agent_health_payload()
 
@@ -131,13 +137,17 @@ def test_agent_health_payload_alive_uses_safe_runtime_details(monkeypatch):
     assert "pid" not in payload["details"]
 
 
-def test_agent_health_payload_down_when_gateway_metadata_exists_but_no_process(monkeypatch):
+def test_agent_health_payload_down_when_gateway_metadata_exists_but_no_process(
+    monkeypatch,
+):
     from api import agent_health
 
     monkeypatch.setattr(
         agent_health,
         "_gateway_status_module",
-        lambda: _FakeGatewayStatus(_runtime_status(gateway_state="stale"), running_pid=None),
+        lambda: _FakeGatewayStatus(
+            _runtime_status(gateway_state="stale"), running_pid=None
+        ),
     )
 
     payload = agent_health.build_agent_health_payload()
@@ -160,7 +170,10 @@ def test_agent_health_payload_unknown_when_gateway_is_not_configured(monkeypatch
     payload = agent_health.build_agent_health_payload()
 
     assert payload["alive"] is None
-    assert payload["details"] == {"state": "unknown", "reason": "gateway_not_configured"}
+    assert payload["details"] == {
+        "state": "unknown",
+        "reason": "gateway_not_configured",
+    }
 
 
 def test_agent_health_route_is_registered_with_tri_state_payload_shape():
@@ -186,7 +199,10 @@ def test_agent_health_frontend_polls_only_visible_and_distinguishes_states():
     assert "const AGENT_HEALTH_INTERVAL_MS=30000" in UI_JS
     assert "api('/api/health/agent')" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
-    assert "document.addEventListener('visibilitychange',_syncAgentHealthMonitorVisibility)" in UI_JS
+    assert (
+        "document.addEventListener('visibilitychange',_syncAgentHealthMonitorVisibility)"
+        in UI_JS
+    )
     assert "if(payload.alive === true)" in UI_JS
     assert "if(payload.alive === false)" in UI_JS
     assert "if(payload.alive == null)" in UI_JS

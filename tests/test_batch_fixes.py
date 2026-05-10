@@ -20,8 +20,8 @@ def read(rel):
 
 # ── Group A: /root workspace ──────────────────────────────────────────────────
 
-class TestRootWorkspaceUnblocked:
 
+class TestRootWorkspaceUnblocked:
     def test_root_not_in_blocked_system_roots(self):
         src = read("api/workspace.py")
         assert "Path('/root')" not in src, (
@@ -51,8 +51,8 @@ class TestRootWorkspaceUnblocked:
 
 # ── Group B: custom_providers visibility ─────────────────────────────────────
 
-class TestCustomProvidersVisibility:
 
+class TestCustomProvidersVisibility:
     def test_has_custom_providers_variable_present(self):
         src = read("api/config.py")
         assert "_has_custom_providers" in src, (
@@ -75,8 +75,8 @@ class TestCustomProvidersVisibility:
 
 # ── Group C: cron skill cache ─────────────────────────────────────────────────
 
-class TestCronSkillCacheInvalidation:
 
+class TestCronSkillCacheInvalidation:
     def _panels_src(self):
         return read("static/panels.js")
 
@@ -86,8 +86,9 @@ class TestCronSkillCacheInvalidation:
         # openCronCreate() opens the task create form (renamed from toggleCronForm
         # in the main-view refactor). It must null the skills cache before fetching.
         m = re.search(
-            r'function openCronCreate\(\)\{.*?_cronSkillsCache\s*=\s*null',
-            src, re.DOTALL
+            r"function openCronCreate\(\)\{.*?_cronSkillsCache\s*=\s*null",
+            src,
+            re.DOTALL,
         )
         assert m, (
             "openCronCreate must unconditionally null _cronSkillsCache "
@@ -97,10 +98,7 @@ class TestCronSkillCacheInvalidation:
     def test_cache_not_guarded_by_if_on_open(self):
         src = self._panels_src()
         # openCronCreate must not gate the fetch behind an if(!_cronSkillsCache) guard.
-        m = re.search(
-            r'function openCronCreate\(\)\{.*?\}',
-            src, re.DOTALL
-        )
+        m = re.search(r"function openCronCreate\(\)\{.*?\}", src, re.DOTALL)
         assert m, "openCronCreate definition not found"
         assert "if(!_cronSkillsCache)" not in m.group(0), (
             "openCronCreate should not use 'if(!_cronSkillsCache)' guard — "
@@ -112,8 +110,9 @@ class TestCronSkillCacheInvalidation:
         # saveSkillForm() is the handler invoked on skill save (renamed from
         # submitSkillSave in the main-view refactor; the old name still aliases it).
         m = re.search(
-            r'async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
-            src, re.DOTALL
+            r"async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null",
+            src,
+            re.DOTALL,
         )
         assert m, (
             "_cronSkillsCache must be set to null in saveSkillForm() "
@@ -123,8 +122,8 @@ class TestCronSkillCacheInvalidation:
 
 # ── Group D: System (auto) theme ──────────────────────────────────────────────
 
-class TestSystemTheme:
 
+class TestSystemTheme:
     def test_apply_theme_helper_in_boot_js(self):
         src = read("static/boot.js")
         assert "function _applyTheme(" in src, (
@@ -154,15 +153,11 @@ class TestSystemTheme:
         assert "_pickTheme('system')" in html, (
             "Theme picker must include a system theme button"
         )
-        assert ">System<" in html, (
-            "Theme picker must show 'System' label"
-        )
+        assert ">System<" in html, "Theme picker must show 'System' label"
 
     def test_theme_picker_uses_pick_theme(self):
         html = read("static/index.html")
-        assert "_pickTheme(" in html, (
-            "Theme buttons must call _pickTheme()"
-        )
+        assert "_pickTheme(" in html, "Theme buttons must call _pickTheme()"
 
     def test_flicker_script_resolves_system(self):
         html = read("static/index.html")
@@ -194,7 +189,9 @@ class TestSystemTheme:
 
     def test_panels_reverts_via_apply_theme(self):
         src = read("static/panels.js")
-        block = re.search(r"function _revertSettingsPreview\(\)\{.*?\n\}", src, re.DOTALL)
+        block = re.search(
+            r"function _revertSettingsPreview\(\)\{.*?\n\}", src, re.DOTALL
+        )
         assert block, "_revertSettingsPreview() should be present"
         assert "_applyTheme(" not in block.group(0), (
             "_revertSettingsPreview must no longer call _applyTheme() since Appearance now autosaves"

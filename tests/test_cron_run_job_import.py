@@ -5,8 +5,8 @@ names it references must be resolvable from that thread's scope.
 Before the fix, run_job was only imported inside _handle_cron_run
 (a local scope invisible to _run_cron_tracked), causing NameError.
 """
+
 import ast
-import inspect
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,10 @@ def _get_function_source(func_name: str) -> str:
     """Extract a top-level function's source via AST for stability."""
     tree = ast.parse(ROUTES_PY.read_text(encoding="utf-8"))
     for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == func_name
+        ):
             lines = ROUTES_PY.read_text(encoding="utf-8").splitlines()
             return "\n".join(lines[node.lineno - 1 : node.end_lineno])
     pytest.fail(f"Function {func_name} not found in {ROUTES_PY}")
@@ -59,10 +62,14 @@ class TestRunCronTrackedImport:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
-                    func_imports.add(alias.name if alias.asname is None else alias.asname)
+                    func_imports.add(
+                        alias.name if alias.asname is None else alias.asname
+                    )
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    func_imports.add(alias.name if alias.asname is None else alias.asname)
+                    func_imports.add(
+                        alias.name if alias.asname is None else alias.asname
+                    )
 
         # run_job is referenced → must be imported inside the function
         if "run_job" in names_used:
@@ -80,7 +87,9 @@ class TestRunCronTrackedImport:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
-                    imported_names.add(alias.name if alias.asname is None else alias.asname)
+                    imported_names.add(
+                        alias.name if alias.asname is None else alias.asname
+                    )
         assert "run_job" not in imported_names, (
             "_handle_cron_run still imports run_job — it should be moved to "
             "_run_cron_tracked to avoid the NameError in worker threads."

@@ -5,6 +5,7 @@ The WebUI can be served at /hermes/. In that deployment API requests look like
 network-only; otherwise cache-first handling can serve a stale sidebar session
 list until the browser cache/service-worker cache is cleared.
 """
+
 from pathlib import Path
 
 
@@ -44,7 +45,9 @@ def test_service_worker_uses_network_first_for_page_navigation():
     fetch_idx = SW_SRC.find("fetch(event.request)", navigate_idx)
     cache_idx = SW_SRC.find("caches.match", navigate_idx)
     assert fetch_idx != -1, "navigation branch must try the live server first"
-    assert cache_idx != -1, "navigation branch may use cached shell only as offline fallback"
+    assert cache_idx != -1, (
+        "navigation branch may use cached shell only as offline fallback"
+    )
     assert fetch_idx < cache_idx, (
         "navigation requests must be network-first, not cache-first, so auth redirects "
         "and freshly set login cookies are honored without a manual refresh"
@@ -53,7 +56,11 @@ def test_service_worker_uses_network_first_for_page_navigation():
 
 def test_service_worker_does_not_precache_page_shell_under_auth():
     """Do not cache './' during install; it may be the authenticated app or login redirect."""
-    shell_block = SW_SRC[SW_SRC.find("const SHELL_ASSETS"):SW_SRC.find("];", SW_SRC.find("const SHELL_ASSETS"))]
+    shell_block = SW_SRC[
+        SW_SRC.find("const SHELL_ASSETS") : SW_SRC.find(
+            "];", SW_SRC.find("const SHELL_ASSETS")
+        )
+    ]
     assert "'./'" not in shell_block and '"./"' not in shell_block, (
         "pre-caching './' can serve a stale authenticated app shell while logged out; "
         "navigation should populate shell cache only after a successful non-redirect network load"
@@ -61,7 +68,10 @@ def test_service_worker_does_not_precache_page_shell_under_auth():
 
 
 def test_service_worker_never_caches_login_page_or_login_script():
-    assert "url.pathname.endsWith('/login')" in SW_SRC or "url.pathname.includes('/login')" in SW_SRC, (
+    assert (
+        "url.pathname.endsWith('/login')" in SW_SRC
+        or "url.pathname.includes('/login')" in SW_SRC
+    ), (
         "service worker must bypass the login page so stale auth UI cannot survive until cache clear"
     )
     assert "url.pathname.endsWith('/static/login.js')" in SW_SRC, (

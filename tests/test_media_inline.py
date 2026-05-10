@@ -9,17 +9,17 @@ Covers:
 5. renderMd() MEDIA: stash/restore logic (static JS analysis)
 6. /api/media endpoint: integration test via live server (requires 8788)
 """
+
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import tempfile
 import unittest
 import urllib.error
 import urllib.request
 
-from tests._pytest_port import BASE, TEST_STATE_DIR
+from tests._pytest_port import BASE
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
@@ -28,49 +28,73 @@ WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8
 
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
 
+
 class TestMediaRenderMdStash(unittest.TestCase):
     """Verify the MEDIA: stash/restore logic exists in ui.js."""
 
     def test_media_stash_defined(self):
-        self.assertIn("media_stash", UI_JS,
-                      "media_stash array must be defined in renderMd()")
+        self.assertIn(
+            "media_stash", UI_JS, "media_stash array must be defined in renderMd()"
+        )
 
     def test_media_token_regex(self):
-        self.assertIn("MEDIA:", UI_JS,
-                      "MEDIA: token regex must be present in renderMd()")
+        self.assertIn(
+            "MEDIA:", UI_JS, "MEDIA: token regex must be present in renderMd()"
+        )
 
     def test_media_restore_produces_img_tag(self):
-        self.assertIn("msg-media-img", UI_JS,
-                      "restore pass must produce <img class='msg-media-img'>")
+        self.assertIn(
+            "msg-media-img",
+            UI_JS,
+            "restore pass must produce <img class='msg-media-img'>",
+        )
 
     def test_media_restore_produces_download_link(self):
-        self.assertIn("msg-media-link", UI_JS,
-                      "restore pass must produce download link for non-image files")
+        self.assertIn(
+            "msg-media-link",
+            UI_JS,
+            "restore pass must produce download link for non-image files",
+        )
 
     def test_media_api_url_pattern(self):
-        self.assertIn("api/media?path=", UI_JS,
-                      "renderMd must build api/media?path=... URL for local files")
+        self.assertIn(
+            "api/media?path=",
+            UI_JS,
+            "renderMd must build api/media?path=... URL for local files",
+        )
 
     def test_local_audio_video_media_tokens_request_inline_streaming(self):
-        self.assertIn("apiUrl+'&inline=1'", UI_JS,
-                      "MEDIA: audio/video local paths must request inline streaming")
+        self.assertIn(
+            "apiUrl+'&inline=1'",
+            UI_JS,
+            "MEDIA: audio/video local paths must request inline streaming",
+        )
 
     def test_media_stash_uses_null_byte_token(self):
-        self.assertIn("\\x00D", UI_JS,
-                      "MEDIA stash must use null-byte token (\\x00D) to avoid conflicts")
+        self.assertIn(
+            "\\x00D",
+            UI_JS,
+            "MEDIA stash must use null-byte token (\\x00D) to avoid conflicts",
+        )
 
     def test_media_stash_runs_before_fence_stash(self):
         media_pos = UI_JS.find("media_stash")
         fence_pos = UI_JS.find("fence_stash")
-        self.assertGreater(fence_pos, media_pos,
-                           "media_stash must be defined before fence_stash in renderMd()")
+        self.assertGreater(
+            fence_pos,
+            media_pos,
+            "media_stash must be defined before fence_stash in renderMd()",
+        )
 
     def test_image_extension_regex_covers_common_types(self):
         # The JS source has these extensions in a regex like /\.png|jpg|.../i
         # Check for the extension strings (without the dot, which may be escaped as \.)
         for ext in ["png", "jpg", "jpeg", "gif", "webp"]:
-            self.assertIn(ext, UI_JS,
-                          f"Image extension {ext} must be in the MEDIA img-check regex")
+            self.assertIn(
+                ext,
+                UI_JS,
+                f"Image extension {ext} must be in the MEDIA img-check regex",
+            )
 
     def test_http_url_media_rendered_as_img(self):
         # renderMd should treat MEDIA:https://... as an <img>
@@ -82,14 +106,17 @@ class TestMediaRenderMdStash(unittest.TestCase):
 
     def test_zoom_toggle_on_click(self):
         # PR #1135: CSS class toggle replaced by proper lightbox overlay
-        self.assertIn("_openImgLightbox", UI_JS,
-                      "Clicking the image must open lightbox overlay (_openImgLightbox)")
+        self.assertIn(
+            "_openImgLightbox",
+            UI_JS,
+            "Clicking the image must open lightbox overlay (_openImgLightbox)",
+        )
 
 
 # ── Static analysis: CSS ──────────────────────────────────────────────────────
 
-class TestMediaCSS(unittest.TestCase):
 
+class TestMediaCSS(unittest.TestCase):
     CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
     def test_msg_media_img_class_defined(self):
@@ -100,18 +127,23 @@ class TestMediaCSS(unittest.TestCase):
         # Lightbox shows full-size. Check width is set instead.
         idx = self.CSS.find(".msg-media-img{")
         self.assertGreater(idx, 0)
-        rule = self.CSS[idx:idx+200]
+        rule = self.CSS[idx : idx + 200]
         self.assertIn("width:120px", rule, "Thumbnail must have fixed 120px width")
 
     def test_msg_media_img_full_class_defined(self):
         # PR #1135: .msg-media-img--full removed; lightbox replaces inline zoom.
-        self.assertIn(".img-lightbox", self.CSS,
-                      "Full-size toggle class must exist for zoom-on-click")
+        self.assertIn(
+            ".img-lightbox",
+            self.CSS,
+            "Full-size toggle class must exist for zoom-on-click",
+        )
 
     def test_msg_media_link_class_defined(self):
-        self.assertIn(".msg-media-link", self.CSS,
-                      "Download link style must be defined for non-image media")
-
+        self.assertIn(
+            ".msg-media-link",
+            self.CSS,
+            "Download link style must be defined for non-image media",
+        )
 
 
 class TestInlineAudioVideoEditor(unittest.TestCase):
@@ -172,7 +204,14 @@ class TestInlineAudioVideoEditor(unittest.TestCase):
         self.assertIn('id="previewMediaWrap"', self.INDEX_HTML)
 
     def test_media_editor_css_defined(self):
-        for cls in [".msg-media-editor", ".msg-media-player", ".msg-media-video", ".media-speed-controls", ".media-speed-btn", ".preview-media-wrap"]:
+        for cls in [
+            ".msg-media-editor",
+            ".msg-media-player",
+            ".msg-media-video",
+            ".media-speed-controls",
+            ".media-speed-btn",
+            ".preview-media-wrap",
+        ]:
             self.assertIn(cls, self.CSS)
 
 
@@ -198,13 +237,16 @@ class TestWorkspacePdfViewer(unittest.TestCase):
         for cls in [".preview-pdf-wrap", ".preview-pdf-frame", ".preview-badge.pdf"]:
             self.assertIn(cls, self.CSS)
 
+
 # ── Backend: /api/media endpoint (unit-level, no server needed) ─────────────
+
 
 class TestMediaEndpointUnit(unittest.TestCase):
     """Test route registration and handler logic via imports."""
 
     def test_handle_media_function_exists(self):
         from api import routes
+
         self.assertTrue(
             hasattr(routes, "_handle_media"),
             "_handle_media must be defined in api/routes.py",
@@ -213,27 +255,37 @@ class TestMediaEndpointUnit(unittest.TestCase):
     def test_api_media_route_registered(self):
         """The GET dispatch must include the /api/media path."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn('"/api/media"', routes_src,
-                      '/api/media must be registered in the GET route dispatch')
+        self.assertIn(
+            '"/api/media"',
+            routes_src,
+            "/api/media must be registered in the GET route dispatch",
+        )
 
     def test_allowed_roots_include_tmp(self):
         """Handler must allow /tmp so screenshot paths work."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn('/tmp', routes_src,
-                      '/tmp must be in the allowed roots list for /api/media')
+        self.assertIn(
+            "/tmp", routes_src, "/tmp must be in the allowed roots list for /api/media"
+        )
 
     def test_svg_forces_download(self):
         """.svg must not be served inline (XSS risk)."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         # SVG should be in _DOWNLOAD_TYPES or explicitly excluded from inline
-        self.assertIn("image/svg+xml", routes_src,
-                      "SVG MIME type must be handled (forced download) in _handle_media")
+        self.assertIn(
+            "image/svg+xml",
+            routes_src,
+            "SVG MIME type must be handled (forced download) in _handle_media",
+        )
 
     def test_non_image_forces_download(self):
         """Non-image files should be forced to download, not served inline."""
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-        self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
-                      "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
+        self.assertIn(
+            "_INLINE_IMAGE_TYPES",
+            routes_src,
+            "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media",
+        )
 
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
@@ -250,7 +302,6 @@ class TestMediaEndpointUnit(unittest.TestCase):
 
 
 class TestMediaEndpointIntegration(unittest.TestCase):
-
     def setUp(self):
         try:
             urllib.request.urlopen(BASE + "/health", timeout=5)
@@ -282,9 +333,9 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         """Create a 1-pixel PNG in /tmp and verify it's served correctly."""
         # Minimal valid 1x1 transparent PNG (67 bytes)
         png_bytes = (
-            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
-            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
-            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+            b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
         )
         with tempfile.NamedTemporaryFile(
             suffix=".png", prefix="hermes_test_", dir="/tmp", delete=False
@@ -325,7 +376,9 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             )
             self.assertEqual(status, 206)
             self.assertEqual(body, b"RIFF")
-            self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+            self.assertEqual(
+                headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}"
+            )
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
@@ -346,7 +399,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertIn("attachment", headers.get("Content-Disposition", ""))
             self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
             self.assertFalse(
-                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+                any(
+                    "sandbox allow-scripts" == h
+                    for h in headers.get_all("Content-Security-Policy", [])
+                )
             )
             self.assertEqual(body, html_bytes)
 
@@ -356,7 +412,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertIn("inline", headers.get("Content-Disposition", ""))
             self.assertEqual(headers.get_all("X-Frame-Options", []), [])
             self.assertTrue(
-                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+                any(
+                    "sandbox allow-scripts" == h
+                    for h in headers.get_all("Content-Security-Policy", [])
+                )
             )
             self.assertEqual(body, html_bytes)
         finally:

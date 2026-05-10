@@ -5,6 +5,7 @@ A browser `pageshow` restore from BFCache does not re-run the boot IIFE. After
 `checkInflightOnBoot()`. BFCache restore should align with that path for the
 currently viewed session instead of only refreshing layout chrome/sidebar cache.
 """
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -63,4 +64,9 @@ def test_pageshow_active_session_restore_is_guarded_and_non_blocking():
     body = _pageshow_handler()
     assert "typeof loadSession === 'function'" in body
     assert "typeof checkInflightOnBoot === 'function'" in body
-    assert "catch" in body[body.find("loadSession(S.session.session_id") : body.find("startGatewaySSE")]
+    assert (
+        "catch"
+        in body[
+            body.find("loadSession(S.session.session_id") : body.find("startGatewaySSE")
+        ]
+    )

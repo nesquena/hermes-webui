@@ -4,6 +4,7 @@ A WebUI profile switch uses cookie/thread-local profile state, so it should be
 allowed while another session is streaming. Only process-wide profile switches
 must remain blocked because they mutate global Hermes runtime state.
 """
+
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,9 @@ def _prepare_profile_tree(tmp_path, monkeypatch):
 
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
     monkeypatch.setattr(profiles, "_active_profile", "default")
-    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "default"}, {"name": "writer"}])
+    monkeypatch.setattr(
+        profiles, "list_profiles_api", lambda: [{"name": "default"}, {"name": "writer"}]
+    )
     profiles._tls.profile = None
     return profiles
 
@@ -55,7 +58,9 @@ def test_process_wide_switch_still_blocks_when_stream_is_active(tmp_path, monkey
     STREAMS.clear()
     STREAMS["stream-default"] = object()
     try:
-        with pytest.raises(RuntimeError, match="Cannot switch profiles while an agent is running"):
+        with pytest.raises(
+            RuntimeError, match="Cannot switch profiles while an agent is running"
+        ):
             profiles.switch_profile("writer", process_wide=True)
     finally:
         STREAMS.clear()
@@ -88,7 +93,11 @@ def test_frontend_profile_switch_no_longer_blocks_on_busy_state():
 
 def test_frontend_treats_active_or_pending_session_as_in_progress():
     fn = _extract_switch_to_profile()
-    session_block = fn[fn.find("const sessionInProgress") : fn.find("try {", fn.find("const sessionInProgress"))]
+    session_block = fn[
+        fn.find("const sessionInProgress") : fn.find(
+            "try {", fn.find("const sessionInProgress")
+        )
+    ]
 
     assert "S.session.active_stream_id" in session_block
     assert "S.session.pending_user_message" in session_block

@@ -18,6 +18,7 @@ UX (no manual config.yaml edit needed for users who DO have both), but
 the simple detect-on-OPENAI_API_KEY shortcut is documented here as a
 known limitation.
 """
+
 import pathlib
 
 import api.config as config
@@ -60,7 +61,9 @@ def test_openai_api_key_env_var_path_detects_openai_codex(monkeypatch):
     )
 
     # Also verify the detection logic is present in the source
-    src = (_cfg.Path(__file__).parent.parent / "api" / "config.py").read_text(encoding="utf-8")
+    src = (_cfg.Path(__file__).parent.parent / "api" / "config.py").read_text(
+        encoding="utf-8"
+    )
     assert 'detected_providers.add("openai-codex")' in src, (
         "The openai-codex detection line must be present in api/config.py"
     )

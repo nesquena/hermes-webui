@@ -157,7 +157,7 @@ class TestGitInfoParallel:
             f"Expected 3 parallel git calls, got {call_count['n']}"
         )
         assert started_times[-1] - started_times[0] < 0.15, (
-            f"Git commands started too far apart ({started_times[-1]-started_times[0]:.3f}s), "
+            f"Git commands started too far apart ({started_times[-1] - started_times[0]:.3f}s), "
             f"suggesting serial execution."
         )
 
@@ -360,7 +360,7 @@ class TestMessagePaginationBackend:
 
         reduction = 1 - len(tail_json) / len(all_json)
         assert reduction > 0.6, (
-            f"Expected >60% payload reduction, got {reduction*100:.0f}%."
+            f"Expected >60% payload reduction, got {reduction * 100:.0f}%."
         )
 
     def test_msg_before_bounds_clamping(self):
@@ -474,7 +474,10 @@ class TestSessionSwitchCancellation:
             "call returns to detect session-switch race conditions."
         )
         # The guard should be: if _loadingSessionId !== null && _loadingSessionId !== sid
-        assert "_loadingSessionId !== null" in fn_body or "_loadingSessionId!==null" in fn_body, (
+        assert (
+            "_loadingSessionId !== null" in fn_body
+            or "_loadingSessionId!==null" in fn_body
+        ), (
             "_loadOlderMessages should bail out if a new session load started "
             "while the older-messages request was in flight."
         )
@@ -555,9 +558,11 @@ class TestSessionSwitchCancellation:
         # The S.session check must appear BEFORE the S.messages mutation.
         active_check_idx = fn_body.find("S.session.session_id !== sid")
         mutation_idx = fn_body.find("S.messages = [...olderMsgs")
-        assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
-            "Active-session guard must run before S.messages mutation."
-        )
+        assert (
+            active_check_idx >= 0
+            and mutation_idx >= 0
+            and active_check_idx < mutation_idx
+        ), "Active-session guard must run before S.messages mutation."
 
 
 # ── 6. Scroll position preservation ──────────────────────────────────────────
@@ -603,8 +608,15 @@ class TestScrollPositionPreservation:
             "render does not snap back to the newest output."
         )
         target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
-        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        scroll_idx = fn_body.find(
+            "requestAnimationFrame(()=>{ _programmaticScroll = false; })"
+        )
         pinned_idx = fn_body.rfind("_scrollPinned = false")
-        assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
+        assert (
+            target_idx >= 0
+            and scroll_idx >= 0
+            and pinned_idx >= 0
+            and target_idx < scroll_idx < pinned_idx
+        ), (
             "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
         )

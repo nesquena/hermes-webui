@@ -24,6 +24,7 @@ These tests pin the source-level wiring — they do not exercise the live
 HTTP endpoints (those are covered by integration tests where they exist
 in the wider suite).
 """
+
 from pathlib import Path
 import re
 
@@ -218,10 +219,9 @@ class TestRevealFailedTostIncludesPath:
         """
         src = UI.read_text(encoding="utf-8")
         # Match both possible forms (with or without parens).
-        assert (
-            "(err.message||err)" in src or "(err.message || err)" in src
-        ), "Reveal-failed toast must guard against err with no .message"
-
+        assert "(err.message||err)" in src or "(err.message || err)" in src, (
+            "Reveal-failed toast must guard against err with no .message"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -300,7 +300,10 @@ class TestFilePathEndpointBehaviour:
         assert status == 400, body  # safe_resolve raises ValueError → bad()
         # Error message must NOT include the attempted traversal target's
         # contents, just a generic safe-resolve message.
-        assert "passwd" not in body.get("error", "").lower() or "outside" in body.get("error", "").lower()
+        assert (
+            "passwd" not in body.get("error", "").lower()
+            or "outside" in body.get("error", "").lower()
+        )
 
     def test_missing_session_id_returns_400(self):
         body, status = _post("/api/file/path", {"path": "foo.txt"})

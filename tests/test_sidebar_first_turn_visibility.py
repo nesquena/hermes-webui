@@ -16,7 +16,9 @@ class TestSidebarFirstTurnVisibility:
             "send() must optimistically upsert the active session into the sidebar "
             "as soon as the local user message is pushed."
         )
-        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);")
+        push_idx = src.index(
+            "S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);"
+        )
         helper_idx = src.index("upsertActiveSessionForLocalTurn", push_idx)
         start_idx = src.index("api('/api/chat/start'", push_idx)
         assert helper_idx < start_idx, (
@@ -53,10 +55,17 @@ class TestSidebarFirstTurnVisibility:
 
     def test_chat_start_failure_clears_optimistic_streaming_state(self):
         messages = read("static/messages.js")
-        catch_start = messages.index("}catch(e){", messages.index("api('/api/chat/start'"))
-        failure_start = messages.index("S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});", catch_start)
-        catch_body = messages[failure_start:messages.index("return;", failure_start)]
-        assert "setBusy(false)" in catch_body, "chat/start failure must leave the active pane idle"
+        catch_start = messages.index(
+            "}catch(e){", messages.index("api('/api/chat/start'")
+        )
+        failure_start = messages.index(
+            "S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});",
+            catch_start,
+        )
+        catch_body = messages[failure_start : messages.index("return;", failure_start)]
+        assert "setBusy(false)" in catch_body, (
+            "chat/start failure must leave the active pane idle"
+        )
         assert "clearOptimisticSessionStreaming(activeSid)" in catch_body, (
             "If /api/chat/start fails after the optimistic sidebar upsert, the cached row "
             "must drop its streaming spinner immediately instead of waiting for polling."
@@ -77,8 +86,10 @@ class TestSidebarFirstTurnVisibility:
 
     def test_backend_compact_counts_pending_first_turn_as_visible(self):
         src = read("api/models.py")
-        compact = src[src.index("def compact"):src.index("def _get_profile_home")]
-        assert "has_pending_user_message" in compact and "pending_user_message" in compact, (
+        compact = src[src.index("def compact") : src.index("def _get_profile_home")]
+        assert (
+            "has_pending_user_message" in compact and "pending_user_message" in compact
+        ), (
             "Session.compact() must account for pending_user_message in sidebar metadata."
         )
         assert "message_count = max(message_count, 1)" in compact, (
@@ -90,15 +101,22 @@ class TestSidebarFirstTurnVisibility:
 
     def test_backend_index_filter_keeps_pending_first_turn_sessions(self):
         src = read("api/models.py")
-        index_filter_start = src.index("# Hide empty Untitled sessions from the UI entirely")
-        index_filter_end = src.index("result = [s for s in result if not _hide_from_default_sidebar", index_filter_start)
+        index_filter_start = src.index(
+            "# Hide empty Untitled sessions from the UI entirely"
+        )
+        index_filter_end = src.index(
+            "result = [s for s in result if not _hide_from_default_sidebar",
+            index_filter_start,
+        )
         index_filter = src[index_filter_start:index_filter_end]
         assert "has_pending_user_message" in index_filter, (
             "The index-path empty-session filter must exempt pending first-turn sessions, "
             "matching the full-scan fallback."
         )
 
-    def test_session_refresh_preserves_optimistic_first_turn_rows_when_server_lags(self):
+    def test_session_refresh_preserves_optimistic_first_turn_rows_when_server_lags(
+        self,
+    ):
         src = read("static/sessions.js")
         assert "function _mergeOptimisticFirstTurnSessions" in src, (
             "renderSessionList() must merge locally optimistically inserted first-turn rows "
@@ -110,7 +128,7 @@ class TestSidebarFirstTurnVisibility:
         render_end = src.index("// ── Gateway session SSE", render_start)
         render_body = src[render_start:render_end]
         assign_idx = render_body.index("_allSessions =")
-        assert "_mergeOptimisticFirstTurnSessions" in render_body[:assign_idx + 160], (
+        assert "_mergeOptimisticFirstTurnSessions" in render_body[: assign_idx + 160], (
             "The fetched session list should be merged with optimistic rows at the assignment "
             "site, before completion transitions or renderSessionListFromCache() run."
         )

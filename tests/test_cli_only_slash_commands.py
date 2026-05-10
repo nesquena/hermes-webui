@@ -114,7 +114,9 @@ def _run_commands_js(script_body: str) -> dict:
         }});
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     return json.loads(proc.stdout)
 
 
@@ -159,7 +161,9 @@ def test_cli_only_response_helper_uses_canonical_command_name():
 def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
     assert intercept_idx != -1
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find(
+        "const activeSid=S.session.session_id", intercept_idx
+    )
     assert normal_send_idx != -1
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
@@ -172,23 +176,29 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
 def test_unknown_slash_commands_still_fall_through_to_agent():
     """Only known cli_only commands should be intercepted."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find(
+        "const activeSid=S.session.session_id", intercept_idx
+    )
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
     assert "if(_parsedCmd&&!_cmd)" in intercept
     assert "if(!_agentCmd" not in intercept
-    assert "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
+    assert (
+        "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
+    )
 
 
 def test_builtin_command_opt_outs_do_not_hit_agent_metadata_lookup():
     """Built-in fall-through commands like /reasoning high keep their old path."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
-    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    normal_send_idx = MESSAGES_JS.find(
+        "const activeSid=S.session.session_id", intercept_idx
+    )
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
     optout_idx = intercept.find("if(_cmd.fn(_parsedCmd.args)===false)")
     metadata_idx = intercept.find("await getAgentCommandMetadata(_parsedCmd.name)")
 
     assert optout_idx != -1
     assert metadata_idx != -1
-    assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx:metadata_idx + 120]
+    assert "if(_parsedCmd&&!_cmd)" in intercept[optout_idx : metadata_idx + 120]

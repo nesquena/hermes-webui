@@ -40,7 +40,9 @@ def _scrub_provider_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def _install_fake_hermes_cli(monkeypatch, *, provider_id: str, live_ids, raise_on_lookup: bool = False):
+def _install_fake_hermes_cli(
+    monkeypatch, *, provider_id: str, live_ids, raise_on_lookup: bool = False
+):
     """Install a hermes_cli stub that reports one authenticated provider."""
     fake_pkg = types.ModuleType("hermes_cli")
     fake_pkg.__path__ = []
@@ -79,7 +81,9 @@ def _install_fake_hermes_cli(monkeypatch, *, provider_id: str, live_ids, raise_o
 
 
 def _configure(monkeypatch, tmp_path, *, provider: str, default: str = ""):
-    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    monkeypatch.setattr(
+        config, "_get_config_path", lambda: tmp_path / "missing-config.yaml"
+    )
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
     monkeypatch.setattr(
         config,
@@ -102,7 +106,9 @@ def _ids(group: dict) -> list[str]:
     return [m.get("id") for m in group.get("models", [])]
 
 
-def test_generic_provider_uses_hermes_cli_catalog_before_static_snapshot(monkeypatch, tmp_path):
+def test_generic_provider_uses_hermes_cli_catalog_before_static_snapshot(
+    monkeypatch, tmp_path
+):
     """A normal provider should show fresh CLI-discovered models.
 
     ``claude-sonnet-5.0`` is intentionally absent from WebUI's static Anthropic
@@ -125,7 +131,9 @@ def test_generic_provider_uses_hermes_cli_catalog_before_static_snapshot(monkeyp
     assert group["models"][1]["label"] == "Claude Sonnet 5.0"
 
 
-def test_generic_provider_keeps_static_catalog_as_cli_failure_fallback(monkeypatch, tmp_path):
+def test_generic_provider_keeps_static_catalog_as_cli_failure_fallback(
+    monkeypatch, tmp_path
+):
     _scrub_provider_env(monkeypatch)
     calls = _install_fake_hermes_cli(
         monkeypatch,
@@ -143,7 +151,9 @@ def test_generic_provider_keeps_static_catalog_as_cli_failure_fallback(monkeypat
     assert "claude-sonnet-4.6" in _ids(group)
 
 
-def test_generic_provider_prefixes_live_ids_when_not_active_provider(monkeypatch, tmp_path):
+def test_generic_provider_prefixes_live_ids_when_not_active_provider(
+    monkeypatch, tmp_path
+):
     """Provider-qualified live IDs must route through the selected provider."""
     _scrub_provider_env(monkeypatch)
     calls = _install_fake_hermes_cli(

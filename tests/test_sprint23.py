@@ -2,7 +2,10 @@
 Sprint 23 Tests: agentic transparency — token/cost display, session usage fields,
 subagent card names, skill picker in cron, skill linked files.
 """
-import json, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -14,8 +17,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -31,6 +35,7 @@ def make_session(created_list):
 
 
 # ── Session usage fields ─────────────────────────────────────────────────
+
 
 def test_new_session_has_usage_fields():
     """New session should include input_tokens, output_tokens, estimated_cost."""
@@ -76,7 +81,9 @@ def test_session_usage_defaults_zero():
     try:
         sid, sess = make_session(created)
         assert "input_tokens" in sess, "input_tokens missing from new session response"
-        assert "output_tokens" in sess, "output_tokens missing from new session response"
+        assert "output_tokens" in sess, (
+            "output_tokens missing from new session response"
+        )
         assert sess["input_tokens"] == 0
         assert sess["output_tokens"] == 0
     finally:
@@ -85,6 +92,7 @@ def test_session_usage_defaults_zero():
 
 
 # ── Skills content linked_files ──────────────────────────────────────────
+
 
 def test_skills_content_requires_name():
     """GET /api/skills/content without name should return 400 (or 500 if skills module unavailable)."""
@@ -104,7 +112,9 @@ def test_skills_content_has_linked_files_key():
         name = d["skills"][0]["name"]
         d2, status2 = get(f"/api/skills/content?name={name}")
         assert status2 == 200
-        assert "linked_files" in d2, "linked_files key missing from skills/content response"
+        assert "linked_files" in d2, (
+            "linked_files key missing from skills/content response"
+        )
         # linked_files must be a dict (possibly empty), not None
         assert isinstance(d2["linked_files"], dict), "linked_files must be a dict"
     except urllib.error.HTTPError:
@@ -114,6 +124,7 @@ def test_skills_content_has_linked_files_key():
 def test_skills_content_file_path_traversal_rejected():
     """GET /api/skills/content with traversal path should be rejected."""
     from urllib.parse import quote as _quote
+
     try:
         d, status = get("/api/skills")
         if not d.get("skills"):
@@ -122,9 +133,13 @@ def test_skills_content_file_path_traversal_rejected():
         traversal = _quote("../../etc/passwd", safe="")
         try:
             d2, status2 = get(f"/api/skills/content?name={name}&file={traversal}")
-            assert status2 in (400, 404, 500), f"Path traversal should be rejected, got {status2}"
+            assert status2 in (400, 404, 500), (
+                f"Path traversal should be rejected, got {status2}"
+            )
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404, 500), f"Path traversal should be rejected, got {e.code}"
+            assert e.code in (400, 404, 500), (
+                f"Path traversal should be rejected, got {e.code}"
+            )
     except urllib.error.HTTPError:
         pass  # skills module unavailable in test env
 
@@ -136,12 +151,15 @@ def test_skills_content_wildcard_name_rejected():
             d2, status2 = get("/api/skills/content?name=*&file=SKILL.md")
             assert status2 == 400, f"Wildcard name should return 400, got {status2}"
         except urllib.error.HTTPError as e:
-            assert e.code in (400, 404), f"Wildcard name should be rejected, got {e.code}"
+            assert e.code in (400, 404), (
+                f"Wildcard name should be rejected, got {e.code}"
+            )
     except Exception:
         pass
 
 
 # ── Cron create with skills ───────────────────────────────────────────────
+
 
 def test_cron_create_accepts_skills():
     """POST /api/crons/create should accept and store a skills array (or 500 if cron module unavailable)."""
@@ -152,10 +170,12 @@ def test_cron_create_accepts_skills():
             "schedule": "0 9 * * *",
             "prompt": "test prompt",
             "deliver": "local",
-            "skills": ["some-skill"]
+            "skills": ["some-skill"],
         }
         d, status = post("/api/crons/create", body)
-        if status in (400, 500) and ('module' in str(d.get('error','')) or 'cron' in str(d.get('error',''))):
+        if status in (400, 500) and (
+            "module" in str(d.get("error", "")) or "cron" in str(d.get("error", ""))
+        ):
             return  # cron module not available in test env
         assert status == 200, f"Expected 200 from cron create, got {status}: {d}"
         assert d.get("ok"), f"Cron create did not return ok: {d}"
@@ -164,10 +184,18 @@ def test_cron_create_accepts_skills():
             created_jobs.append(job_id)
         # Verify job appears in list
         jobs_d, _ = get("/api/crons")
-        job = next((j for j in jobs_d.get("jobs", []) if j.get("name") == "test-sprint23-skills"), None)
+        job = next(
+            (
+                j
+                for j in jobs_d.get("jobs", [])
+                if j.get("name") == "test-sprint23-skills"
+            ),
+            None,
+        )
         assert job is not None, "Created cron job not found in job list"
-        assert job.get("skills") == ["some-skill"] or job.get("skill") == "some-skill", \
-            f"skills not stored on job: {job}"
+        assert (
+            job.get("skills") == ["some-skill"] or job.get("skill") == "some-skill"
+        ), f"skills not stored on job: {job}"
     finally:
         try:
             for jid in created_jobs:
@@ -182,6 +210,7 @@ def test_cron_create_accepts_skills():
 
 # ── Tool call integrity ──────────────────────────────────────────────────
 
+
 def test_tool_calls_have_real_names():
     """Tool calls in session JSON should not have unresolved 'tool' name."""
     created = []
@@ -190,7 +219,9 @@ def test_tool_calls_have_real_names():
         d, status = get(f"/api/session?session_id={sid}")
         assert status == 200
         for tc in d["session"].get("tool_calls", []):
-            assert tc.get("name") not in ("tool", "", None), f"Unresolved tool name: {tc}"
+            assert tc.get("name") not in ("tool", "", None), (
+                f"Unresolved tool name: {tc}"
+            )
     finally:
         for s in created:
             post("/api/session/delete", {"session_id": s})

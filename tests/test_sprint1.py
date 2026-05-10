@@ -14,14 +14,12 @@ No mocking required for session CRUD, upload parser, or approval API.
 
 import io
 import json
-import os
 import sys
 import time
 import uuid
 import urllib.request
 import urllib.parse
 import urllib.error
-import tempfile
 import pathlib
 
 # Allow importing server modules directly for unit tests
@@ -34,6 +32,7 @@ from tests._pytest_port import BASE
 # HTTP helpers
 # ──────────────────────────────────────────────
 
+
 def get(path):
     url = BASE + path
     with urllib.request.urlopen(url, timeout=10) as r:
@@ -43,8 +42,9 @@ def get(path):
 def post(path, body=None):
     url = BASE + path
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=data,
-          headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -58,16 +58,19 @@ def post_multipart(path, fields, files):
     body = b""
     for name, value in fields.items():
         body += b"--" + boundary + b"\r\n"
-        body += f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n".encode()
+        body += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
         body += value.encode() + b"\r\n"
     for name, (filename, data) in files.items():
         body += b"--" + boundary + b"\r\n"
-        body += f"Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n".encode()
+        body += f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode()
         body += b"Content-Type: application/octet-stream\r\n\r\n"
         body += data + b"\r\n"
     body += b"--" + boundary + b"--\r\n"
-    req = urllib.request.Request(BASE + path, data=body,
-          headers={"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"})
+    req = urllib.request.Request(
+        BASE + path,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -78,17 +81,18 @@ def post_multipart(path, fields, files):
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid, pathlib.Path(d["session"]["workspace"])
 
 
-
 # ──────────────────────────────────────────────
 # Health check (prerequisite for all tests)
 # ──────────────────────────────────────────────
+
 
 def test_health():
     """Server must be running and healthy."""
@@ -99,6 +103,7 @@ def test_health():
 # ──────────────────────────────────────────────
 # B11: /api/session GET footgun fix
 # ──────────────────────────────────────────────
+
 
 def test_session_get_no_id_returns_400():
     """B11: GET /api/session with no session_id must return 400, not silently create."""
@@ -115,6 +120,7 @@ def test_session_get_no_id_returns_400():
 # ──────────────────────────────────────────────
 # Session CRUD
 # ──────────────────────────────────────────────
+
 
 def test_session_create_and_load():
     """Create a session, verify it appears in /api/sessions, load it."""
@@ -149,11 +155,14 @@ def test_session_update():
     child_ws = current_ws / f"session-update-{uuid.uuid4().hex[:6]}"
     child_ws.mkdir(parents=True, exist_ok=True)
 
-    updated, status = post("/api/session/update", {
-        "session_id": sid,
-        "workspace": str(child_ws),
-        "model": "anthropic/claude-sonnet-4.6"
-    })
+    updated, status = post(
+        "/api/session/update",
+        {
+            "session_id": sid,
+            "workspace": str(child_ws),
+            "model": "anthropic/claude-sonnet-4.6",
+        },
+    )
     assert status == 200
     assert updated["session"]["model"] == "anthropic/claude-sonnet-4.6"
 
@@ -202,8 +211,9 @@ def test_sessions_list_sorted():
     sids = [s["session_id"] for s in sessions["sessions"]]
 
     # b was updated more recently, should appear before a
-    assert sids.index(sid_b) < sids.index(sid_a), \
+    assert sids.index(sid_b) < sids.index(sid_a), (
         "Sessions not sorted by updated_at desc"
+    )
 
     # Cleanup
     post("/api/session/delete", {"session_id": sid_a})
@@ -214,20 +224,22 @@ def test_sessions_list_sorted():
 # Upload parser unit tests (pure function, no HTTP)
 # ──────────────────────────────────────────────
 
+
 def test_parse_multipart_text_file():
     """parse_multipart correctly parses a text file field."""
     sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
     # Import the function directly from the server module
     import importlib.util
+
     spec = importlib.util.spec_from_file_location(
-        "server",
-        str(pathlib.Path(__file__).parent.parent / "server.py")
+        "server", str(pathlib.Path(__file__).parent.parent / "server.py")
     )
     # We only need parse_multipart; import it without running the server
     # Parse manually by reading the source and exec only the function
     src = pathlib.Path(__file__).parent.parent.joinpath("api/upload.py").read_text()
     # Extract and exec parse_multipart
     import re
+
     # Find the function
     m = re.search(r"(def parse_multipart\(.*?)(?=\ndef )", src, re.DOTALL)
     assert m, "Could not find parse_multipart in server.py"
@@ -239,18 +251,16 @@ def test_parse_multipart_text_file():
     boundary = b"testboundary"
     body = (
         b"--testboundary\r\n"
-        b"Content-Disposition: form-data; name=\"session_id\"\r\n\r\n"
+        b'Content-Disposition: form-data; name="session_id"\r\n\r\n'
         b"abc123\r\n"
         b"--testboundary\r\n"
-        b"Content-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="hello.txt"\r\n'
         b"Content-Type: text/plain\r\n\r\n"
         b"hello world\r\n"
         b"--testboundary--\r\n"
     )
     fields, files = parse_multipart(
-        io.BytesIO(body),
-        "multipart/form-data; boundary=testboundary",
-        len(body)
+        io.BytesIO(body), "multipart/form-data; boundary=testboundary", len(body)
     )
     assert fields.get("session_id") == "abc123", f"fields: {fields}"
     assert "file" in files, f"files: {files}"
@@ -263,6 +273,7 @@ def test_parse_multipart_binary_file():
     """parse_multipart handles binary (PNG header bytes) without corruption."""
     src = pathlib.Path(__file__).parent.parent.joinpath("api/upload.py").read_text()
     import re
+
     m = re.search(r"(def parse_multipart\(.*?)(?=\ndef )", src, re.DOTALL)
     ns = {}
     exec("import re as _re, email.parser as _ep\n" + m.group(1), ns)
@@ -273,17 +284,15 @@ def test_parse_multipart_binary_file():
     boundary = b"binboundary"
     body = (
         b"--binboundary\r\n"
-        b"Content-Disposition: form-data; name=\"session_id\"\r\n\r\n"
+        b'Content-Disposition: form-data; name="session_id"\r\n\r\n'
         b"sess1\r\n"
         b"--binboundary\r\n"
-        b"Content-Disposition: form-data; name=\"file\"; filename=\"test.png\"\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="test.png"\r\n'
         b"Content-Type: image/png\r\n\r\n" + png_magic + b"\r\n"
         b"--binboundary--\r\n"
     )
     fields, files = parse_multipart(
-        io.BytesIO(body),
-        "multipart/form-data; boundary=binboundary",
-        len(body)
+        io.BytesIO(body), "multipart/form-data; boundary=binboundary", len(body)
     )
     assert "file" in files
     filename, content = files["file"]
@@ -295,13 +304,16 @@ def test_parse_multipart_binary_file():
 # File upload via HTTP
 # ──────────────────────────────────────────────
 
+
 def test_upload_text_file(cleanup_test_sessions):
     """Upload a text file to a session workspace, verify it appears in /api/list."""
     sid, ws = make_session_tracked(cleanup_test_sessions)
 
-    result, status = post_multipart("/api/upload", {"session_id": sid}, {
-        "file": ("test_upload.txt", b"sprint1 test content")
-    })
+    result, status = post_multipart(
+        "/api/upload",
+        {"session_id": sid},
+        {"file": ("test_upload.txt", b"sprint1 test content")},
+    )
     assert status == 200, f"Upload failed {status}: {result}"
     assert "filename" in result
     assert result["size"] == len(b"sprint1 test content")
@@ -321,9 +333,9 @@ def test_upload_too_large(cleanup_test_sessions):
     # 21MB > 20MB limit
     big = b"x" * (21 * 1024 * 1024)
     try:
-        result, status = post_multipart("/api/upload", {"session_id": sid}, {
-            "file": ("big.bin", big)
-        })
+        result, status = post_multipart(
+            "/api/upload", {"session_id": sid}, {"file": ("big.bin", big)}
+        )
         # If we get a response it should be 413
         assert status == 413, f"Expected 413, got {status}: {result}"
     except (urllib.error.URLError, ConnectionResetError, BrokenPipeError):
@@ -341,15 +353,16 @@ def test_upload_no_file_field(cleanup_test_sessions):
 
 def test_upload_bad_session():
     """Upload to nonexistent session returns 404."""
-    result, status = post_multipart("/api/upload", {"session_id": "nosuchsession"}, {
-        "file": ("x.txt", b"data")
-    })
+    result, status = post_multipart(
+        "/api/upload", {"session_id": "nosuchsession"}, {"file": ("x.txt", b"data")}
+    )
     assert status == 404, f"Expected 404, got {status}: {result}"
 
 
 # ──────────────────────────────────────────────
 # Approval API
 # ──────────────────────────────────────────────
+
 
 def test_approval_pending_none():
     """GET /api/approval/pending for a session with no pending entry returns null."""
@@ -364,7 +377,9 @@ def test_approval_submit_and_respond():
     key = "recursive_delete"
 
     # Inject into server process via test endpoint (shared module state)
-    inject = get(f"/api/approval/inject_test?session_id={urllib.parse.quote(test_sid)}&pattern_key={key}&command={urllib.parse.quote(cmd)}")
+    inject = get(
+        f"/api/approval/inject_test?session_id={urllib.parse.quote(test_sid)}&pattern_key={key}&command={urllib.parse.quote(cmd)}"
+    )
     assert inject["ok"] is True
 
     # Poll should now show the pending entry
@@ -373,10 +388,9 @@ def test_approval_submit_and_respond():
     assert data["pending"]["command"] == cmd
 
     # Respond with deny
-    result, status = post("/api/approval/respond", {
-        "session_id": test_sid,
-        "choice": "deny"
-    })
+    result, status = post(
+        "/api/approval/respond", {"session_id": test_sid, "choice": "deny"}
+    )
     assert status == 200
     assert result["ok"] is True
     assert result["choice"] == "deny"
@@ -390,25 +404,29 @@ def test_approval_respond_allow_session():
     """Inject pending entry, respond with session choice, verify cleared (approved)."""
     test_sid = f"test-approval-sess-{uuid.uuid4().hex[:6]}"
 
-    inject = get(f"/api/approval/inject_test?session_id={urllib.parse.quote(test_sid)}&pattern_key=force_kill&command=pkill+-9+someproc")
+    inject = get(
+        f"/api/approval/inject_test?session_id={urllib.parse.quote(test_sid)}&pattern_key=force_kill&command=pkill+-9+someproc"
+    )
     assert inject["ok"] is True
 
-    result, status = post("/api/approval/respond", {
-        "session_id": test_sid,
-        "choice": "session"
-    })
+    result, status = post(
+        "/api/approval/respond", {"session_id": test_sid, "choice": "session"}
+    )
     assert status == 200
     assert result["ok"] is True
     assert result["choice"] == "session"
 
     # After session approval, pending should be cleared
     data = get(f"/api/approval/pending?session_id={urllib.parse.quote(test_sid)}")
-    assert data["pending"] is None, "Pending entry should be cleared after session approval"
+    assert data["pending"] is None, (
+        "Pending entry should be cleared after session approval"
+    )
 
 
 # ──────────────────────────────────────────────
 # Stream status endpoint (B4/B5)
 # ──────────────────────────────────────────────
+
 
 def test_stream_status_unknown_id():
     """GET /api/chat/stream/status for unknown stream_id returns active:false."""
@@ -419,6 +437,7 @@ def test_stream_status_unknown_id():
 # ──────────────────────────────────────────────
 # File browser
 # ──────────────────────────────────────────────
+
 
 def test_list_dir(cleanup_test_sessions):
     """List workspace directory for a session."""
@@ -437,4 +456,6 @@ def test_list_dir_path_traversal(cleanup_test_sessions):
         # (safe_resolve should raise ValueError)
         assert False, f"Expected error for path traversal, got: {listing}"
     except urllib.error.HTTPError as e:
-        assert e.code in (400, 404, 500), f"Expected 400/404/500 for traversal, got {e.code}"
+        assert e.code in (400, 404, 500), (
+            f"Expected 400/404/500 for traversal, got {e.code}"
+        )

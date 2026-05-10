@@ -10,10 +10,9 @@ Bug 2: /api/models returned stale results after a profile switch because the
 
 These tests verify both fixes.
 """
+
 import os
-import json
 import tempfile
-import textwrap
 from pathlib import Path
 
 
@@ -30,40 +29,40 @@ def test_switch_profile_returns_target_workspace_not_current(tmp_path, monkeypat
     import api.profiles as profiles
 
     # Build fake profile structure
-    default_home = tmp_path / '.hermes'
+    default_home = tmp_path / ".hermes"
     default_home.mkdir()
-    ayan_home = default_home / 'profiles' / 'ayan'
+    ayan_home = default_home / "profiles" / "ayan"
     ayan_home.mkdir(parents=True)
 
     # Give ayan a terminal.cwd config (common case)
-    ayan_workspace = tmp_path / 'ayan_workspace'
+    ayan_workspace = tmp_path / "ayan_workspace"
     ayan_workspace.mkdir()
-    ayan_config = ayan_home / 'config.yaml'
+    ayan_config = ayan_home / "config.yaml"
     ayan_config.write_text(
-        f'model:\n  default: kimi-k2-instruct\n  provider: nous\n'
-        f'terminal:\n  cwd: {ayan_workspace}\n',
-        encoding='utf-8',
+        f"model:\n  default: kimi-k2-instruct\n  provider: nous\n"
+        f"terminal:\n  cwd: {ayan_workspace}\n",
+        encoding="utf-8",
     )
 
     # Give default profile a different workspace stored in last_workspace.txt
-    default_ws = tmp_path / 'default_workspace'
+    default_ws = tmp_path / "default_workspace"
     default_ws.mkdir()
-    default_state = default_home / 'webui_state'
+    default_state = default_home / "webui_state"
     default_state.mkdir()
-    (default_state / 'last_workspace.txt').write_text(str(default_ws), encoding='utf-8')
+    (default_state / "last_workspace.txt").write_text(str(default_ws), encoding="utf-8")
 
     # Patch _DEFAULT_HERMES_HOME to our tmp dir
     orig_default = profiles._DEFAULT_HERMES_HOME
     profiles._DEFAULT_HERMES_HOME = default_home
     # Ensure _active_profile = 'default'
     orig_active = profiles._active_profile
-    profiles._active_profile = 'default'
+    profiles._active_profile = "default"
     # Clear TLS
     profiles._tls.profile = None
 
     try:
-        result = profiles.switch_profile('ayan', process_wide=False)
-        ws = result.get('default_workspace', '')
+        result = profiles.switch_profile("ayan", process_wide=False)
+        ws = result.get("default_workspace", "")
         # Must be ayan's workspace, NOT default's workspace
         assert str(ayan_workspace) in ws or ayan_workspace.resolve() == Path(ws), (
             f"Expected ayan's workspace ({ayan_workspace}), got: {ws}"
@@ -84,34 +83,35 @@ def test_switch_profile_uses_last_workspace_txt_over_config(tmp_path, monkeypatc
     """
     import api.profiles as profiles
 
-    default_home = tmp_path / '.hermes'
+    default_home = tmp_path / ".hermes"
     default_home.mkdir()
-    target_home = default_home / 'profiles' / 'myprofile'
+    target_home = default_home / "profiles" / "myprofile"
     target_home.mkdir(parents=True)
 
     # config.yaml has terminal.cwd
-    cfg_ws = tmp_path / 'cfg_workspace'
+    cfg_ws = tmp_path / "cfg_workspace"
     cfg_ws.mkdir()
-    (target_home / 'config.yaml').write_text(
-        f'terminal:\n  cwd: {cfg_ws}\n', encoding='utf-8',
+    (target_home / "config.yaml").write_text(
+        f"terminal:\n  cwd: {cfg_ws}\n",
+        encoding="utf-8",
     )
 
     # last_workspace.txt overrides it
-    explicit_ws = tmp_path / 'explicit_workspace'
+    explicit_ws = tmp_path / "explicit_workspace"
     explicit_ws.mkdir()
-    state_dir = target_home / 'webui_state'
+    state_dir = target_home / "webui_state"
     state_dir.mkdir()
-    (state_dir / 'last_workspace.txt').write_text(str(explicit_ws), encoding='utf-8')
+    (state_dir / "last_workspace.txt").write_text(str(explicit_ws), encoding="utf-8")
 
     orig_default = profiles._DEFAULT_HERMES_HOME
     profiles._DEFAULT_HERMES_HOME = default_home
     orig_active = profiles._active_profile
-    profiles._active_profile = 'default'
+    profiles._active_profile = "default"
     profiles._tls.profile = None
 
     try:
-        result = profiles.switch_profile('myprofile', process_wide=False)
-        ws = result.get('default_workspace', '')
+        result = profiles.switch_profile("myprofile", process_wide=False)
+        ws = result.get("default_workspace", "")
         assert str(explicit_ws) in ws or Path(ws) == explicit_ws.resolve(), (
             f"Expected last_workspace.txt ({explicit_ws}), got: {ws}"
         )
@@ -131,28 +131,28 @@ def test_switch_profile_process_wide_false_returns_correct_model(tmp_path, monke
     """
     import api.profiles as profiles
 
-    default_home = tmp_path / '.hermes'
+    default_home = tmp_path / ".hermes"
     default_home.mkdir()
-    target_home = default_home / 'profiles' / 'aiprofile'
+    target_home = default_home / "profiles" / "aiprofile"
     target_home.mkdir(parents=True)
 
-    target_ws = tmp_path / 'ai_ws'
+    target_ws = tmp_path / "ai_ws"
     target_ws.mkdir()
-    (target_home / 'config.yaml').write_text(
-        f'model:\n  default: kimi-k2-instruct\n  provider: nous\n'
-        f'terminal:\n  cwd: {target_ws}\n',
-        encoding='utf-8',
+    (target_home / "config.yaml").write_text(
+        f"model:\n  default: kimi-k2-instruct\n  provider: nous\n"
+        f"terminal:\n  cwd: {target_ws}\n",
+        encoding="utf-8",
     )
 
     orig_default = profiles._DEFAULT_HERMES_HOME
     profiles._DEFAULT_HERMES_HOME = default_home
     orig_active = profiles._active_profile
-    profiles._active_profile = 'default'
+    profiles._active_profile = "default"
     profiles._tls.profile = None
 
     try:
-        result = profiles.switch_profile('aiprofile', process_wide=False)
-        assert result.get('default_model') == 'kimi-k2-instruct', (
+        result = profiles.switch_profile("aiprofile", process_wide=False)
+        assert result.get("default_model") == "kimi-k2-instruct", (
             f"Expected 'kimi-k2-instruct', got: {result.get('default_model')!r}"
         )
     finally:
@@ -165,7 +165,7 @@ def test_profile_switch_route_invalidates_models_cache(tmp_path):
     """
     After a profile switch, the model cache must be invalidated so the next
     /api/models request rebuilds from the new profile's config.
-    
+
     This is a unit test verifying that invalidate_models_cache() is called
     as part of the /api/profile/switch response flow.
     """
@@ -175,9 +175,9 @@ def test_profile_switch_route_invalidates_models_cache(tmp_path):
     # Seed a non-None cache value to simulate a populated cache
     with _available_models_cache_lock:
         config_module._available_models_cache = {
-            'active_provider': 'old_provider',
-            'default_model': 'old-model',
-            'groups': [],
+            "active_provider": "old_provider",
+            "default_model": "old-model",
+            "groups": [],
         }
         config_module._available_models_cache_ts = 9999999.0
 
@@ -203,8 +203,6 @@ no active session), the early-return branch ran without updating the chip.
 This caused the chip to keep showing the old profile name after switchToProfile().
 """
 
-import re
-
 
 def test_syncTopbar_early_return_updates_profile_chip():
     """
@@ -212,7 +210,10 @@ def test_syncTopbar_early_return_updates_profile_chip():
     Without this, the composer profile chip stays stale when there is no active session.
     """
     from pathlib import Path
-    ui_js = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+
+    ui_js = (Path(__file__).parent.parent / "static" / "ui.js").read_text(
+        encoding="utf-8"
+    )
 
     # Find the syncTopbar function
     fn_start = ui_js.find("function syncTopbar(){")
@@ -220,7 +221,9 @@ def test_syncTopbar_early_return_updates_profile_chip():
 
     # Find the early-return block (!S.session branch)
     early_ret_start = ui_js.find("if(!S.session){", fn_start)
-    assert early_ret_start != -1, "!S.session early-return block not found in syncTopbar"
+    assert early_ret_start != -1, (
+        "!S.session early-return block not found in syncTopbar"
+    )
 
     # Find where the early return ends (the closing brace + return)
     early_ret_end = ui_js.find("return;", early_ret_start)
@@ -242,7 +245,10 @@ def test_syncTopbar_early_return_updates_profile_chip():
 # These tests exist to catch future regressions in profile switching behavior.
 # Each one corresponds to a specific bug that was fixed in the #1200 PR.
 
-def test_regression_switch_profile_default_workspace_not_from_process_global(tmp_path, monkeypatch):
+
+def test_regression_switch_profile_default_workspace_not_from_process_global(
+    tmp_path, monkeypatch
+):
     """
     REGRESSION GUARD (#1200 Bug 1): switch_profile(process_wide=False) must NOT
     return the active (old) profile's workspace via get_last_workspace().
@@ -290,7 +296,7 @@ def test_regression_switch_profile_default_workspace_not_from_process_global(tmp
             "switch_profile() is reading from the wrong profile."
         )
         assert str(old_ws) not in ws, (
-            f"REGRESSION: Returned old profile workspace. Bug 1 regressed."
+            "REGRESSION: Returned old profile workspace. Bug 1 regressed."
         )
     finally:
         profiles._DEFAULT_HERMES_HOME = orig_default
@@ -335,7 +341,9 @@ def test_regression_synctopbar_early_return_updates_profile_chip():
     """
     from pathlib import Path
 
-    ui_js = (Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+    ui_js = (Path(__file__).parent.parent / "static" / "ui.js").read_text(
+        encoding="utf-8"
+    )
 
     fn_start = ui_js.find("function syncTopbar(){")
     assert fn_start != -1, "syncTopbar not found — has it been renamed?"
@@ -362,13 +370,13 @@ def test_regression_switch_profile_returns_target_model():
     """
     import api.profiles as profiles
     from pathlib import Path
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         target = base / "profiles" / "myp"
         target.mkdir(parents=True)
-        ws = base / "mypws"; ws.mkdir()
+        ws = base / "mypws"
+        ws.mkdir()
         (target / "config.yaml").write_text(
             f"model:\n  default: my-target-model\nterminal:\n  cwd: {ws}\n",
             encoding="utf-8",
@@ -567,7 +575,9 @@ def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(routes.threading, "Thread", FakeThread)
-    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: payload)
+    monkeypatch.setattr(
+        routes, "j", lambda handler, payload, status=200, **kwargs: payload
+    )
 
     routes._handle_chat_start(
         object(),

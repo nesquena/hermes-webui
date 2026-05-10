@@ -13,6 +13,7 @@ Post-fix, the dedup key is ``f"{slug}:{model_id}"`` per named provider, so each
 provider's models are tracked independently. Per-provider dedup of duplicate
 entries within the same provider still works.
 """
+
 import pytest
 import api.config as config
 
@@ -84,10 +85,21 @@ class TestPR1947SameModelMultipleProviders:
         dropped. Post-fix: the dedup key is ``slug:model_id`` so both survive.
         """
         result = _models_with_cfg(
-            model_cfg={"provider": "custom", "base_url": "https://baidu.example.com/v1"},
+            model_cfg={
+                "provider": "custom",
+                "base_url": "https://baidu.example.com/v1",
+            },
             custom_providers=[
-                {"name": "baidu", "model": "glm-5.1", "base_url": "https://baidu.example.com/v1"},
-                {"name": "huoshan", "model": "glm-5.1", "base_url": "https://huoshan.example.com/v1"},
+                {
+                    "name": "baidu",
+                    "model": "glm-5.1",
+                    "base_url": "https://baidu.example.com/v1",
+                },
+                {
+                    "name": "huoshan",
+                    "model": "glm-5.1",
+                    "base_url": "https://huoshan.example.com/v1",
+                },
             ],
         )
 
@@ -119,9 +131,21 @@ class TestPR1947SameModelMultipleProviders:
         result = _models_with_cfg(
             model_cfg={"provider": "custom", "base_url": "https://a.example.com/v1"},
             custom_providers=[
-                {"name": "edith", "model": "gpt-5.4", "base_url": "https://a.example.com/v1"},
-                {"name": "super-javis", "model": "gpt-5.4", "base_url": "https://b.example.com/v1"},
-                {"name": "vision-prime", "model": "gpt-5.4", "base_url": "https://c.example.com/v1"},
+                {
+                    "name": "edith",
+                    "model": "gpt-5.4",
+                    "base_url": "https://a.example.com/v1",
+                },
+                {
+                    "name": "super-javis",
+                    "model": "gpt-5.4",
+                    "base_url": "https://b.example.com/v1",
+                },
+                {
+                    "name": "vision-prime",
+                    "model": "gpt-5.4",
+                    "base_url": "https://c.example.com/v1",
+                },
             ],
         )
 
@@ -142,8 +166,16 @@ class TestPR1947SameModelMultipleProviders:
         result = _models_with_cfg(
             model_cfg={"provider": "custom", "base_url": "https://a.example.com/v1"},
             custom_providers=[
-                {"name": "alpha", "model": "model-a", "base_url": "https://a.example.com/v1"},
-                {"name": "beta", "model": "model-b", "base_url": "https://b.example.com/v1"},
+                {
+                    "name": "alpha",
+                    "model": "model-a",
+                    "base_url": "https://a.example.com/v1",
+                },
+                {
+                    "name": "beta",
+                    "model": "model-b",
+                    "base_url": "https://b.example.com/v1",
+                },
             ],
         )
         alpha = _group_for_provider(result, "alpha")

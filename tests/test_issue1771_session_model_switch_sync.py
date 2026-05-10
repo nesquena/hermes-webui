@@ -7,6 +7,7 @@ These tests execute the real static/ui.js syncTopbar() path in Node with a tiny
 DOM/select shim so the behavioral contract is protected without needing a full
 browser harness.
 """
+
 import json
 import shutil
 import subprocess
@@ -144,7 +145,15 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _run_sync(driver_path, *, session_model, initial_value="@expensive:gpt-5.5", default_model="@safe:gpt-4o-mini", dropdown_open=False, model_resolution_deferred=False):
+def _run_sync(
+    driver_path,
+    *,
+    session_model,
+    initial_value="@expensive:gpt-5.5",
+    default_model="@safe:gpt-4o-mini",
+    dropdown_open=False,
+    model_resolution_deferred=False,
+):
     payload = {
         "sessionModel": session_model,
         "sessionProvider": None,
@@ -154,7 +163,11 @@ def _run_sync(driver_path, *, session_model, initial_value="@expensive:gpt-5.5",
         "dropdownOpen": dropdown_open,
         "modelResolutionDeferred": model_resolution_deferred,
         "options": [
-            {"provider": "expensive", "value": "@expensive:gpt-5.5", "label": "GPT-5.5"},
+            {
+                "provider": "expensive",
+                "value": "@expensive:gpt-5.5",
+                "label": "GPT-5.5",
+            },
             {"provider": "safe", "value": "@safe:gpt-4o-mini", "label": "GPT-4o mini"},
         ],
     }
@@ -165,11 +178,15 @@ def _run_sync(driver_path, *, session_model, initial_value="@expensive:gpt-5.5",
         timeout=10,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+        raise RuntimeError(
+            f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}"
+        )
     return json.loads(result.stdout)
 
 
-def test_sync_topbar_missing_model_falls_back_to_configured_default_not_previous_chat(driver_path):
+def test_sync_topbar_missing_model_falls_back_to_configured_default_not_previous_chat(
+    driver_path,
+):
     got = _run_sync(driver_path, session_model="")
 
     assert got["selectValue"] == "@safe:gpt-4o-mini"
@@ -178,7 +195,9 @@ def test_sync_topbar_missing_model_falls_back_to_configured_default_not_previous
     assert got["selectValue"] != "@expensive:gpt-5.5"
 
 
-def test_sync_topbar_unknown_model_falls_back_to_configured_default_not_first_option(driver_path):
+def test_sync_topbar_unknown_model_falls_back_to_configured_default_not_first_option(
+    driver_path,
+):
     got = _run_sync(driver_path, session_model="unknown")
 
     assert got["selectValue"] == "@safe:gpt-4o-mini"
@@ -186,7 +205,9 @@ def test_sync_topbar_unknown_model_falls_back_to_configured_default_not_first_op
     assert got["sessionProvider"] == "safe"
 
 
-def test_sync_topbar_rerenders_open_visible_model_dropdown_after_session_model_change(driver_path):
+def test_sync_topbar_rerenders_open_visible_model_dropdown_after_session_model_change(
+    driver_path,
+):
     got = _run_sync(driver_path, session_model="", dropdown_open=True)
 
     assert got["selectValue"] == "@safe:gpt-4o-mini"
@@ -194,8 +215,9 @@ def test_sync_topbar_rerenders_open_visible_model_dropdown_after_session_model_c
     assert got["calls"]["positionModelDropdown"] >= 1
 
 
-
-def test_sync_topbar_does_not_persist_correction_while_model_resolution_deferred(driver_path):
+def test_sync_topbar_does_not_persist_correction_while_model_resolution_deferred(
+    driver_path,
+):
     """Regression for stage-310 Opus review: the !hasSessionModel branch must
     skip the network write + state mutation while sessions.js has set
     _modelResolutionDeferred=true between the fast-path session render and
@@ -210,12 +232,28 @@ def test_sync_topbar_does_not_persist_correction_while_model_resolution_deferred
     # Visible UX still happens (sel.value gets the safe default) ...
     assert got_empty["selectValue"] == "@safe:gpt-4o-mini"
     # ... but session state is NOT mutated and NO POST is issued.
-    assert got_empty["sessionModel"] == "", "S.session.model must not be mutated while resolution is deferred"
-    update_calls = [c for c in got_empty["calls"]["fetches"] if "session" in c["url"] and "update" in c["url"]]
-    assert update_calls == [], f"no /api/session/update POSTs while deferred (got {update_calls})"
+    assert got_empty["sessionModel"] == "", (
+        "S.session.model must not be mutated while resolution is deferred"
+    )
+    update_calls = [
+        c
+        for c in got_empty["calls"]["fetches"]
+        if "session" in c["url"] and "update" in c["url"]
+    ]
+    assert update_calls == [], (
+        f"no /api/session/update POSTs while deferred (got {update_calls})"
+    )
 
-    got_unknown = _run_sync(driver_path, session_model="unknown", model_resolution_deferred=True)
+    got_unknown = _run_sync(
+        driver_path, session_model="unknown", model_resolution_deferred=True
+    )
     assert got_unknown["selectValue"] == "@safe:gpt-4o-mini"
     assert got_unknown["sessionModel"] == "unknown"
-    update_calls_u = [c for c in got_unknown["calls"]["fetches"] if "session" in c["url"] and "update" in c["url"]]
-    assert update_calls_u == [], "imported/read-only CLI session with model=unknown must not be silently written"
+    update_calls_u = [
+        c
+        for c in got_unknown["calls"]["fetches"]
+        if "session" in c["url"] and "update" in c["url"]
+    ]
+    assert update_calls_u == [], (
+        "imported/read-only CLI session with model=unknown must not be silently written"
+    )

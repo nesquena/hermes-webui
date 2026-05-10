@@ -14,8 +14,6 @@ the cache on the very next /api/models call instead of lingering for 24h.
 
 import json
 import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -38,6 +36,7 @@ def with_runtime_version():
     """Return a setter that forces a particular runtime WEBUI_VERSION."""
     # api.updates must be loaded for the lazy resolver to find it
     import api.updates as upd
+
     original = upd.WEBUI_VERSION
 
     def _set(version: str):
@@ -63,6 +62,7 @@ def _shape_cache():
 def test_current_webui_version_returns_runtime_version(with_runtime_version):
     """When api.updates is loaded, the lazy resolver returns its WEBUI_VERSION."""
     from api.config import _current_webui_version
+
     with_runtime_version("v0.50.999-test")
     assert _current_webui_version() == "v0.50.999-test"
 
@@ -75,6 +75,7 @@ def test_current_webui_version_returns_none_when_module_missing(monkeypatch):
     """
     monkeypatch.delitem(sys.modules, "api.updates", raising=False)
     from api.config import _current_webui_version
+
     assert _current_webui_version() is None
 
 
@@ -110,6 +111,7 @@ def test_save_omits_webui_version_when_runtime_unknown(isolated_cache, monkeypat
 def test_save_only_writes_known_keys(isolated_cache, with_runtime_version):
     """Defensive — extra junk in the cache dict shouldn't leak to disk."""
     from api import config
+
     with_runtime_version("v0.50.999")
 
     cache = _shape_cache()
@@ -162,7 +164,9 @@ def test_load_rejects_mismatched_webui_version(isolated_cache, with_runtime_vers
     )
 
 
-def test_load_rejects_legacy_cache_without_version_stamp(isolated_cache, with_runtime_version):
+def test_load_rejects_legacy_cache_without_version_stamp(
+    isolated_cache, with_runtime_version
+):
     """Pre-#1633 cache files have no _webui_version field at all. They must
     be treated as invalid on the very first load post-update so users get
     a fresh rebuild instead of stale picker contents."""
@@ -235,6 +239,7 @@ def test_is_valid_models_cache_remains_shape_only():
     so in-memory cache validations don't fail on missing _webui_version. The
     strict version check lives in _is_loadable_disk_cache only."""
     from api.config import _is_valid_models_cache
+
     cache = _shape_cache()
     # No _webui_version field
     assert _is_valid_models_cache(cache) is True
@@ -243,6 +248,7 @@ def test_is_valid_models_cache_remains_shape_only():
 def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
     """_is_loadable_disk_cache must check both schema + webui_version stamps."""
     from api import config
+
     with_runtime_version("v0.50.293")
 
     # Missing _webui_version
@@ -278,6 +284,7 @@ def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
 def test_is_loadable_disk_cache_rejects_non_dict():
     """Non-dict input is invalid even when version checks are skipped."""
     from api.config import _is_loadable_disk_cache
+
     assert _is_loadable_disk_cache(None) is False
     assert _is_loadable_disk_cache([]) is False
     assert _is_loadable_disk_cache("string") is False
@@ -303,6 +310,7 @@ def test_load_handles_corrupt_json(isolated_cache, with_runtime_version):
 def test_load_handles_missing_file(isolated_cache, with_runtime_version):
     """Cache file simply doesn't exist (cold boot) → None, not error."""
     from api import config
+
     # isolated_cache fixture creates the path but not the file
     assert not isolated_cache.exists()
 
@@ -327,6 +335,7 @@ def test_save_overwrite_atomic(isolated_cache, with_runtime_version):
 def test_save_skips_invalid_shape(isolated_cache, with_runtime_version):
     """Pre-#1633 contract: invalid shape never lands on disk. Preserved."""
     from api import config
+
     with_runtime_version("v0.50.293")
 
     # Missing required keys
@@ -337,7 +346,9 @@ def test_save_skips_invalid_shape(isolated_cache, with_runtime_version):
 # ── End-to-end: simulate a Docker container update ───────────────────────
 
 
-def test_docker_update_scenario_invalidates_old_cache(isolated_cache, with_runtime_version):
+def test_docker_update_scenario_invalidates_old_cache(
+    isolated_cache, with_runtime_version
+):
     """Reproduce Deor's exact scenario from the bug report:
 
     1. Server v0.50.281 builds a cache and writes it to STATE_DIR.
@@ -378,7 +389,9 @@ def test_docker_update_scenario_invalidates_old_cache(isolated_cache, with_runti
 # ── invalidate_models_cache still cleans the disk file ───────────────────
 
 
-def test_invalidate_models_cache_still_deletes_disk_file(isolated_cache, with_runtime_version):
+def test_invalidate_models_cache_still_deletes_disk_file(
+    isolated_cache, with_runtime_version
+):
     """Pre-existing contract preserved: invalidate_models_cache() drops the
     in-memory cache AND deletes the disk file. The version stamping must not
     interfere with this teardown path."""

@@ -33,7 +33,9 @@ def _valid_models_cache(provider_id: str, model_id: str) -> dict:
         },
         "groups": [
             {
-                "provider": config._PROVIDER_DISPLAY.get(provider_id, provider_id.title()),
+                "provider": config._PROVIDER_DISPLAY.get(
+                    provider_id, provider_id.title()
+                ),
                 "provider_id": provider_id,
                 "models": [{"id": model_id, "label": model_id}],
             }
@@ -107,7 +109,9 @@ def test_memory_models_cache_invalidates_when_auth_store_active_provider_changes
     result = config.get_available_models()
 
     assert result["active_provider"] == "opencode-go"
-    assert not any(group.get("provider_id") == "openrouter" for group in result["groups"])
+    assert not any(
+        group.get("provider_id") == "openrouter" for group in result["groups"]
+    )
     assert any(group.get("provider_id") == "opencode-go" for group in result["groups"])
 
 
@@ -127,7 +131,9 @@ def test_disk_models_cache_invalidates_when_auth_store_active_provider_changes(
     result = config.get_available_models()
 
     assert result["active_provider"] == "opencode-go"
-    assert not any(group.get("provider_id") == "openrouter" for group in result["groups"])
+    assert not any(
+        group.get("provider_id") == "openrouter" for group in result["groups"]
+    )
     assert any(group.get("provider_id") == "opencode-go" for group in result["groups"])
 
 

@@ -22,13 +22,19 @@ def _install_fake_hermes_models(monkeypatch, provider_model_ids):
 
 
 def _configure_codex(monkeypatch, tmp_path, default="gpt-5.3-codex-spark"):
-    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    monkeypatch.setattr(
+        config, "_get_config_path", lambda: tmp_path / "missing-config.yaml"
+    )
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
-    monkeypatch.setattr(config, "cfg", {
-        "model": {"provider": "openai-codex", "default": default},
-        "providers": {},
-        "fallback_providers": [],
-    })
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openai-codex", "default": default},
+            "providers": {},
+            "fallback_providers": [],
+        },
+    )
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
     config.invalidate_models_cache()
 
@@ -53,7 +59,9 @@ def test_openai_codex_group_uses_provider_model_ids_for_spark(monkeypatch, tmp_p
 
     result = config.get_available_models()
 
-    codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
+    codex_groups = [
+        g for g in result["groups"] if g.get("provider_id") == "openai-codex"
+    ]
     # Resilient to test-isolation pollution: when a sibling test replaces
     # sys.modules['hermes_cli.models'] without restoring it, list_available_providers
     # may report a different provider list and `calls` won't be ['openai-codex'].
@@ -61,7 +69,10 @@ def test_openai_codex_group_uses_provider_model_ids_for_spark(monkeypatch, tmp_p
     # gpt-5.3-codex-spark when hermes_cli.provider_model_ids returns it".
     if calls != ["openai-codex"]:
         import pytest
-        pytest.skip(f"hermes_cli stub not active for openai-codex (likely test-isolation pollution from sibling test). Got calls={calls}")
+
+        pytest.skip(
+            f"hermes_cli stub not active for openai-codex (likely test-isolation pollution from sibling test). Got calls={calls}"
+        )
     assert codex_groups, "OpenAI Codex group should be present"
     assert "gpt-5.3-codex-spark" in _flatten_ids(codex_groups)
     assert codex_groups[0]["models"][0]["label"] == "GPT 5.4"
@@ -75,6 +86,7 @@ def test_openai_codex_group_merges_visible_codex_cache_models(monkeypatch, tmp_p
     out, but the WebUI picker is a Codex-model selection surface and should
     mirror the visible Codex catalog instead of hiding Spark.
     """
+
     def provider_model_ids(provider):
         assert provider == "openai-codex"
         return ["gpt-5.4", "gpt-5.3-codex"]
@@ -105,7 +117,9 @@ def test_openai_codex_group_merges_visible_codex_cache_models(monkeypatch, tmp_p
 
     result = config.get_available_models()
 
-    codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
+    codex_groups = [
+        g for g in result["groups"] if g.get("provider_id") == "openai-codex"
+    ]
     ids = _flatten_ids(codex_groups)
     assert "gpt-5.3-codex-spark" in ids
     assert "hidden-test-model" not in ids

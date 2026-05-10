@@ -5,9 +5,9 @@ Python environment (the agent venv). They are skipped when hermes-agent is
 not installed, since the server falls back to system Python which typically
 lacks pyyaml.
 """
+
 import json
 import pathlib
-import sys
 import urllib.error
 import urllib.request
 
@@ -18,10 +18,13 @@ from tests._pytest_port import BASE
 # Check if pyyaml is available — onboarding setup tests need it on the server
 try:
     import yaml as _yaml
+
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
-_needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
+_needs_yaml = pytest.mark.skipif(
+    not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it"
+)
 
 
 def get(path):
@@ -67,7 +70,6 @@ def clean_hermes_config_files():
     yield
     for rel in ("config.yaml", ".env"):
         (hermes_home / rel).unlink(missing_ok=True)
-
 
 
 def test_onboarding_status_defaults_incomplete():
@@ -212,6 +214,7 @@ def test_onboarding_complete_preserves_other_settings():
     finally:
         # Always restore default send_key to avoid contaminating other tests
         post("/api/settings", {"send_key": "enter"})
+
 
 def test_onboarding_already_completed_status():
     """After marking onboarding complete, status must reflect completed=True

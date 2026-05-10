@@ -1,7 +1,10 @@
 """
 Sprint 19 Tests: auth/login, security headers, request size limit.
 """
-import json, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -17,8 +20,9 @@ def get(path, headers=None):
 
 def post(path, body=None, headers=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     if headers:
         for k, v in headers.items():
             req.add_header(k, v)
@@ -30,6 +34,7 @@ def post(path, body=None, headers=None):
 
 
 # ── Auth status (no password configured in test env) ──────────────────────
+
 
 def test_auth_status_disabled():
     """Auth should be disabled by default (no password set)."""
@@ -75,13 +80,24 @@ def test_login_route_injects_webui_version_for_login_script():
     """The /login route should replace the login.js version placeholder."""
     from pathlib import Path
 
-    src = Path(__file__).resolve().parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
-    login_block = src[src.find('if parsed.path == "/login"'):src.find('if parsed.path == "/api/auth/status"')]
+    src = (
+        Path(__file__)
+        .resolve()
+        .parents[1]
+        .joinpath("api", "routes.py")
+        .read_text(encoding="utf-8")
+    )
+    login_block = src[
+        src.find('if parsed.path == "/login"') : src.find(
+            'if parsed.path == "/api/auth/status"'
+        )
+    ]
     assert "WEBUI_VERSION" in login_block
     assert "{{WEBUI_VERSION}}" in login_block
 
 
 # ── Security headers ─────────────────────────────────────────────────────
+
 
 def test_security_headers_on_json():
     """JSON responses should include security headers."""
@@ -105,8 +121,9 @@ def test_permissions_policy_does_not_disable_microphone():
     assert status == 200
     policy = headers.get("Permissions-Policy", "")
     assert policy, "Permissions-Policy header missing"
-    assert "microphone=()" not in policy, \
+    assert "microphone=()" not in policy, (
         "Permissions-Policy must not block microphone access or desktop/mobile voice input cannot work"
+    )
 
 
 def test_cache_control_no_store():
@@ -116,6 +133,7 @@ def test_cache_control_no_store():
 
 
 # ── Settings password field ──────────────────────────────────────────────
+
 
 def test_settings_password_hash_not_exposed():
     """GET /api/settings must never expose the stored password hash."""

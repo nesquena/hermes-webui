@@ -31,7 +31,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 from tests.test_sprint16 import render_md  # Python mirror of renderMd()
 
@@ -201,13 +200,17 @@ def test_inline_code_after_fence():
 def test_renderMd_fence_regex_is_line_anchored():
     """The fence regex in renderMd must keep line anchoring and fence-length matching."""
     pattern = r"s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g"
-    assert pattern in UI_JS, "renderMd fence regex lost line anchoring or #1696 fence-length matching"
+    assert pattern in UI_JS, (
+        "renderMd fence regex lost line anchoring or #1696 fence-length matching"
+    )
 
 
 def test_renderUserFencedBlocks_fence_regex_is_line_anchored():
     """The fence regex in _renderUserFencedBlocks must also be line-anchored."""
     pattern = r"s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g"
-    assert UI_JS.count(pattern) >= 2, "render/user fence regexes lost line anchoring or #1696 fence-length matching"
+    assert UI_JS.count(pattern) >= 2, (
+        "render/user fence regexes lost line anchoring or #1696 fence-length matching"
+    )
 
 
 def test_stripForTTS_fence_regex_is_line_anchored():
@@ -241,10 +244,16 @@ def test_no_unanchored_fence_regex_remains_in_render_paths():
     """
     # The exact OLD vulnerable forms that this PR replaces.
     old_render_md = "s=s.replace(/```([\\s\\S]*?)```/g,(_,raw)=>{"
-    old_user_fenced = "s=s.replace(/```([a-zA-Z0-9_+-]*)\\n([\\s\\S]*?)```/g,(_,lang,code)=>{"
+    old_user_fenced = (
+        "s=s.replace(/```([a-zA-Z0-9_+-]*)\\n([\\s\\S]*?)```/g,(_,lang,code)=>{"
+    )
     old_tts_strip = "text=text.replace(/```[\\s\\S]*?```/g,' ');"
-    assert old_render_md not in UI_JS, "old unanchored renderMd fence regex still present"
-    assert old_user_fenced not in UI_JS, "old unanchored _renderUserFencedBlocks regex still present"
+    assert old_render_md not in UI_JS, (
+        "old unanchored renderMd fence regex still present"
+    )
+    assert old_user_fenced not in UI_JS, (
+        "old unanchored _renderUserFencedBlocks regex still present"
+    )
     assert old_tts_strip not in UI_JS, "old unanchored _stripForTTS regex still present"
 
 

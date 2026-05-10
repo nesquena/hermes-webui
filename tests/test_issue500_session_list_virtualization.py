@@ -1,4 +1,5 @@
 """Regression coverage for issue #500 session-sidebar virtualization."""
+
 import json
 import shutil
 import subprocess
@@ -57,7 +58,9 @@ function extractFunc(name) {{
 def test_session_virtual_window_reduces_large_lists_and_tracks_scroll():
     """A 1000-row sidebar should render a bounded slice near scroll position."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
+    source = (
+        _extract_func_script(js)
+        + """
 eval(extractFunc('_sessionVirtualWindow'));
 const metrics = _sessionVirtualWindow({
   total: 1000,
@@ -69,6 +72,7 @@ const metrics = _sessionVirtualWindow({
 });
 console.log(JSON.stringify(metrics));
 """
+    )
     metrics = json.loads(_run_node(source))
     assert metrics["virtualized"] is True
     assert 390 <= metrics["start"] <= 420
@@ -81,7 +85,9 @@ console.log(JSON.stringify(metrics));
 def test_session_virtual_window_keeps_active_session_rendered():
     """The active sidebar row must remain in the DOM when we anchor a new active session."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
+    source = (
+        _extract_func_script(js)
+        + """
 eval(extractFunc('_sessionVirtualWindow'));
 const metrics = _sessionVirtualWindow({
   total: 1000,
@@ -94,6 +100,7 @@ const metrics = _sessionVirtualWindow({
 });
 console.log(JSON.stringify(metrics));
 """
+    )
     metrics = json.loads(_run_node(source))
     assert metrics["virtualized"] is True
     assert metrics["start"] <= 995 < metrics["end"]
@@ -104,14 +111,19 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     """renderSessionListFromCache should window rows without stale cached slices."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     render_start = js.index("function renderSessionListFromCache()")
-    render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
+    render_end = js.index(
+        "async function _handleActiveSessionStorageEvent", render_start
+    )
     render_body = js[render_start:render_end]
 
     assert "_sessionVirtualWindow" in render_body
     assert "_sessionVirtualSpacer" in render_body
     assert "spacer.dataset.virtualSpacer=where||'gap'" in js
     assert "list.addEventListener('scroll', _scheduleSessionVirtualizedRender" in js
-    assert "requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();})" in js
+    assert (
+        "requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();})"
+        in js
+    )
     assert "const listScrollTopBeforeRender=list.scrollTop||0" in render_body
     assert "scrollTop:listScrollTopBeforeRender" in render_body
     assert "list.scrollTop=listScrollTopBeforeRender" in render_body

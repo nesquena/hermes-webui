@@ -1,4 +1,5 @@
 """Regression tests for config-driven first-turn session persistence (#1406)."""
+
 import json
 
 import pytest
@@ -40,20 +41,30 @@ def test_session_save_mode_defaults_to_deferred_for_missing_config():
 
 @pytest.mark.parametrize("raw", ["bogus", "", None, 42, {"mode": "eager"}])
 def test_invalid_session_save_mode_falls_back_to_deferred(raw):
-    assert config.get_webui_session_save_mode({"webui": {"session_save_mode": raw}}) == "deferred"
+    assert (
+        config.get_webui_session_save_mode({"webui": {"session_save_mode": raw}})
+        == "deferred"
+    )
 
 
 def test_eager_session_save_mode_is_accepted():
-    assert config.get_webui_session_save_mode({"webui": {"session_save_mode": "eager"}}) == "eager"
+    assert (
+        config.get_webui_session_save_mode({"webui": {"session_save_mode": "eager"}})
+        == "eager"
+    )
 
 
 def test_eager_mode_still_does_not_save_empty_new_sessions(_isolate_state, monkeypatch):
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
     s = new_session()
-    assert not s.path.exists(), "eager mode must not recreate empty Untitled session files"
+    assert not s.path.exists(), (
+        "eager mode must not recreate empty Untitled session files"
+    )
 
 
-def test_deferred_chat_start_persists_pending_only_before_thread(_isolate_state, monkeypatch):
+def test_deferred_chat_start_persists_pending_only_before_thread(
+    _isolate_state, monkeypatch
+):
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "deferred"}})
     s = new_session(workspace=str(_isolate_state.parent))
     routes._prepare_chat_start_session_for_stream(
@@ -71,7 +82,9 @@ def test_deferred_chat_start_persists_pending_only_before_thread(_isolate_state,
     assert on_disk["pending_user_message"] == "hello deferred"
 
 
-def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_state, monkeypatch):
+def test_eager_chat_start_checkpoints_first_user_message_before_thread(
+    _isolate_state, monkeypatch
+):
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
     s = new_session(workspace=str(_isolate_state.parent))
     routes._prepare_chat_start_session_for_stream(
@@ -91,8 +104,12 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
     assert on_disk["pending_user_message"] == "hello eager"
 
 
-def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_state, monkeypatch):
-    s = Session(session_id="eager_repair", messages=[{"role": "user", "content": "survive"}])
+def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(
+    _isolate_state, monkeypatch
+):
+    s = Session(
+        session_id="eager_repair", messages=[{"role": "user", "content": "survive"}]
+    )
     s.pending_user_message = "survive"
     s.active_stream_id = "dead_stream"
     s.pending_started_at = 789.0
@@ -101,7 +118,11 @@ def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_
     repaired = models._repair_stale_pending(s)
 
     assert repaired is True
-    user_messages = [m for m in s.messages if m.get("role") == "user" and m.get("content") == "survive"]
+    user_messages = [
+        m
+        for m in s.messages
+        if m.get("role") == "user" and m.get("content") == "survive"
+    ]
     assert len(user_messages) == 1
     assert s.pending_user_message is None
     assert any(m.get("_error") for m in s.messages if m.get("role") == "assistant")

@@ -56,7 +56,6 @@ class TestBfcacheLayoutRestore:
             "pageshow handler must call syncWorkspacePanelState() on bfcache restore"
         )
 
-
     def test_pageshow_calls_start_gateway_sse(self):
         """pageshow handler must call startGatewaySSE() to reconnect the dead SSE connection."""
         src = _boot_js()
@@ -96,8 +95,15 @@ class TestBfcacheLayoutRestore:
         src = _boot_js()
         handler_body = _pageshow_handler(src)
         # Each of the new calls must be guarded
-        for fn in ("syncTopbar", "syncWorkspacePanelState", "startGatewaySSE",
-                   "closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
+        for fn in (
+            "syncTopbar",
+            "syncWorkspacePanelState",
+            "startGatewaySSE",
+            "closeModelDropdown",
+            "closeReasoningDropdown",
+            "closeWsDropdown",
+            "closeProfileDropdown",
+        ):
             assert f"typeof {fn} === 'function'" in handler_body, (
                 f"{fn}() call in pageshow handler must be guarded with typeof === 'function'"
             )
@@ -106,7 +112,12 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must close all known dropdowns to reset frozen bfcache popover state."""
         src = _boot_js()
         handler_body = _pageshow_handler(src)
-        for fn in ("closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
+        for fn in (
+            "closeModelDropdown",
+            "closeReasoningDropdown",
+            "closeWsDropdown",
+            "closeProfileDropdown",
+        ):
             assert fn in handler_body, (
                 f"pageshow handler must call {fn}() to dismiss any dropdown left open by bfcache"
             )
@@ -117,8 +128,9 @@ class TestBfcacheLayoutRestore:
         handler_body = _pageshow_handler(src)
         close_idx = handler_body.find("closeModelDropdown")
         sync_idx = handler_body.find("syncTopbar")
-        assert close_idx != -1 and sync_idx != -1, "Both close and sync calls must be present"
+        assert close_idx != -1 and sync_idx != -1, (
+            "Both close and sync calls must be present"
+        )
         assert close_idx < sync_idx, (
             "Dropdown close calls must appear before layout sync calls in the pageshow handler"
         )
-

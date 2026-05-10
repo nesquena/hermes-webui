@@ -52,8 +52,7 @@ def test_branch_endpoint_rejects_negative_keep_count():
         "and that's a confusing fork behavior."
     )
     assert '"keep_count must be non-negative"' in block, (
-        "branch handler must return a clear error message for negative "
-        "keep_count."
+        "branch handler must return a clear error message for negative keep_count."
     )
 
 

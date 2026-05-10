@@ -8,7 +8,9 @@ from api.streaming import (
 )
 
 
-def test_session_persists_model_context_separately_from_display_transcript(tmp_path, monkeypatch):
+def test_session_persists_model_context_separately_from_display_transcript(
+    tmp_path, monkeypatch
+):
     """Compacted model context must not replace the visible WebUI transcript."""
     state_dir = tmp_path / "state"
     session_dir = state_dir / "sessions"
@@ -44,7 +46,10 @@ def test_session_persists_model_context_separately_from_display_transcript(tmp_p
     assert reloaded.messages == original_display
     assert reloaded.context_messages == compacted_context
     assert _session_context_messages(reloaded) == compacted_context
-    assert _sanitize_messages_for_api(_session_context_messages(reloaded)) == compacted_context
+    assert (
+        _sanitize_messages_for_api(_session_context_messages(reloaded))
+        == compacted_context
+    )
 
 
 def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
@@ -58,7 +63,10 @@ def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
             "role": "assistant",
             "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.",
         },
-        {"role": "user", "content": "[Workspace: /home/manfred/.hermes/workspace]\nOk, mache weiter"},
+        {
+            "role": "user",
+            "content": "[Workspace: /home/manfred/.hermes/workspace]\nOk, mache weiter",
+        },
         {"role": "assistant", "content": "continuing"},
     ]
 
@@ -69,12 +77,25 @@ def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
         "Ok, mache weiter",
     )
 
-    assert [m["role"] for m in merged] == ["user", "assistant", "assistant", "user", "assistant"]
+    assert [m["role"] for m in merged] == [
+        "user",
+        "assistant",
+        "assistant",
+        "user",
+        "assistant",
+    ]
     assert [m["content"] for m in merged[-2:]] == [
         "Ok, mache weiter",
         "continuing",
     ]
-    assert sum(1 for m in merged if m.get("role") == "user" and "Ok, mache weiter" in m.get("content", "")) == 1
+    assert (
+        sum(
+            1
+            for m in merged
+            if m.get("role") == "user" and "Ok, mache weiter" in m.get("content", "")
+        )
+        == 1
+    )
 
 
 def test_compacted_agent_result_keeps_old_prompts_and_appends_current_turn():
@@ -166,7 +187,9 @@ def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_
         {"role": "user", "content": "legacy prompt"},
         {"role": "assistant", "content": "legacy answer"},
     ]
-    session = Session(session_id="legacy1217", workspace=str(tmp_path), messages=messages)
+    session = Session(
+        session_id="legacy1217", workspace=str(tmp_path), messages=messages
+    )
 
     assert session.context_messages == []
     assert _session_context_messages(session) == messages
@@ -185,7 +208,10 @@ def test_retry_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path
             {"role": "assistant", "content": "visible four"},
         ],
         context_messages=[
-            {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+            {
+                "role": "user",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
+            },
             {"role": "user", "content": "visible three"},
             {"role": "assistant", "content": "visible four"},
         ],
@@ -194,7 +220,9 @@ def test_retry_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path
     session.save = lambda *args, **kwargs: saved.append(True)
     monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
     monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
-    monkeypatch.setattr(session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
 
     result = session_ops.retry_last(session.session_id)
 
@@ -219,7 +247,10 @@ def test_undo_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path)
             {"role": "assistant", "content": "visible four"},
         ],
         context_messages=[
-            {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+            {
+                "role": "user",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
+            },
             {"role": "user", "content": "visible three"},
             {"role": "assistant", "content": "visible four"},
         ],
@@ -228,7 +259,9 @@ def test_undo_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path)
     session.save = lambda *args, **kwargs: saved.append(True)
     monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
     monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
-    monkeypatch.setattr(session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
 
     result = session_ops.undo_last(session.session_id)
 

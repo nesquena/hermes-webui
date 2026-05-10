@@ -33,7 +33,9 @@ def test_gateway_routing_metadata_is_safely_normalized_from_response_metadata():
         ],
     }
 
-    normalized = _normalize_gateway_routing_metadata(metadata, requested_model="deepseek-v3.2", requested_provider="CanopyWave")
+    normalized = _normalize_gateway_routing_metadata(
+        metadata, requested_model="deepseek-v3.2", requested_provider="CanopyWave"
+    )
 
     assert normalized == {
         "used_provider": "Alibaba Cloud",
@@ -44,7 +46,12 @@ def test_gateway_routing_metadata_is_safely_normalized_from_response_metadata():
         "model_changed": False,
         "has_failover": True,
         "routing": [
-            {"provider": "CanopyWave", "status": "failed", "reason": "timeout", "score": 0.12},
+            {
+                "provider": "CanopyWave",
+                "status": "failed",
+                "reason": "timeout",
+                "score": 0.12,
+            },
             {"provider": "Alibaba Cloud", "status": "selected", "score": 0.91},
         ],
     }
@@ -52,8 +59,18 @@ def test_gateway_routing_metadata_is_safely_normalized_from_response_metadata():
 
 
 def test_gateway_routing_metadata_absent_returns_none_without_placeholder_noise():
-    assert _normalize_gateway_routing_metadata({}, requested_model="gpt-5.5", requested_provider="openai-codex") is None
-    assert _normalize_gateway_routing_metadata(None, requested_model="gpt-5.5", requested_provider="openai-codex") is None
+    assert (
+        _normalize_gateway_routing_metadata(
+            {}, requested_model="gpt-5.5", requested_provider="openai-codex"
+        )
+        is None
+    )
+    assert (
+        _normalize_gateway_routing_metadata(
+            None, requested_model="gpt-5.5", requested_provider="openai-codex"
+        )
+        is None
+    )
 
 
 def test_session_persists_latest_gateway_routing_and_history_across_reload():
@@ -71,8 +88,15 @@ def test_session_persists_latest_gateway_routing_and_history_across_reload():
         requested_model="model-a",
         requested_provider="provider-a",
     )
-    session = Session(session_id="732gateway", title="Gateway", gateway_routing=routing, gateway_routing_history=[routing])
-    session.messages = [{"role": "assistant", "content": "done", "_gatewayRouting": routing}]
+    session = Session(
+        session_id="732gateway",
+        title="Gateway",
+        gateway_routing=routing,
+        gateway_routing_history=[routing],
+    )
+    session.messages = [
+        {"role": "assistant", "content": "done", "_gatewayRouting": routing}
+    ]
     session.save()
 
     reloaded = Session.load("732gateway")

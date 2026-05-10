@@ -18,8 +18,11 @@ def _reload_profiles_module(base_home: Path):
     # Save the original module references so we can restore them after the test.
     # Permanently deleting api.config / api.profiles from sys.modules breaks
     # subsequent tests that import these modules and expect consistent state.
-    _saved = {name: sys.modules[name] for name in ["api.config", "api.profiles"]
-              if name in sys.modules}
+    _saved = {
+        name: sys.modules[name]
+        for name in ["api.config", "api.profiles"]
+        if name in sys.modules
+    }
 
     for name in ["api.config", "api.profiles"]:
         if name in sys.modules:

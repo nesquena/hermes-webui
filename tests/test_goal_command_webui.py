@@ -1,11 +1,7 @@
 """Regression tests for first-class WebUI /goal command parity."""
 
-import io
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
@@ -92,7 +88,9 @@ def test_goal_command_payload_rejects_new_goal_while_stream_running(monkeypatch)
     monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
 
     status = webui_goals.goal_command_payload("sid-123", "status", stream_running=True)
-    rejected = webui_goals.goal_command_payload("sid-123", "replace it", stream_running=True)
+    rejected = webui_goals.goal_command_payload(
+        "sid-123", "replace it", stream_running=True
+    )
 
     assert status["ok"] is True
     assert rejected["ok"] is False
@@ -143,11 +141,15 @@ def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypa
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 20)
 
-    decision = webui_goals.evaluate_goal_after_turn("sid-123", "not done yet", user_initiated=False)
+    decision = webui_goals.evaluate_goal_after_turn(
+        "sid-123", "not done yet", user_initiated=False
+    )
 
     assert decision["message"].startswith("↻ Continuing toward goal")
     assert decision["should_continue"] is True
-    assert decision["continuation_prompt"].startswith("[Continuing toward your standing goal]")
+    assert decision["continuation_prompt"].startswith(
+        "[Continuing toward your standing goal]"
+    )
 
 
 def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path):
@@ -197,10 +199,21 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
 
     def fake_start(session, **kwargs):
         started.append(kwargs)
-        return {"stream_id": "goal-stream", "session_id": session.session_id, "pending_started_at": 123.0}
+        return {
+            "stream_id": "goal-stream",
+            "session_id": session.session_id,
+            "pending_started_at": 123.0,
+        }
 
     monkeypatch.setattr(routes, "_start_chat_stream_for_session", fake_start)
-    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, **kwargs: {
+            "status": status,
+            "payload": payload,
+        },
+    )
 
     result = routes._handle_goal_command(
         object(),
@@ -237,18 +250,25 @@ def test_streaming_post_turn_goal_hook_surfaces_and_continues():
     goal_idx = STREAMING_PY.find("evaluate_goal_after_turn")
     done_idx = STREAMING_PY.find("put('done'", goal_idx)
     assert goal_idx != -1 and done_idx != -1
-    assert goal_idx < done_idx, "goal status should be emitted before the terminal done payload"
+    assert goal_idx < done_idx, (
+        "goal status should be emitted before the terminal done payload"
+    )
 
 
 def test_streaming_goal_hook_emits_evaluating_state_before_judge():
     evaluating_idx = STREAMING_PY.find("'state': 'evaluating'")
     judge_idx = STREAMING_PY.find("_goal_decision = evaluate_goal_after_turn")
     done_idx = STREAMING_PY.find("put('done'", judge_idx)
-    assert evaluating_idx != -1, "goal hook should emit an evaluating state before judge round-trip"
+    assert evaluating_idx != -1, (
+        "goal hook should emit an evaluating state before judge round-trip"
+    )
     assert judge_idx != -1 and done_idx != -1
     assert evaluating_idx < judge_idx < done_idx
     assert "Evaluating goal progress…" in STREAMING_PY
-    assert "'state': 'continuing' if decision.get('should_continue') else 'idle'" in STREAMING_PY
+    assert (
+        "'state': 'continuing' if decision.get('should_continue') else 'idle'"
+        in STREAMING_PY
+    )
 
 
 def test_frontend_has_goal_slash_command_and_status_event_handler():
@@ -260,7 +280,10 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)" in MESSAGES_JS
+    assert (
+        "['steer','interrupt','queue','terminal','goal'].includes(_pc.name)"
+        in MESSAGES_JS
+    )
     assert "queueSessionMessage" in MESSAGES_JS
 
 

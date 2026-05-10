@@ -86,7 +86,9 @@ def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
     raise AssertionError(f"process {pid} did not exit")
 
 
-def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(tmp_path):
+def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
+    tmp_path,
+):
     fake_python = tmp_path / "fake-python"
     fake_log = tmp_path / "fake-python.log"
     write_fake_python(fake_python)
@@ -131,7 +133,9 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     shutil.copy2(CTL, repo_root / "ctl.sh")
-    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+    (repo_root / "bootstrap.py").write_text(
+        "# fake bootstrap target\n", encoding="utf-8"
+    )
 
     fake_python = tmp_path / "fake-python"
     fake_log = tmp_path / "fake-python.log"

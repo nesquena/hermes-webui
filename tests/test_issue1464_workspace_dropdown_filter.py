@@ -9,6 +9,7 @@ should appear only when zero items match the filter.
 This test pins both ternaries inside renderWorkspaceDropdownInto.filterWs() to
 their correct shape, so future edits can't silently re-invert either of them.
 """
+
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -21,7 +22,9 @@ def test_workspace_dropdown_noresults_hides_when_matches_exist():
 
     # Locate filterWs body inside the renderWorkspaceDropdownInto function.
     filter_start = panels.find("function filterWs(", fn_start)
-    assert filter_start != -1, "filterWs helper must exist inside the dropdown render function"
+    assert filter_start != -1, (
+        "filterWs helper must exist inside the dropdown render function"
+    )
     filter_end = panels.find("\n  }\n", filter_start)
     assert filter_end != -1, "filterWs body must close cleanly"
     body = panels[filter_start:filter_end]
@@ -48,13 +51,15 @@ def test_workspace_dropdown_noresults_hides_when_matches_exist():
     nr_idx = body.find("noResults.style.display=")
     assert opt_idx < nr_idx, "opt visibility line must come before noResults line"
 
-    opt_line = body[opt_idx:body.find("\n", opt_idx)]
-    nr_line = body[nr_idx:body.find("\n", nr_idx)]
+    opt_line = body[opt_idx : body.find("\n", opt_idx)]
+    nr_line = body[nr_idx : body.find("\n", nr_idx)]
     # Each line picks one branch for show/hide; the chosen branch must be
     # opposite. The simplest invariant: the noResults line must NOT be string-
     # equal to the opt line with `opt` swapped for `noResults` and `show` for
     # `visible`.
-    parallel = opt_line.replace("opt.style.display", "noResults.style.display").replace("show?", "visible?")
+    parallel = opt_line.replace("opt.style.display", "noResults.style.display").replace(
+        "show?", "visible?"
+    )
     assert nr_line != parallel, (
         f"opt and noResults visibility ternaries are accidentally parallel — "
         f"they must be mirror images. opt={opt_line!r} noResults={nr_line!r}"

@@ -43,11 +43,15 @@ def test_start_payload_does_not_leak_provider_device_secrets(monkeypatch, tmp_pa
 
     oauth._OAUTH_FLOWS.clear()
     monkeypatch.setattr(oauth, "_get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(oauth, "_request_codex_user_code", lambda: {
-        "device_auth_id": "device-secret",
-        "user_code": "ABCD-EFGH",
-        "interval": 3,
-    })
+    monkeypatch.setattr(
+        oauth,
+        "_request_codex_user_code",
+        lambda: {
+            "device_auth_id": "device-secret",
+            "user_code": "ABCD-EFGH",
+            "interval": 3,
+        },
+    )
     monkeypatch.setattr(oauth, "_spawn_codex_oauth_worker", lambda flow_id: None)
 
     payload = oauth.start_onboarding_oauth_flow({"provider": "openai-codex"})
@@ -88,9 +92,19 @@ def test_poll_returns_high_level_status_only(monkeypatch, tmp_path):
 
     payload = oauth.poll_onboarding_oauth_flow(flow_id)
 
-    assert payload == {"ok": True, "provider": "openai-codex", "flow_id": flow_id, "status": "pending"}
+    assert payload == {
+        "ok": True,
+        "provider": "openai-codex",
+        "flow_id": flow_id,
+        "status": "pending",
+    }
     serialized = json.dumps(payload)
-    for forbidden in ("device_auth_id", "device-secret", "code_verifier", "authorization_code"):
+    for forbidden in (
+        "device_auth_id",
+        "device-secret",
+        "code_verifier",
+        "authorization_code",
+    ):
         assert forbidden not in serialized
 
 
@@ -113,7 +127,9 @@ def test_cancel_marks_flow_cancelled_and_poll_stops(tmp_path):
     assert polled["status"] == "cancelled"
 
 
-def test_cancel_during_token_exchange_does_not_persist_credentials(monkeypatch, tmp_path):
+def test_cancel_during_token_exchange_does_not_persist_credentials(
+    monkeypatch, tmp_path
+):
     """Cancel arriving while the worker is mid-network-call must win.
 
     Without the post-exchange status re-check, the worker would proceed to
@@ -152,7 +168,9 @@ def test_cancel_during_token_exchange_does_not_persist_credentials(monkeypatch, 
         "updated_at": time.time(),
     }
 
-    worker = threading.Thread(target=oauth._run_codex_oauth_worker, args=(flow_id,), daemon=True)
+    worker = threading.Thread(
+        target=oauth._run_codex_oauth_worker, args=(flow_id,), daemon=True
+    )
     worker.start()
     assert poll_started.wait(timeout=5)
 
@@ -231,7 +249,7 @@ def test_frontend_uses_onboarding_oauth_endpoints_and_no_secret_poll_url():
 def test_unsupported_note_mentions_codex_and_claude_as_in_app():
     src = (REPO / "api" / "onboarding.py").read_text(encoding="utf-8")
     start = src.find("_UNSUPPORTED_PROVIDER_NOTE")
-    body = src[start:start + 500]
+    body = src[start : start + 500]
     assert "OpenAI Codex, and GitHub" not in body
     assert "OpenAI Codex" in body and "authenticated in this onboarding flow" in body
     assert "Claude" in body or "Anthropic" in body
@@ -260,13 +278,19 @@ def test_anthropic_immediate_success_when_credentials_exist(monkeypatch, tmp_pat
 
     oauth._OAUTH_FLOWS.clear()
     monkeypatch.setattr(oauth, "_get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(oauth, "_read_claude_code_credentials", lambda: {
-        "accessToken": "cc-access-secret",
-        "refreshToken": "cc-refresh-secret",
-        "expiresAt": 9999999999999,
-    })
+    monkeypatch.setattr(
+        oauth,
+        "_read_claude_code_credentials",
+        lambda: {
+            "accessToken": "cc-access-secret",
+            "refreshToken": "cc-refresh-secret",
+            "expiresAt": 9999999999999,
+        },
+    )
     linked = []
-    monkeypatch.setattr(oauth, "_link_anthropic_credentials", lambda hh: linked.append(str(hh)))
+    monkeypatch.setattr(
+        oauth, "_link_anthropic_credentials", lambda hh: linked.append(str(hh))
+    )
 
     payload = oauth.start_onboarding_oauth_flow({"provider": "anthropic"})
 
@@ -274,11 +298,20 @@ def test_anthropic_immediate_success_when_credentials_exist(monkeypatch, tmp_pat
     assert payload["provider"] == "anthropic"
     assert linked == [str(tmp_path)]
     serialized = json.dumps(payload)
-    for forbidden in ("cc-access-secret", "cc-refresh-secret", "accessToken", "refreshToken", "access_token", "refresh_token"):
+    for forbidden in (
+        "cc-access-secret",
+        "cc-refresh-secret",
+        "accessToken",
+        "refreshToken",
+        "access_token",
+        "refresh_token",
+    ):
         assert forbidden not in serialized
 
 
-def test_anthropic_pending_payload_is_action_only_and_secret_free(monkeypatch, tmp_path):
+def test_anthropic_pending_payload_is_action_only_and_secret_free(
+    monkeypatch, tmp_path
+):
     import api.oauth as oauth
 
     oauth._OAUTH_FLOWS.clear()
@@ -295,9 +328,16 @@ def test_anthropic_pending_payload_is_action_only_and_secret_free(monkeypatch, t
     assert "claude" in payload["action_required"].lower()
     serialized = json.dumps(payload)
     for forbidden in (
-        "access_token", "refresh_token", "accessToken", "refreshToken",
-        ".credentials.json", ".claude", "hermes_home", str(tmp_path),
-        "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
+        "access_token",
+        "refresh_token",
+        "accessToken",
+        "refreshToken",
+        ".credentials.json",
+        ".claude",
+        "hermes_home",
+        str(tmp_path),
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
     ):
         assert forbidden not in serialized
 
@@ -344,7 +384,9 @@ def test_anthropic_worker_detects_credentials_and_cancel_wins(monkeypatch, tmp_p
         return {"accessToken": "cc-access-secret", "refreshToken": "cc-refresh-secret"}
 
     monkeypatch.setattr(oauth, "_read_claude_code_credentials", _slow_read_creds)
-    monkeypatch.setattr(oauth, "_link_anthropic_credentials", lambda hh: linked.append(str(hh)))
+    monkeypatch.setattr(
+        oauth, "_link_anthropic_credentials", lambda hh: linked.append(str(hh))
+    )
 
     flow_id = "claude-race-flow"
     oauth._OAUTH_FLOWS[flow_id] = {
@@ -356,7 +398,9 @@ def test_anthropic_worker_detects_credentials_and_cancel_wins(monkeypatch, tmp_p
         "created_at": time.time(),
         "updated_at": time.time(),
     }
-    worker = threading.Thread(target=oauth._run_anthropic_credential_worker, args=(flow_id,), daemon=True)
+    worker = threading.Thread(
+        target=oauth._run_anthropic_credential_worker, args=(flow_id,), daemon=True
+    )
     worker.start()
     assert started.wait(timeout=5)
     oauth.cancel_onboarding_oauth_flow({"flow_id": flow_id})
@@ -376,7 +420,14 @@ def test_anthropic_cancel_during_link_keeps_flow_cancelled(monkeypatch, tmp_path
     link_started = threading.Event()
     link_continue = threading.Event()
     monkeypatch.setattr(oauth.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(oauth, "_read_claude_code_credentials", lambda: {"accessToken": "cc-access-secret", "refreshToken": "cc-refresh-secret"})
+    monkeypatch.setattr(
+        oauth,
+        "_read_claude_code_credentials",
+        lambda: {
+            "accessToken": "cc-access-secret",
+            "refreshToken": "cc-refresh-secret",
+        },
+    )
 
     def _slow_clear(_home):
         link_started.set()
@@ -394,10 +445,15 @@ def test_anthropic_cancel_during_link_keeps_flow_cancelled(monkeypatch, tmp_path
         "updated_at": time.time(),
     }
 
-    worker = threading.Thread(target=oauth._run_anthropic_credential_worker, args=(flow_id,), daemon=True)
+    worker = threading.Thread(
+        target=oauth._run_anthropic_credential_worker, args=(flow_id,), daemon=True
+    )
     worker.start()
     assert link_started.wait(timeout=5)
-    assert oauth.cancel_onboarding_oauth_flow({"flow_id": flow_id})["status"] == "cancelled"
+    assert (
+        oauth.cancel_onboarding_oauth_flow({"flow_id": flow_id})["status"]
+        == "cancelled"
+    )
     link_continue.set()
     worker.join(timeout=5)
 
@@ -411,7 +467,9 @@ def test_anthropic_cancel_missing_flow_keeps_requested_provider():
 
     oauth._OAUTH_FLOWS.clear()
 
-    assert oauth.cancel_onboarding_oauth_flow({"flow_id": "missing", "provider": "claude-code"}) == {
+    assert oauth.cancel_onboarding_oauth_flow(
+        {"flow_id": "missing", "provider": "claude-code"}
+    ) == {
         "ok": True,
         "provider": "anthropic",
         "flow_id": "missing",
@@ -444,7 +502,14 @@ def test_anthropic_worker_reports_link_errors(monkeypatch, tmp_path):
 
     oauth._OAUTH_FLOWS.clear()
     monkeypatch.setattr(oauth.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(oauth, "_read_claude_code_credentials", lambda: {"accessToken": "cc-access-secret", "refreshToken": "cc-refresh-secret"})
+    monkeypatch.setattr(
+        oauth,
+        "_read_claude_code_credentials",
+        lambda: {
+            "accessToken": "cc-access-secret",
+            "refreshToken": "cc-refresh-secret",
+        },
+    )
 
     def _raise_link_error(_home):
         raise RuntimeError("link failed without secrets")
@@ -480,7 +545,10 @@ def test_anthropic_link_clears_env_and_writes_secret_free_marker(monkeypatch, tm
     from api.onboarding import _provider_oauth_authenticated
 
     env_path = tmp_path / ".env"
-    env_path.write_text("ANTHROPIC_TOKEN=old-token\nANTHROPIC_API_KEY=old-key\nOTHER=value\n", encoding="utf-8")
+    env_path.write_text(
+        "ANTHROPIC_TOKEN=old-token\nANTHROPIC_API_KEY=old-key\nOTHER=value\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("ANTHROPIC_TOKEN", "old-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "old-key")
 
@@ -551,21 +619,34 @@ def test_runtime_provider_reads_use_anthropic_env_lock():
     assert "resolve_runtime_provider_with_anthropic_env_lock" in routes_src
 
 
-def test_anthropic_onboarding_setup_allows_linked_oauth_without_api_key(monkeypatch, tmp_path):
+def test_anthropic_onboarding_setup_allows_linked_oauth_without_api_key(
+    monkeypatch, tmp_path
+):
     import api.onboarding as onboarding
 
     cfg_path = tmp_path / "config.yaml"
     home = tmp_path / "home"
     home.mkdir()
-    (home / "auth.json").write_text(json.dumps({
-        "credential_pool": {"anthropic": [{"auth_type": "oauth", "source": "claude_code_linked"}]}
-    }), encoding="utf-8")
+    (home / "auth.json").write_text(
+        json.dumps(
+            {
+                "credential_pool": {
+                    "anthropic": [
+                        {"auth_type": "oauth", "source": "claude_code_linked"}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(onboarding, "_get_config_path", lambda: cfg_path)
     monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: home)
     monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
     monkeypatch.setattr(onboarding, "reload_config", lambda: None)
 
-    result = onboarding.apply_onboarding_setup({"provider": "anthropic", "model": "claude-sonnet-4.6"})
+    result = onboarding.apply_onboarding_setup(
+        {"provider": "anthropic", "model": "claude-sonnet-4.6"}
+    )
 
     assert result == {"ok": True}
     saved = cfg_path.read_text(encoding="utf-8")
@@ -585,6 +666,6 @@ def test_frontend_has_anthropic_oauth_support():
     assert "/api/onboarding/oauth/start" in js
     assert "/api/onboarding/oauth/poll" in js
     assert "/api/onboarding/oauth/cancel" in js
-    assert "window.open(" not in js[js.find("startAnthropicOAuth"):]
-    assert "accessToken" not in js[js.find("startAnthropicOAuth"):]
-    assert "refreshToken" not in js[js.find("startAnthropicOAuth"):]
+    assert "window.open(" not in js[js.find("startAnthropicOAuth") :]
+    assert "accessToken" not in js[js.find("startAnthropicOAuth") :]
+    assert "refreshToken" not in js[js.find("startAnthropicOAuth") :]

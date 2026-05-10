@@ -3,6 +3,7 @@ Sprint 27 Tests: configurable assistant display name (bot_name).
 Tests cover settings API round-trip, empty/missing input defaults,
 login page rendering, and server-side sanitization.
 """
+
 import json
 import urllib.error
 import urllib.request
@@ -22,8 +23,9 @@ def get_raw(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                 headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -32,6 +34,7 @@ def post(path, body=None):
 
 
 # ── Default value ─────────────────────────────────────────────────────────
+
 
 def test_settings_default_bot_name():
     """GET /api/settings should return bot_name defaulting to 'Hermes'."""
@@ -42,6 +45,7 @@ def test_settings_default_bot_name():
 
 
 # ── Round-trip ────────────────────────────────────────────────────────────
+
 
 def test_settings_set_bot_name():
     """POST /api/settings with bot_name should persist and round-trip."""
@@ -68,6 +72,7 @@ def test_settings_bot_name_special_chars():
 
 # ── Server-side sanitization ──────────────────────────────────────────────
 
+
 def test_settings_empty_bot_name_defaults_to_hermes():
     """Posting an empty bot_name should default to 'Hermes' server-side."""
     try:
@@ -91,6 +96,7 @@ def test_settings_whitespace_bot_name_defaults_to_hermes():
 
 
 # ── Login page rendering ──────────────────────────────────────────────────
+
 
 def test_login_page_shows_default_bot_name():
     """GET /login should contain 'Hermes' in title and h1 when default."""

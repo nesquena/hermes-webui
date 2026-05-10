@@ -1,7 +1,6 @@
 """Regression tests for manual WebUI cron runs."""
 
 
-
 def test_manual_cron_run_saves_output_and_marks_job(monkeypatch):
     import api.routes as routes
 

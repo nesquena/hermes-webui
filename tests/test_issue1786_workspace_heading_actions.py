@@ -25,11 +25,15 @@ def test_workspace_heading_context_menu_exposes_root_reveal_and_copy_path():
 
 def test_workspace_heading_affordance_requires_workspace():
     """The heading should only advertise button behavior when a workspace exists."""
-    heading_line = next(line for line in INDEX_HTML.splitlines() if 'id="workspacePanelHeading"' in line)
+    heading_line = next(
+        line for line in INDEX_HTML.splitlines() if 'id="workspacePanelHeading"' in line
+    )
     assert 'role="button"' not in heading_line
     assert 'tabindex="0"' not in heading_line
     assert "_syncWorkspaceHeadingState" in UI_JS
-    assert "heading.classList.toggle('workspace-panel-heading--enabled',enabled)" in UI_JS
+    assert (
+        "heading.classList.toggle('workspace-panel-heading--enabled',enabled)" in UI_JS
+    )
     assert "heading.setAttribute('role','button')" in UI_JS
     assert "heading.setAttribute('tabindex','0')" in UI_JS
     assert "heading.removeAttribute('role')" in UI_JS

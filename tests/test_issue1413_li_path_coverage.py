@@ -103,8 +103,7 @@ def test_all_li_calls_reference_registered_icons() -> None:
         pytest.fail(
             "li() called with icon name(s) not registered in LI_PATHS in "
             "static/icons.js. The button/container will render empty in "
-            "production. Add the Lucide SVG path to LI_PATHS for each:\n"
-            + report
+            "production. Add the Lucide SVG path to LI_PATHS for each:\n" + report
         )
 
 

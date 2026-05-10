@@ -20,11 +20,9 @@ This test suite locks the diagnostic shape of the new error message:
 Behavioural test for the actual raise path lives in the streaming integration
 suite; this file only exercises the helper.
 """
-import os
+
 import sys
 from pathlib import Path
-
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +38,7 @@ def _import_helper():
     """
     sys.path.insert(0, str(REPO_ROOT))
     from api import streaming  # noqa: F401
+
     return streaming._aiagent_import_error_detail
 
 
@@ -53,9 +52,9 @@ class TestAIAgentImportErrorDetail:
         helper = _import_helper()
         out = helper()
         first = out.splitlines()[0]
-        assert first == "AIAgent not available -- check that hermes-agent is on sys.path", (
-            f"first line must be the original error message verbatim, got: {first!r}"
-        )
+        assert (
+            first == "AIAgent not available -- check that hermes-agent is on sys.path"
+        ), f"first line must be the original error message verbatim, got: {first!r}"
 
     def test_includes_running_python_interpreter(self):
         """The diagnostic must include the running python so the user knows
@@ -152,13 +151,15 @@ class TestAIAgentImportErrorDocsPresence:
 
     def test_troubleshooting_md_exists(self):
         path = REPO_ROOT / "docs" / "troubleshooting.md"
-        assert path.exists(), "docs/troubleshooting.md must exist (referenced by streaming.py)"
+        assert path.exists(), (
+            "docs/troubleshooting.md must exist (referenced by streaming.py)"
+        )
 
     def test_troubleshooting_md_has_aiagent_section(self):
         path = REPO_ROOT / "docs" / "troubleshooting.md"
         content = path.read_text(encoding="utf-8")
         assert "AIAgent not available" in content, (
-            "docs/troubleshooting.md must have an entry titled \"AIAgent not available\""
+            'docs/troubleshooting.md must have an entry titled "AIAgent not available"'
         )
 
     def test_troubleshooting_md_includes_pip_install_editable(self):

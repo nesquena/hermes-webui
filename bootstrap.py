@@ -55,6 +55,7 @@ def _load_repo_dotenv() -> None:
                 os.environ[k] = v
     except Exception as exc:
         import sys as _sys
+
         print(f"[bootstrap] Warning: could not load .env — {exc}", file=_sys.stderr)
 
 
@@ -154,7 +155,12 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     if env_python:
         return env_python
     if agent_dir:
-        for rel in ("venv/bin/python", "venv/Scripts/python.exe", ".venv/bin/python", ".venv/Scripts/python.exe"):
+        for rel in (
+            "venv/bin/python",
+            "venv/Scripts/python.exe",
+            ".venv/bin/python",
+            ".venv/Scripts/python.exe",
+        ):
             candidate = agent_dir / rel
             if candidate.exists():
                 return str(candidate)
@@ -165,7 +171,9 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     return shutil.which("python3") or shutil.which("python") or sys.executable
 
 
-def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
+def _python_can_run_webui_and_agent(
+    python_exe: str, agent_dir: Path | None = None
+) -> bool:
     script = "import yaml\nfrom run_agent import AIAgent\n"
     env = os.environ.copy()
     if agent_dir:
@@ -394,7 +402,9 @@ def main() -> int:
         install_hermes_agent()
         agent_dir = discover_agent_dir()
 
-    python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
+    python_exe = ensure_python_has_webui_deps(
+        discover_launcher_python(agent_dir), agent_dir
+    )
     state_dir = Path(
         os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui"))
     ).expanduser()

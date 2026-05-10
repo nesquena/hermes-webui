@@ -11,9 +11,7 @@ INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 def test_sienna_skin_present_in_skins_list():
     """The Sienna skin must be exposed in the picker grid via _SKINS."""
     assert "{name:'Sienna'" in BOOT_JS, "Sienna skin missing from _SKINS list"
-    assert "'#D97757','#C06A49','#9A523A'" in BOOT_JS, (
-        "Sienna preview swatches missing"
-    )
+    assert "'#D97757','#C06A49','#9A523A'" in BOOT_JS, "Sienna preview swatches missing"
 
 
 def test_sienna_skin_in_early_init_allowlist():
@@ -50,7 +48,12 @@ def test_sienna_skin_does_not_force_migration():
     init_script_idx = INDEX_HTML.find("var themes=")
     end_idx = INDEX_HTML.find("</script>", init_script_idx)
     init_block = INDEX_HTML[init_script_idx:end_idx]
-    forbidden = ["sienna-migrated", "skin-sienna-migrated", "skin='sienna'", 'skin="sienna"']
+    forbidden = [
+        "sienna-migrated",
+        "skin-sienna-migrated",
+        "skin='sienna'",
+        'skin="sienna"',
+    ]
     for marker in forbidden:
         assert marker not in init_block, (
             f"Sienna skin must be opt-in, not force-migrated. Found '{marker}' "

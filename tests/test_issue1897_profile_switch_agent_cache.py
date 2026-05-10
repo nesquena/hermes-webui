@@ -19,7 +19,9 @@ def _signature_block() -> str:
     return STREAMING_PY[sig_start:sig_end]
 
 
-def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path, monkeypatch):
+def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(
+    tmp_path, monkeypatch
+):
     """Switching profiles in one WebUI session must not reuse old SOUL.md.
 
     The fake AIAgent mirrors the real failure mode: it reads SOUL.md from
@@ -158,7 +160,9 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
         "resolve_model_provider",
         lambda _model: ("test-model", "test-provider", None),
     )
-    monkeypatch.setattr(streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        streaming, "_maybe_schedule_title_refresh", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(profiles, "get_hermes_home_for_profile", home_for_profile)
     monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda _home: {})
     monkeypatch.setattr(
@@ -200,7 +204,9 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
 
     run_turn("alpha", "issue1897-stream-1", "first turn")
     run_turn("alpha", "issue1897-stream-2", "same profile second turn")
-    assert len(constructed_agents) == 1, "same-profile turns should reuse the cached agent"
+    assert len(constructed_agents) == 1, (
+        "same-profile turns should reuse the cached agent"
+    )
 
     run_turn("beta", "issue1897-stream-3", "profile switched turn")
 
@@ -219,7 +225,10 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
         str(profile_b_home),
     ]
     with cfg.SESSION_AGENT_CACHE_LOCK:
-        assert cfg.SESSION_AGENT_CACHE[fake_session.session_id][0] is constructed_agents[-1]
+        assert (
+            cfg.SESSION_AGENT_CACHE[fake_session.session_id][0]
+            is constructed_agents[-1]
+        )
 
 
 def test_cache_signature_includes_profile_home():
@@ -232,7 +241,9 @@ def test_cache_signature_includes_profile_home():
 
 
 def test_profile_home_resolved_before_cache_signature():
-    profile_home_assignment = STREAMING_PY.index("_profile_home = str(_profile_home_path)")
+    profile_home_assignment = STREAMING_PY.index(
+        "_profile_home = str(_profile_home_path)"
+    )
     sig_start = STREAMING_PY.index("_sig_blob = _json.dumps")
     assert profile_home_assignment < sig_start
 

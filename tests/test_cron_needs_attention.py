@@ -35,7 +35,9 @@ def _run_node(script: str) -> str:
 
 
 def test_legacy_broken_recurring_cron_is_needs_attention_not_off():
-    script = _cron_helper_source() + r"""
+    script = (
+        _cron_helper_source()
+        + r"""
 function t(key){ return key; }
 const legacyBroken = {
   id: 'legacy-broken',
@@ -70,6 +72,7 @@ console.log(JSON.stringify({
   scheduleError: _cronStatusMeta(scheduleError),
 }));
 """
+    )
     states = json.loads(_run_node(script))
 
     assert states["legacyBroken"]["state"] == "needs_attention"

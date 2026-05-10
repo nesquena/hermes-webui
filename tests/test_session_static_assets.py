@@ -72,7 +72,9 @@ def test_session_static_js_returns_javascript_mime(monkeypatch):
     assert handle_get(handler, parsed) is True
     assert handler.status == 200
     ct = handler.header("Content-Type") or ""
-    assert ct.startswith("application/javascript"), f"expected application/javascript, got {ct!r}"
+    assert ct.startswith("application/javascript"), (
+        f"expected application/javascript, got {ct!r}"
+    )
 
 
 def test_session_html_route_still_serves_index():
@@ -120,12 +122,19 @@ def test_session_static_auth_exemption(monkeypatch):
 
     # /session/static/* is public (matches /static/* policy)
     handler = _FakeHandler()
-    assert check_auth(handler, SimpleNamespace(path="/session/static/style.css", query="")) is True
+    assert (
+        check_auth(handler, SimpleNamespace(path="/session/static/style.css", query=""))
+        is True
+    )
 
     # Confirm the /static/ baseline still works (regression guard)
     handler = _FakeHandler()
-    assert check_auth(handler, SimpleNamespace(path="/static/style.css", query="")) is True
+    assert (
+        check_auth(handler, SimpleNamespace(path="/static/style.css", query="")) is True
+    )
 
     # And confirm a non-static /session/* path still requires auth
     handler = _FakeHandler()
-    assert check_auth(handler, SimpleNamespace(path="/session/abc123", query="")) is False
+    assert (
+        check_auth(handler, SimpleNamespace(path="/session/abc123", query="")) is False
+    )

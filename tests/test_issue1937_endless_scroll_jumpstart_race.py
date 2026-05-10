@@ -59,6 +59,7 @@ def _function_body(src: str, name: str) -> str:
 # Generation token: declared at module scope, bumped via the helper.
 # ---------------------------------------------------------------------------
 
+
 def test_generation_token_declared_at_module_scope():
     """``_messagesGeneration`` exists as a module-scoped mutable counter."""
     assert "let _messagesGeneration = 0;" in SESSIONS_JS, (
@@ -83,6 +84,7 @@ def test_generation_bump_helper_exists():
 # ---------------------------------------------------------------------------
 # _loadOlderMessages: snapshot before await, re-check after.
 # ---------------------------------------------------------------------------
+
 
 def test_load_older_snapshots_generation_before_await():
     """Snapshot must be captured BEFORE the `await api(...)` call."""
@@ -120,6 +122,7 @@ def test_load_older_generation_check_runs_before_prepend():
 # ---------------------------------------------------------------------------
 # _ensureAllMessagesLoaded: claims the mutex, bumps the generation, yields.
 # ---------------------------------------------------------------------------
+
 
 def test_ensure_all_bumps_generation_before_replace():
     """Bump must happen BEFORE `S.messages = msgs` so racing prefetch sees it."""

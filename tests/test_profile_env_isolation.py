@@ -1,7 +1,6 @@
 import importlib
 import os
 import sys
-from pathlib import Path
 
 
 def test_profile_switch_clears_previous_profile_env_vars(monkeypatch, tmp_path):

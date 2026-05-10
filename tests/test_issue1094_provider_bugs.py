@@ -33,7 +33,9 @@ def _post(path, body=None):
     """POST helper — returns (parsed_json, status_code)."""
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
-        BASE + path, data=data, headers={"Content-Type": "application/json"},
+        BASE + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -66,6 +68,7 @@ def _install_fake_hermes_cli(monkeypatch):
 
     try:
         from api.config import invalidate_models_cache
+
         invalidate_models_cache()
     except Exception:
         pass
@@ -82,11 +85,20 @@ def _setup_clean_config(monkeypatch, tmp_path):
 
     # Clear provider API key env vars to prevent host env leaking into tests
     _provider_env_vars = [
-        "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-        "GOOGLE_API_KEY", "GEMINI_API_KEY", "GLM_API_KEY",
-        "KIMI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY",
-        "MISTRAL_API_KEY", "XAI_API_KEY", "OLLAMA_API_KEY",
-        "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "GLM_API_KEY",
+        "KIMI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MINIMAX_API_KEY",
+        "MISTRAL_API_KEY",
+        "XAI_API_KEY",
+        "OLLAMA_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
     ]
     for var in _provider_env_vars:
         monkeypatch.delenv(var, raising=False)
@@ -132,14 +144,18 @@ class TestBug1094HasKeyFalsePositive:
                 "model": "claude-sonnet-4-20250514",
             }
 
-            assert _provider_has_key("anthropic") is True, \
+            assert _provider_has_key("anthropic") is True, (
                 "anthropic (active provider) should have key"
-            assert _provider_has_key("openai") is False, \
+            )
+            assert _provider_has_key("openai") is False, (
                 "openai should NOT show has_key just because anthropic has model.api_key"
-            assert _provider_has_key("deepseek") is False, \
+            )
+            assert _provider_has_key("deepseek") is False, (
                 "deepseek should NOT show has_key just because anthropic has model.api_key"
-            assert _provider_has_key("openrouter") is False, \
+            )
+            assert _provider_has_key("openrouter") is False, (
                 "openrouter should NOT show has_key just because anthropic has model.api_key"
+            )
         finally:
             _restore_config(old_cfg, old_mtime)
 
@@ -209,6 +225,7 @@ class TestBug1094RemoveProviderKey:
 
         # Create a fake config.yaml with a provider key
         import yaml as _yaml
+
         config_path = tmp_path / "config.yaml"
         config_data = {
             "model": {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
@@ -235,14 +252,16 @@ class TestBug1094RemoveProviderKey:
             # Verify key is gone from config.yaml
             reloaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             deepseek_cfg = reloaded.get("providers", {}).get("deepseek", {})
-            assert "api_key" not in deepseek_cfg, \
+            assert "api_key" not in deepseek_cfg, (
                 "api_key should be removed from providers.deepseek in config.yaml"
+            )
 
             # Verify _provider_has_key no longer detects it
             config.cfg.clear()
             config.cfg.update(reloaded)
-            assert _provider_has_key("deepseek") is False, \
+            assert _provider_has_key("deepseek") is False, (
                 "deepseek should not have key after removal"
+            )
         finally:
             _restore_config(old_cfg, old_mtime)
 
@@ -251,6 +270,7 @@ class TestBug1094RemoveProviderKey:
         old_cfg, old_mtime = _setup_clean_config(monkeypatch, tmp_path)
 
         import yaml as _yaml
+
         config_path = tmp_path / "config.yaml"
         config_data = {
             "model": {
@@ -274,8 +294,9 @@ class TestBug1094RemoveProviderKey:
 
             reloaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             model_cfg = reloaded.get("model", {})
-            assert "api_key" not in model_cfg, \
+            assert "api_key" not in model_cfg, (
                 "api_key should be removed from model section in config.yaml"
+            )
 
             config.cfg.clear()
             config.cfg.update(reloaded)
@@ -290,6 +311,7 @@ class TestBug1094RemoveProviderKey:
         old_cfg, old_mtime = _setup_clean_config(monkeypatch, tmp_path)
 
         import yaml as _yaml
+
         config_path = tmp_path / "config.yaml"
         config_data = {
             "model": {
@@ -314,8 +336,9 @@ class TestBug1094RemoveProviderKey:
 
             reloaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             # anthropic's model.api_key should still exist (we only removed deepseek)
-            assert reloaded["model"].get("api_key"), \
+            assert reloaded["model"].get("api_key"), (
                 "model.api_key for active provider should not be removed"
+            )
             # deepseek's key should be gone
             assert "api_key" not in reloaded.get("providers", {}).get("deepseek", {})
         finally:
@@ -365,5 +388,6 @@ class TestBug1094Endpoints:
         assert anthropic is not None, "anthropic should be in providers list"
         # has_key should be False unless there's a config.yaml key set
         # (which integration tests won't have in tmp test state)
-        assert anthropic["has_key"] is False, \
+        assert anthropic["has_key"] is False, (
             f"anthropic should not have key after deletion, got has_key={anthropic['has_key']}"
+        )

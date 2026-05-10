@@ -60,7 +60,9 @@ def _run_session_time_case(script_body: str) -> dict:
         {script_body}
         """
     )
-    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        ["node", "-e", script], check=True, capture_output=True, text=True
+    )
     return json.loads(proc.stdout)
 
 

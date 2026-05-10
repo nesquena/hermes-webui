@@ -40,6 +40,7 @@ def _locale_count(src: str) -> int:
 
 # ── 1–4. cancelStream() cleanup is unconditional ─────────────────────────────
 
+
 class TestCancelStreamCleanup:
     """cancelStream() must clear all busy state regardless of SSE connection state."""
 
@@ -52,9 +53,9 @@ class TestCancelStreamCleanup:
         depth = 0
         end = idx
         for i, ch in enumerate(src[idx:]):
-            if ch == '{':
+            if ch == "{":
                 depth += 1
-            elif ch == '}':
+            elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     end = idx + i + 1
@@ -111,6 +112,7 @@ class TestCancelStreamCleanup:
 
 # ── 5. Error path behavior ────────────────────────────────────────────────────
 
+
 class TestCancelStreamErrorPath:
     """The catch block should not prevent cleanup from running."""
 
@@ -123,7 +125,7 @@ class TestCancelStreamErrorPath:
         """
         src = read("static/boot.js")
         idx = src.find("async function cancelStream()")
-        block = src[idx:idx + 400]
+        block = src[idx : idx + 400]
         # The old pattern was setStatus inside catch; new pattern has it outside
         # Look for the catch block specifically
         catch_idx = block.find("}catch(")
@@ -133,7 +135,7 @@ class TestCancelStreamErrorPath:
         # Get just the catch body
         brace_open = block.find("{", catch_idx)
         brace_close = block.find("}", brace_open)
-        catch_body = block[brace_open:brace_close + 1]
+        catch_body = block[brace_open : brace_close + 1]
         assert "cancel_failed" not in catch_body, (
             "catch block still calls setStatus(cancel_failed) — "
             "this means a failed cancel shows an error instead of cleaning up silently"
@@ -141,6 +143,7 @@ class TestCancelStreamErrorPath:
 
 
 # ── 6. SSE cancel handler still present ──────────────────────────────────────
+
 
 def test_sse_cancel_handler_still_present():
     """The SSE 'cancel' event handler must still exist in messages.js.
@@ -165,18 +168,17 @@ def test_sse_cancel_handler_calls_set_busy():
     assert idx != -1
     # Find the closing of this handler block (next top-level addEventListener)
     next_handler = src.find("source.addEventListener(", idx + 50)
-    block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
-    assert (
-        "setBusy(false)" in block
-        or "_setActivePaneIdleIfOwner()" in block
-    ), (
+    block = src[idx:next_handler] if next_handler != -1 else src[idx : idx + 3000]
+    assert "setBusy(false)" in block or "_setActivePaneIdleIfOwner()" in block, (
         "SSE cancel handler no longer idles the owning active pane"
     )
     if "_setActivePaneIdleIfOwner()" in block:
         helper_idx = src.find("function _setActivePaneIdleIfOwner")
         assert helper_idx != -1
         next_function = src.find("\n  function ", helper_idx + 1)
-        helper = src[helper_idx:next_function if next_function != -1 else helper_idx + 800]
+        helper = src[
+            helper_idx : next_function if next_function != -1 else helper_idx + 800
+        ]
         assert "setBusy(false)" in helper
         # The helper MUST preserve the v0.51.12 (#1753) 3-way OR guard so
         # idling the active pane on a background completion is gated on the
@@ -193,6 +195,7 @@ def test_sse_cancel_handler_calls_set_busy():
 
 # ── 7. i18n key preserved ─────────────────────────────────────────────────────
 
+
 def test_cancel_failed_i18n_key_exists_in_all_locales():
     """cancel_failed key must still exist in i18n.js for all locales."""
     src = read("static/i18n.js")
@@ -206,6 +209,7 @@ def test_cancel_failed_i18n_key_exists_in_all_locales():
 
 
 # ── 8. Server-persisted cancel marker doesn't leak into agent history ────────
+
 
 def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
     """The server-side cancel marker appended in cancel_stream() must carry
@@ -228,7 +232,7 @@ def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
     brace_close = src.find("}", idx)
     assert brace_open != -1 and brace_close != -1, "couldn't locate cancel marker dict"
 
-    marker_dict = src[brace_open:brace_close + 1]
+    marker_dict = src[brace_open : brace_close + 1]
     assert "_error" in marker_dict and "True" in marker_dict, (
         "cancel marker is missing _error: True — it will leak into the agent's "
         "conversation_history via _sanitize_messages_for_api() on the next turn. "
@@ -240,6 +244,7 @@ def test_sanitize_strips_error_flagged_assistant_messages():
     """_sanitize_messages_for_api() must drop messages with _error: True —
     this is the invariant the cancel marker's _error flag relies on."""
     from api.streaming import _sanitize_messages_for_api
+
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},

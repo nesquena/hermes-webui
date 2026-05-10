@@ -79,14 +79,28 @@ def _swap_in_test_config(extra_cfg):
 
 def _scrub_provider_env(monkeypatch):
     for var in (
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
-        "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
-        "MISTRAL_API_KEY", "OPENROUTER_API_KEY",
-        "OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY",
-        "GLM_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
-        "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
-        "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
-        "NOUS_API_KEY", "NVIDIA_API_KEY", "LM_API_KEY", "LMSTUDIO_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OLLAMA_CLOUD_API_KEY",
+        "OLLAMA_API_KEY",
+        "GLM_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "NOUS_API_KEY",
+        "NVIDIA_API_KEY",
+        "LM_API_KEY",
+        "LMSTUDIO_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -99,31 +113,39 @@ def _scrub_provider_env(monkeypatch):
 class TestCanonicaliseProviderId:
     def test_canonical_id_preserved(self):
         from api.config import _canonicalise_provider_id
+
         assert _canonicalise_provider_id("opencode-go") == "opencode-go"
         assert _canonicalise_provider_id("anthropic") == "anthropic"
         assert _canonicalise_provider_id("x-ai") == "x-ai"
 
     def test_underscore_folded_to_hyphen(self):
         from api.config import _canonicalise_provider_id
+
         # Deor's exact failure mode — the config-file key uses underscores
         # but every other code path uses the hyphenated canonical form.
         assert _canonicalise_provider_id("opencode_go") == "opencode-go"
 
     def test_case_folded(self):
         from api.config import _canonicalise_provider_id
+
         assert _canonicalise_provider_id("OpenCode-Go") == "opencode-go"
         assert _canonicalise_provider_id("OPENCODE_GO") == "opencode-go"
         assert _canonicalise_provider_id("Anthropic") == "anthropic"
 
     def test_alias_resolved_when_target_is_canonical(self):
         from api.config import _canonicalise_provider_id
+
         # z-ai is an alias for the canonical zai.
         assert _canonicalise_provider_id("z-ai") == "zai"
         assert _canonicalise_provider_id("z_ai") == "zai"
-        assert _canonicalise_provider_id("Z.AI") == "zai" or _canonicalise_provider_id("Z.AI") == "z.ai"
+        assert (
+            _canonicalise_provider_id("Z.AI") == "zai"
+            or _canonicalise_provider_id("Z.AI") == "z.ai"
+        )
 
     def test_alias_not_applied_when_input_is_already_canonical(self):
         from api.config import _canonicalise_provider_id
+
         # x-ai IS the canonical key in _PROVIDER_DISPLAY/_PROVIDER_MODELS.
         # _PROVIDER_ALIASES happens to also map x-ai → xai (for hermes_cli
         # compat), but we must NOT round-trip through that alias because
@@ -133,12 +155,14 @@ class TestCanonicaliseProviderId:
 
     def test_empty_input(self):
         from api.config import _canonicalise_provider_id
+
         assert _canonicalise_provider_id("") == ""
         assert _canonicalise_provider_id(None) == ""
         assert _canonicalise_provider_id("   ") == ""
 
     def test_unknown_id_normalised_but_preserved(self):
         from api.config import _canonicalise_provider_id
+
         # Unknown ids: still get the underscore→hyphen + lowercase fold so
         # downstream dedup works, but no alias resolution.
         assert _canonicalise_provider_id("future_provider") == "future-provider"
@@ -146,10 +170,13 @@ class TestCanonicaliseProviderId:
 
     def test_idempotent(self):
         from api.config import _canonicalise_provider_id
+
         for raw in ("opencode_go", "OPENCODE-GO", "z-ai", "anthropic", "future_x"):
             once = _canonicalise_provider_id(raw)
             twice = _canonicalise_provider_id(once)
-            assert once == twice, f"helper must be idempotent: {raw!r} -> {once!r} -> {twice!r}"
+            assert once == twice, (
+                f"helper must be idempotent: {raw!r} -> {once!r} -> {twice!r}"
+            )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -161,21 +188,26 @@ class TestProviderGroupDedup:
     """When config.yaml uses a non-canonical providers.<id> key, the picker
     must still surface ONE provider group, not two."""
 
-    def test_underscored_providers_key_does_not_create_phantom_group(self, monkeypatch, tmp_path):
+    def test_underscored_providers_key_does_not_create_phantom_group(
+        self, monkeypatch, tmp_path
+    ):
         """Deor's exact reproduction case: ``providers.opencode_go.api_key``
         (underscored) with ``model.provider: opencode-go`` (hyphenated)."""
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "opencode-go", "default": "glm-5.1"},
-            "providers": {"opencode_go": {"api_key": "fake-test-key"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "opencode-go", "default": "glm-5.1"},
+                "providers": {"opencode_go": {"api_key": "fake-test-key"}},
+            }
+        )
         try:
             data = config.get_available_models()
             opencode_groups = [
-                g for g in data["groups"]
+                g
+                for g in data["groups"]
                 if "opencode" in (g.get("provider_id") or "").lower()
                 or "opencode" in (g.get("provider") or "").lower()
             ]
@@ -197,20 +229,26 @@ class TestProviderGroupDedup:
         finally:
             restore()
 
-    def test_uppercase_providers_key_does_not_create_phantom_group(self, monkeypatch, tmp_path):
+    def test_uppercase_providers_key_does_not_create_phantom_group(
+        self, monkeypatch, tmp_path
+    ):
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "opencode-go", "default": "glm-5.1"},
-            "providers": {"OPENCODE-GO": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "opencode-go", "default": "glm-5.1"},
+                "providers": {"OPENCODE-GO": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             opencode_groups = [
-                g for g in data["groups"]
-                if (g.get("provider_id") or "").lower().replace("_", "-") == "opencode-go"
+                g
+                for g in data["groups"]
+                if (g.get("provider_id") or "").lower().replace("_", "-")
+                == "opencode-go"
             ]
             assert len(opencode_groups) == 1
         finally:
@@ -223,14 +261,17 @@ class TestProviderGroupDedup:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "zai", "default": "glm-5"},
-            "providers": {"z-ai": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "zai", "default": "glm-5"},
+                "providers": {"z-ai": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             zai_groups = [
-                g for g in data["groups"]
+                g
+                for g in data["groups"]
                 if (g.get("provider_id") or "") in ("zai", "z-ai")
             ]
             assert len(zai_groups) == 1, (
@@ -247,15 +288,16 @@ class TestProviderGroupDedup:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "opencode-go", "default": "glm-5.1"},
-            "providers": {"opencode-go": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "opencode-go", "default": "glm-5.1"},
+                "providers": {"opencode-go": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             opencode_groups = [
-                g for g in data["groups"]
-                if g.get("provider_id") == "opencode-go"
+                g for g in data["groups"] if g.get("provider_id") == "opencode-go"
             ]
             assert len(opencode_groups) == 1
             assert opencode_groups[0]["provider"] == "OpenCode Go"
@@ -274,15 +316,19 @@ class TestDefaultModelProviderIdGuard:
     picker silently injected the provider id as a phantom model option.
     Post-fix the injection is skipped + a warning is logged."""
 
-    def test_provider_id_as_default_does_not_inject_phantom(self, monkeypatch, tmp_path, caplog):
+    def test_provider_id_as_default_does_not_inject_phantom(
+        self, monkeypatch, tmp_path, caplog
+    ):
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "opencode-go", "default": "opencode_go"},
-            "providers": {"opencode-go": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "opencode-go", "default": "opencode_go"},
+                "providers": {"opencode-go": {"api_key": "fake"}},
+            }
+        )
         try:
             with caplog.at_level("WARNING", logger="api.config"):
                 data = config.get_available_models()
@@ -310,17 +356,21 @@ class TestDefaultModelProviderIdGuard:
         finally:
             restore()
 
-    def test_provider_alias_as_default_does_not_inject_phantom(self, monkeypatch, tmp_path):
+    def test_provider_alias_as_default_does_not_inject_phantom(
+        self, monkeypatch, tmp_path
+    ):
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
         # Z.AI / GLM has display name "Z.AI / GLM", canonical id "zai",
         # alias "z-ai". model.default == "z-ai" should be caught.
-        restore = _swap_in_test_config({
-            "model": {"provider": "zai", "default": "z-ai"},
-            "providers": {"zai": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "zai", "default": "z-ai"},
+                "providers": {"zai": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             zai = next(g for g in data["groups"] if g.get("provider_id") == "zai")
@@ -338,10 +388,12 @@ class TestDefaultModelProviderIdGuard:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "anthropic", "default": "claude-opus-5.0-future"},
-            "providers": {"anthropic": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "anthropic", "default": "claude-opus-5.0-future"},
+                "providers": {"anthropic": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             all_ids = {m["id"] for g in data["groups"] for m in g["models"]}
@@ -373,16 +425,19 @@ class TestEmptyGroupFilter:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "opencode-go", "default": "glm-5.1"},
-            "providers": {"opencode_go": {"api_key": "fake"}},
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "opencode-go", "default": "glm-5.1"},
+                "providers": {"opencode_go": {"api_key": "fake"}},
+            }
+        )
         try:
             data = config.get_available_models()
             empty_groups = [g for g in data["groups"] if not g.get("models")]
             # Only custom: groups are allowed to be empty (intentional UX).
             allowed_empty = [
-                g for g in empty_groups
+                g
+                for g in empty_groups
                 if (g.get("provider_id") or "").startswith("custom:")
             ]
             disallowed = [g for g in empty_groups if g not in allowed_empty]
@@ -402,12 +457,14 @@ class TestEmptyGroupFilter:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        restore = _swap_in_test_config({
-            "model": {"provider": "custom", "default": "some-model"},
-            "custom_providers": [
-                {"name": "my-empty-provider", "api_key": "fake"},
-            ],
-        })
+        restore = _swap_in_test_config(
+            {
+                "model": {"provider": "custom", "default": "some-model"},
+                "custom_providers": [
+                    {"name": "my-empty-provider", "api_key": "fake"},
+                ],
+            }
+        )
         try:
             data = config.get_available_models()
             # The empty-group filter should NOT drop a custom: provider.

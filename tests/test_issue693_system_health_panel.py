@@ -61,11 +61,28 @@ def test_system_health_payload_normalizes_safe_aggregate_metrics(monkeypatch):
     assert payload["status"] == "ok"
     assert payload["available"] is True
     assert payload["cpu"] == {"percent": 17.3}
-    assert payload["memory"] == {"used_bytes": 4000, "total_bytes": 10000, "percent": 40.0}
-    assert payload["disk"] == {"used_bytes": 55500, "total_bytes": 100000, "percent": 55.5}
+    assert payload["memory"] == {
+        "used_bytes": 4000,
+        "total_bytes": 10000,
+        "percent": 40.0,
+    }
+    assert payload["disk"] == {
+        "used_bytes": 55500,
+        "total_bytes": 100000,
+        "percent": 55.5,
+    }
     assert payload["checked_at"]
     rendered = repr(payload)
-    for private_fragment in ("/home/", "/Users/", "mount", "path", "argv", "command", "env", "token"):
+    for private_fragment in (
+        "/home/",
+        "/Users/",
+        "mount",
+        "path",
+        "argv",
+        "command",
+        "env",
+        "token",
+    ):
         assert private_fragment not in rendered
 
 
@@ -111,7 +128,10 @@ def test_system_health_route_registered_and_auth_gated(monkeypatch):
     from api.auth import check_auth
 
     handler = _FakeHandler()
-    assert check_auth(handler, SimpleNamespace(path="/api/system/health", query="")) is False
+    assert (
+        check_auth(handler, SimpleNamespace(path="/api/system/health", query=""))
+        is False
+    )
     assert handler.status in (302, 401)
 
 
@@ -132,29 +152,45 @@ def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
         },
     )
     handler = _FakeHandler()
-    assert routes.handle_get(handler, urlparse("http://example.test/api/system/health")) is True
+    assert (
+        routes.handle_get(handler, urlparse("http://example.test/api/system/health"))
+        is True
+    )
     payload = handler.json_body()
     assert payload["cpu"]["percent"] == 12.0
-    assert set(payload) == {"status", "available", "checked_at", "cpu", "memory", "disk", "errors"}
+    assert set(payload) == {
+        "status",
+        "available",
+        "checked_at",
+        "cpu",
+        "memory",
+        "disk",
+        "errors",
+    }
 
 
 def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrome():
     top_shell = INDEX_HTML[: INDEX_HTML.index('<div class="layout">')]
     assert 'id="systemHealthPanel"' not in top_shell
     assert 'aria-label="Host resource health"' not in top_shell
-    assert 'function _renderSystemHealthPanel()' in PANELS_JS
+    assert "function _renderSystemHealthPanel()" in PANELS_JS
     assert 'id="systemHealthPanel"' in PANELS_JS
     assert 'aria-label="Host resource health"' in PANELS_JS
-    assert 'System health' in PANELS_JS
-    assert 'Current VPS resource usage' in PANELS_JS
-    assert PANELS_JS.index('_renderSystemHealthPanel()') < PANELS_JS.index('_renderLlmWikiStatus(wikiStatus)')
+    assert "System health" in PANELS_JS
+    assert "Current VPS resource usage" in PANELS_JS
+    assert PANELS_JS.index("_renderSystemHealthPanel()") < PANELS_JS.index(
+        "_renderLlmWikiStatus(wikiStatus)"
+    )
     assert 'data-system-health-metric="cpu"' in PANELS_JS
     assert 'data-system-health-metric="memory"' in PANELS_JS
     assert 'data-system-health-metric="disk"' in PANELS_JS
     assert ".system-health-panel.insights-card" in STYLE_CSS
     assert ".system-health-bar-fill" in STYLE_CSS
     assert ".system-health-panel.unavailable" in STYLE_CSS
-    assert "@media(max-width:640px)" in STYLE_CSS and ".system-health-panel.insights-card" in STYLE_CSS
+    assert (
+        "@media(max-width:640px)" in STYLE_CSS
+        and ".system-health-panel.insights-card" in STYLE_CSS
+    )
 
 
 def test_system_health_frontend_polls_visible_and_renders_progress_labels():
@@ -162,7 +198,10 @@ def test_system_health_frontend_polls_visible_and_renders_progress_labels():
     assert "api('/api/system/health')" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
     assert "document.querySelector('main.main.showing-insights')" in UI_JS
-    assert "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)" in UI_JS
+    assert (
+        "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)"
+        in UI_JS
+    )
     assert "typeof _syncSystemHealthMonitorVisibility === 'function'" in PANELS_JS
     assert "function renderSystemHealth(payload)" in UI_JS
     assert "setSystemHealthUnavailable" in UI_JS

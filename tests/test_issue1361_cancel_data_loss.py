@@ -15,15 +15,13 @@ All three fix the same "tokens-paid-for-data-loss" class of bug.
 
 import pathlib
 import queue
-import re
 import threading
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 import api.config as config
 import api.models as models
-import api.streaming as streaming
 from api.models import Session
 from api.streaming import cancel_stream
 
@@ -31,6 +29,7 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _isolate_session_dir(tmp_path, monkeypatch):
@@ -53,18 +52,18 @@ def _isolate_stream_state():
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
     # New shared dicts for §A and §B
-    if hasattr(config, 'STREAM_REASONING_TEXT'):
+    if hasattr(config, "STREAM_REASONING_TEXT"):
         config.STREAM_REASONING_TEXT.clear()
-    if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+    if hasattr(config, "STREAM_LIVE_TOOL_CALLS"):
         config.STREAM_LIVE_TOOL_CALLS.clear()
     yield
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
-    if hasattr(config, 'STREAM_REASONING_TEXT'):
+    if hasattr(config, "STREAM_REASONING_TEXT"):
         config.STREAM_REASONING_TEXT.clear()
-    if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+    if hasattr(config, "STREAM_LIVE_TOOL_CALLS"):
         config.STREAM_LIVE_TOOL_CALLS.clear()
 
 
@@ -75,9 +74,9 @@ def _isolate_agent_locks():
     config.SESSION_AGENT_LOCKS.clear()
 
 
-def _make_session(session_id="cancel_sid_1361",
-                  pending_msg="Help me debug this",
-                  messages=None):
+def _make_session(
+    session_id="cancel_sid_1361", pending_msg="Help me debug this", messages=None
+):
     """Build a session in mid-stream state."""
     s = Session(
         session_id=session_id,
@@ -106,9 +105,10 @@ def _setup_cancel_state(session_id, stream_id="stream_1361"):
 
 # ── §A: Reasoning text lost on cancel ───────────────────────────────────────
 
+
 class TestCancelPreservesReasoningText:
     """§A: _reasoning_text is thread-local and invisible to cancel_stream().
-    
+
     After fix: reasoning text should be persisted in a shared dict
     (STREAM_REASONING_TEXT) keyed by stream_id, and cancel_stream()
     should append it as a 'reasoning' field on the partial assistant message.
@@ -125,7 +125,7 @@ class TestCancelPreservesReasoningText:
         reasoning = "Let me think about this step by step..."
         config.STREAM_PARTIAL_TEXT[stream_id] = ""  # no visible tokens
 
-        if hasattr(config, 'STREAM_REASONING_TEXT'):
+        if hasattr(config, "STREAM_REASONING_TEXT"):
             config.STREAM_REASONING_TEXT[stream_id] = reasoning
 
         cancel_stream(stream_id)
@@ -134,10 +134,13 @@ class TestCancelPreservesReasoningText:
         s2 = models.SESSIONS[sid]
         msgs = s2.messages
         # There should be a partial assistant message with reasoning
-        assistant_msgs = [m for m in msgs if isinstance(m, dict) and m.get('role') == 'assistant']
-        has_reasoning = any(m.get('reasoning') for m in assistant_msgs)
-        assert has_reasoning, \
+        assistant_msgs = [
+            m for m in msgs if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
+        has_reasoning = any(m.get("reasoning") for m in assistant_msgs)
+        assert has_reasoning, (
             f"Expected reasoning field on partial assistant msg after cancel. Got messages: {assistant_msgs}"
+        )
 
     def test_cancel_with_reasoning_and_partial_tokens_preserves_both(self):
         """Cancel mid-stream with both reasoning and some visible tokens."""
@@ -150,18 +153,23 @@ class TestCancelPreservesReasoningText:
         partial_text = "Based on my analysis, the bug is in the"
         config.STREAM_PARTIAL_TEXT[stream_id] = partial_text
 
-        if hasattr(config, 'STREAM_REASONING_TEXT'):
+        if hasattr(config, "STREAM_REASONING_TEXT"):
             config.STREAM_REASONING_TEXT[stream_id] = reasoning
 
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
         # Should have partial content
-        partial_msgs = [m for m in assistant_msgs if m.get('_partial')]
-        has_content = any(m.get('content') for m in partial_msgs)
-        assert has_content, \
+        partial_msgs = [m for m in assistant_msgs if m.get("_partial")]
+        has_content = any(m.get("content") for m in partial_msgs)
+        assert has_content, (
             f"Expected partial assistant content after cancel. Got: {partial_msgs}"
+        )
 
     def test_cancel_without_reasoning_dict_works_as_before(self):
         """If STREAM_REASONING_TEXT doesn't exist yet (pre-fix), cancel still works."""
@@ -178,7 +186,7 @@ class TestCancelPreservesReasoningText:
         msgs = s2.messages
         # Should have the cancel marker
         has_cancel = any(
-            isinstance(m, dict) and m.get('role') == 'assistant' and m.get('_error')
+            isinstance(m, dict) and m.get("role") == "assistant" and m.get("_error")
             for m in msgs
         )
         assert has_cancel, "Cancel marker should always be present"
@@ -186,9 +194,10 @@ class TestCancelPreservesReasoningText:
 
 # ── §B: Tool calls lost on cancel ───────────────────────────────────────────
 
+
 class TestCancelPreservesToolCalls:
     """§B: _live_tool_calls is thread-local and invisible to cancel_stream().
-    
+
     After fix: tool calls should be persisted in a shared dict
     (STREAM_LIVE_TOOL_CALLS) keyed by stream_id, and cancel_stream()
     should append them as tool_call entries on the partial assistant message.
@@ -203,7 +212,7 @@ class TestCancelPreservesToolCalls:
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
 
-        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+        if hasattr(config, "STREAM_LIVE_TOOL_CALLS"):
             config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
                 {"name": "read_file", "args": {"path": "/tmp/test.py"}, "done": True},
                 {"name": "terminal", "args": {"command": "ls"}, "done": False},
@@ -212,10 +221,18 @@ class TestCancelPreservesToolCalls:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
-        has_tools = any(m.get('_partial_tool_calls') or m.get('tool_calls') or m.get('tools') for m in assistant_msgs)
-        assert has_tools, \
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
+        has_tools = any(
+            m.get("_partial_tool_calls") or m.get("tool_calls") or m.get("tools")
+            for m in assistant_msgs
+        )
+        assert has_tools, (
             f"Expected _partial_tool_calls on partial assistant msg after cancel. Got: {assistant_msgs}"
+        )
 
     def test_cancel_with_tools_and_text_preserves_both(self):
         """Cancel after tools + partial text should keep both."""
@@ -225,7 +242,7 @@ class TestCancelPreservesToolCalls:
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = "Here's what I found:"
-        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+        if hasattr(config, "STREAM_LIVE_TOOL_CALLS"):
             config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
                 {"name": "web_search", "args": {"query": "test"}, "done": True},
             ]
@@ -233,19 +250,25 @@ class TestCancelPreservesToolCalls:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
-        partial_msgs = [m for m in assistant_msgs if m.get('_partial')]
-        has_content = any(m.get('content') for m in partial_msgs)
-        assert has_content, \
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
+        partial_msgs = [m for m in assistant_msgs if m.get("_partial")]
+        has_content = any(m.get("content") for m in partial_msgs)
+        assert has_content, (
             f"Expected partial content with tools after cancel. Got: {partial_msgs}"
+        )
 
 
 # ── §C: Empty _stripped skips entire append ─────────────────────────────────
 
+
 class TestCancelWithReasoningOnlyNoText:
     """§C: When streaming was 100% reasoning (no visible tokens), _stripped is
     empty after regex cleanup, so no partial assistant message is appended.
-    
+
     After fix: even when _stripped is empty, if reasoning or tool calls exist,
     a partial assistant message should be appended (with no content, but with
     reasoning and/or tool_calls fields).
@@ -261,17 +284,22 @@ class TestCancelWithReasoningOnlyNoText:
         # Only reasoning, no visible tokens at all
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
 
-        if hasattr(config, 'STREAM_REASONING_TEXT'):
+        if hasattr(config, "STREAM_REASONING_TEXT"):
             config.STREAM_REASONING_TEXT[stream_id] = "Deep reasoning here..."
 
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
         # Should NOT be only the cancel marker — there should be a partial msg
-        partial_msgs = [m for m in assistant_msgs if m.get('_partial')]
-        assert len(partial_msgs) > 0, \
+        partial_msgs = [m for m in assistant_msgs if m.get("_partial")]
+        assert len(partial_msgs) > 0, (
             f"Expected at least one partial assistant msg for reasoning-only cancel. Got: {assistant_msgs}"
+        )
 
     def test_tools_only_creates_partial_message(self):
         """Cancel after tool-only output (no text, no reasoning) should still create a partial msg."""
@@ -282,7 +310,7 @@ class TestCancelWithReasoningOnlyNoText:
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
 
-        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+        if hasattr(config, "STREAM_LIVE_TOOL_CALLS"):
             config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
                 {"name": "read_file", "args": {"path": "/tmp/x"}, "done": True},
             ]
@@ -290,10 +318,15 @@ class TestCancelWithReasoningOnlyNoText:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
-        partial_msgs = [m for m in assistant_msgs if m.get('_partial')]
-        assert len(partial_msgs) > 0, \
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
+        partial_msgs = [m for m in assistant_msgs if m.get("_partial")]
+        assert len(partial_msgs) > 0, (
             f"Expected at least one partial assistant msg for tools-only cancel. Got: {assistant_msgs}"
+        )
 
     def test_no_reasoning_no_tools_no_partial(self):
         """Cancel with no reasoning and no tools and no text = only cancel marker (no change)."""
@@ -307,16 +340,24 @@ class TestCancelWithReasoningOnlyNoText:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[sid]
-        assistant_msgs = [m for m in s2.messages if isinstance(m, dict) and m.get('role') == 'assistant']
+        assistant_msgs = [
+            m
+            for m in s2.messages
+            if isinstance(m, dict) and m.get("role") == "assistant"
+        ]
         # Should only have the cancel marker, no partial messages
-        partial_msgs = [m for m in assistant_msgs if m.get('_partial')]
-        cancel_msgs = [m for m in assistant_msgs if m.get('_error')]
-        assert len(partial_msgs) == 0, \
+        partial_msgs = [m for m in assistant_msgs if m.get("_partial")]
+        cancel_msgs = [m for m in assistant_msgs if m.get("_error")]
+        assert len(partial_msgs) == 0, (
             f"Expected no partial msg when nothing was streamed. Got partials: {partial_msgs}"
-        assert len(cancel_msgs) == 1, \
+        )
+        assert len(cancel_msgs) == 1, (
             f"Expected exactly 1 cancel marker. Got: {cancel_msgs}"
+        )
+
 
 # ── §D: Error paths must not lose pending user turn ─────────────────────────
+
 
 def test_stream_error_materializes_pending_user_turn_before_clearing_runtime_state():
     """If a stream errors before normal merge, pending_user_message must become a
@@ -402,6 +443,7 @@ def test_stale_stream_cleanup_materializes_pending_turn_before_clearing_state():
 
 # ── Structural guard: pin call sites of the materialize helper at error branches ──
 
+
 def test_materialize_helper_called_immediately_before_error_path_clears():
     """Pin call sites of _materialize_pending_user_turn_before_error.
 
@@ -417,12 +459,20 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
     call from one of the error sites, this assertion fires.
     """
     from pathlib import Path
-    src = Path(__file__).parent.parent.joinpath('api', 'streaming.py').read_text(encoding='utf-8')
+
+    src = (
+        Path(__file__)
+        .parent.parent.joinpath("api", "streaming.py")
+        .read_text(encoding="utf-8")
+    )
     lines = src.splitlines()
 
-    helper_name = '_materialize_pending_user_turn_before_error('
-    clear_sites = [(i + 1, line) for i, line in enumerate(lines)
-                   if 'pending_user_message = None' in line]
+    helper_name = "_materialize_pending_user_turn_before_error("
+    clear_sites = [
+        (i + 1, line)
+        for i, line in enumerate(lines)
+        if "pending_user_message = None" in line
+    ]
     assert len(clear_sites) >= 4, (
         f"Expected ≥4 sites that clear pending_user_message; found {len(clear_sites)}. "
         f"If api/streaming.py was refactored, re-audit this test."
@@ -430,7 +480,7 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
 
     sites_with_helper = []
     for lineno, _ in clear_sites:
-        prev_block = '\n'.join(lines[max(0, lineno - 5):lineno - 1])
+        prev_block = "\n".join(lines[max(0, lineno - 5) : lineno - 1])
         if helper_name in prev_block:
             sites_with_helper.append(lineno)
 

@@ -48,7 +48,11 @@ def _make_hermes_cli(tmp_path, shebang_target: str | None):
 
 def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     """Point `which("hermes")` at our fake CLI and clear all standard candidates."""
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: str(hermes_path) if name == "hermes" else None)
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "which",
+        lambda name: str(hermes_path) if name == "hermes" else None,
+    )
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-such-hermes-home"))
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
     # Force REPO_ROOT.parent to a dir that won't accidentally contain a
@@ -60,7 +64,9 @@ def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     # cannot pick up the dev machine's real install. Stage-313 absorbed
     # this in-stage after the original test file isolated only env vars
     # and REPO_ROOT, missing the Path.home() leakage.
-    monkeypatch.setattr(bootstrap.Path, "home", classmethod(lambda cls: tmp_path / "isolated-home"))
+    monkeypatch.setattr(
+        bootstrap.Path, "home", classmethod(lambda cls: tmp_path / "isolated-home")
+    )
 
 
 def test_discovers_agent_dir_from_hermes_shebang(monkeypatch, tmp_path):
@@ -90,7 +96,9 @@ def test_returns_none_when_hermes_has_no_shebang(monkeypatch, tmp_path):
     assert bootstrap.discover_agent_dir() is None
 
 
-def test_returns_none_when_shebang_interpreter_does_not_walk_to_run_agent(monkeypatch, tmp_path):
+def test_returns_none_when_shebang_interpreter_does_not_walk_to_run_agent(
+    monkeypatch, tmp_path
+):
     """Shebang points at a system Python — no parent of /usr/bin/python3 has run_agent.py."""
     hermes = _make_hermes_cli(tmp_path, "/usr/bin/python3")
     _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)

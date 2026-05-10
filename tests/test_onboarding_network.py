@@ -14,9 +14,7 @@ Covers:
 """
 
 import json
-import os
 import pathlib
-import sys
 import unittest.mock
 import urllib.error
 import urllib.request
@@ -31,6 +29,7 @@ from tests._pytest_port import BASE
 # without needing a live server. We replicate the logic to keep tests fast
 # and independent of server startup.
 # ---------------------------------------------------------------------------
+
 
 def _is_local_from_handler(
     raw_ip: str,
@@ -112,7 +111,10 @@ class TestOnboardingIPLogic:
     def test_xff_takes_priority_over_xri(self):
         """X-Forwarded-For wins over X-Real-IP when both present."""
         # XFF says public, XRI says local → blocked (XFF takes priority)
-        assert _is_local_from_handler("172.20.0.1", xff="8.8.8.8", xri="127.0.0.1") is False
+        assert (
+            _is_local_from_handler("172.20.0.1", xff="8.8.8.8", xri="127.0.0.1")
+            is False
+        )
 
     def test_open_env_bypasses_check(self):
         """HERMES_WEBUI_ONBOARDING_OPEN=1 allows any IP."""
@@ -131,6 +133,7 @@ class TestOnboardingIPLogic:
 # Integration tests — hit the live test server at test server port
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestOnboardingSetupEndpoint:
     """
@@ -138,7 +141,9 @@ class TestOnboardingSetupEndpoint:
     These require the test server running on test server port.
     """
 
-    def _post(self, path: str, data: dict, headers: dict | None = None) -> tuple[int, dict]:
+    def _post(
+        self, path: str, data: dict, headers: dict | None = None
+    ) -> tuple[int, dict]:
         payload = json.dumps(data).encode()
         req = urllib.request.Request(
             BASE + path,
@@ -160,25 +165,37 @@ class TestOnboardingSetupEndpoint:
         # The test server runs on 127.0.0.1:{TEST_PORT} so client_address[0] is 127.0.0.1.
         # A valid setup payload with a mock provider should not be rejected for IP reasons.
         # We patch apply_onboarding_setup to avoid actually writing any config.
-        import unittest.mock
-        with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
+        with unittest.mock.patch(
+            "api.onboarding.apply_onboarding_setup", return_value={"ok": True}
+        ):
             status, body = self._post(
                 "/api/onboarding/setup",
-                {"provider": "anthropic", "model": "claude-sonnet-4.6", "api_key": "test-key"},
+                {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4.6",
+                    "api_key": "test-key",
+                },
             )
         # Should not be 403 (IP blocked). May be 200 or another error from apply logic.
-        assert status != 403, f"Got 403 — IP check incorrectly blocked loopback. Body: {body}"
+        assert status != 403, (
+            f"Got 403 — IP check incorrectly blocked loopback. Body: {body}"
+        )
 
     def test_xff_loopback_header_respected(self):
         """
         Simulated reverse proxy: raw TCP is 127.0.0.1 but X-Forwarded-For is also
         127.0.0.1. Should be allowed.
         """
-        import unittest.mock
-        with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
+        with unittest.mock.patch(
+            "api.onboarding.apply_onboarding_setup", return_value={"ok": True}
+        ):
             status, body = self._post(
                 "/api/onboarding/setup",
-                {"provider": "anthropic", "model": "claude-sonnet-4.6", "api_key": "test-key"},
+                {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4.6",
+                    "api_key": "test-key",
+                },
                 headers={"X-Forwarded-For": "127.0.0.1"},
             )
         assert status != 403, f"Got 403 with XFF=127.0.0.1. Body: {body}"

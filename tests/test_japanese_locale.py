@@ -146,10 +146,18 @@ def test_japanese_locale_duplicates_match_english():
     src = read(REPO / "static" / "i18n.js")
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
     en_dupes = sorted(
-        k for k, c in Counter(key_pattern.findall(extract_locale_block(src, "en"))).items() if c > 1
+        k
+        for k, c in Counter(
+            key_pattern.findall(extract_locale_block(src, "en"))
+        ).items()
+        if c > 1
     )
     ja_dupes = sorted(
-        k for k, c in Counter(key_pattern.findall(extract_locale_block(src, "ja"))).items() if c > 1
+        k
+        for k, c in Counter(
+            key_pattern.findall(extract_locale_block(src, "ja"))
+        ).items()
+        if c > 1
     )
     assert en_dupes == ja_dupes, (
         f"Japanese duplicates must mirror English exactly. "

@@ -2,12 +2,9 @@
 
 import json
 import pathlib
-import shutil
-import tempfile
 
 import pytest
 
-from tests.conftest import TEST_STATE_DIR, _post, TEST_BASE
 
 pytestmark = pytest.mark.usefixtures("test_server")
 
@@ -15,6 +12,7 @@ pytestmark = pytest.mark.usefixtures("test_server")
 def _get_projects(base_url):
     """Fetch the project list from the API."""
     import urllib.request
+
     with urllib.request.urlopen(base_url + "/api/projects", timeout=5) as r:
         return json.loads(r.read())
 
@@ -25,17 +23,17 @@ def test_ensure_cron_project_creates_project():
 
     # Remove any existing Cron Jobs project to test creation
     projects = load_projects()
-    original = [p for p in projects if p.get('name') != 'Cron Jobs']
+    original = [p for p in projects if p.get("name") != "Cron Jobs"]
     save_projects(original)
 
     pid = ensure_cron_project()
 
     # Should now exist
     projects = load_projects()
-    cron_projects = [p for p in projects if p.get('name') == 'Cron Jobs']
+    cron_projects = [p for p in projects if p.get("name") == "Cron Jobs"]
     assert len(cron_projects) == 1
-    assert cron_projects[0]['project_id'] == pid
-    assert cron_projects[0]['color'] == '#6366f1'
+    assert cron_projects[0]["project_id"] == pid
+    assert cron_projects[0]["color"] == "#6366f1"
     assert len(pid) == 12
 
     # Restore
@@ -47,7 +45,7 @@ def test_ensure_cron_project_idempotent():
     from api.models import ensure_cron_project, load_projects, save_projects
 
     projects = load_projects()
-    save_projects([p for p in projects if p.get('name') != 'Cron Jobs'])
+    save_projects([p for p in projects if p.get("name") != "Cron Jobs"])
 
     pid1 = ensure_cron_project()
     pid2 = ensure_cron_project()
@@ -82,12 +80,15 @@ def test_cron_jobs_project_i18n_key_exists():
 
     # Count occurrences of cron_jobs_project
     count = content.count("cron_jobs_project:")
-    assert count >= 9, f"Expected >= 9 locale entries for cron_jobs_project, found {count}"
+    assert count >= 9, (
+        f"Expected >= 9 locale entries for cron_jobs_project, found {count}"
+    )
 
 
 def test_cron_session_gets_project_id_in_cli_list():
     """get_cli_sessions() should assign project_id for cron sessions."""
     from api.models import get_cli_sessions
+
     # Just verify the function is callable and returns a list
     # The actual project assignment is tested indirectly via integration
     sessions = get_cli_sessions()

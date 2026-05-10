@@ -46,6 +46,7 @@ import api.config as config
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _isolate_models_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
@@ -99,7 +100,9 @@ def _stub_provider_modules(monkeypatch, detected_provider_ids: list[dict]):
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
     monkeypatch.setattr(
-        config, "_get_auth_store_path", lambda: config.Path("/tmp/does-not-exist-auth.json")
+        config,
+        "_get_auth_store_path",
+        lambda: config.Path("/tmp/does-not-exist-auth.json"),
     )
 
 
@@ -107,6 +110,7 @@ def _stub_provider_modules(monkeypatch, detected_provider_ids: list[dict]):
 # Fix #1 — bare "custom" PID must not absorb auto_detected_models when the
 # active provider is concrete (ai-gateway etc.)
 # ---------------------------------------------------------------------------
+
 
 def test_no_phantom_custom_group_when_active_provider_is_ai_gateway(monkeypatch):
     """The bare "custom" PID must not duplicate ai-gateway models (#1881)."""
@@ -143,6 +147,7 @@ def test_no_phantom_custom_group_when_active_provider_is_ai_gateway(monkeypatch)
 # ---------------------------------------------------------------------------
 # Fix #2 — unnamed custom:* PIDs must not fall through to auto_detected
 # ---------------------------------------------------------------------------
+
 
 def test_unnamed_custom_provider_id_does_not_inherit_auto_detected(monkeypatch):
     """A custom:* PID NOT in _named_custom_groups must skip cleanly (#1881).
@@ -185,6 +190,7 @@ def test_unnamed_custom_provider_id_does_not_inherit_auto_detected(monkeypatch):
 # active provider IS the named custom slug
 # ---------------------------------------------------------------------------
 
+
 def test_named_custom_group_still_populates_when_active_is_custom_alias(monkeypatch):
     """Named custom_providers groups still appear when the active provider IS
     the named custom slug — preserves test_issue1806 invariants."""
@@ -197,7 +203,9 @@ def test_named_custom_group_still_populates_when_active_is_custom_alias(monkeypa
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
     monkeypatch.setattr(
-        config, "_get_auth_store_path", lambda: config.Path("/tmp/does-not-exist-auth.json")
+        config,
+        "_get_auth_store_path",
+        lambda: config.Path("/tmp/does-not-exist-auth.json"),
     )
     monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
 

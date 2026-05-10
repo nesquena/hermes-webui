@@ -1,4 +1,5 @@
 """Regression coverage for settings navigation and master-detail refresh state."""
+
 import pathlib
 import re
 
@@ -11,7 +12,10 @@ class TestSettingsNavigationGuard:
     """Leaving Settings through the rail must still honor save/discard semantics."""
 
     def test_switch_panel_checks_settings_guard(self):
-        assert "if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;" in PANELS_JS, (
+        assert (
+            "if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;"
+            in PANELS_JS
+        ), (
             "switchPanel() must consult the settings guard before leaving Settings "
             "so rail/sidebar navigation cannot bypass the unsaved-changes flow"
         )
@@ -44,7 +48,10 @@ class TestSettingsNavigationGuard:
         )
 
     def test_entering_settings_starts_fresh_preview_session(self):
-        assert "if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();" in PANELS_JS, (
+        assert (
+            "if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();"
+            in PANELS_JS
+        ), (
             "switchPanel() must snapshot the preview baseline when entering Settings "
             "through the main navigation"
         )
@@ -54,9 +61,10 @@ class TestMasterDetailRefreshClearsRemovedSelections:
     """Refreshes must not leave dead detail panes visible after a selection disappears."""
 
     def test_tasks_clear_empty_state_detail(self):
-        assert "if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();" in PANELS_JS, (
-            "loadCrons() must clear the detail pane when the jobs list becomes empty"
-        )
+        assert (
+            "if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();"
+            in PANELS_JS
+        ), "loadCrons() must clear the detail pane when the jobs list becomes empty"
 
     def test_tasks_clear_missing_selected_job(self):
         m = re.search(

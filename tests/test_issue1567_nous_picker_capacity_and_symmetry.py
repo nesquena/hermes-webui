@@ -36,10 +36,25 @@ import api.profiles as profiles
 # Volume distribution mirrors what we saw on Nathan's machine (~30 models)
 # extrapolated up to ~400 with the same vendor mix Deor reported.
 _BIG_CATALOG_VENDORS = {
-    "anthropic": 8, "openai": 30, "google": 12, "moonshotai": 5, "z-ai": 15,
-    "minimax": 10, "qwen": 80, "x-ai": 8, "deepseek": 20, "stepfun": 10,
-    "xiaomi": 6, "tencent": 12, "nvidia": 25, "arcee-ai": 8,
-    "meta-llama": 50, "mistralai": 40, "cohere": 25, "databricks": 15, "lambda-ai": 18,
+    "anthropic": 8,
+    "openai": 30,
+    "google": 12,
+    "moonshotai": 5,
+    "z-ai": 15,
+    "minimax": 10,
+    "qwen": 80,
+    "x-ai": 8,
+    "deepseek": 20,
+    "stepfun": 10,
+    "xiaomi": 6,
+    "tencent": 12,
+    "nvidia": 25,
+    "arcee-ai": 8,
+    "meta-llama": 50,
+    "mistralai": 40,
+    "cohere": 25,
+    "databricks": 15,
+    "lambda-ai": 18,
 }
 
 
@@ -71,11 +86,18 @@ def _install_fake_hermes_cli(
 
     fake_models = types.ModuleType("hermes_cli.models")
     fake_models.list_available_providers = lambda: [
-        {"id": "nous", "label": "Nous Portal", "aliases": [], "authenticated": list_authenticated},
+        {
+            "id": "nous",
+            "label": "Nous Portal",
+            "aliases": [],
+            "authenticated": list_authenticated,
+        },
     ]
     if raise_on_lookup:
+
         def _raise(_pid):
             raise RuntimeError("simulated hermes_cli failure")
+
         fake_models.provider_model_ids = _raise
     else:
         ids = list(nous_ids) if nous_ids is not None else []
@@ -121,14 +143,28 @@ def _swap_in_test_config(extra_cfg):
 def _scrub_provider_env(monkeypatch):
     """Drop every provider env var so detection doesn't leak unrelated keys."""
     for var in (
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
-        "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
-        "MISTRAL_API_KEY", "OPENROUTER_API_KEY",
-        "OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY",
-        "GLM_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
-        "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
-        "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
-        "NOUS_API_KEY", "NVIDIA_API_KEY", "LM_API_KEY", "LMSTUDIO_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OLLAMA_CLOUD_API_KEY",
+        "OLLAMA_API_KEY",
+        "GLM_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "NOUS_API_KEY",
+        "NVIDIA_API_KEY",
+        "LM_API_KEY",
+        "LMSTUDIO_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -143,6 +179,7 @@ class TestBuildNousFeaturedSet:
 
     def test_small_catalog_is_no_op(self):
         from api.config import _build_nous_featured_set, _NOUS_FEATURED_THRESHOLD
+
         # 20 entries — below the threshold, helper should return the input
         # untouched and an empty extras list.
         catalog = [f"vendor/model-{i:02d}" for i in range(20)]
@@ -153,6 +190,7 @@ class TestBuildNousFeaturedSet:
 
     def test_large_catalog_is_capped_to_target(self):
         from api.config import _build_nous_featured_set, _NOUS_FEATURED_TARGET
+
         catalog = _build_big_catalog()
         assert len(catalog) > 100, "test fixture should produce a large catalog"
         featured, extras = _build_nous_featured_set(catalog)
@@ -164,6 +202,7 @@ class TestBuildNousFeaturedSet:
 
     def test_featured_and_extras_are_disjoint_and_complete(self):
         from api.config import _build_nous_featured_set
+
         catalog = _build_big_catalog()
         featured, extras = _build_nous_featured_set(catalog)
         assert set(featured) & set(extras) == set(), (
@@ -177,6 +216,7 @@ class TestBuildNousFeaturedSet:
 
     def test_priority_vendors_get_picked_first(self):
         from api.config import _build_nous_featured_set, _NOUS_VENDOR_PRIORITY
+
         catalog = _build_big_catalog()
         featured, _ = _build_nous_featured_set(catalog)
         # Every priority vendor with ≥1 entry in the catalog must appear in
@@ -191,6 +231,7 @@ class TestBuildNousFeaturedSet:
 
     def test_sticky_selection_is_preserved(self):
         from api.config import _build_nous_featured_set
+
         catalog = _build_big_catalog()
         # Pick a model from a leftover (non-priority) vendor that wouldn't
         # normally make the featured cut.
@@ -206,23 +247,27 @@ class TestBuildNousFeaturedSet:
 
     def test_sticky_selection_handles_at_nous_prefix(self):
         from api.config import _build_nous_featured_set
+
         catalog = _build_big_catalog()
         # The frontend stores selections as @nous:vendor/model — helper must
         # strip the prefix to match against the bare-id catalog.
         sticky_with_prefix = "@nous:lambda-ai/model-lambda-ai-15"
         bare = "lambda-ai/model-lambda-ai-15"
-        featured, _ = _build_nous_featured_set(catalog, selected_model_id=sticky_with_prefix)
+        featured, _ = _build_nous_featured_set(
+            catalog, selected_model_id=sticky_with_prefix
+        )
         assert bare in featured
 
     def test_curated_static_flagships_are_preserved(self):
         from api.config import _build_nous_featured_set, _PROVIDER_MODELS
+
         # Build a catalog that contains all the curated static IDs so the
         # rule-2 path fires.
         static_ids = []
         for entry in _PROVIDER_MODELS.get("nous", []):
             sid = entry["id"]
             if sid.startswith("@nous:"):
-                sid = sid[len("@nous:"):]
+                sid = sid[len("@nous:") :]
             static_ids.append(sid)
         catalog = static_ids + [f"filler-vendor/filler-{i:03d}" for i in range(100)]
         featured, _ = _build_nous_featured_set(catalog)
@@ -233,11 +278,13 @@ class TestBuildNousFeaturedSet:
 
     def test_empty_catalog_returns_empty(self):
         from api.config import _build_nous_featured_set
+
         f, e = _build_nous_featured_set([])
         assert f == [] and e == []
 
     def test_deterministic_across_calls(self):
         from api.config import _build_nous_featured_set
+
         catalog = _build_big_catalog()
         f1, e1 = _build_nous_featured_set(catalog)
         f2, e2 = _build_nous_featured_set(catalog)
@@ -268,6 +315,7 @@ class TestApiModelsLargeCatalog:
             assert len(nous_groups) == 1
             grp = nous_groups[0]
             from api.config import _NOUS_FEATURED_TARGET
+
             assert len(grp["models"]) == _NOUS_FEATURED_TARGET, (
                 f"Picker should render {_NOUS_FEATURED_TARGET} featured entries "
                 f"on a {len(catalog)}-model catalog, got {len(grp['models'])}."
@@ -316,7 +364,9 @@ class TestNousDetectionSymmetry:
     """The picker must include Nous whenever the providers card would —
     fixes the asymmetric-detection bug at the heart of #1567."""
 
-    def test_picker_includes_nous_when_get_auth_status_logged_in(self, monkeypatch, tmp_path):
+    def test_picker_includes_nous_when_get_auth_status_logged_in(
+        self, monkeypatch, tmp_path
+    ):
         """list_available_providers() reports authenticated=False but
         get_auth_status('nous').logged_in=True. Picker must still show Nous."""
         _scrub_provider_env(monkeypatch)
@@ -342,7 +392,9 @@ class TestNousDetectionSymmetry:
         finally:
             restore()
 
-    def test_picker_omits_nous_when_both_auth_signals_false(self, monkeypatch, tmp_path):
+    def test_picker_omits_nous_when_both_auth_signals_false(
+        self, monkeypatch, tmp_path
+    ):
         """When neither signal reports authenticated, Nous should NOT appear.
         Previously the static 4-entry list could leak in via the fallback path
         even for unauthenticated users — that fallback is now scoped to the
@@ -444,7 +496,9 @@ class TestProvidersCardPickerSymmetry:
     Nous Portal. This is the load-bearing invariant that ends the visual
     disagreement #1567 reports."""
 
-    def test_providers_card_and_picker_agree_on_featured_set(self, monkeypatch, tmp_path):
+    def test_providers_card_and_picker_agree_on_featured_set(
+        self, monkeypatch, tmp_path
+    ):
         _scrub_provider_env(monkeypatch)
         catalog = _build_big_catalog()
         _install_fake_hermes_cli(monkeypatch, nous_ids=catalog)
@@ -457,7 +511,9 @@ class TestProvidersCardPickerSymmetry:
 
             providers = {p["id"]: p for p in get_providers()["providers"]}
             picker = config.get_available_models()
-            picker_nous = next(g for g in picker["groups"] if g["provider_id"] == "nous")
+            picker_nous = next(
+                g for g in picker["groups"] if g["provider_id"] == "nous"
+            )
 
             card = providers["nous"]
             # Both render exactly _NOUS_FEATURED_TARGET visible models.
@@ -502,7 +558,10 @@ class TestFrontendExtrasContract:
 
     def test_ui_js_hydrates_dynamic_labels_from_extra_models(self):
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+
+        src = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(
+            encoding="utf-8"
+        )
         # Find the populateModelDropdown function and check it consumes
         # extra_models. Use a windowed substring search so the test stays
         # robust against minor refactors of surrounding code.
@@ -518,7 +577,10 @@ class TestFrontendExtrasContract:
 
     def test_commands_js_loads_slash_args_from_extra_models(self):
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
+
+        src = (
+            Path(__file__).resolve().parent.parent / "static" / "commands.js"
+        ).read_text(encoding="utf-8")
         idx = src.find("async function _loadSlashModelSubArgs")
         assert idx != -1
         body = src[idx : idx + 1500]
@@ -531,7 +593,10 @@ class TestFrontendExtrasContract:
 
     def test_panels_js_uses_models_total_for_count(self):
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
+
+        src = (
+            Path(__file__).resolve().parent.parent / "static" / "panels.js"
+        ).read_text(encoding="utf-8")
         idx = src.find("function _buildProviderCard")
         assert idx != -1
         body = src[idx : idx + 1500]
@@ -544,7 +609,10 @@ class TestFrontendExtrasContract:
 
     def test_panels_js_renders_more_disclosure_pill(self):
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
+
+        src = (
+            Path(__file__).resolve().parent.parent / "static" / "panels.js"
+        ).read_text(encoding="utf-8")
         # The "+N more" disclosure must reference the difference between
         # rendered count and total count somewhere in the providers-card
         # rendering path.

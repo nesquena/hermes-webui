@@ -5,6 +5,7 @@ ephemeral assistant-style card from already-loaded session/profile/model data.
 It must not round-trip through the agent or a status endpoint just to draw the
 card.
 """
+
 import pathlib
 
 
@@ -27,7 +28,7 @@ def _function_body(src: str, name: str) -> str:
         elif src[idx] == "}":
             depth -= 1
             if depth == 0:
-                return src[start:idx + 1]
+                return src[start : idx + 1]
     raise AssertionError(f"Could not extract {name}()")
 
 
@@ -65,13 +66,15 @@ def test_status_card_renderer_escapes_all_dynamic_values_and_is_copyable():
     body = _function_body(UI_JS, "_statusCardHtml")
     assert "data-status-card" in body
     assert "data-copy-status-session" in body
-    assert "onclick=\"copyStatusSessionId(this);event.stopPropagation()\"" in body
+    assert 'onclick="copyStatusSessionId(this);event.stopPropagation()"' in body
     assert "esc(card.title" in body
     assert "esc(card.subtitle" in body
     assert "esc(row.label" in body
     assert "esc(row.value" in body
     assert "esc(card.sessionId" in body
-    assert "renderMd(" not in body, "Status card data should not be interpreted as markdown"
+    assert "renderMd(" not in body, (
+        "Status card data should not be interpreted as markdown"
+    )
 
 
 def test_render_messages_treats_status_card_as_visible_assistant_content():

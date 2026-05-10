@@ -40,8 +40,7 @@ def _scroll_listener_block() -> str:
 def test_scroll_listener_tracks_last_scroll_top():
     """The listener must remember the previous scrollTop to detect direction."""
     assert "let _lastScrollTop=" in UI_JS, (
-        "Direction detection requires a closure-scoped _lastScrollTop "
-        "tracker (#1731)."
+        "Direction detection requires a closure-scoped _lastScrollTop tracker (#1731)."
     )
 
     block = _scroll_listener_block()

@@ -16,6 +16,7 @@ This bridge is the source of truth that native WKWebView wrappers
 (hermes-webui/hermes-swift-mac) read instead of pixel-sampling the page —
 overlay-resistant (modals/lightboxes don't poison it) and IPC-free.
 """
+
 from pathlib import Path
 
 
@@ -73,7 +74,9 @@ class TestBootJsThemeColorSync:
         """
         src = BOOT.read_text(encoding="utf-8")
         # The helper reads getComputedStyle on documentElement and extracts --bg.
-        assert "getComputedStyle(document.documentElement).getPropertyValue('--bg')" in src
+        assert (
+            "getComputedStyle(document.documentElement).getPropertyValue('--bg')" in src
+        )
 
     def test_sync_helper_updates_all_theme_color_tags(self):
         """The helper must update the canonical id tag and the static fallback tags.

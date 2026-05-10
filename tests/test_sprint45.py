@@ -7,6 +7,7 @@ Covers:
 - Legacy assistant_language is no longer exposed and is removed on the next save
 - The local reply-language UI/runtime enhancement is gone from the synced codebase
 """
+
 import json
 import pathlib
 import urllib.error
@@ -15,14 +16,19 @@ import urllib.request
 import os
 
 from tests._pytest_port import BASE
+
 REPO = pathlib.Path(__file__).parent.parent
+
+
 # Use HERMES_WEBUI_TEST_STATE_DIR if available (set by conftest for the test process),
 # falling back to the conventional webui-mvp-test path.
 def _get_settings_file() -> pathlib.Path:
     """Resolve SETTINGS_FILE at call time (env var set by conftest after module import)."""
     state_dir = pathlib.Path(
-        os.environ.get("HERMES_WEBUI_TEST_STATE_DIR",
-                       str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"))
+        os.environ.get(
+            "HERMES_WEBUI_TEST_STATE_DIR",
+            str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"),
+        )
     )
     return state_dir / "settings.json"
 
@@ -70,7 +76,9 @@ def test_first_password_enablement_returns_cookie_and_keeps_browser_logged_in():
     original_settings = _snapshot_settings_file()
     cookie_header = None  # captured for teardown use
     try:
-        saved, status, headers = post("/api/settings", {"_set_password": "sprint45-secret"})
+        saved, status, headers = post(
+            "/api/settings", {"_set_password": "sprint45-secret"}
+        )
         assert status == 200
         assert saved["auth_enabled"] is True
         assert saved["logged_in"] is True
@@ -80,7 +88,9 @@ def test_first_password_enablement_returns_cookie_and_keeps_browser_logged_in():
         assert "hermes_session=" in set_cookie
         cookie_header = set_cookie.split(";", 1)[0]
 
-        auth, auth_status, _ = get("/api/auth/status", headers={"Cookie": cookie_header})
+        auth, auth_status, _ = get(
+            "/api/auth/status", headers={"Cookie": cookie_header}
+        )
         assert auth_status == 200
         assert auth["auth_enabled"] is True
         assert auth["logged_in"] is True
@@ -96,10 +106,13 @@ def test_first_password_enablement_returns_cookie_and_keeps_browser_logged_in():
         # First: write a clean settings file (no password_hash) directly to disk
         try:
             import json as _json
+
             clean = _json.loads(original_settings) if original_settings else {}
             clean.pop("password_hash", None)
             _get_settings_file().parent.mkdir(parents=True, exist_ok=True)
-            _get_settings_file().write_text(_json.dumps(clean, indent=2), encoding="utf-8")
+            _get_settings_file().write_text(
+                _json.dumps(clean, indent=2), encoding="utf-8"
+            )
         except Exception:
             pass
         # Then: tell the server to clear auth via API (must use the session cookie)
@@ -153,5 +166,3 @@ def test_reply_language_customization_ui_and_runtime_are_removed():
     assert "settingsAssistantLanguage" not in panels_js
     assert "assistant_language" not in streaming_py
     assert "Default reply language:" not in streaming_py
-
-

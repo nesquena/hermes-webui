@@ -19,6 +19,7 @@ The session ID persisting in localStorage is harmless — server-side
 sidebar entry appears, and ``newSession()`` overwrites the key when the
 user actually creates a real session.
 """
+
 import pathlib
 import re
 

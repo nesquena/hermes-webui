@@ -4,14 +4,11 @@ Verifies that config.yaml custom_providers entries (e.g. glmcode, timicc)
 are surfaced in the /api/providers response alongside built-in providers.
 """
 
-import json
-import os
 import sys
 import types
 
 import api.config as config
 import api.profiles as profiles
-from tests._pytest_port import BASE
 
 
 def _install_fake_hermes_cli(monkeypatch):
@@ -34,6 +31,7 @@ def _install_fake_hermes_cli(monkeypatch):
 
     try:
         from api.config import invalidate_models_cache
+
         invalidate_models_cache()
     except Exception:
         pass
@@ -66,17 +64,20 @@ class TestCustomProvidersInGetProviders:
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
         monkeypatch.setenv("GLMCODE_API_KEY", "test-glm-key-12345678")
 
-        old_cfg, old_mtime = self._setup_cfg([
-            {
-                "name": "glmcode",
-                "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-                "api_key": "${GLMCODE_API_KEY}",
-                "api_mode": "openai_compatible",
-                "model": "glm-5.1",
-            },
-        ])
+        old_cfg, old_mtime = self._setup_cfg(
+            [
+                {
+                    "name": "glmcode",
+                    "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+                    "api_key": "${GLMCODE_API_KEY}",
+                    "api_mode": "openai_compatible",
+                    "model": "glm-5.1",
+                },
+            ]
+        )
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             provider_ids = {p["id"] for p in result["providers"]}
@@ -108,17 +109,20 @@ class TestCustomProvidersInGetProviders:
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-test-12345678")
 
-        old_cfg, old_mtime = self._setup_cfg([
-            {
-                "name": "deepseek",
-                "base_url": "https://api.deepseek.com",
-                "api_key": "${DEEPSEEK_API_KEY}",
-                "api_mode": "openai_compatible",
-                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
-            },
-        ])
+        old_cfg, old_mtime = self._setup_cfg(
+            [
+                {
+                    "name": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "${DEEPSEEK_API_KEY}",
+                    "api_mode": "openai_compatible",
+                    "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                },
+            ]
+        )
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             provider_ids = {p["id"] for p in result["providers"]}
@@ -140,16 +144,19 @@ class TestCustomProvidersInGetProviders:
         # Ensure TIMICC_API_KEY is not set
         monkeypatch.delenv("TIMICC_API_KEY", raising=False)
 
-        old_cfg, old_mtime = self._setup_cfg([
-            {
-                "name": "timicc-claude",
-                "base_url": "https://timicc.com/v1",
-                "api_key": "${TIMICC_API_KEY}",
-                "api_mode": "anthropic_messages",
-            },
-        ])
+        old_cfg, old_mtime = self._setup_cfg(
+            [
+                {
+                    "name": "timicc-claude",
+                    "base_url": "https://timicc.com/v1",
+                    "api_key": "${TIMICC_API_KEY}",
+                    "api_mode": "anthropic_messages",
+                },
+            ]
+        )
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             # TIMICC_API_KEY env var is not set → has_key should be False
@@ -168,6 +175,7 @@ class TestCustomProvidersInGetProviders:
         old_cfg, old_mtime = self._setup_cfg([])
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             # No crash, still returns built-in providers
@@ -185,15 +193,18 @@ class TestCustomProvidersInGetProviders:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        old_cfg, old_mtime = self._setup_cfg([
-            {
-                "name": "my-proxy",
-                "base_url": "https://proxy.example.com/v1",
-                "api_key": "sk-inline-key-12345678",
-            },
-        ])
+        old_cfg, old_mtime = self._setup_cfg(
+            [
+                {
+                    "name": "my-proxy",
+                    "base_url": "https://proxy.example.com/v1",
+                    "api_key": "sk-inline-key-12345678",
+                },
+            ]
+        )
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             cp = [p for p in result["providers"] if p["id"] == "custom:my-proxy"]
@@ -207,14 +218,19 @@ class TestCustomProvidersInGetProviders:
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
-        old_cfg, old_mtime = self._setup_cfg([
-            {"base_url": "https://no-name.example.com/v1"},
-        ])
+        old_cfg, old_mtime = self._setup_cfg(
+            [
+                {"base_url": "https://no-name.example.com/v1"},
+            ]
+        )
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
-            custom_ids = {p["id"] for p in result["providers"] if p["id"].startswith("custom:")}
+            custom_ids = {
+                p["id"] for p in result["providers"] if p["id"].startswith("custom:")
+            }
             assert len(custom_ids) == 0, (
                 f"Entry without name should be skipped, got: {custom_ids}"
             )
@@ -228,6 +244,7 @@ class TestDeepSeekV4Models:
     def test_v4_models_in_provider_models(self):
         """_PROVIDER_MODELS['deepseek'] should contain v4 and legacy v3 entries."""
         from api.config import _PROVIDER_MODELS
+
         ds_models = _PROVIDER_MODELS.get("deepseek", [])
         ids = {m["id"] for m in ds_models}
 
@@ -245,6 +262,7 @@ class TestDeepSeekV4Models:
     def test_zai_models_include_glm_series(self):
         """_PROVIDER_MODELS['zai'] should have GLM-5.x and GLM-4.x models."""
         from api.config import _PROVIDER_MODELS
+
         zai_models = _PROVIDER_MODELS.get("zai", [])
         ids = {m["id"] for m in zai_models}
 
@@ -258,6 +276,7 @@ class TestDeepSeekV4Models:
     def test_zai_in_onboarding_setup(self):
         """_SUPPORTED_PROVIDER_SETUPS should have 'zai' entry."""
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         assert "zai" in _SUPPORTED_PROVIDER_SETUPS, (
             "zai provider should be in onboarding quick-setup"
         )
@@ -270,6 +289,7 @@ class TestDeepSeekV4Models:
     def test_deepseek_onboarding_default_is_v4(self):
         """DeepSeek onboarding default should be v4-flash, not V3."""
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         ds = _SUPPORTED_PROVIDER_SETUPS.get("deepseek", {})
         assert ds.get("default_model") == "deepseek-v4-flash", (
             f"DeepSeek default should be v4-flash, got: {ds.get('default_model')}"

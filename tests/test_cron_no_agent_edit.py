@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +56,10 @@ def test_no_agent_form_drops_prompt_required_attribute_and_shows_script_context(
 
 def test_save_cron_form_keeps_agent_prompt_required_but_skips_no_agent_edits():
     body = _function_body("saveCronForm")
-    assert "const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);" in body
+    assert (
+        "const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);"
+        in body
+    )
     assert "if(!isNoAgent && !prompt)" in body
     assert "cron_prompt_required" in body
     assert "if (!isNoAgent) updates.prompt = prompt;" in body

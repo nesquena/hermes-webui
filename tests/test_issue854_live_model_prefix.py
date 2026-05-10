@@ -1,5 +1,6 @@
 """Regression tests for #854 — live-fetched models must route through the
 configured portal provider, not OpenRouter."""
+
 import os
 import re
 
@@ -24,9 +25,9 @@ class TestLiveModelPrefix:
         leaves the bug unfixed."""
         js = _read("static/ui.js")
         # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
-        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function _addLiveModelsToSelect\(.*?\n\}", js, re.DOTALL)
         if not m:
-            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+            m = re.search(r"async function _fetchLiveModels\(.*?\n\}", js, re.DOTALL)
         assert m, "_addLiveModelsToSelect or _fetchLiveModels not found"
         fn = m.group(0)
         # The prefix application block must NOT have `!mid.includes('/')`
@@ -51,9 +52,9 @@ class TestLiveModelPrefix:
         false.  Earlier revision used `!_needsPrefix` (inverted)."""
         js = _read("static/ui.js")
         # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
-        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function _addLiveModelsToSelect\(.*?\n\}", js, re.DOTALL)
         if not m:
-            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+            m = re.search(r"async function _fetchLiveModels\(.*?\n\}", js, re.DOTALL)
         assert m
         fn = m.group(0)
         # New flag: _isPortalFetch (positive semantics)
@@ -66,16 +67,18 @@ class TestLiveModelPrefix:
             r"if\s*\(\s*_isPortalFetch\s*&&\s*!mid\.startsWith",
             fn,
         )
-        assert gate, "prefix application must be guarded by _isPortalFetch (true ⇒ prefix)"
+        assert gate, (
+            "prefix application must be guarded by _isPortalFetch (true ⇒ prefix)"
+        )
 
     def test_portal_fetch_excludes_openrouter_and_custom(self):
         """OpenRouter IDs are cross-namespace by design, and `custom` providers
         use user-defined bare names — neither should get a `@provider:` prefix."""
         js = _read("static/ui.js")
         # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
-        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function _addLiveModelsToSelect\(.*?\n\}", js, re.DOTALL)
         if not m:
-            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+            m = re.search(r"async function _fetchLiveModels\(.*?\n\}", js, re.DOTALL)
         assert m
         fn = m.group(0)
         assert "_ap!=='openrouter'" in fn or "_ap !== 'openrouter'" in fn, (
@@ -92,7 +95,7 @@ class TestCheckProviderMismatchAtPrefix:
 
     def test_returns_null_for_at_prefix_ids(self):
         js = _read("static/ui.js")
-        m = re.search(r'function _checkProviderMismatch\(.*?\n\}', js, re.DOTALL)
+        m = re.search(r"function _checkProviderMismatch\(.*?\n\}", js, re.DOTALL)
         assert m, "_checkProviderMismatch not found"
         fn = m.group(0)
         assert "modelId.startsWith('@')" in fn or 'modelId.startsWith("@")' in fn, (

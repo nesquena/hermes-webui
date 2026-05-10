@@ -10,6 +10,7 @@ Tests cover:
   6. API route accepts base_url and api_key in POST body
   7. Profile created via API has base_url in config.yaml
 """
+
 import json
 import pathlib
 import shutil
@@ -21,31 +22,41 @@ yaml = pytest.importorskip("yaml", reason="PyYAML required for config write test
 
 # ── 1-5: _write_endpoint_to_config unit tests ─────────────────────────────────
 
+
 class TestWriteEndpointToConfig:
     def test_writes_base_url(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
+
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:11434")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["base_url"] == "http://localhost:11434"
 
     def test_writes_api_key(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
+
         _write_endpoint_to_config(tmp_path, api_key="sk-local-test")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["api_key"] == "sk-local-test"
 
     def test_writes_both(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
-        _write_endpoint_to_config(tmp_path, base_url="http://localhost:8080", api_key="mykey")
+
+        _write_endpoint_to_config(
+            tmp_path, base_url="http://localhost:8080", api_key="mykey"
+        )
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["base_url"] == "http://localhost:8080"
         assert cfg["model"]["api_key"] == "mykey"
 
     def test_merges_with_existing_config(self, tmp_path):
         """Does not clobber other top-level config keys."""
-        existing = {"model": {"default": "gpt-4o", "provider": "openai"}, "agent": {"max_turns": 90}}
+        existing = {
+            "model": {"default": "gpt-4o", "provider": "openai"},
+            "agent": {"max_turns": 90},
+        }
         (tmp_path / "config.yaml").write_text(yaml.dump(existing))
         from api.profiles import _write_endpoint_to_config
+
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:1234")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         # Existing keys preserved
@@ -57,11 +68,13 @@ class TestWriteEndpointToConfig:
 
     def test_noop_when_both_none(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
+
         _write_endpoint_to_config(tmp_path, base_url=None, api_key=None)
         assert not (tmp_path / "config.yaml").exists()
 
     def test_noop_when_both_empty_strings(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
+
         _write_endpoint_to_config(tmp_path, base_url="", api_key="")
         assert not (tmp_path / "config.yaml").exists()
 
@@ -73,6 +86,7 @@ from tests._pytest_port import BASE as _TEST_BASE
 
 def _post(path, body=None):
     import urllib.request
+
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
         _TEST_BASE + path, data=data, headers={"Content-Type": "application/json"}
@@ -87,7 +101,9 @@ def _post(path, body=None):
             return {}, e.code
 
 
-@pytest.mark.xfail(reason="Pre-existing isolation issue: test_server fixture conflict (#sprint31)")
+@pytest.mark.xfail(
+    reason="Pre-existing isolation issue: test_server fixture conflict (#sprint31)"
+)
 class TestProfileCreateAPIWithEndpoint:
     _PROFILE_NAME = "test-ep-sprint31"
 
@@ -115,10 +131,13 @@ class TestProfileCreateAPIWithEndpoint:
 
     def test_api_route_accepts_base_url(self, test_server):
         """POST /api/profile/create with base_url returns ok:True."""
-        data, err = _post("/api/profile/create", {
-            "name": self._PROFILE_NAME,
-            "base_url": "http://localhost:11434",
-        })
+        data, err = _post(
+            "/api/profile/create",
+            {
+                "name": self._PROFILE_NAME,
+                "base_url": "http://localhost:11434",
+            },
+        )
         assert err is None, f"Expected 200, got {err}: {data}"
         assert data.get("ok") is True
 
@@ -127,18 +146,26 @@ class TestProfileCreateAPIWithEndpoint:
 
         The actual config.yaml write is covered by the unit tests above.
         """
-        data, err = _post("/api/profile/create", {
-            "name": self._PROFILE_NAME,
-            "base_url": "http://localhost:9999",
-        })
+        data, err = _post(
+            "/api/profile/create",
+            {
+                "name": self._PROFILE_NAME,
+                "base_url": "http://localhost:9999",
+            },
+        )
         assert err is None, f"Expected 200, got {err}: {data}"
         assert data.get("ok") is True
-        assert data.get("profile", {}).get("path"), f"API response missing profile.path: {data}"
+        assert data.get("profile", {}).get("path"), (
+            f"API response missing profile.path: {data}"
+        )
 
     def test_api_route_rejects_invalid_base_url(self, test_server):
         """POST /api/profile/create with a non-http base_url returns 400."""
-        data, err = _post("/api/profile/create", {
-            "name": self._PROFILE_NAME,
-            "base_url": "ftp://localhost:11434",
-        })
+        data, err = _post(
+            "/api/profile/create",
+            {
+                "name": self._PROFILE_NAME,
+                "base_url": "ftp://localhost:11434",
+            },
+        )
         assert err == 400, f"Expected 400, got {err}: {data}"

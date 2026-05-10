@@ -11,7 +11,9 @@ import api.models as models
 from api.models import Session, get_session
 
 
-def test_stale_stream_cleanup_recovers_pending_turn_on_non_empty_session(tmp_path, monkeypatch):
+def test_stale_stream_cleanup_recovers_pending_turn_on_non_empty_session(
+    tmp_path, monkeypatch
+):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)

@@ -9,18 +9,20 @@ This test writes two distinct jobs.json files (default + a named profile),
 then verifies `cron_profile_context` pins the cron.jobs call to the named
 profile's file.
 """
+
 import json
 import os
 import pathlib
 import sys
 import threading
-from unittest import mock
 
 import pytest
 
 # Ensure both repos are importable.
 WEBUI_ROOT = pathlib.Path(__file__).resolve().parent.parent
-AGENT_ROOT = pathlib.Path(os.environ.get("HERMES_AGENT_ROOT", pathlib.Path.home() / "hermes-agent"))
+AGENT_ROOT = pathlib.Path(
+    os.environ.get("HERMES_AGENT_ROOT", pathlib.Path.home() / "hermes-agent")
+)
 for p in (str(WEBUI_ROOT), str(AGENT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -29,9 +31,7 @@ for p in (str(WEBUI_ROOT), str(AGENT_ROOT)):
 def _write_jobs(home: pathlib.Path, jobs: list):
     cron_dir = home / "cron"
     cron_dir.mkdir(parents=True, exist_ok=True)
-    (cron_dir / "jobs.json").write_text(
-        json.dumps({"jobs": jobs}), encoding="utf-8"
-    )
+    (cron_dir / "jobs.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
 
 
 def test_cron_profile_context_pins_profile_home(tmp_path, monkeypatch):
@@ -53,33 +53,39 @@ def test_cron_profile_context_pins_profile_home(tmp_path, monkeypatch):
 
     # Baseline: no context → default profile.
     from cron.jobs import list_jobs
+
     # Force cron.jobs to re-evaluate its cached constants for this test run.
     import cron.jobs as _cj
+
     _cj.HERMES_DIR = default_home
     _cj.CRON_DIR = default_home / "cron"
     _cj.JOBS_FILE = _cj.CRON_DIR / "jobs.json"
     _cj.OUTPUT_DIR = _cj.CRON_DIR / "output"
 
     jobs_before = list_jobs(include_disabled=True)
-    assert any(j["id"] == "d1" for j in jobs_before), \
+    assert any(j["id"] == "d1" for j in jobs_before), (
         f"Expected default-profile job before entering context, got {jobs_before}"
+    )
 
     # Simulate a request with TLS profile = 'meow'.
     p.set_request_profile("meow")
     try:
         with p.cron_profile_context():
             jobs_inside = list_jobs(include_disabled=True)
-            assert any(j["id"] == "m1" for j in jobs_inside), \
+            assert any(j["id"] == "m1" for j in jobs_inside), (
                 f"Expected meow-profile job inside context, got {jobs_inside}"
-            assert not any(j["id"] == "d1" for j in jobs_inside), \
+            )
+            assert not any(j["id"] == "d1" for j in jobs_inside), (
                 "Default-profile job leaked into meow context"
+            )
     finally:
         p.clear_request_profile()
 
     # After the context exits, we should be back to default.
     jobs_after = list_jobs(include_disabled=True)
-    assert any(j["id"] == "d1" for j in jobs_after), \
+    assert any(j["id"] == "d1" for j in jobs_after), (
         f"Expected default-profile job after exiting context, got {jobs_after}"
+    )
 
 
 def test_cron_profile_context_for_home_pins_explicit_home(tmp_path):
@@ -96,6 +102,7 @@ def test_cron_profile_context_for_home_pins_explicit_home(tmp_path):
     os.environ["HERMES_HOME"] = str(home_a)
     try:
         import cron.jobs as _cj
+
         _cj.HERMES_DIR = home_a
         _cj.CRON_DIR = home_a / "cron"
         _cj.JOBS_FILE = _cj.CRON_DIR / "jobs.json"
@@ -131,8 +138,8 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
 
     # Ensure the context lock is released between tests.
     from api import profiles as p
-    assert not p._cron_env_lock.locked(), \
-        "Lock leaked from a previous test"
+
+    assert not p._cron_env_lock.locked(), "Lock leaked from a previous test"
 
     observed = []
     barrier = threading.Barrier(2)
@@ -147,8 +154,10 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
 
     t1 = threading.Thread(target=worker, args=(home_a, "A"))
     t2 = threading.Thread(target=worker, args=(home_b, "B"))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     # Every enter must be immediately followed by its matching exit (no
     # interleaving), because the lock serializes the two contexts.
@@ -173,7 +182,10 @@ def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
     over-broad except clause.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+
+    src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     # Locate _handle_cron_run definition; assert the spawn block does NOT
     # wrap get_active_hermes_home() in a bare except that falls back to None.
@@ -199,7 +211,9 @@ def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
     )
 
 
-def test_webui_installs_profile_context_on_in_process_scheduler_run_job(tmp_path, monkeypatch):
+def test_webui_installs_profile_context_on_in_process_scheduler_run_job(
+    tmp_path, monkeypatch
+):
     """If WebUI ever runs cron.scheduler.tick in-process, scheduled run_job calls
     must execute under the job's selected profile home, not the process-global
     HERMES_HOME that happened to be active when the scheduler thread fired.
@@ -245,7 +259,9 @@ def test_webui_installs_profile_context_on_in_process_scheduler_run_job(tmp_path
     ]
 
 
-def test_scheduler_run_job_wrapper_does_not_reenter_manual_cron_context(tmp_path, monkeypatch):
+def test_scheduler_run_job_wrapper_does_not_reenter_manual_cron_context(
+    tmp_path, monkeypatch
+):
     """Manual /api/crons/run already pins run_job before calling it.
 
     The scheduler safety wrapper must detect that existing context and delegate
@@ -296,7 +312,10 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
     must not continue into run_job outside the requested profile context.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+
+    src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(
+        encoding="utf-8"
+    )
 
     idx = src.find("def _cron_job_subprocess_main(job")
     assert idx != -1, "_cron_job_subprocess_main not found"
@@ -305,7 +324,10 @@ def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
     assert "with cron_profile_context_for_home(execution_profile_home):" in body
     assert "result = _run()" in body
     assert "ctx = None" not in body
-    assert "except Exception" not in body[:body.find("with cron_profile_context_for_home")], (
+    assert (
+        "except Exception"
+        not in body[: body.find("with cron_profile_context_for_home")]
+    ), (
         "cron subprocess target appears to catch profile-context setup before "
         "entering the context; do not fall back to an unpinned run_job call."
     )

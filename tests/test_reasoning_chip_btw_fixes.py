@@ -17,6 +17,7 @@ Four invariants this file locks in place:
    gates `onerror`'s row removal on `!_streamDone` — otherwise the browser's
    post-`stream_end` error event wipes the just-rendered answer.
 """
+
 from __future__ import annotations
 
 import pathlib
@@ -98,7 +99,7 @@ class TestReasoningChipIcon:
         assert 'stroke="currentColor"' in btn_body, (
             "reasoning chip must use stroke='currentColor' SVG matching other chips"
         )
-        assert '<svg' in btn_body, "reasoning chip must contain an <svg> icon"
+        assert "<svg" in btn_body, "reasoning chip must contain an <svg> icon"
 
     def test_apply_reasoning_chip_label_has_no_emoji(self):
         # Locate _applyReasoningChip and confirm the label assignment doesn't
@@ -221,8 +222,9 @@ class TestBtwStreamDoneGuard:
             fn,
         )
         assert done_block_m, "done handler not found in attachBtwStream"
-        assert "_streamDone=true" in done_block_m.group(0) or \
-               "_streamDone = true" in done_block_m.group(0), (
+        assert "_streamDone=true" in done_block_m.group(
+            0
+        ) or "_streamDone = true" in done_block_m.group(0), (
             "_streamDone must be set to true in the done handler so onerror "
             "knows the stream completed successfully"
         )
@@ -268,7 +270,7 @@ class TestBtwStreamDoneGuard:
         assert done_block_m
         block = done_block_m.group(0)
         # The _ensureBtwRow call must be guarded by a session-match check
-        assert ("S.session" in block and "parentSid" in block), (
+        assert "S.session" in block and "parentSid" in block, (
             "_ensureBtwRow() in the done handler must be gated on "
             "S.session.session_id === parentSid — otherwise a user who "
             "switched sessions during the /btw stream gets the answer "

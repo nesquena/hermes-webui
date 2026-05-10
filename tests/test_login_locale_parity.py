@@ -267,7 +267,9 @@ def test_login_locale_count_matches_or_exceeds_floor():
         assert k in login, f"_LOGIN_LOCALE missing core locale {k!r}"
 
 
-@pytest.mark.parametrize("loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"])
+@pytest.mark.parametrize(
+    "loc_key", ["en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"]
+)
 def test_login_locale_entry_well_formed(loc_key: str):
     """Each _LOGIN_LOCALE entry must have all required sub-keys and non-empty string values."""
     login = _load_login_locale()
@@ -277,7 +279,9 @@ def test_login_locale_entry_well_formed(loc_key: str):
         f"Expected {set(REQUIRED_LOGIN_KEYS)}, got {set(entry.keys())}."
     )
     for k, v in entry.items():
-        assert isinstance(v, str) and v, f"_LOGIN_LOCALE[{loc_key!r}][{k!r}] is empty/non-str: {v!r}"
+        assert isinstance(v, str) and v, (
+            f"_LOGIN_LOCALE[{loc_key!r}][{k!r}] is empty/non-str: {v!r}"
+        )
 
 
 def test_login_locale_resolver_handles_new_locales():
@@ -308,7 +312,9 @@ def _value_of(seg: str, key: str) -> str | None:
     return None
 
 
-@pytest.mark.parametrize("loc_key", ["es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"])
+@pytest.mark.parametrize(
+    "loc_key", ["es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"]
+)
 def test_login_flow_keys_are_translated(loc_key: str):
     """Login/sign-out/password keys in static/i18n.js must NOT equal the English value.
 

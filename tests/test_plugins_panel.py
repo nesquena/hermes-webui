@@ -6,11 +6,14 @@ from urllib.parse import urlparse
 
 def read(path: str) -> str:
     from pathlib import Path
+
     return Path(path).read_text(encoding="utf-8")
 
 
 class _FakeManifest:
-    def __init__(self, *, name, key, version="", description="", provides_hooks=None, path=None):
+    def __init__(
+        self, *, name, key, version="", description="", provides_hooks=None, path=None
+    ):
         self.name = name
         self.key = key
         self.version = version
@@ -41,6 +44,7 @@ class _FakePluginManager:
 class TestPluginsApi:
     def _capture_plugins_response(self, manager):
         import api.routes as routes
+
         captured = {}
 
         def fake_j(handler, payload, status=200, extra_headers=None):
@@ -49,8 +53,12 @@ class TestPluginsApi:
             return True
 
         handler = MagicMock()
-        with patch("api.routes.j", side_effect=fake_j), \
-             patch("api.routes._get_plugin_manager_for_visibility", return_value=manager):
+        with (
+            patch("api.routes.j", side_effect=fake_j),
+            patch(
+                "api.routes._get_plugin_manager_for_visibility", return_value=manager
+            ),
+        ):
             handled = routes.handle_get(handler, urlparse("/api/plugins"))
 
         assert handled is True
@@ -58,19 +66,21 @@ class TestPluginsApi:
         return captured["payload"]
 
     def test_api_plugins_exposes_sanitized_metadata_and_hook_names(self):
-        manager = _FakePluginManager({
-            "guard": _FakeLoadedPlugin(
-                _FakeManifest(
-                    name="guard",
-                    key="guard",
-                    version="1.2.3",
-                    description="Blocks unsafe tool calls",
-                    path="/home/michael/.hermes/plugins/guard",
-                ),
-                enabled=True,
-                hooks_registered=["pre_tool_call", "post_tool_call"],
-            )
-        })
+        manager = _FakePluginManager(
+            {
+                "guard": _FakeLoadedPlugin(
+                    _FakeManifest(
+                        name="guard",
+                        key="guard",
+                        version="1.2.3",
+                        description="Blocks unsafe tool calls",
+                        path="/home/michael/.hermes/plugins/guard",
+                    ),
+                    enabled=True,
+                    hooks_registered=["pre_tool_call", "post_tool_call"],
+                )
+            }
+        )
 
         payload = self._capture_plugins_response(manager)
 
@@ -80,14 +90,16 @@ class TestPluginsApi:
             "pre_llm_call",
             "post_llm_call",
         ]
-        assert payload["plugins"] == [{
-            "name": "guard",
-            "key": "guard",
-            "version": "1.2.3",
-            "description": "Blocks unsafe tool calls",
-            "enabled": True,
-            "hooks": ["pre_tool_call", "post_tool_call"],
-        }]
+        assert payload["plugins"] == [
+            {
+                "name": "guard",
+                "key": "guard",
+                "version": "1.2.3",
+                "description": "Blocks unsafe tool calls",
+                "enabled": True,
+                "hooks": ["pre_tool_call", "post_tool_call"],
+            }
+        ]
         serialized = repr(payload)
         assert "/home/michael" not in serialized
         assert "callback" not in serialized.lower()
@@ -108,20 +120,30 @@ class TestPluginsApi:
         ]
 
     def test_api_plugins_filters_non_visibility_hooks_and_manifest_paths(self):
-        manager = _FakePluginManager({
-            "mixed": _FakeLoadedPlugin(
-                _FakeManifest(
-                    name="mixed",
-                    key="mixed",
-                    version="0.1",
-                    description="Mixed hooks",
-                    provides_hooks=["/tmp/not-a-hook", "pre_llm_call", "on_session_end"],
-                    path="/secret/plugin.py",
-                ),
-                enabled=False,
-                hooks_registered=["post_llm_call", "pre_gateway_dispatch", "post_llm_call"],
-            )
-        })
+        manager = _FakePluginManager(
+            {
+                "mixed": _FakeLoadedPlugin(
+                    _FakeManifest(
+                        name="mixed",
+                        key="mixed",
+                        version="0.1",
+                        description="Mixed hooks",
+                        provides_hooks=[
+                            "/tmp/not-a-hook",
+                            "pre_llm_call",
+                            "on_session_end",
+                        ],
+                        path="/secret/plugin.py",
+                    ),
+                    enabled=False,
+                    hooks_registered=[
+                        "post_llm_call",
+                        "pre_gateway_dispatch",
+                        "post_llm_call",
+                    ],
+                )
+            }
+        )
 
         payload = self._capture_plugins_response(manager)
 
@@ -156,6 +178,8 @@ class TestPluginsSettingsUi:
         assert "_buildPluginCard" in js
         assert "plugin-hook-badge" in js
         assert "esc(plugin.description" in js
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
+        segment = js[
+            js.find("function _buildPluginCard") : js.find("// ── Providers panel")
+        ]
         assert ".path" not in segment
         assert ".callback" not in segment

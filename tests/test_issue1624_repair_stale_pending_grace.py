@@ -15,10 +15,6 @@ treated as "old enough" to preserve current legacy-data recovery semantics.
 """
 
 import time
-import threading
-from unittest.mock import patch
-
-import pytest
 
 
 # ── _repair_stale_pending grace guard ───────────────────────────────────
@@ -26,8 +22,15 @@ import pytest
 
 class _FakeSession:
     """Minimal stand-in for api.models.Session — only the fields _repair_stale_pending reads."""
-    def __init__(self, sid="abcdef123456", pending="hi", stream_id="stream_xyz",
-                 pending_started_at=None, profile="default"):
+
+    def __init__(
+        self,
+        sid="abcdef123456",
+        pending="hi",
+        stream_id="stream_xyz",
+        pending_started_at=None,
+        profile="default",
+    ):
         self.session_id = sid
         self.pending_user_message = pending
         self.active_stream_id = stream_id
@@ -55,6 +58,7 @@ def _setup_repair_environment(monkeypatch, tmp_path):
     def fake_apply(session, core_path, **kw):
         calls["applied"] += 1
         return True
+
     monkeypatch.setattr(models, "_apply_core_sync_or_error_marker", fake_apply)
 
     return calls
@@ -63,17 +67,21 @@ def _setup_repair_environment(monkeypatch, tmp_path):
 def test_repair_skips_fresh_turn(tmp_path, monkeypatch):
     """A turn that started 5 seconds ago is too fresh — repair must bail."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at=time.time() - 5.0)
     result = models._repair_stale_pending(s)
     assert result is False, "Repair must skip a 5s-old turn"
-    assert calls["applied"] == 0, "Heavy-lift _apply_core_sync_or_error_marker must not be called"
+    assert calls["applied"] == 0, (
+        "Heavy-lift _apply_core_sync_or_error_marker must not be called"
+    )
 
 
 def test_repair_skips_almost_grace_window(tmp_path, monkeypatch):
     """A turn 1 second younger than the grace threshold must still bail."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
     grace = models._REPAIR_STALE_PENDING_GRACE_SECONDS
 
@@ -86,19 +94,23 @@ def test_repair_skips_almost_grace_window(tmp_path, monkeypatch):
 def test_repair_fires_after_grace_window(tmp_path, monkeypatch):
     """A turn older than the grace window should trigger repair as before."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
     grace = models._REPAIR_STALE_PENDING_GRACE_SECONDS
 
     s = _FakeSession(pending_started_at=time.time() - (grace + 30.0))
     result = models._repair_stale_pending(s)
     assert result is True, f"Repair must fire on a turn older than {grace}s"
-    assert calls["applied"] == 1, "Heavy-lift _apply_core_sync_or_error_marker should be called"
+    assert calls["applied"] == 1, (
+        "Heavy-lift _apply_core_sync_or_error_marker should be called"
+    )
 
 
 def test_repair_fires_when_pending_started_at_missing(tmp_path, monkeypatch):
     """Legacy sidecars predate `pending_started_at`; missing/falsy must NOT
     block repair — preserves current behavior for legacy data."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at=None)
@@ -110,6 +122,7 @@ def test_repair_fires_when_pending_started_at_missing(tmp_path, monkeypatch):
 def test_repair_fires_when_pending_started_at_zero(tmp_path, monkeypatch):
     """Falsy 0 must also be treated as 'old enough' (defense against accidental zeroing)."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at=0)
@@ -120,16 +133,20 @@ def test_repair_fires_when_pending_started_at_zero(tmp_path, monkeypatch):
 def test_repair_fires_when_pending_started_at_garbage(tmp_path, monkeypatch):
     """Garbage values (string, dict, etc.) shouldn't crash and shouldn't block repair."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at="not-a-number")
     result = models._repair_stale_pending(s)
-    assert result is True, "Garbage pending_started_at should be treated as 'old enough'"
+    assert result is True, (
+        "Garbage pending_started_at should be treated as 'old enough'"
+    )
 
 
 def test_repair_skips_when_no_pending_message(tmp_path, monkeypatch):
     """Without pending_user_message, repair must always bail (existing contract)."""
     import api.models as models
+
     calls = _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending="", pending_started_at=time.time() - 60)
@@ -141,6 +158,7 @@ def test_repair_skips_when_no_pending_message(tmp_path, monkeypatch):
 def test_repair_skips_when_stream_still_alive(tmp_path, monkeypatch):
     """If the stream is still in the registry, repair must bail even past grace."""
     import api.models as models
+
     monkeypatch.setattr(models, "_active_stream_ids", lambda: {"stream_xyz"})
     monkeypatch.setattr(models, "_get_profile_home", lambda profile: tmp_path)
 
@@ -152,6 +170,7 @@ def test_repair_skips_when_stream_still_alive(tmp_path, monkeypatch):
 def test_grace_constant_exists_and_is_sane():
     """The grace constant is exposed and sized in a sane range (10s..120s)."""
     import api.models as models
+
     grace = models._REPAIR_STALE_PENDING_GRACE_SECONDS
     assert isinstance(grace, (int, float))
     assert 10 <= grace <= 120, (

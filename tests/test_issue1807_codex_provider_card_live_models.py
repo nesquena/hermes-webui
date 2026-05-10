@@ -28,12 +28,18 @@ def _install_fake_hermes_cli(monkeypatch, provider_model_ids):
 
 def _configure_codex(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
-    monkeypatch.setattr(config, "cfg", {
-        "model": {"provider": "openai-codex", "default": "gpt-5.5"},
-        "providers": {},
-        "fallback_providers": [],
-    })
+    monkeypatch.setattr(
+        config, "_get_config_path", lambda: tmp_path / "missing-config.yaml"
+    )
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+            "providers": {},
+            "fallback_providers": [],
+        },
+    )
     monkeypatch.setattr(config, "_cfg_mtime", 0.0)
     # Isolate the Codex local model cache so the dev machine's real
     # ~/.codex/models_cache.json (which may include account-specific entries
@@ -77,7 +83,9 @@ def test_codex_provider_card_prefers_live_account_catalog(monkeypatch, tmp_path)
     assert "codex-mini-latest" not in ids
 
 
-def test_codex_provider_card_keeps_static_fallback_when_live_catalog_empty(monkeypatch, tmp_path):
+def test_codex_provider_card_keeps_static_fallback_when_live_catalog_empty(
+    monkeypatch, tmp_path
+):
     _install_fake_hermes_cli(monkeypatch, lambda _pid: [])
     _configure_codex(monkeypatch, tmp_path)
 

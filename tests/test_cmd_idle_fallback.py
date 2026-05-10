@@ -8,15 +8,18 @@ fall through to a direct send() call, matching CLI behaviour:
   - /interrupt msg → send when idle, cancel+requeue when busy+streaming
   - /steer msg  → send when idle, inject mid-turn when busy+streaming
 """
-import re
+
 import pathlib
 
-COMMANDS_JS = (pathlib.Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")
+COMMANDS_JS = (
+    pathlib.Path(__file__).parent.parent / "static" / "commands.js"
+).read_text(encoding="utf-8")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source-level structural checks
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestIdleFallbackStructure:
     """Each handler must contain an idle-path that calls send() instead of
@@ -25,7 +28,7 @@ class TestIdleFallbackStructure:
     def _get_function_body(self, fn_name: str, window: int = 800) -> str:
         idx = COMMANDS_JS.find(f"async function {fn_name}(")
         assert idx >= 0, f"{fn_name} not found in commands.js"
-        return COMMANDS_JS[idx: idx + window]
+        return COMMANDS_JS[idx : idx + window]
 
     # /queue ──────────────────────────────────────────────────────────────────
 
@@ -51,7 +54,7 @@ class TestIdleFallbackStructure:
         # be the only thing that happens when !S.busy.
         idle_branch_start = body.find("if(!S.busy)")
         assert idle_branch_start >= 0, "cmdQueue must have an if(!S.busy) branch"
-        idle_branch = body[idle_branch_start: idle_branch_start + 300]
+        idle_branch = body[idle_branch_start : idle_branch_start + 300]
         assert "send()" in idle_branch, (
             "cmdQueue's idle branch must call send(), not just show a toast"
         )
@@ -75,7 +78,7 @@ class TestIdleFallbackStructure:
         has_idle = "!S.busy||!S.activeStreamId" in body or "!S.busy" in body
         assert has_idle, "cmdInterrupt must have an idle guard"
         idle_start = body.find("!S.busy")
-        assert "send()" in body[idle_start: idle_start + 350], (
+        assert "send()" in body[idle_start : idle_start + 350], (
             "cmdInterrupt idle branch must call send()"
         )
 
@@ -113,7 +116,7 @@ class TestIdleFallbackStructure:
         body = self._get_function_body("cmdQueue")
         idle_idx = body.find("if(!S.busy)")
         assert idle_idx >= 0
-        idle_block = body[idle_idx: idle_idx + 250]
+        idle_block = body[idle_idx : idle_idx + 250]
         # send() must appear in the idle block
         assert "send()" in idle_block, (
             "cmdQueue idle block must contain send(), not just a toast+return"
@@ -126,7 +129,7 @@ class TestIdleFallbackStructure:
         body = self._get_function_body("cmdSteer")
         idle_idx = body.find("!S.busy")
         assert idle_idx >= 0
-        idle_block = body[idle_idx: idle_idx + 250]
+        idle_block = body[idle_idx : idle_idx + 250]
         assert "no_active_task" not in idle_block, (
             "cmdSteer idle path must not show 'no_active_task' — steer doesn't "
             "stop tasks, and when idle it should send normally"
@@ -139,7 +142,7 @@ class TestBusyPathsStillWork:
     def _get_function_body(self, fn_name: str, window: int = 800) -> str:
         idx = COMMANDS_JS.find(f"async function {fn_name}(")
         assert idx >= 0
-        return COMMANDS_JS[idx: idx + window]
+        return COMMANDS_JS[idx : idx + window]
 
     def test_queue_still_queues_when_busy(self):
         """When S.busy, cmdQueue must still call queueSessionMessage."""
@@ -161,7 +164,7 @@ class TestBusyPathsStillWork:
     def test_stop_command_unchanged(self):
         """cmdStop still uses no_active_task toast — that's correct for /stop."""
         idx = COMMANDS_JS.find("async function cmdStop(")
-        body = COMMANDS_JS[idx: idx + 400]
+        body = COMMANDS_JS[idx : idx + 400]
         assert "no_active_task" in body, (
             "/stop should still show 'no active task' when idle — stopping nothing is an error"
         )

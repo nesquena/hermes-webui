@@ -9,6 +9,7 @@ Mirrors:
   api/config.py        _norm_model_id
   static/ui.js         _normalizeConfiguredModelKey
 """
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -74,7 +75,14 @@ def test_ui_js_mirror_has_trailing_empty_guard():
     # The new pattern uses `const last=s.split(':').pop();s=last||s;`
     assert "s.split(':').pop()" in UI_JS, "ui.js no longer uses split-pop pattern"
     # Look for the `||s` fallback specifically
-    snippet = UI_JS[UI_JS.find("function _normalizeConfiguredModelKey"):UI_JS.find("function _normalizeConfiguredModelKey") + 600]
+    snippet = UI_JS[
+        UI_JS.find("function _normalizeConfiguredModelKey") : UI_JS.find(
+            "function _normalizeConfiguredModelKey"
+        )
+        + 600
+    ]
     assert "last||s" in snippet, "ui.js missing trailing-empty guard `||s` fallback"
     # And mirror on / branch
-    assert snippet.count("last||s") >= 2, "ui.js trailing-empty guard not mirrored on slash branch"
+    assert snippet.count("last||s") >= 2, (
+        "ui.js trailing-empty guard not mirrored on slash branch"
+    )

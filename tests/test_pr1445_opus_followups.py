@@ -8,7 +8,6 @@ These tests pin the defense-in-depth additions from the Opus advisor review:
 """
 
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -47,14 +46,26 @@ def test_fully_unquote_handles_quadruple_encoded(monkeypatch):
     from api.extensions import _fully_unquote_path
 
     # Plain percent-encoding stops at `..` after 1 unquote
-    assert _fully_unquote_path("/extensions/%2e%2e/api/session") == "/extensions/../api/session"
+    assert (
+        _fully_unquote_path("/extensions/%2e%2e/api/session")
+        == "/extensions/../api/session"
+    )
     # Double-encoded after 2 unquotes
-    assert _fully_unquote_path("/extensions/%252e%252e/api/session") == "/extensions/../api/session"
+    assert (
+        _fully_unquote_path("/extensions/%252e%252e/api/session")
+        == "/extensions/../api/session"
+    )
     # Triple-encoded after 3 unquotes
-    assert _fully_unquote_path("/extensions/%25252e%25252e/api/session") == "/extensions/../api/session"
+    assert (
+        _fully_unquote_path("/extensions/%25252e%25252e/api/session")
+        == "/extensions/../api/session"
+    )
     # Quadruple-encoded after 4 unquotes — the case that slipped through the
     # original `range(3)` and reached the validator unchanged
-    assert _fully_unquote_path("/extensions/%2525252e%2525252e/api/session") == "/extensions/../api/session"
+    assert (
+        _fully_unquote_path("/extensions/%2525252e%2525252e/api/session")
+        == "/extensions/../api/session"
+    )
 
 
 def test_quadruple_encoded_traversal_url_now_rejected(tmp_path, monkeypatch):
@@ -114,6 +125,7 @@ def test_url_list_logs_rejected_urls_once(tmp_path, monkeypatch, caplog):
     # Reset the per-process warning cache so the test doesn't accidentally
     # depend on state from other tests in the same run
     from api.extensions import _warned_urls
+
     _warned_urls.clear()
 
     caplog.set_level(logging.WARNING, logger="api.extensions")
@@ -135,7 +147,8 @@ def test_url_list_logs_rejected_urls_once(tmp_path, monkeypatch, caplog):
     config2 = get_extension_config()
     assert config2["script_urls"] == ["/extensions/legit.js"]
     rejection_records = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if "Rejected extension URL" in r.message and "evil.example.com" in r.message
     ]
     assert rejection_records == [], (
@@ -159,17 +172,26 @@ def test_expanded_mime_map_serves_fonts_and_wasm(tmp_path, monkeypatch):
     from api.extensions import serve_extension_static
 
     ttf = FakeHandler()
-    assert serve_extension_static(ttf, SimpleNamespace(path="/extensions/font.ttf")) is True
+    assert (
+        serve_extension_static(ttf, SimpleNamespace(path="/extensions/font.ttf"))
+        is True
+    )
     assert ttf.status == 200
     assert ttf.header("Content-Type") == "font/ttf"
 
     otf = FakeHandler()
-    assert serve_extension_static(otf, SimpleNamespace(path="/extensions/font.otf")) is True
+    assert (
+        serve_extension_static(otf, SimpleNamespace(path="/extensions/font.otf"))
+        is True
+    )
     assert otf.status == 200
     assert otf.header("Content-Type") == "font/otf"
 
     wasm = FakeHandler()
-    assert serve_extension_static(wasm, SimpleNamespace(path="/extensions/module.wasm")) is True
+    assert (
+        serve_extension_static(wasm, SimpleNamespace(path="/extensions/module.wasm"))
+        is True
+    )
     assert wasm.status == 200
     assert wasm.header("Content-Type") == "application/wasm"
     # Binary types must NOT have a charset suffix

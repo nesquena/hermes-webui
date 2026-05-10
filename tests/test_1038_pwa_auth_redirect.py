@@ -11,7 +11,6 @@ These are static regression tests that verify the JS source contains the
 correct guard patterns.
 """
 
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -30,12 +29,18 @@ class TestPWAAuthRedirect:
         """api() in workspace.js must redirect to login on 401."""
         src = _workspace_js()
         # Guard must appear inside the !res.ok block, before throwing
-        assert "res.status===401" in src, \
+        assert "res.status===401" in src, (
             "workspace.js api() must check res.status===401"
-        assert "window.location.href='login" in src or 'window.location.href="login' in src, \
-            "workspace.js api() must redirect to login on 401"
-        assert "window.location.href='/login" not in src and 'window.location.href="/login' not in src, \
+        )
+        assert (
+            "window.location.href='login" in src or 'window.location.href="login' in src
+        ), "workspace.js api() must redirect to login on 401"
+        assert (
+            "window.location.href='/login" not in src
+            and 'window.location.href="/login' not in src
+        ), (
             "workspace.js api() must not escape subpath mounts by redirecting to root /login"
+        )
 
     def test_workspace_js_401_before_throw(self):
         """The 401 redirect must come before any error throw."""
@@ -50,33 +55,38 @@ class TestPWAAuthRedirect:
             idx_throw = src.find("throw err")
         assert idx_401 != -1, "401 guard not found in workspace.js"
         assert idx_throw != -1, "no error throw found in workspace.js"
-        assert idx_401 < idx_throw, \
+        assert idx_401 < idx_throw, (
             "401 redirect must appear before the generic throw in workspace.js"
+        )
 
     def test_ui_js_has_redirect_helper(self):
         """ui.js must define _redirectIfUnauth helper."""
         src = _ui_js()
-        assert "_redirectIfUnauth" in src, \
+        assert "_redirectIfUnauth" in src, (
             "ui.js must define _redirectIfUnauth helper function"
+        )
 
     def test_ui_js_models_fetch_uses_redirect(self):
         """populateModelDropdown() must call _redirectIfUnauth on the api/models response."""
         src = _ui_js()
         # The helper must be called after the api/models fetch
-        assert "_redirectIfUnauth(_modelsRes)" in src, \
+        assert "_redirectIfUnauth(_modelsRes)" in src, (
             "populateModelDropdown() must check 401 on api/models fetch"
+        )
 
     def test_ui_js_live_models_fetch_uses_redirect(self):
         """loadLiveModels() must call _redirectIfUnauth on the api/models/live response."""
         src = _ui_js()
-        assert "_redirectIfUnauth(_liveRes)" in src, \
+        assert "_redirectIfUnauth(_liveRes)" in src, (
             "loadLiveModels() must check 401 on api/models/live fetch"
+        )
 
     def test_ui_js_upload_fetch_uses_redirect(self):
         """File upload must call _redirectIfUnauth on the api/upload response."""
         src = _ui_js()
-        assert "_redirectIfUnauth(res)" in src, \
+        assert "_redirectIfUnauth(res)" in src, (
             "upload fetch must call _redirectIfUnauth"
+        )
 
 
 class TestLoginJsSafeNextPath:
@@ -84,7 +94,9 @@ class TestLoginJsSafeNextPath:
 
     @staticmethod
     def _login_js():
-        return (Path(__file__).parent.parent / "static" / "login.js").read_text(encoding="utf-8")
+        return (Path(__file__).parent.parent / "static" / "login.js").read_text(
+            encoding="utf-8"
+        )
 
     def test_safe_next_path_function_exists(self):
         """login.js must define _safeNextPath() to honor the ?next= redirect."""

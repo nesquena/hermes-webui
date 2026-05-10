@@ -15,8 +15,25 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 def _claude_fixture_rows() -> list[dict]:
     return [
         {"summary": "Claude Code import QA"},
-        {"timestamp": "2026-04-18T12:00:01Z", "message": {"role": "user", "content": [{"type": "text", "text": "Can Hermes show this Claude Code history read-only?"}]}},
-        {"timestamp": "2026-04-18T12:00:02Z", "message": {"role": "assistant", "content": "Yes — it appears with a Claude Code source badge."}},
+        {
+            "timestamp": "2026-04-18T12:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Can Hermes show this Claude Code history read-only?",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-04-18T12:00:02Z",
+            "message": {
+                "role": "assistant",
+                "content": "Yes — it appears with a Claude Code source badge.",
+            },
+        },
         "not a dict",
         {"not_json_message": True},
     ]
@@ -55,10 +72,20 @@ def test_get_claude_code_sessions_reads_fixture_jsonl_without_real_home(tmp_path
     assert session["is_cli_session"] is True
     assert session["read_only"] is True
 
-    messages = models.get_claude_code_session_messages(session["session_id"], projects_dir=projects_dir)
+    messages = models.get_claude_code_session_messages(
+        session["session_id"], projects_dir=projects_dir
+    )
     assert messages == [
-        {"role": "user", "content": "Can Hermes show this Claude Code history read-only?", "timestamp": 1776513601.0},
-        {"role": "assistant", "content": "Yes — it appears with a Claude Code source badge.", "timestamp": 1776513602.0},
+        {
+            "role": "user",
+            "content": "Can Hermes show this Claude Code history read-only?",
+            "timestamp": 1776513601.0,
+        },
+        {
+            "role": "assistant",
+            "content": "Yes — it appears with a Claude Code source badge.",
+            "timestamp": 1776513602.0,
+        },
     ]
 
 
@@ -73,20 +100,27 @@ def test_claude_code_scan_skips_symlinks_and_oversized_files(tmp_path):
 
     outside = tmp_path / "outside"
     outside.mkdir()
-    _write_jsonl(outside / "leaked.jsonl", [{"message": {"role": "user", "content": "do not import"}}])
+    _write_jsonl(
+        outside / "leaked.jsonl",
+        [{"message": {"role": "user", "content": "do not import"}}],
+    )
     symlink_project = projects_dir / "symlink-project"
     symlink_project.symlink_to(outside, target_is_directory=True)
 
     root_link = tmp_path / "root-link"
     root_link.symlink_to(projects_dir, target_is_directory=True)
 
-    sessions = models.get_claude_code_sessions(projects_dir=projects_dir, max_file_bytes=512)
+    sessions = models.get_claude_code_sessions(
+        projects_dir=projects_dir, max_file_bytes=512
+    )
 
     assert [session["title"] for session in sessions] == ["valid import"]
     assert models.get_claude_code_sessions(projects_dir=root_link) == []
 
 
-def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):
+def test_session_import_cli_returns_read_only_claude_code_payload(
+    monkeypatch, tmp_path
+):
     import api.routes as routes
 
     sid = "claude_code_fixture"
@@ -107,12 +141,26 @@ def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, t
 
     monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, _sid: None))
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: messages if _sid == sid else [])
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(
+        routes, "get_cli_session_messages", lambda _sid: messages if _sid == sid else []
+    )
     monkeypatch.setattr(routes, "get_cli_sessions", lambda: [meta])
     monkeypatch.setattr(routes, "get_last_workspace", lambda: tmp_path / "workspace")
-    monkeypatch.setattr(routes, "import_cli_session", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read-only import must not persist")))
+    monkeypatch.setattr(
+        routes,
+        "import_cli_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("read-only import must not persist")
+        ),
+    )
 
     response = routes._handle_session_import_cli(object(), {"session_id": sid})
 

@@ -11,7 +11,6 @@ import types
 from api.models import Session
 from api.config import SESSION_DIR
 from api.routes import _handle_session_compress
-from tests._pytest_port import BASE
 
 
 class _FakeHandler:
@@ -95,6 +94,7 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     import api.config as _cfg
+
     fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_provider.resolve_runtime_provider = lambda requested=None: {
         "api_key": "fake-key",
@@ -105,7 +105,9 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     fake_hermes_cli.__path__ = []
     fake_hermes_cli.runtime_provider = fake_runtime_provider
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(
+        sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider
+    )
     import hermes_cli.runtime_provider as _rtp
 
     monkeypatch.setattr(
@@ -129,7 +131,9 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     )
 
     handler = _FakeHandler()
-    _handle_session_compress(handler, {"session_id": sid, "focus_topic": "database schema"})
+    _handle_session_compress(
+        handler, {"session_id": sid, "focus_topic": "database schema"}
+    )
 
     assert handler.status == 200
     payload = handler.payload()
@@ -142,13 +146,18 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
         {"role": "assistant", "content": "four"},
     ]
     assert _FakeAgent.last_instance is not None
-    assert _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"] == "database schema"
+    assert (
+        _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"]
+        == "database schema"
+    )
 
 
 def test_static_commands_js_registers_compress_alias(cleanup_test_sessions):
     from pathlib import Path
 
-    with open(Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8") as f:
+    with open(
+        Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8"
+    ) as f:
         src = f.read()
     assert "name:'compress'" in src
     assert "name:'compact'" in src
@@ -160,8 +169,13 @@ def test_static_commands_js_registers_compress_alias(cleanup_test_sessions):
 def test_static_commands_js_prefers_persisted_reference_message(cleanup_test_sessions):
     from pathlib import Path
 
-    with open(Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8") as f:
+    with open(
+        Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8"
+    ) as f:
         src = f.read()
 
-    assert "const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';" in src
+    assert (
+        "const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';"
+        in src
+    )
     assert "const referenceText=messageRef || summaryRef;" in src

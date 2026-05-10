@@ -40,7 +40,7 @@ def test_import_cli_initializes_model_before_metadata_loop():
         # Allow single quotes too.
         init_idx = handler.find("model = 'unknown'")
     assert init_idx != -1, (
-        "Expected `model = \"unknown\"` initialization in "
+        'Expected `model = "unknown"` initialization in '
         "_handle_session_import_cli before the metadata loop. Without it, "
         "import crashes when the session has messages but no metadata row."
     )
@@ -69,7 +69,9 @@ def test_import_cli_passes_model_to_import_helper():
     )
 
 
-def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_differences(monkeypatch):
+def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_differences(
+    monkeypatch,
+):
     """Refreshing an imported session should still extend when timestamps differ only by type.
 
     Existing WebUI messages can use integer timestamps while CLI refresh returns
@@ -106,12 +108,38 @@ def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_diff
         {"role": "assistant", "content": "next", "timestamp": 1710000002.0},
     ]
 
-    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: existing if sid == session_id else None))
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        classmethod(lambda _cls, sid: existing if sid == session_id else None),
+    )
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: fresh if sid == session_id else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [{"session_id": session_id, "source_tag": "weixin", "raw_source": "weixin", "session_source": "messaging", "source_label": "WeChat"}])
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda sid: fresh if sid == session_id else [],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda: [
+            {
+                "session_id": session_id,
+                "source_tag": "weixin",
+                "raw_source": "weixin",
+                "session_source": "messaging",
+                "source_label": "WeChat",
+            }
+        ],
+    )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
 
@@ -121,7 +149,9 @@ def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_diff
     assert save_calls == [False]
 
 
-def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverges(monkeypatch):
+def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverges(
+    monkeypatch,
+):
     """Only true prefixes should be treated as unchanged history during refresh.
 
     If the refreshed message body diverges, we should keep the existing in-memory
@@ -158,12 +188,38 @@ def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverge
         {"role": "assistant", "content": "next", "timestamp": 1710000002.0},
     ]
 
-    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: existing if sid == session_id else None))
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        classmethod(lambda _cls, sid: existing if sid == session_id else None),
+    )
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: fresh if sid == session_id else [])
-    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [{"session_id": session_id, "source_tag": "telegram", "raw_source": "telegram", "session_source": "messaging", "source_label": "Telegram"}])
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda sid: fresh if sid == session_id else [],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_sessions",
+        lambda: [
+            {
+                "session_id": session_id,
+                "source_tag": "telegram",
+                "raw_source": "telegram",
+                "session_source": "messaging",
+                "source_label": "Telegram",
+            }
+        ],
+    )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
 
@@ -191,7 +247,11 @@ def test_session_import_cli_preserves_parent_metadata_on_existing_import(monkeyp
             self.is_cli_session = True
 
         def compact(self):
-            return {"session_id": session_id, "title": "Imported", "parent_session_id": self.parent_session_id}
+            return {
+                "session_id": session_id,
+                "title": "Imported",
+                "parent_session_id": self.parent_session_id,
+            }
 
         def save(self, touch_updated_at=False):
             save_calls.append(touch_updated_at)
@@ -199,21 +259,33 @@ def test_session_import_cli_preserves_parent_metadata_on_existing_import(monkeyp
     save_calls = []
     existing = FakeSession()
 
-    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: existing if sid == session_id else None))
+    monkeypatch.setattr(
+        routes.Session,
+        "load",
+        classmethod(lambda _cls, sid: existing if sid == session_id else None),
+    )
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: existing.messages if sid == session_id else [])
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda sid: existing.messages if sid == session_id else [],
+    )
     monkeypatch.setattr(
         routes,
         "get_cli_sessions",
-        lambda: [{
-            "session_id": session_id,
-            "source_tag": "telegram",
-            "raw_source": "telegram",
-            "session_source": "messaging",
-            "source_label": "Telegram",
-            "parent_session_id": parent_id,
-        }],
+        lambda: [
+            {
+                "session_id": session_id,
+                "source_tag": "telegram",
+                "raw_source": "telegram",
+                "session_source": "messaging",
+                "source_label": "Telegram",
+                "parent_session_id": parent_id,
+            }
+        ],
     )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
@@ -234,25 +306,37 @@ def test_read_only_import_payload_includes_parent_session_id(monkeypatch):
 
     monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: None))
     monkeypatch.setattr(routes, "require", lambda body, *keys: None)
-    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
-    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: messages if sid == session_id else [])
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+    )
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda sid: messages if sid == session_id else [],
+    )
     monkeypatch.setattr(
         routes,
         "get_cli_sessions",
-        lambda: [{
-            "session_id": session_id,
-            "title": "Read-only child",
-            "model": "test-model",
-            "created_at": 1.0,
-            "updated_at": 2.0,
-            "source_tag": "discord",
-            "raw_source": "discord",
-            "session_source": "messaging",
-            "source_label": "Discord",
-            "parent_session_id": parent_id,
-            "read_only": True,
-        }],
+        lambda: [
+            {
+                "session_id": session_id,
+                "title": "Read-only child",
+                "model": "test-model",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "source_tag": "discord",
+                "raw_source": "discord",
+                "session_source": "messaging",
+                "source_label": "Discord",
+                "parent_session_id": parent_id,
+                "read_only": True,
+            }
+        ],
     )
 
     response = routes._handle_session_import_cli(object(), {"session_id": session_id})
@@ -279,5 +363,5 @@ def test_messaging_session_loader_prefers_longer_sidecar_transcript():
     handler = _extract_handler("handle_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
-    assert "sidecar_messages = getattr(s, \"messages\", []) or []" in handler
+    assert 'sidecar_messages = getattr(s, "messages", []) or []' in handler
     assert "len(sidecar_messages) > len(cli_messages)" in handler

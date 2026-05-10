@@ -7,12 +7,14 @@ Docker setups), Path.exists() raises PermissionError instead of returning False.
 load_settings() must treat that as "file not accessible = use defaults" rather
 than propagating the exception up to crash the request handler.
 """
+
 import stat
-import pytest
 import api.config as config
 
 
-def test_load_settings_returns_defaults_when_settings_file_unreadable(monkeypatch, tmp_path):
+def test_load_settings_returns_defaults_when_settings_file_unreadable(
+    monkeypatch, tmp_path
+):
     """PermissionError from SETTINGS_FILE.exists() must not propagate — return defaults instead.
 
     Regression for issue #570 comment: Docker UID mismatch caused every request
@@ -38,7 +40,9 @@ def test_load_settings_returns_defaults_when_settings_file_unreadable(monkeypatc
         state_dir.chmod(stat.S_IRWXU)  # restore for cleanup
 
 
-def test_load_settings_returns_defaults_when_exists_raises_permission_error(monkeypatch, tmp_path):
+def test_load_settings_returns_defaults_when_exists_raises_permission_error(
+    monkeypatch, tmp_path
+):
     """Direct simulation: monkeypatch SETTINGS_FILE.exists to raise PermissionError."""
     from unittest import mock
 
@@ -48,8 +52,9 @@ def test_load_settings_returns_defaults_when_exists_raises_permission_error(monk
 
     monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
 
-    with mock.patch.object(type(settings_file), "exists",
-                           side_effect=PermissionError("Permission denied")):
+    with mock.patch.object(
+        type(settings_file), "exists", side_effect=PermissionError("Permission denied")
+    ):
         result = config.load_settings()
 
     assert isinstance(result, dict)

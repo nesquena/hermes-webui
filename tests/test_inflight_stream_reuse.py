@@ -1,4 +1,5 @@
 """Regression tests for preserving live streams across session switches."""
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -37,9 +38,15 @@ def test_attach_live_stream_reuses_existing_same_stream_transport():
     body = _function_body(MESSAGES_JS, "attachLiveStream")
     close_pos = body.find("\n  closeLiveStream(activeSid);\n")
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
-    assert reuse_pos != -1, "attachLiveStream() should check for an existing live stream"
-    assert close_pos != -1, "attachLiveStream() should still close stale/different streams"
-    assert reuse_pos < close_pos, "same-stream reuse must run before closeLiveStream(activeSid)"
+    assert reuse_pos != -1, (
+        "attachLiveStream() should check for an existing live stream"
+    )
+    assert close_pos != -1, (
+        "attachLiveStream() should still close stale/different streams"
+    )
+    assert reuse_pos < close_pos, (
+        "same-stream reuse must run before closeLiveStream(activeSid)"
+    )
     assert "existingLive.streamId===streamId" in body
     assert "existingLive.source.readyState!==EventSource.CLOSED" in body
     assert "return" in body[reuse_pos:close_pos]
@@ -48,7 +55,9 @@ def test_attach_live_stream_reuses_existing_same_stream_transport():
 def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
     """Reusing transport must not skip per-session uploaded attachment state."""
     body = _function_body(MESSAGES_JS, "attachLiveStream")
-    upload_pos = body.find("if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded]")
+    upload_pos = body.find(
+        "if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded]"
+    )
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
     close_pos = body.find("\n  closeLiveStream(activeSid);\n")
     assert upload_pos != -1

@@ -62,25 +62,27 @@ def _handler_body() -> str:
     start = ROUTES_SRC.find("def _handle_approval_sse_stream(")
     assert start != -1, "_handle_approval_sse_stream must exist"
     end = ROUTES_SRC.find("\ndef ", start + 1)
-    return ROUTES_SRC[start:end if end != -1 else len(ROUTES_SRC)]
+    return ROUTES_SRC[start : end if end != -1 else len(ROUTES_SRC)]
 
 
 def test_snapshot_taken_under_lock():
     """The initial _pending snapshot must be guarded by `with _lock:`."""
     lock_body = _extract_lock_block(_handler_body())
     assert lock_body, "_handle_approval_sse_stream must contain a `with _lock:` block"
-    assert "_pending.get(sid)" in lock_body, \
+    assert "_pending.get(sid)" in lock_body, (
         "Initial snapshot of _pending must be read inside the `with _lock:` block"
+    )
 
 
 def test_subscriber_registered_inside_lock():
     """The subscriber queue must be registered inside the same `with _lock:` block."""
     lock_body = _extract_lock_block(_handler_body())
     assert lock_body, "Handler must contain a `with _lock:` block"
-    assert "_approval_sse_subscribers" in lock_body and "append(q)" in lock_body, \
-        ("Subscriber registration (`_approval_sse_subscribers.setdefault(sid, []).append(q)`) "
-         "must happen inside the same `with _lock:` block as the snapshot. "
-         "Otherwise a submit_pending() between snapshot-and-subscribe is lost.")
+    assert "_approval_sse_subscribers" in lock_body and "append(q)" in lock_body, (
+        "Subscriber registration (`_approval_sse_subscribers.setdefault(sid, []).append(q)`) "
+        "must happen inside the same `with _lock:` block as the snapshot. "
+        "Otherwise a submit_pending() between snapshot-and-subscribe is lost."
+    )
 
 
 def test_subscribe_before_snapshot_in_lock():

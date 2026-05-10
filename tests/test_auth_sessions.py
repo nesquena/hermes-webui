@@ -2,6 +2,7 @@
 Tests for auth session lifecycle — session creation, verification, expiry,
 and lazy pruning of expired entries.
 """
+
 import time
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ _TEST_STATE = Path(tempfile.mkdtemp())
 os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import importlib
@@ -57,7 +59,7 @@ class TestSessionPruning(unittest.TestCase):
     def test_prune_does_not_remove_valid_sessions(self):
         """_prune_expired_sessions should never remove sessions that are still active."""
         auth._sessions["active_1"] = time.time() + 86400  # 24 hours from now
-        auth._sessions["active_2"] = time.time() + 7200    # 2 hours from now
+        auth._sessions["active_2"] = time.time() + 7200  # 2 hours from now
         auth._sessions["expired_1"] = time.time() - 10
 
         auth._prune_expired_sessions()
@@ -97,6 +99,7 @@ class TestSessionPruning(unittest.TestCase):
         # We can check the expiry is approximately SESSION_TTL seconds from now
         # by looking up the raw entry via the token
         from api.auth import _sessions, SESSION_TTL
+
         # find our entry
         for t, exp in _sessions.items():
             if t == token_hex:
@@ -139,10 +142,7 @@ class TestSessionTtlResolution(unittest.TestCase):
 
     def setUp(self):
         # Snapshot environment + load_settings so each test starts clean.
-        self._saved_env = {
-            k: os.environ.get(k)
-            for k in ("HERMES_WEBUI_SESSION_TTL",)
-        }
+        self._saved_env = {k: os.environ.get(k) for k in ("HERMES_WEBUI_SESSION_TTL",)}
         os.environ.pop("HERMES_WEBUI_SESSION_TTL", None)
         self._saved_load_settings = auth.load_settings
 
@@ -158,6 +158,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         """HERMES_WEBUI_SESSION_TTL env var should take priority."""
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
         from api.auth import _resolve_session_ttl
+
         self.assertEqual(_resolve_session_ttl(), 3600)
 
     def test_clamps_minimum(self):
@@ -165,6 +166,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "10"
         auth.load_settings = lambda: {}
         from api.auth import _resolve_session_ttl
+
         # Out-of-range env values are rejected; falls through to default 30 days.
         self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
 
@@ -173,6 +175,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "100000000"
         auth.load_settings = lambda: {}
         from api.auth import _resolve_session_ttl
+
         # Out-of-range env values are rejected; falls through to default 30 days.
         self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
 
@@ -181,6 +184,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "not-a-number"
         auth.load_settings = lambda: {}
         from api.auth import _resolve_session_ttl
+
         self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
 
     def test_empty_env_falls_through(self):
@@ -188,6 +192,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = ""
         auth.load_settings = lambda: {}
         from api.auth import _resolve_session_ttl
+
         self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
 
     def test_settings_path_returns_value(self):
@@ -195,6 +200,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ.pop("HERMES_WEBUI_SESSION_TTL", None)
         auth.load_settings = lambda: {"session_ttl_seconds": 7200}
         from api.auth import _resolve_session_ttl
+
         self.assertEqual(_resolve_session_ttl(), 7200)
 
     def test_session_uses_dynamic_ttl(self):
@@ -203,6 +209,7 @@ class TestSessionTtlResolution(unittest.TestCase):
         os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
         token_hex = auth.create_session().split(".")[0]
         from api.auth import _sessions
+
         for t, exp in _sessions.items():
             if t == token_hex:
                 # The resolved env-var value (3600s) should be applied, not

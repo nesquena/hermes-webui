@@ -18,7 +18,7 @@ def _multipart_body(fields=None, files=None, boundary=b"voiceboundary"):
         body += b"--" + boundary + b"\r\n"
         body += (
             f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
-            f'Content-Type: {content_type}\r\n\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
         ).encode()
         body += data + b"\r\n"
     body += b"--" + boundary + b"--\r\n"
@@ -59,7 +59,10 @@ def test_handle_transcribe_requires_file_field():
 
 def test_handle_transcribe_returns_transcript(monkeypatch):
     fake_mod = types.ModuleType("tools.transcription_tools")
-    fake_mod.transcribe_audio = lambda path: {"success": True, "transcript": "hello from audio"}
+    fake_mod.transcribe_audio = lambda path: {
+        "success": True,
+        "transcript": "hello from audio",
+    }
     monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
 
     body, content_type = _multipart_body(
@@ -74,7 +77,10 @@ def test_handle_transcribe_returns_transcript(monkeypatch):
 
 def test_handle_transcribe_surfaces_provider_error(monkeypatch):
     fake_mod = types.ModuleType("tools.transcription_tools")
-    fake_mod.transcribe_audio = lambda path: {"success": False, "error": "STT not configured"}
+    fake_mod.transcribe_audio = lambda path: {
+        "success": False,
+        "error": "STT not configured",
+    }
     monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
 
     body, content_type = _multipart_body(

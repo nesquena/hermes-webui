@@ -37,7 +37,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -102,7 +101,10 @@ def test_cron_history_rejects_traversal_in_job_id():
     detail_body = src[detail_idx : detail_idx + 1500]
 
     # Both must include the regex check
-    for body, name in [(history_body, "_handle_cron_history"), (detail_body, "_handle_cron_run_detail")]:
+    for body, name in [
+        (history_body, "_handle_cron_history"),
+        (detail_body, "_handle_cron_run_detail"),
+    ]:
         assert "_re.fullmatch" in body and "[A-Za-z0-9_-]" in body, (
             f"{name} must validate job_id via regex — without this, "
             f"`?job_id=../<other>` enumerates sibling directory contents."
@@ -131,7 +133,6 @@ def test_cron_history_clamps_offset_and_limit():
         "_handle_cron_history must clamp `limit` to a sane upper bound (500 chosen) "
         "to prevent DoS via `?limit=999999999`."
     )
-
 
 
 # ── Critical Opus finding: enabled_toolsets actually applies ─────────────────
@@ -176,26 +177,31 @@ def test_session_load_metadata_only_returns_instance_not_dict():
     if a future change converts it to a dict."""
     sys.path.insert(0, str(REPO))
     from api.models import Session
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmpd:
         # Create a fake session file
         import json as _json
+
         sid = "test1234abcd"
         from api import models
+
         original = models.SESSION_DIR
         models.SESSION_DIR = Path(tmpd)
         try:
             session_file = Path(tmpd) / f"{sid}.json"
-            session_file.write_text(_json.dumps({
-                "session_id": sid,
-                "title": "Test",
-                "workspace": tmpd,
-                "model": "test/model",
-                "enabled_toolsets": ["bash", "file"],
-                "messages": [],
-                "tool_calls": [],
-            }))
+            session_file.write_text(
+                _json.dumps(
+                    {
+                        "session_id": sid,
+                        "title": "Test",
+                        "workspace": tmpd,
+                        "model": "test/model",
+                        "enabled_toolsets": ["bash", "file"],
+                        "messages": [],
+                        "tool_calls": [],
+                    }
+                )
+            )
             result = Session.load_metadata_only(sid)
         finally:
             models.SESSION_DIR = original
@@ -206,4 +212,4 @@ def test_session_load_metadata_only_returns_instance_not_dict():
         f"load_metadata_only must return Session instance, got {type(result)}"
     )
     # And the enabled_toolsets must be readable via getattr
-    assert getattr(result, 'enabled_toolsets', None) == ["bash", "file"]
+    assert getattr(result, "enabled_toolsets", None) == ["bash", "file"]

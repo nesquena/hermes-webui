@@ -1,4 +1,5 @@
 """Regression tests for #926 Hindsight dependency in Docker WebUI venv."""
+
 import pathlib
 
 

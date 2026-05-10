@@ -42,14 +42,13 @@ def _extract_js_function_body(src: str, name: str) -> str:
 
 
 class TestWorkspacePanelCollapsePriority:
-
     def test_rightpanel_is_a_size_container(self):
         """The right panel must declare itself as an inline-size container so
         its descendants can run @container queries against the panel's width."""
         # Look at the .rightpanel rule body
         idx = STYLE_CSS.find(".rightpanel{")
         assert idx >= 0, ".rightpanel rule not found"
-        rule = STYLE_CSS[idx: idx + 1200]
+        rule = STYLE_CSS[idx : idx + 1200]
         assert "container-type:inline-size" in rule, (
             ".rightpanel must declare container-type:inline-size for the "
             "header collapse-priority @container queries to work."
@@ -64,7 +63,7 @@ class TestWorkspacePanelCollapsePriority:
         simultaneous-shrink behaviour. The header now uses `gap` and
         `margin-left:auto` on `.panel-actions` to push them right."""
         idx = STYLE_CSS.find(".panel-header{")
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx) + 1]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx) + 1]
         assert "justify-content:space-between" not in rule, (
             "panel-header still uses justify-content:space-between — that "
             "compresses all three children simultaneously."
@@ -85,8 +84,13 @@ class TestWorkspacePanelCollapsePriority:
                 "rule (.panel-header > span:first-child) handles the "
                 "title-text ellipsis as a fallback."
             )
-            inner_rule = STYLE_CSS[inner_span_idx: STYLE_CSS.find("}", inner_span_idx) + 1]
-            assert "overflow:hidden" in inner_rule and "text-overflow:ellipsis" in inner_rule, (
+            inner_rule = STYLE_CSS[
+                inner_span_idx : STYLE_CSS.find("}", inner_span_idx) + 1
+            ]
+            assert (
+                "overflow:hidden" in inner_rule
+                and "text-overflow:ellipsis" in inner_rule
+            ), (
                 ".panel-header > span:first-child must own the ellipsis "
                 "behaviour now that the parent is overflow:visible."
             )
@@ -96,7 +100,7 @@ class TestWorkspacePanelCollapsePriority:
         the icon buttons stay visible no matter how narrow the panel gets,
         and they sit at the right edge once `space-between` is removed."""
         idx = STYLE_CSS.find(".panel-actions{")
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "flex-shrink:0" in rule, (
             ".panel-actions must not shrink — icons are the priority."
         )
@@ -112,7 +116,7 @@ class TestWorkspacePanelCollapsePriority:
         sel = ".panel-header > span:first-child"
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, f"Selector {sel!r} not found in style.css"
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "text-overflow:ellipsis" in rule
         assert "min-width:0" in rule
         assert "flex-shrink:2" in rule  # shrinks before icons (icons are 0)
@@ -121,7 +125,7 @@ class TestWorkspacePanelCollapsePriority:
         """`.git-badge` must shrink faster than the label so it disappears
         first as the panel narrows."""
         idx = STYLE_CSS.find(".git-badge{")
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "flex-shrink:3" in rule, (
             ".git-badge must have flex-shrink:3 so it shrinks before the "
             "label (flex-shrink:2) and the icons (flex-shrink:0)."
@@ -136,7 +140,7 @@ class TestWorkspacePanelCollapsePriority:
         )
         # Find the block and check git-badge is targeted
         idx = STYLE_CSS.find("@container rightpanel (max-width: 220px)")
-        block = STYLE_CSS[idx: idx + 200]
+        block = STYLE_CSS[idx : idx + 200]
         assert ".git-badge{display:none" in block
 
     def test_container_query_hides_label_at_narrower_width(self):
@@ -144,7 +148,7 @@ class TestWorkspacePanelCollapsePriority:
         confirms collapse priority order."""
         assert "@container rightpanel (max-width: 160px)" in STYLE_CSS
         idx = STYLE_CSS.find("@container rightpanel (max-width: 160px)")
-        block = STYLE_CSS[idx: idx + 200]
+        block = STYLE_CSS[idx : idx + 200]
         assert ".panel-header > span:first-child{display:none" in block
 
     def test_breakpoints_in_correct_order(self):
@@ -152,6 +156,7 @@ class TestWorkspacePanelCollapsePriority:
         label breakpoint (160px). Otherwise the label would vanish first."""
         # Both queries exist — extract numeric thresholds
         import re
+
         matches = re.findall(
             r"@container rightpanel \(max-width:\s*(\d+)px\)", STYLE_CSS
         )
@@ -168,7 +173,6 @@ class TestWorkspacePanelCollapsePriority:
 
 
 class TestProjectDotPlacement:
-
     def test_dot_appended_to_title_row_not_title(self):
         """The project dot must be appended to `titleRow` (a flex sibling
         of the title and timestamp), not to the title span (which truncates
@@ -207,7 +211,7 @@ class TestProjectDotPlacement:
         # Get the bare .session-time rule (not .session-time.is-hidden, not
         # .session-item:hover .session-time)
         idx = STYLE_CSS.find(".session-time{")
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "position:absolute" not in rule, (
             ".session-time must not be position:absolute — bug 2 requires "
             "it to live in the flex flow of .session-title-row."
@@ -223,7 +227,7 @@ class TestProjectDotPlacement:
         `vertical-align:middle` are unnecessary and only confuse layout."""
         idx = STYLE_CSS.find(".session-project-dot{")
         assert idx >= 0
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "margin-left:4px" not in rule, (
             "Old margin-left:4px is unnecessary now — gap:6px on "
             ".session-title-row handles spacing"
@@ -243,14 +247,16 @@ class TestProjectDotPlacement:
         # mobile-touch override).
         idx = STYLE_CSS.find(".session-item{padding:8px")
         assert idx >= 0, "Could not find desktop .session-item padding rule"
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "padding:8px 8px" in rule, (
             f"Expected 'padding:8px 8px' for at-rest session items, got: {rule!r}"
         )
         # Mobile also drops from 86px to 40px — the absolute timestamp is
         # gone (now flex-flow), so only the always-visible action button's
         # footprint (26px + 6px gap ≈ 32px, rounded to 40px) needs reservation.
-        assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+        assert (
+            ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+        )
 
     def test_session_item_expands_padding_on_hover_and_attention(self):
         """PR #1110: Touch layout-shift fix — :hover removed from the COMBINED
@@ -268,7 +274,7 @@ class TestProjectDotPlacement:
         assert idx >= 0, (
             "Combined streaming/unread/focus-within/menu-open padding rule not found"
         )
-        rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
+        rule = STYLE_CSS[idx : STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
         # Desktop hover padding restored via @media (hover:hover) — mouse devices only
         assert "@media (hover:hover)" in STYLE_CSS

@@ -15,20 +15,31 @@ def _write(path: Path, text: str = "# Synthetic\n") -> Path:
     return path
 
 
-def test_llm_wiki_status_reads_synthetic_fixture_without_exposing_content(tmp_path, monkeypatch):
+def test_llm_wiki_status_reads_synthetic_fixture_without_exposing_content(
+    tmp_path, monkeypatch
+):
     """The wiki status API should summarize counts/mtime without leaking page text."""
     import api.routes as routes
 
     wiki = tmp_path / "wiki"
     _write(wiki / "SCHEMA.md", "# Schema\n")
     _write(wiki / "index.md", "# Index\n")
-    _write(wiki / "log.md", "# Log\n## [2026-05-04] update | Secret project name\n- Details stay private\n")
+    _write(
+        wiki / "log.md",
+        "# Log\n## [2026-05-04] update | Secret project name\n- Details stay private\n",
+    )
     _write(
         wiki / "entities" / "private-agent.md",
         "---\ntitle: Private Agent\nupdated: 2026-05-04\n---\nSensitive body text must not ship.\n",
     )
-    _write(wiki / "concepts" / "safe-summary.md", "---\ntitle: Safe Summary\n---\nMore private text\n")
-    _write(wiki / "raw" / "articles" / "source.md", "Raw source body should not count as wiki page\n")
+    _write(
+        wiki / "concepts" / "safe-summary.md",
+        "---\ntitle: Safe Summary\n---\nMore private text\n",
+    )
+    _write(
+        wiki / "raw" / "articles" / "source.md",
+        "Raw source body should not count as wiki page\n",
+    )
 
     monkeypatch.setenv("WIKI_PATH", str(wiki))
 

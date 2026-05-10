@@ -92,10 +92,13 @@ def test_handler_snapshot_does_not_deadlock_when_queue_has_entry():
 
     sid = f"clarify-sse-populated-{time.time_ns()}"
     try:
-        clarify.submit_pending(sid, {
-            "question": "Pick one?",
-            "choices_offered": ["a", "b"],
-        })
+        clarify.submit_pending(
+            sid,
+            {
+                "question": "Pick one?",
+                "choices_offered": ["a", "b"],
+            },
+        )
         initial_pending, initial_count = _run_handler_snapshot(sid)
         assert initial_count == 1
         assert initial_pending is not None
@@ -114,7 +117,7 @@ def test_routes_handler_does_not_call_get_pending_under_lock():
     start = src.find("def _handle_clarify_sse_stream(")
     assert start != -1, "_handle_clarify_sse_stream must exist"
     end = src.find("\ndef ", start + 1)
-    body = src[start:end if end != -1 else len(src)]
+    body = src[start : end if end != -1 else len(src)]
 
     # Find the lock block
     lock_start = body.find("with _clarify_lock:")

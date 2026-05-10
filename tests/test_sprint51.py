@@ -11,13 +11,12 @@ These tests verify that after cancel_stream() is called:
 All tests are isolated and clean up after themselves.
 """
 
-import pytest
 import queue
 import threading
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from api.streaming import cancel_stream
-from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK, CANCEL_FLAGS
+from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS
 
 
 class TestCancelStreamEagerRelease:
@@ -45,8 +44,9 @@ class TestCancelStreamEagerRelease:
         result = cancel_stream(stream_id)
 
         assert result is True
-        assert stream_id not in STREAMS, \
+        assert stream_id not in STREAMS, (
             "cancel_stream() should eagerly pop from STREAMS to release the session lock"
+        )
 
     def test_cancel_pops_cancel_flags(self):
         """After cancel, stream_id should no longer be in CANCEL_FLAGS."""
@@ -56,8 +56,9 @@ class TestCancelStreamEagerRelease:
 
         cancel_stream(stream_id)
 
-        assert stream_id not in CANCEL_FLAGS, \
+        assert stream_id not in CANCEL_FLAGS, (
             "cancel_stream() should eagerly pop from CANCEL_FLAGS"
+        )
 
     def test_cancel_pops_agent_instances(self):
         """After cancel, stream_id should no longer be in AGENT_INSTANCES."""
@@ -70,8 +71,9 @@ class TestCancelStreamEagerRelease:
 
         cancel_stream(stream_id)
 
-        assert stream_id not in AGENT_INSTANCES, \
+        assert stream_id not in AGENT_INSTANCES, (
             "cancel_stream() should eagerly pop from AGENT_INSTANCES"
+        )
 
     def test_cancel_clears_session_active_stream_id(self):
         """After cancel, session.active_stream_id should be None."""
@@ -91,17 +93,21 @@ class TestCancelStreamEagerRelease:
         CANCEL_FLAGS[stream_id] = threading.Event()
         AGENT_INSTANCES[stream_id] = mock_agent
 
-        with patch('api.streaming.get_session', return_value=mock_session):
+        with patch("api.streaming.get_session", return_value=mock_session):
             cancel_stream(stream_id)
 
-        assert mock_session.active_stream_id is None, \
+        assert mock_session.active_stream_id is None, (
             "cancel_stream() should clear session.active_stream_id"
-        assert mock_session.pending_user_message is None, \
+        )
+        assert mock_session.pending_user_message is None, (
             "cancel_stream() should clear session.pending_user_message"
-        assert mock_session.pending_attachments == [], \
+        )
+        assert mock_session.pending_attachments == [], (
             "cancel_stream() should clear session.pending_attachments"
-        assert mock_session.pending_started_at is None, \
+        )
+        assert mock_session.pending_started_at is None, (
             "cancel_stream() should clear session.pending_started_at"
+        )
         mock_session.save.assert_called_once()
 
     def test_cancel_without_agent_still_pops_streams(self):
@@ -113,8 +119,9 @@ class TestCancelStreamEagerRelease:
 
         cancel_stream(stream_id)
 
-        assert stream_id not in STREAMS, \
+        assert stream_id not in STREAMS, (
             "cancel_stream() should pop STREAMS even without agent instance"
+        )
         assert stream_id not in CANCEL_FLAGS
 
     def test_cancel_sentinel_still_queued(self):
@@ -129,8 +136,8 @@ class TestCancelStreamEagerRelease:
         # The cancel sentinel should have been queued before the pop
         assert not q.empty()
         event_type, data = q.get_nowait()
-        assert event_type == 'cancel'
-        assert data['message'] == 'Cancelled by user'
+        assert event_type == "cancel"
+        assert data["message"] == "Cancelled by user"
 
     def test_double_cancel_is_safe(self):
         """Calling cancel_stream() twice should not raise."""
@@ -163,7 +170,9 @@ class TestCancelStreamEagerRelease:
         CANCEL_FLAGS[stream_id] = threading.Event()
         AGENT_INSTANCES[stream_id] = mock_agent
 
-        with patch('api.streaming.get_session', side_effect=KeyError("Session not found")):
+        with patch(
+            "api.streaming.get_session", side_effect=KeyError("Session not found")
+        ):
             # Should not raise
             result = cancel_stream(stream_id)
 

@@ -7,7 +7,10 @@ from api.streaming import (
 
 def test_workspace_prefix_strips_only_versioned_sentinel():
     assert _strip_workspace_prefix("[Workspace::v1: /tmp/project]\nHello") == "Hello"
-    assert _strip_workspace_prefix("[Workspace: /tmp/project]\nHello") == "[Workspace: /tmp/project]\nHello"
+    assert (
+        _strip_workspace_prefix("[Workspace: /tmp/project]\nHello")
+        == "[Workspace: /tmp/project]\nHello"
+    )
 
 
 def test_workspace_prefix_escapes_paths_with_closing_brackets():

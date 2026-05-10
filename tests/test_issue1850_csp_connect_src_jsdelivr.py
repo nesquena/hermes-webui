@@ -5,6 +5,7 @@ cdn.jsdelivr.net via <script> tags. Their bundled source maps also live on
 jsDelivr and are fetched via connect (not script load), so connect-src must
 include cdn.jsdelivr.net or browsers block the fetch and emit CSP violations.
 """
+
 import re
 from pathlib import Path
 

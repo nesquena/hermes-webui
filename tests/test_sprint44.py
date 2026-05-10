@@ -11,6 +11,7 @@ Covers:
 - boot.js: handleWorkspaceClose() logic — clears preview when one is visible,
   closes panel otherwise (existing function, confirmed wired to both buttons).
 """
+
 import pathlib
 import re
 import unittest
@@ -64,6 +65,7 @@ class TestMobileCloseButtonBehavior(unittest.TestCase):
             BOOT_JS,
             "handleWorkspaceClose() must call clearPreview() when preview is visible",
         )
+
     def test_handle_workspace_close_falls_back_to_close_panel(self):
         """handleWorkspaceClose() must call closeWorkspacePanel() as fallback."""
         # Find the function start and extract until the closing brace by scanning
@@ -105,7 +107,9 @@ class TestDesktopNoDuplicateXButton(unittest.TestCase):
     def test_clear_preview_toggle_only_applied_on_desktop(self):
         """The display toggle must be guarded by !isCompact so mobile is unaffected."""
         # Expect: if(!isCompact) clearBtn.style.display=...
-        pattern = r"isCompact.*clearBtn\.style\.display|clearBtn\.style\.display.*isCompact"
+        pattern = (
+            r"isCompact.*clearBtn\.style\.display|clearBtn\.style\.display.*isCompact"
+        )
         self.assertRegex(
             BOOT_JS,
             pattern,

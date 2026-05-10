@@ -1,4 +1,5 @@
 """Tests for PR #644 — load provider models from config.yaml in get_available_models()."""
+
 import pytest
 import api.config as _cfg
 
@@ -32,6 +33,7 @@ def _available_models_with_cfg(cfg_override):
     old_mtime = _cfg._cfg_mtime
     try:
         from pathlib import Path
+
         _cfg._cfg_mtime = Path(_cfg._get_config_path()).stat().st_mtime
     except OSError:
         _cfg._cfg_mtime = 0.0
@@ -62,7 +64,9 @@ class TestConfigYamlModelsLoading:
         groups = {g["provider"]: g["models"] for g in result["groups"]}
         # Provider should appear (previously it was silently skipped)
         provider_names = [g["provider"] for g in result["groups"]]
-        found = any("my-custom-llm" in n.lower() or "My-Custom-Llm" in n for n in provider_names)
+        found = any(
+            "my-custom-llm" in n.lower() or "My-Custom-Llm" in n for n in provider_names
+        )
         # If it appears, its models must include our cfg models
         for g in result["groups"]:
             if "custom" in g["provider"].lower():
@@ -116,7 +120,9 @@ class TestConfigYamlModelsLoading:
                 )
                 break
 
-    def test_provider_in_provider_models_but_no_cfg_override_uses_static_fallback(self, monkeypatch):
+    def test_provider_in_provider_models_but_no_cfg_override_uses_static_fallback(
+        self, monkeypatch
+    ):
         """When Hermes CLI has no live catalog, _PROVIDER_MODELS remains fallback."""
         monkeypatch.setattr(_cfg, "_read_live_provider_model_ids", lambda _pid: [])
         cfg = {

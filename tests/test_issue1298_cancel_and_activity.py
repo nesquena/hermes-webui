@@ -9,6 +9,7 @@ Bug 2 is server-side data loss (the message is gone from session JSON, not just
 the in-memory client copy) caused by cancel_stream() clearing pending_user_message
 without first persisting it to s.messages. This test suite locks down both fixes.
 """
+
 import pathlib
 import queue
 import re
@@ -19,7 +20,6 @@ import pytest
 
 import api.config as config
 import api.models as models
-import api.streaming as streaming
 from api.models import Session
 from api.streaming import cancel_stream
 
@@ -27,6 +27,7 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(autouse=True)
 def _isolate_session_dir(tmp_path, monkeypatch):
@@ -61,10 +62,12 @@ def _isolate_agent_locks():
     config.SESSION_AGENT_LOCKS.clear()
 
 
-def _make_pending_session(session_id="cancel_sid_1298",
-                          pending_msg="Help me debug this issue",
-                          messages=None,
-                          attachments=None):
+def _make_pending_session(
+    session_id="cancel_sid_1298",
+    pending_msg="Help me debug this issue",
+    messages=None,
+    attachments=None,
+):
     """Build a session in mid-stream state: pending_user_message set, messages may be empty."""
     s = Session(
         session_id=session_id,
@@ -92,6 +95,7 @@ def _setup_cancel_stream_state(session_id, stream_id="stream_1298"):
 
 
 # ── Server-side: cancel preserves pending_user_message in s.messages ────────
+
 
 class TestIssue1298CancelPreservesUserMessage:
     """Issue 2: Latest user message disappears after Stop/Cancel during streaming.
@@ -127,8 +131,7 @@ class TestIssue1298CancelPreservesUserMessage:
         contents = [m.get("content") for m in s2.messages if isinstance(m, dict)]
 
         assert "user" in roles, (
-            "Expected user turn synthesized into s.messages — "
-            f"got roles={roles}"
+            f"Expected user turn synthesized into s.messages — got roles={roles}"
         )
         assert "What's the weather forecast?" in contents, (
             "Expected pending_user_message text preserved verbatim in s.messages — "
@@ -154,11 +157,15 @@ class TestIssue1298CancelPreservesUserMessage:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[s.session_id]
-        user_messages = [m for m in s2.messages
-                         if isinstance(m, dict) and m.get("role") == "user"]
+        user_messages = [
+            m for m in s2.messages if isinstance(m, dict) and m.get("role") == "user"
+        ]
         # Exactly one user turn — no duplicate
-        matching = [m for m in user_messages
-                    if "Run a tool for me" in str(m.get("content") or "")]
+        matching = [
+            m
+            for m in user_messages
+            if "Run a tool for me" in str(m.get("content") or "")
+        ]
         assert len(matching) == 1, (
             "Expected exactly one user turn matching pending_user_message — "
             f"got {len(matching)} ({user_messages})"
@@ -178,12 +185,14 @@ class TestIssue1298CancelPreservesUserMessage:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[s.session_id]
-        user_msgs = [m for m in s2.messages
-                     if isinstance(m, dict) and m.get("role") == "user"]
+        user_msgs = [
+            m for m in s2.messages if isinstance(m, dict) and m.get("role") == "user"
+        ]
         assert user_msgs, "User turn must be persisted on cancel"
         recovered = user_msgs[0]
         assert recovered.get("attachments") == [
-            "bug_screenshot.png", "stack_trace.txt"
+            "bug_screenshot.png",
+            "stack_trace.txt",
         ], (
             "Attachment list must be preserved on the synthesized user turn — "
             f"got {recovered.get('attachments')}"
@@ -207,8 +216,9 @@ class TestIssue1298CancelPreservesUserMessage:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[s.session_id]
-        user_messages = [m for m in s2.messages
-                         if isinstance(m, dict) and m.get("role") == "user"]
+        user_messages = [
+            m for m in s2.messages if isinstance(m, dict) and m.get("role") == "user"
+        ]
         # Still exactly one — the original earlier turn
         assert len(user_messages) == 1
         assert user_messages[0].get("content") == "earlier turn"
@@ -229,6 +239,7 @@ class TestIssue1298CancelPreservesUserMessage:
         the synthesis path.
         """
         import time as _time
+
         # Prior reply was "ok" (a common short reply).
         prior_ts = int(_time.time()) - 60  # 1 minute ago
         prior_user = {
@@ -250,8 +261,9 @@ class TestIssue1298CancelPreservesUserMessage:
         cancel_stream(stream_id)
 
         s2 = models.SESSIONS[s.session_id]
-        user_messages = [m for m in s2.messages
-                         if isinstance(m, dict) and m.get("role") == "user"]
+        user_messages = [
+            m for m in s2.messages if isinstance(m, dict) and m.get("role") == "user"
+        ]
         contents = [m.get("content") for m in user_messages]
 
         assert "ok please continue with the analysis" in contents, (
@@ -266,6 +278,7 @@ class TestIssue1298CancelPreservesUserMessage:
 
 
 # ── Client-side: ui.js source-level guards for activity-group state ─────────
+
 
 class TestIssue1298ActivityGroupExpandPersistence:
     """Issue 1: Expanded Activity list collapses automatically when new
@@ -303,7 +316,8 @@ class TestIssue1298ActivityGroupExpandPersistence:
         # Find the ensureActivityGroup function body
         m = re.search(
             r"function ensureActivityGroup\(inner, opts\)\{(.*?)\n\}",
-            src, re.DOTALL,
+            src,
+            re.DOTALL,
         )
         assert m, "ensureActivityGroup() must exist in ui.js"
         body = m.group(1)
@@ -322,7 +336,8 @@ class TestIssue1298ActivityGroupExpandPersistence:
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function finalizeThinkingCard\(\)\{(.*?)\n\}",
-            src, re.DOTALL,
+            src,
+            re.DOTALL,
         )
         assert m, "finalizeThinkingCard() must exist in ui.js"
         body = m.group(1)
@@ -331,8 +346,10 @@ class TestIssue1298ActivityGroupExpandPersistence:
             "without this guard, the panel snaps shut on every tool boundary"
         )
         # Hard fail if force-collapse is unconditional
-        assert "_liveActivityUserExpanded !== true" in body or \
-               "_liveActivityUserExpanded!==true" in body.replace(" ", ""), (
+        assert (
+            "_liveActivityUserExpanded !== true" in body
+            or "_liveActivityUserExpanded!==true" in body.replace(" ", "")
+        ), (
             "finalizeThinkingCard() must skip the force-collapse path when "
             "_liveActivityUserExpanded === true"
         )
@@ -353,7 +370,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
         # captured into _liveActivityUserExpanded.
         m = re.search(r'class="tool-call-group-summary"[^`]*`', src)
         assert m, "live activity summary button template must be present"
-        assert "onclick=\"_toggleActivityGroup(this)\"" in m.group(0), (
+        assert 'onclick="_toggleActivityGroup(this)"' in m.group(0), (
             "ensureActivityGroup() summary button should use the shared toggle helper"
         )
         toggle_body = re.search(
@@ -373,7 +390,8 @@ class TestIssue1298ActivityGroupExpandPersistence:
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function clearLiveToolCards\(\)\{(.*?)\n\}",
-            src, re.DOTALL,
+            src,
+            re.DOTALL,
         )
         assert m, "clearLiveToolCards() must exist"
         body = m.group(1)

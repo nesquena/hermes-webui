@@ -17,18 +17,16 @@ Covers:
   9. Variables are set unconditionally (not setdefault)
   10. Structural: loader is called before DEFAULT_HOST/DEFAULT_PORT
 """
+
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 
 
 class TestLoadRepoDotenv:
-
     def setup_method(self):
         self._saved_env = os.environ.copy()
 
@@ -39,6 +37,7 @@ class TestLoadRepoDotenv:
     def _run(self, tmp_path, env_content: str):
         """Write .env to tmp_path and run _load_repo_dotenv() with that root."""
         import bootstrap as bs
+
         (tmp_path / ".env").write_text(env_content, encoding="utf-8")
         orig_root = bs.REPO_ROOT
         try:
@@ -81,6 +80,7 @@ class TestLoadRepoDotenv:
     def test_noop_when_no_dotenv(self, tmp_path):
         """No .env file — function returns silently without error."""
         import bootstrap as bs
+
         orig = bs.REPO_ROOT
         try:
             bs.REPO_ROOT = tmp_path  # tmp_path has no .env
@@ -91,20 +91,24 @@ class TestLoadRepoDotenv:
     def test_noop_when_dotenv_unreadable(self, tmp_path, capsys):
         """Unreadable .env prints a warning to stderr — does not crash."""
         import bootstrap as bs
+
         env_path = tmp_path / ".env"
         env_path.write_text("HERMES_WEBUI_PORT=9999\n")
         orig = bs.REPO_ROOT
         try:
             bs.REPO_ROOT = tmp_path
-            with patch("pathlib.Path.read_text", side_effect=PermissionError("no access")):
+            with patch(
+                "pathlib.Path.read_text", side_effect=PermissionError("no access")
+            ):
                 bs._load_repo_dotenv()  # must not raise
         finally:
             bs.REPO_ROOT = orig
         captured = capsys.readouterr()
-        assert "bootstrap" in captured.err.lower() or "warning" in captured.err.lower() or \
-               "could not load" in captured.err.lower(), (
-            "_load_repo_dotenv() should print a warning to stderr on read failure"
-        )
+        assert (
+            "bootstrap" in captured.err.lower()
+            or "warning" in captured.err.lower()
+            or "could not load" in captured.err.lower()
+        ), "_load_repo_dotenv() should print a warning to stderr on read failure"
 
     def test_overwrites_existing_env_var(self, tmp_path):
         """Unconditional overwrite matches shell source semantics."""
@@ -119,7 +123,9 @@ class TestLoadRepoDotenv:
         # The current implementation sets key to "" (empty string) — verify it is
         # not set to a non-empty string, which would be clearly wrong.
         val = os.environ.get("HERMES_EMPTY_KEY")
-        assert val != "something-wrong", "Empty-value key must not be set to a non-empty string"
+        assert val != "something-wrong", (
+            "Empty-value key must not be set to a non-empty string"
+        )
         # Specifically: empty string or absent are both acceptable behaviours.
         assert val in (None, ""), f"Unexpected value for empty-quoted key: {val!r}"
 
@@ -147,11 +153,12 @@ class TestLoadRepoDotenv:
 # Structural tests — confirm the fix is in place
 # ---------------------------------------------------------------------------
 
-class TestBootstrapStructure:
 
+class TestBootstrapStructure:
     def test_load_repo_dotenv_function_exists(self):
         """bootstrap.py must export _load_repo_dotenv()."""
         import bootstrap as bs
+
         assert callable(getattr(bs, "_load_repo_dotenv", None)), (
             "bootstrap.py must define _load_repo_dotenv() so that "
             "python3 bootstrap.py loads REPO_ROOT/.env before reading env defaults"

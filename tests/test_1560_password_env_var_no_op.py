@@ -20,7 +20,6 @@ the silent-no-op UX bug.
 
 import io
 import json
-import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -58,6 +57,7 @@ def _restore_settings_file_after_test():
 
 
 # ── FakeHandler that supports GET *and* POST body reading ─────────────────────
+
 
 class _FakeHandler:
     """Minimal BaseHTTPRequestHandler stand-in for routes.handle_get/handle_post.
@@ -110,6 +110,7 @@ class _FakeHandler:
 
 
 # ── Backend: GET /api/settings exposes password_env_var ──────────────────────
+
 
 def test_get_settings_exposes_password_env_var_true_when_env_set(monkeypatch):
     """Acceptance criterion: GET /api/settings includes `password_env_var: true`
@@ -168,9 +169,11 @@ def test_get_settings_password_env_var_false_when_env_blank(monkeypatch):
 
 # ── Backend: POST /api/settings returns 409 when env var shadows ─────────────
 
+
 def _post_settings(body_dict, cookie=""):
     """Helper: POST a JSON body to /api/settings via handle_post."""
     from api.routes import handle_post
+
     raw = json.dumps(body_dict).encode("utf-8")
     handler = _FakeHandler(body_bytes=raw, cookie=cookie)
     parsed = urlparse("http://example.com/api/settings")
@@ -219,10 +222,12 @@ def test_post_set_password_settings_hash_unchanged_after_409(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "shadow-pw")
 
     # Seed settings.json with a known sentinel hash so we can detect any write.
-    from api.config import load_settings, save_settings
+    from api.config import load_settings
+
     # Don't go through save_settings (it would re-route _set_password) — write
     # the file directly via the same path load_settings reads from.
     import api.config as cfg
+
     sentinel_hash = "deadbeef" * 8  # 64 chars, matches PBKDF2 hex output shape
     settings_before = load_settings()
     settings_before["password_hash"] = sentinel_hash
@@ -274,7 +279,7 @@ def test_index_html_has_password_lock_banner_div():
     assert 'id="settingsPasswordEnvLock"' in INDEX_HTML
     assert 'data-i18n="password_env_var_locked"' in INDEX_HTML
     # Default-hidden; panels.js reveals it when settings.password_env_var is true.
-    assert 'settingsPasswordEnvLock' in INDEX_HTML
+    assert "settingsPasswordEnvLock" in INDEX_HTML
     # Sanity: banner sits inside the System pane (same context as the password
     # field) — this guards against a future refactor that moves the banner away
     # from the field it explains.
@@ -346,7 +351,7 @@ def _locale_block(locale_key: str) -> str:
         opener = f"  {locale_key}:"
     start = I18N_JS.index(opener)
     # Find the next locale opener, scanning all known locales.
-    rest = I18N_JS[start + len(opener):]
+    rest = I18N_JS[start + len(opener) :]
     next_starts = []
     for other in EXPECTED_LOCALES:
         if other == locale_key:

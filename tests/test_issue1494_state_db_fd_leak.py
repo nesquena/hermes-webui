@@ -27,6 +27,7 @@ audited as still leaking on master @ 7fddc33:
 Each test monkeypatches sqlite3.connect to track every connection the function
 opens, then asserts every connection is .close()'d after the call returns.
 """
+
 import sqlite3
 
 import pytest
@@ -151,7 +152,9 @@ def _assert_all_closed(tracking, fn_name):
     )
 
 
-def test_read_importable_agent_session_rows_closes_connection(tmp_path, tracking_sqlite):
+def test_read_importable_agent_session_rows_closes_connection(
+    tmp_path, tracking_sqlite
+):
     """`read_importable_agent_session_rows` must close every sqlite connection."""
     db = tmp_path / "state.db"
     _make_state_db(db)
@@ -180,7 +183,9 @@ def test_read_session_lineage_metadata_closes_connection(tmp_path, tracking_sqli
     assert len(tracking_sqlite.instances) == 5
 
 
-def test_get_cli_session_messages_closes_connection(tmp_path, tracking_sqlite, monkeypatch):
+def test_get_cli_session_messages_closes_connection(
+    tmp_path, tracking_sqlite, monkeypatch
+):
     """`get_cli_session_messages` must close every sqlite connection."""
     db = tmp_path / "state.db"
     _make_state_db(db)
@@ -188,6 +193,7 @@ def test_get_cli_session_messages_closes_connection(tmp_path, tracking_sqlite, m
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     # Stub get_active_hermes_home so the tmp_path is used regardless of profile state.
     import api.profiles
+
     monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: str(tmp_path))
 
     from api.models import get_cli_session_messages
@@ -208,6 +214,7 @@ def test_delete_cli_session_closes_connection(tmp_path, tracking_sqlite, monkeyp
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     import api.profiles
+
     monkeypatch.setattr(api.profiles, "get_active_hermes_home", lambda: str(tmp_path))
 
     from api.models import delete_cli_session
@@ -228,7 +235,9 @@ def test_delete_cli_session_closes_connection(tmp_path, tracking_sqlite, monkeyp
     try:
         cur = real.execute("SELECT COUNT(*) FROM sessions WHERE id = ?", ("s1",))
         assert cur.fetchone()[0] == 0
-        cur = real.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", ("s1",))
+        cur = real.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?", ("s1",)
+        )
         assert cur.fetchone()[0] == 0
     finally:
         real.close()

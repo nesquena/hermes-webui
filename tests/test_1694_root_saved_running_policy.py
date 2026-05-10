@@ -64,14 +64,16 @@ def test_saved_running_session_helper_uses_metadata_only_and_runtime_markers():
     """The helper should inspect metadata without loading messages or attaching SSE."""
     helper_idx = BOOT_JS.find("async function _savedSessionShouldStaySidebarOnly")
     assert helper_idx > 0, "saved-running root policy helper not found"
-    helper = BOOT_JS[helper_idx:helper_idx + 1200]
+    helper = BOOT_JS[helper_idx : helper_idx + 1200]
     assert "/api/session?session_id=" in helper, (
         "helper should inspect session metadata via /api/session before deciding"
     )
     assert "messages=0" in helper, "helper must avoid loading full messages"
     assert "resolve_model=0" in helper, "helper must avoid unnecessary model resolution"
     assert "active_stream_id" in helper, "helper must treat active_stream_id as running"
-    assert "pending_user_message" in helper, "helper must treat pending_user_message as running"
+    assert "pending_user_message" in helper, (
+        "helper must treat pending_user_message as running"
+    )
     assert "loadSession(" not in helper, (
         "helper must not call loadSession(), because that would already project "
         "the saved session into the active pane"
@@ -88,4 +90,6 @@ def test_root_saved_running_sidebar_only_path_renders_empty_state_and_sidebar():
     assert helper_pos >= 0, "saved-running helper call not found"
     assert empty_pos > helper_pos, "sidebar-only path must show the empty state"
     assert render_pos > helper_pos, "sidebar-only path must render the session list"
-    assert return_pos > render_pos, "sidebar-only path should return before loadSession(saved)"
+    assert return_pos > render_pos, (
+        "sidebar-only path should return before loadSession(saved)"
+    )

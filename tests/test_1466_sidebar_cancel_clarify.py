@@ -5,6 +5,7 @@ owns the stream. Cancelling a running session from the sidebar context menu must
 address that session's stream id and must only clear approval/clarify UI owned by
 that session.
 """
+
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -33,18 +34,22 @@ class TestSidebarCancelAction:
         assert "cancelSessionStream(session)" in body, (
             "running sidebar sessions must expose a stop action that cancels that session"
         )
-        assert body.find("cancelSessionStream(session)") < body.find("deleteSession(session.session_id)"), (
-            "stop action should appear before destructive delete action"
-        )
+        assert body.find("cancelSessionStream(session)") < body.find(
+            "deleteSession(session.session_id)"
+        ), "stop action should appear before destructive delete action"
 
     def test_cancel_session_stream_uses_session_owned_stream_id(self):
         """Cancel-from-sidebar must call /api/chat/cancel with the row's stream id."""
         body = _function_body(BOOT_JS, "cancelSessionStream")
-        assert "session&&session.active_stream_id" in body or "session && session.active_stream_id" in body
-        assert "stream_id=${encodeURIComponent(streamId)}" in body
-        assert "S.activeStreamId" not in body.split("const streamId", 1)[1].split("fetch", 1)[0], (
-            "sidebar cancel must not derive the stream id from the active pane global"
+        assert (
+            "session&&session.active_stream_id" in body
+            or "session && session.active_stream_id" in body
         )
+        assert "stream_id=${encodeURIComponent(streamId)}" in body
+        assert (
+            "S.activeStreamId"
+            not in body.split("const streamId", 1)[1].split("fetch", 1)[0]
+        ), "sidebar cancel must not derive the stream id from the active pane global"
 
     def test_cancel_session_stream_clears_only_owned_clarify_and_approval_cards(self):
         """Cancelling A from sidebar must not blanket-clear B's clarify/approval cards."""
@@ -80,5 +85,7 @@ class TestSidebarCancelAction:
         # duplicate/delete should both be gated by the same external-session check
         first = body.find("_appendSessionDuplicateAction")
         second = body.find("t('session_delete')")
-        assert first > 0 and second > 0, "menu actions should still include duplicate/delete nodes"
+        assert first > 0 and second > 0, (
+            "menu actions should still include duplicate/delete nodes"
+        )
         assert first < second, "duplicate action should render before delete action"

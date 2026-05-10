@@ -24,6 +24,7 @@ Fix:
 
 These tests pin both prongs.
 """
+
 from __future__ import annotations
 
 import api.config as config
@@ -57,7 +58,9 @@ def test_cfg_has_in_memory_overrides_detects_attr_rebind(monkeypatch):
     assert config._cfg_has_in_memory_overrides() is False
 
     # Rebind cfg.
-    monkeypatch.setattr(config, "cfg", {"model": {"provider": "openrouter"}}, raising=False)
+    monkeypatch.setattr(
+        config, "cfg", {"model": {"provider": "openrouter"}}, raising=False
+    )
     assert config._cfg_has_in_memory_overrides() is True
 
 

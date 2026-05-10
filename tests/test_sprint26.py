@@ -2,7 +2,10 @@
 Sprint 26 Tests: canonical appearance settings persist and legacy theme names
 map onto the new theme + skin system.
 """
-import json, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 import pathlib
 import sys
 
@@ -22,8 +25,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -32,6 +36,7 @@ def post(path, body=None):
 
 
 # ── Theme settings ───────────────────────────────────────────────────────
+
 
 def test_settings_default_theme():
     """Default theme should be 'dark'."""

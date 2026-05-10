@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import pytest
-from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from api import routes
@@ -73,9 +72,24 @@ def test_kanban_stale_client_error_renders_hard_refresh_escape_hatch():
     ("method", "path", "payload_attr", "payload_error"),
     [
         ("GET", "/api/kanban/tasks/abc/log", "_task_log_payload", "task not found"),
-        ("POST", "/api/kanban/boards", "_create_board_payload", "invalid board payload"),
-        ("PATCH", "/api/kanban/boards/abc", "_update_board_payload", "invalid patch payload"),
-        ("DELETE", "/api/kanban/links", "_link_tasks_payload", "invalid delete payload"),
+        (
+            "POST",
+            "/api/kanban/boards",
+            "_create_board_payload",
+            "invalid board payload",
+        ),
+        (
+            "PATCH",
+            "/api/kanban/boards/abc",
+            "_update_board_payload",
+            "invalid patch payload",
+        ),
+        (
+            "DELETE",
+            "/api/kanban/links",
+            "_link_tasks_payload",
+            "invalid delete payload",
+        ),
     ],
 )
 def test_inner_handler_bad_response_does_not_emit_double_404(
@@ -91,7 +105,9 @@ def test_inner_handler_bad_response_does_not_emit_double_404(
     # Force one kanban payload helper to hit bad() and return None, so the
     # wrapper path should not append _kanban_unknown_endpoint.
     monkeypatch.setattr(
-        kanban_bridge, payload_attr, lambda *a, **kw: (_ for _ in ()).throw(LookupError(payload_error))
+        kanban_bridge,
+        payload_attr,
+        lambda *a, **kw: (_ for _ in ()).throw(LookupError(payload_error)),
     )
 
     handler = _FakeHandler()

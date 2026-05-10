@@ -74,10 +74,9 @@ def _both_callsites():
         # Skip legacy fallbacks (gated under `except TypeError:` for older builds).
         # These are intentionally 2-arg.
         # Look back ~200 chars for the legacy marker.
-        lookback = src[max(0, idx - 400):idx]
+        lookback = src[max(0, idx - 400) : idx]
         is_legacy_fallback = (
-            "except TypeError:" in lookback
-            and "_legacy_cl" in block + lookback
+            "except TypeError:" in lookback and "_legacy_cl" in block + lookback
         ) or "_legacy_cl(" in block
         # Also exclude any callsite where the immediately preceding line
         # is part of a TypeError fallback block (the second callsite shape:
@@ -112,7 +111,7 @@ def test_both_callsites_pass_config_context_length():
     blocks = _both_callsites()
     for i, block in enumerate(blocks):
         assert "config_context_length=_cfg_ctx_len" in block, (
-            f"Callsite #{i+1} is missing `config_context_length=_cfg_ctx_len`. "
+            f"Callsite #{i + 1} is missing `config_context_length=_cfg_ctx_len`. "
             f"Without it, users who set `model.context_length: 1048576` in "
             f"config.yaml get 256K from the default fallback. See #1896.\n\n"
             f"Block:\n{block}"
@@ -124,7 +123,7 @@ def test_both_callsites_pass_provider():
     blocks = _both_callsites()
     for i, block in enumerate(blocks):
         assert "provider=resolved_provider" in block, (
-            f"Callsite #{i+1} is missing `provider=resolved_provider...`. "
+            f"Callsite #{i + 1} is missing `provider=resolved_provider...`. "
             f"Provider is needed for the registry lookup step (models.dev "
             f"provider-aware lookup). See #1896.\n\nBlock:\n{block}"
         )
@@ -135,7 +134,7 @@ def test_both_callsites_pass_custom_providers():
     blocks = _both_callsites()
     for i, block in enumerate(blocks):
         assert "custom_providers=_cfg_custom_providers" in block, (
-            f"Callsite #{i+1} is missing `custom_providers=_cfg_custom_providers`. "
+            f"Callsite #{i + 1} is missing `custom_providers=_cfg_custom_providers`. "
             f"This is needed for the `custom_providers` per-model context_length "
             f"override path. See #1896.\n\nBlock:\n{block}"
         )

@@ -50,7 +50,9 @@ class _IsolatedSkillsDirs:
             self.root_skills.symlink_to(self._root_symlink_target)
 
 
-def _write_skill(skills_dir: pathlib.Path, name: str, description: str, body: str) -> pathlib.Path:
+def _write_skill(
+    skills_dir: pathlib.Path, name: str, description: str, body: str
+) -> pathlib.Path:
     skill_dir = skills_dir / name
     (skill_dir / "references").mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(

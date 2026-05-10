@@ -25,15 +25,17 @@ import pytest
 def test_profiles_match_exact():
     """Same name on both sides matches."""
     from api.routes import _profiles_match
-    assert _profiles_match('haku', 'haku') is True
-    assert _profiles_match('default', 'default') is True
+
+    assert _profiles_match("haku", "haku") is True
+    assert _profiles_match("default", "default") is True
 
 
 def test_profiles_match_distinct_named_profiles():
     """Different named profiles do not cross-match."""
     from api.routes import _profiles_match
-    assert _profiles_match('haku', 'kinni') is False
-    assert _profiles_match('noblepro', 'haku') is False
+
+    assert _profiles_match("haku", "kinni") is False
+    assert _profiles_match("noblepro", "haku") is False
 
 
 def test_profiles_match_default_alias_treated_as_root(monkeypatch):
@@ -43,16 +45,20 @@ def test_profiles_match_default_alias_treated_as_root(monkeypatch):
     import api.profiles as p
     from api.routes import _profiles_match
 
-    monkeypatch.setattr(p, 'list_profiles_api', lambda: [
-        {'name': 'kinni', 'is_default': True, 'path': str(p._DEFAULT_HERMES_HOME)},
-    ])
+    monkeypatch.setattr(
+        p,
+        "list_profiles_api",
+        lambda: [
+            {"name": "kinni", "is_default": True, "path": str(p._DEFAULT_HERMES_HOME)},
+        ],
+    )
     p._invalidate_root_profile_cache()
 
-    assert _profiles_match('default', 'kinni') is True
-    assert _profiles_match('kinni', 'default') is True
+    assert _profiles_match("default", "kinni") is True
+    assert _profiles_match("kinni", "default") is True
     # And neither matches a true named profile
-    assert _profiles_match('default', 'haku') is False
-    assert _profiles_match('kinni', 'haku') is False
+    assert _profiles_match("default", "haku") is False
+    assert _profiles_match("kinni", "haku") is False
 
 
 def test_profiles_match_empty_row_treated_as_root():
@@ -63,16 +69,18 @@ def test_profiles_match_empty_row_treated_as_root():
     to 'default' for such rows.
     """
     from api.routes import _profiles_match
-    assert _profiles_match(None, 'default') is True
-    assert _profiles_match('', 'default') is True
-    assert _profiles_match(None, 'haku') is False
+
+    assert _profiles_match(None, "default") is True
+    assert _profiles_match("", "default") is True
+    assert _profiles_match(None, "haku") is False
 
 
 def test_profiles_match_active_none_treated_as_default():
     """If active profile resolves to None/empty (boot edge case), treat as 'default'."""
     from api.routes import _profiles_match
-    assert _profiles_match('default', None) is True
-    assert _profiles_match('default', '') is True
+
+    assert _profiles_match("default", None) is True
+    assert _profiles_match("default", "") is True
 
 
 # ── _all_profiles_query_flag ───────────────────────────────────────────────
@@ -81,16 +89,22 @@ def test_profiles_match_active_none_treated_as_default():
 def test_all_profiles_query_flag_true_values():
     """1, true, yes, on (case-insensitive) all enable aggregate mode."""
     from api.routes import _all_profiles_query_flag
-    for v in ('1', 'true', 'TRUE', 'yes', 'YES', 'on'):
-        u = urlparse(f'/api/sessions?all_profiles={v}')
+
+    for v in ("1", "true", "TRUE", "yes", "YES", "on"):
+        u = urlparse(f"/api/sessions?all_profiles={v}")
         assert _all_profiles_query_flag(u) is True, f"value {v!r} should be true"
 
 
 def test_all_profiles_query_flag_false_values():
     """0, empty, garbage, missing — all default to scoped mode (False)."""
     from api.routes import _all_profiles_query_flag
-    for path in ('/api/sessions', '/api/sessions?all_profiles=0',
-                 '/api/sessions?all_profiles=', '/api/sessions?all_profiles=lol'):
+
+    for path in (
+        "/api/sessions",
+        "/api/sessions?all_profiles=0",
+        "/api/sessions?all_profiles=",
+        "/api/sessions?all_profiles=lol",
+    ):
         u = urlparse(path)
         assert _all_profiles_query_flag(u) is False, f"path {path!r} should be false"
 
@@ -110,7 +124,7 @@ def test_static_sessions_js_no_cli_session_bypass():
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
-    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    src = (repo_root / "static" / "sessions.js").read_text(encoding="utf-8")
 
     assert "s.is_cli_session||s.profile===S.activeProfile" not in src, (
         "Old CLI-session bypass must be removed (#1611)"
@@ -129,7 +143,7 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
-    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    src = (repo_root / "static" / "sessions.js").read_text(encoding="utf-8")
 
     assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
         "Expected fetch path to flip on the toggle state"
@@ -156,7 +170,7 @@ def test_keep_latest_messaging_runs_after_profile_filter():
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
-    src = (repo_root / 'api' / 'routes.py').read_text(encoding='utf-8')
+    src = (repo_root / "api" / "routes.py").read_text(encoding="utf-8")
 
     handler_idx = src.find('parsed.path == "/api/sessions":')
     assert handler_idx > 0
@@ -164,7 +178,7 @@ def test_keep_latest_messaging_runs_after_profile_filter():
     block = src[handler_idx:next_handler]
 
     filter_idx = block.find('_profiles_match(s.get("profile"), active_profile)')
-    dedupe_idx = block.find('_keep_latest_messaging_session_per_source(scoped)')
+    dedupe_idx = block.find("_keep_latest_messaging_session_per_source(scoped)")
     assert filter_idx > 0, "Profile filter not found in /api/sessions handler"
     assert dedupe_idx > 0, "Messaging dedupe must run on the scoped list"
     assert filter_idx < dedupe_idx, (
@@ -189,10 +203,12 @@ def test_static_sessions_js_trusts_server_profile_scoping():
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
-    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    src = (repo_root / "static" / "sessions.js").read_text(encoding="utf-8")
 
     # The fragile client-side strict-equality filter must be gone.
-    forbidden = "withMessages.filter(s=>(s.profile||'default')===(S.activeProfile||'default'))"
+    forbidden = (
+        "withMessages.filter(s=>(s.profile||'default')===(S.activeProfile||'default'))"
+    )
     assert forbidden not in src, (
         "Client must not re-filter rows the server already cross-aliased "
         "(Opus pre-release SHOULD-FIX #1)"
@@ -211,6 +227,7 @@ def test_static_sessions_js_trusts_server_profile_scoping():
 @pytest.fixture(autouse=True)
 def _invalidate_profile_cache():
     import api.profiles as p
+
     p._invalidate_root_profile_cache()
     yield
     p._invalidate_root_profile_cache()

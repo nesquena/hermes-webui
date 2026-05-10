@@ -22,6 +22,7 @@ try:
         _ClarifyEntry,
         submit_pending,
     )
+
     CLARIFY_AVAILABLE = True
 except ImportError:
     CLARIFY_AVAILABLE = False
@@ -41,7 +42,9 @@ def get(path):
 def post(path, body=None):
     url = BASE + path
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -92,7 +95,11 @@ class TestClarifyUnblocking:
 
     def test_submit_pending_registers_entry(self):
         sid = f"unit-submit-{uuid.uuid4().hex[:8]}"
-        data = {"question": "Pick", "choices_offered": ["one", "two"], "session_id": sid}
+        data = {
+            "question": "Pick",
+            "choices_offered": ["one", "two"],
+            "session_id": sid,
+        }
         entry = submit_pending(sid, data)
         assert entry.data["question"] == data["question"]
         assert entry.data["choices_offered"] == data["choices_offered"]
@@ -119,18 +126,22 @@ class TestClarifyUnblocking:
 class TestClarifyModuleExports:
     def test_register_gateway_notify_exported(self):
         import api.clarify as ap
+
         assert hasattr(ap, "register_gateway_notify")
 
     def test_unregister_gateway_notify_exported(self):
         import api.clarify as ap
+
         assert hasattr(ap, "unregister_gateway_notify")
 
     def test_resolve_clarify_exported(self):
         import api.clarify as ap
+
         assert hasattr(ap, "resolve_clarify")
 
     def test_clarify_entry_exported(self):
         import api.clarify as ap
+
         assert hasattr(ap, "_ClarifyEntry")
 
 
@@ -139,10 +150,13 @@ class TestClarifyHTTPEndpoints:
 
     def test_respond_returns_ok_no_pending(self):
         sid = f"http-no-pending-{uuid.uuid4().hex[:8]}"
-        result, status = post("/api/clarify/respond", {
-            "session_id": sid,
-            "response": "Use option A",
-        })
+        result, status = post(
+            "/api/clarify/respond",
+            {
+                "session_id": sid,
+                "response": "Use option A",
+            },
+        )
         assert status == 200
         assert result["ok"] is True
 
@@ -168,10 +182,13 @@ class TestClarifyHTTPEndpoints:
         data = get(f"/api/clarify/pending?session_id={urllib.parse.quote(sid)}")
         assert data["pending"] is not None
 
-        result, status = post("/api/clarify/respond", {
-            "session_id": sid,
-            "response": "B",
-        })
+        result, status = post(
+            "/api/clarify/respond",
+            {
+                "session_id": sid,
+                "response": "B",
+            },
+        )
         assert status == 200
         assert result["ok"] is True
 

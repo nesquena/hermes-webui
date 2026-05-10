@@ -52,21 +52,33 @@ def _restore_config(old_cfg, old_mtime):
     config._cfg_mtime = old_mtime
 
 
-def test_openrouter_quota_fetches_key_endpoint_and_sanitizes_response(monkeypatch, tmp_path):
+def test_openrouter_quota_fetches_key_endpoint_and_sanitizes_response(
+    monkeypatch, tmp_path
+):
     """OpenRouter's documented key endpoint should be called server-side only."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=test-openrouter-key-private\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENROUTER_API_KEY=test-openrouter-key-private\n", encoding="utf-8"
+    )
     old_cfg, old_mtime = _with_config(model={"provider": "openrouter"})
 
     import api.providers as providers
+
     seen = {}
 
     def fake_urlopen(req, timeout):
         seen["url"] = req.full_url
         seen["timeout"] = timeout
         seen["authorization"] = req.headers.get("Authorization")
-        payload = {"data": {"limit_remaining": "12.5", "usage": 3, "limit": 20, "key": "must-not-leak"}}
+        payload = {
+            "data": {
+                "limit_remaining": "12.5",
+                "usage": 3,
+                "limit": 20,
+                "key": "must-not-leak",
+            }
+        }
         return _FakeResponse(json.dumps(payload).encode("utf-8"))
 
     monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
@@ -94,7 +106,9 @@ def test_openrouter_quota_fetches_key_endpoint_and_sanitizes_response(monkeypatc
     assert "must-not-leak" not in repr(result)
 
 
-def test_openrouter_quota_no_key_returns_safe_no_key_without_network(monkeypatch, tmp_path):
+def test_openrouter_quota_no_key_returns_safe_no_key_without_network(
+    monkeypatch, tmp_path
+):
     """No-key state must not call OpenRouter or leak environment details."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -123,17 +137,22 @@ def test_openrouter_quota_invalid_key_and_timeout_are_sanitized(monkeypatch, tmp
     """Invalid-key and timeout/error paths should expose statuses, not secrets."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=test-openrouter-key-private\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENROUTER_API_KEY=test-openrouter-key-private\n", encoding="utf-8"
+    )
     old_cfg, old_mtime = _with_config(model={"provider": "openrouter"})
 
     import api.providers as providers
 
     req = providers.urllib.request.Request("https://openrouter.ai/api/v1/key")
-    invalid = urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, BytesIO(b"secret body"))
+    invalid = urllib.error.HTTPError(
+        req.full_url, 401, "Unauthorized", {}, BytesIO(b"secret body")
+    )
     errors = [invalid, TimeoutError("slow secret")]
 
     try:
         for expected in ("invalid_key", "unavailable"):
+
             def fake_urlopen(_req, timeout=None, *, _err=errors.pop(0)):
                 raise _err
 
@@ -154,6 +173,7 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     old_cfg, old_mtime = _with_config(model={"provider": "openai"})
 
     import api.providers as providers
+
     try:
         result = providers.get_provider_quota()
     finally:
@@ -167,12 +187,15 @@ def test_unsupported_provider_reports_followup_state(monkeypatch, tmp_path):
     assert "follow-up" in result["message"]
 
 
-def test_codex_account_usage_is_fetched_under_active_profile_home(monkeypatch, tmp_path):
+def test_codex_account_usage_is_fetched_under_active_profile_home(
+    monkeypatch, tmp_path
+):
     """Codex account limits must use the selected WebUI profile's HERMES_HOME."""
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
 
     import api.providers as providers
+
     seen = {}
     previous_home = os.environ.get("HERMES_HOME")
 
@@ -306,7 +329,9 @@ def test_anthropic_oauth_usage_unavailable_reason_is_reported(monkeypatch, tmp_p
     assert result["provider"] == "anthropic"
     assert result["supported"] is True
     assert result["status"] == "unavailable"
-    assert result["account_limits"]["unavailable_reason"].startswith("Anthropic account limits")
+    assert result["account_limits"]["unavailable_reason"].startswith(
+        "Anthropic account limits"
+    )
     assert "OAuth-backed Claude accounts" in result["message"]
 
 
@@ -335,7 +360,9 @@ def test_account_usage_profile_env_is_child_scoped(monkeypatch, tmp_path):
     assert os.environ["ANTHROPIC_API_KEY"] == "process-key"
 
 
-def test_account_usage_profile_fetches_can_overlap_for_different_homes(monkeypatch, tmp_path):
+def test_account_usage_profile_fetches_can_overlap_for_different_homes(
+    monkeypatch, tmp_path
+):
     """Different profile quota fetches should not serialize on cron's global lock."""
     import api.providers as providers
 

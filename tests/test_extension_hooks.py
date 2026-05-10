@@ -85,7 +85,9 @@ def test_extension_config_accepts_only_safe_same_origin_urls(tmp_path, monkeypat
     }
 
 
-def test_index_html_injection_escapes_urls_and_preserves_disabled_default(tmp_path, monkeypatch):
+def test_index_html_injection_escapes_urls_and_preserves_disabled_default(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("HERMES_WEBUI_EXTENSION_DIR", raising=False)
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/app.js")
 
@@ -97,13 +99,17 @@ def test_index_html_injection_escapes_urls_and_preserves_disabled_default(tmp_pa
     root = tmp_path / "extensions"
     root.mkdir()
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(root))
-    monkeypatch.setenv("HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/app.js?v=1&mode=dev")
+    monkeypatch.setenv(
+        "HERMES_WEBUI_EXTENSION_SCRIPT_URLS", "/extensions/app.js?v=1&mode=dev"
+    )
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_STYLESHEET_URLS", "/extensions/app.css")
 
     injected = inject_extension_tags(html)
 
     assert '<link rel="stylesheet" href="/extensions/app.css">' in injected
-    assert '<script src="/extensions/app.js?v=1&amp;mode=dev" defer></script>' in injected
+    assert (
+        '<script src="/extensions/app.js?v=1&amp;mode=dev" defer></script>' in injected
+    )
     assert injected.index("/extensions/app.css") < injected.index("</head>")
     assert injected.index("/extensions/app.js") < injected.index("</body>")
 
@@ -117,7 +123,10 @@ def test_extension_route_remains_behind_webui_auth(monkeypatch):
     # SimpleNamespace must include `query` because api.auth.check_auth (since
     # v0.50.258, the multi-param ?next= encoding fix) accesses `parsed.query`
     # when constructing the redirect Location header.
-    assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
+    assert (
+        check_auth(extension, SimpleNamespace(path="/extensions/app.js", query=""))
+        is False
+    )
     assert extension.status == 302
     assert extension.header("Location") == "login?next=/extensions/app.js"
 
@@ -140,32 +149,52 @@ def test_extension_static_serving_is_sandboxed(tmp_path, monkeypatch):
     from api.extensions import serve_extension_static
 
     ok = FakeHandler()
-    assert serve_extension_static(ok, SimpleNamespace(path="/extensions/app.js")) is True
+    assert (
+        serve_extension_static(ok, SimpleNamespace(path="/extensions/app.js")) is True
+    )
     assert ok.status == 200
     assert ok.header("Content-Type") == "application/javascript; charset=utf-8"
     assert bytes(ok.body) == b"window.extensionLoaded = true;"
 
     traversal = FakeHandler()
-    assert serve_extension_static(traversal, SimpleNamespace(path="/extensions/../outside.txt")) is True
+    assert (
+        serve_extension_static(
+            traversal, SimpleNamespace(path="/extensions/../outside.txt")
+        )
+        is True
+    )
     assert traversal.status == 404
 
     encoded_traversal = FakeHandler()
-    assert serve_extension_static(encoded_traversal, SimpleNamespace(path="/extensions/%2e%2e/outside.txt")) is True
+    assert (
+        serve_extension_static(
+            encoded_traversal, SimpleNamespace(path="/extensions/%2e%2e/outside.txt")
+        )
+        is True
+    )
     assert encoded_traversal.status == 404
 
     dotfile = FakeHandler()
-    assert serve_extension_static(dotfile, SimpleNamespace(path="/extensions/.secret")) is True
+    assert (
+        serve_extension_static(dotfile, SimpleNamespace(path="/extensions/.secret"))
+        is True
+    )
     assert dotfile.status == 404
 
 
-def test_extension_static_serving_fails_closed_when_disabled_or_unreadable(tmp_path, monkeypatch):
+def test_extension_static_serving_fails_closed_when_disabled_or_unreadable(
+    tmp_path, monkeypatch
+):
     missing_root = tmp_path / "missing"
     monkeypatch.setenv("HERMES_WEBUI_EXTENSION_DIR", str(missing_root))
 
     from api.extensions import serve_extension_static
 
     disabled = FakeHandler()
-    assert serve_extension_static(disabled, SimpleNamespace(path="/extensions/app.js")) is True
+    assert (
+        serve_extension_static(disabled, SimpleNamespace(path="/extensions/app.js"))
+        is True
+    )
     assert disabled.status == 404
 
     root = tmp_path / "extensions"
@@ -175,14 +204,22 @@ def test_extension_static_serving_fails_closed_when_disabled_or_unreadable(tmp_p
     (root / "nested" / "app.js").write_text("ok", encoding="utf-8")
 
     encoded_slash_traversal = FakeHandler()
-    assert serve_extension_static(
-        encoded_slash_traversal,
-        SimpleNamespace(path="/extensions/nested%2f..%2f..%2foutside.txt"),
-    ) is True
+    assert (
+        serve_extension_static(
+            encoded_slash_traversal,
+            SimpleNamespace(path="/extensions/nested%2f..%2f..%2foutside.txt"),
+        )
+        is True
+    )
     assert encoded_slash_traversal.status == 404
 
     encoded_backslash = FakeHandler()
-    assert serve_extension_static(encoded_backslash, SimpleNamespace(path="/extensions/nested%5capp.js")) is True
+    assert (
+        serve_extension_static(
+            encoded_backslash, SimpleNamespace(path="/extensions/nested%5capp.js")
+        )
+        is True
+    )
     assert encoded_backslash.status == 404
 
 
@@ -205,5 +242,10 @@ def test_extension_static_serving_rejects_symlink_escape(tmp_path, monkeypatch):
     from api.extensions import serve_extension_static
 
     escaped = FakeHandler()
-    assert serve_extension_static(escaped, SimpleNamespace(path="/extensions/outside-link.txt")) is True
+    assert (
+        serve_extension_static(
+            escaped, SimpleNamespace(path="/extensions/outside-link.txt")
+        )
+        is True
+    )
     assert escaped.status == 404

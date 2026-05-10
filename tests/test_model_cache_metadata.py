@@ -43,6 +43,7 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
     # _webui_version may be absent in early-init paths where api.updates isn't
     # yet imported; in normal test runs api.updates IS imported, so assert it.
     import sys
+
     if "api.updates" in sys.modules:
         assert on_disk.get("_webui_version") == sys.modules["api.updates"].WEBUI_VERSION
 
@@ -51,7 +52,9 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
     assert loaded == payload
 
 
-def test_load_models_cache_from_disk_rejects_legacy_groups_only_cache(tmp_path, monkeypatch):
+def test_load_models_cache_from_disk_rejects_legacy_groups_only_cache(
+    tmp_path, monkeypatch
+):
     cache_path = tmp_path / "models_cache.json"
     monkeypatch.setattr(config, "_models_cache_path", cache_path)
     cache_path.write_text(
@@ -93,10 +96,18 @@ def test_load_models_cache_from_disk_rejects_partial_metadata_cache(
     }
 
     invalid_payloads = [
-        {key: value for key, value in valid_payload.items() if key != "active_provider"},
+        {
+            key: value
+            for key, value in valid_payload.items()
+            if key != "active_provider"
+        },
         {key: value for key, value in valid_payload.items() if key != "default_model"},
         {key: value for key, value in valid_payload.items() if key != "groups"},
-        {key: value for key, value in valid_payload.items() if key != "configured_model_badges"},
+        {
+            key: value
+            for key, value in valid_payload.items()
+            if key != "configured_model_badges"
+        },
         {**valid_payload, "active_provider": 123},
         {**valid_payload, "default_model": None},
         {**valid_payload, "groups": {}},

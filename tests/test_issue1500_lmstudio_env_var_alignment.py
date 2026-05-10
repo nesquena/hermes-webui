@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
 import api.config as config
 import api.profiles as profiles
@@ -49,6 +48,7 @@ def _install_fake_hermes_cli(monkeypatch):
     monkeypatch.delitem(sys.modules, "agent", raising=False)
     try:
         from api.config import invalidate_models_cache
+
         invalidate_models_cache()
     except Exception:
         pass
@@ -77,6 +77,7 @@ class TestIssue1500EnvVarAlignment:
     def test_onboarding_supported_provider_setup_uses_lm_api_key(self):
         """The wizard's lmstudio entry must declare the canonical env var name."""
         from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
         assert "lmstudio" in _SUPPORTED_PROVIDER_SETUPS
         meta = _SUPPORTED_PROVIDER_SETUPS["lmstudio"]
         assert meta["env_var"] == "LM_API_KEY", (
@@ -99,6 +100,7 @@ class TestIssue1500EnvVarAlignment:
         # Redirect every write target to the tmp_path so we don't touch the real
         # ~/.hermes — pattern from webui-onboarding-provider-readiness skill.
         from api import onboarding as ob
+
         monkeypatch.setattr(ob, "_get_active_hermes_home", lambda: tmp_path)
         cfg_path = tmp_path / "config.yaml"
         monkeypatch.setattr(ob, "_get_config_path", lambda: cfg_path)
@@ -107,12 +109,14 @@ class TestIssue1500EnvVarAlignment:
         monkeypatch.delenv("LM_API_KEY", raising=False)
         monkeypatch.delenv("LMSTUDIO_API_KEY", raising=False)
 
-        ob.apply_onboarding_setup({
-            "provider": "lmstudio",
-            "model": "qwen3-27b",
-            "base_url": "http://example.local:1234/v1",
-            "api_key": "fresh-canon",
-        })
+        ob.apply_onboarding_setup(
+            {
+                "provider": "lmstudio",
+                "model": "qwen3-27b",
+                "base_url": "http://example.local:1234/v1",
+                "api_key": "fresh-canon",
+            }
+        )
 
         env_path = tmp_path / ".env"
         assert env_path.exists(), "onboarding must write .env"
@@ -136,6 +140,7 @@ class TestIssue1500EnvVarAlignment:
         restore = _swap_in_test_config({"model": {"provider": "lmstudio"}})
         try:
             from api.providers import get_providers
+
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert by_id["lmstudio"]["has_key"] is True, (
@@ -162,6 +167,7 @@ class TestIssue1500EnvVarAlignment:
         restore = _swap_in_test_config({"model": {"provider": "lmstudio"}})
         try:
             from api.providers import get_providers, _provider_has_key
+
             assert _provider_has_key("lmstudio") is True
             # Both lead to has_key=True; the contract is that canonical is
             # checked first (so it's definitely returning True and not just
@@ -184,6 +190,7 @@ class TestIssue1500EnvVarAlignment:
         user gets a re-firing wizard even though their LM Studio is configured.
         """
         from api.onboarding import _provider_api_key_present
+
         cfg = {"model": {"provider": "lmstudio"}}
 
         # Only the legacy name set in .env values — onboarding must still see it.

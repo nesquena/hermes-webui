@@ -36,8 +36,13 @@ def test_offline_banner_markup_styles_and_copy_exist():
 def test_offline_monitor_patches_fetch_and_auto_reloads_after_health_probe():
     assert "const OFFLINE_RECHECK_MS=2500" in UI_JS
     assert "window.fetch=async function(...args)" in UI_JS
-    assert "window.addEventListener('offline',()=>showOfflineBanner('browser'))" in UI_JS
-    assert "window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();})" in UI_JS
+    assert (
+        "window.addEventListener('offline',()=>showOfflineBanner('browser'))" in UI_JS
+    )
+    assert (
+        "window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();})"
+        in UI_JS
+    )
     assert "setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS)" in UI_JS
     assert "new URL('health',document.baseURI||location.href)" in UI_JS
     assert "window.location.reload()" in UI_JS
@@ -56,10 +61,15 @@ def test_offline_recovery_probe_is_serialized_and_stops_timer_before_reload():
 
 
 def test_fetch_typeerror_is_gated_by_health_probe_not_blind_banner():
-    fetch_patch = UI_JS.split("window.fetch=async function(...args){", 1)[1].split("function initOfflineMonitor", 1)[0]
+    fetch_patch = UI_JS.split("window.fetch=async function(...args){", 1)[1].split(
+        "function initOfflineMonitor", 1
+    )[0]
     assert "function _isAbortError(e)" in UI_JS
     assert "e instanceof TypeError&&!_isAbortError(e)" in fetch_patch
-    assert "void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');})" in fetch_patch
+    assert (
+        "void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');})"
+        in fetch_patch
+    )
     assert "if(!_browserReportsOnline())showOfflineBanner('browser');" in fetch_patch
     assert "e instanceof TypeError||!_browserReportsOnline()" not in fetch_patch
 
@@ -68,5 +78,9 @@ def test_sse_network_error_defers_to_offline_banner_instead_of_inline_error():
     assert "function _deferStreamErrorIfOffline()" in MESSAGES_JS
     assert "t('offline_stream_waiting')" in MESSAGES_JS
     assert "if(_deferStreamErrorIfOffline()) return;" in MESSAGES_JS
-    error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split("source.addEventListener('cancel'", 1)[0]
-    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind("_handleStreamError()")
+    error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[
+        1
+    ].split("source.addEventListener('cancel'", 1)[0]
+    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind(
+        "_handleStreamError()"
+    )

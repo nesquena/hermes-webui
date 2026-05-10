@@ -93,7 +93,11 @@ def test_compose_files_document_skip_chmod_escape_hatch():
     hit by #1389 (the auth.json/.env chmod-override bug) can find the fix
     in the file they're reading. The fix shipped in v0.50.254 but Docker
     users may not be reading CHANGELOGs."""
-    for fname in ("docker-compose.yml", "docker-compose.two-container.yml", "docker-compose.three-container.yml"):
+    for fname in (
+        "docker-compose.yml",
+        "docker-compose.two-container.yml",
+        "docker-compose.three-container.yml",
+    ):
         src = (REPO / fname).read_text(encoding="utf-8")
         assert "HERMES_SKIP_CHMOD" in src, (
             f"{fname}: must document HERMES_SKIP_CHMOD as a bind-mount "
@@ -115,8 +119,15 @@ def test_env_docker_example_exists():
     src = p.read_text(encoding="utf-8")
 
     # Must document the critical vars
-    for var in ("UID", "GID", "HERMES_HOME", "HERMES_WORKSPACE",
-                "HERMES_WEBUI_PASSWORD", "HERMES_SKIP_CHMOD", "HERMES_HOME_MODE"):
+    for var in (
+        "UID",
+        "GID",
+        "HERMES_HOME",
+        "HERMES_WORKSPACE",
+        "HERMES_WEBUI_PASSWORD",
+        "HERMES_SKIP_CHMOD",
+        "HERMES_HOME_MODE",
+    ):
         assert var in src, (
             f".env.docker.example must document {var} — without it, users "
             f"hit by the related failure mode have no in-template hint."
@@ -183,8 +194,11 @@ def test_compose_files_parse_as_valid_yaml():
     file that breaks `docker compose up` for everyone."""
     import yaml
 
-    for fname in ("docker-compose.yml", "docker-compose.two-container.yml",
-                  "docker-compose.three-container.yml"):
+    for fname in (
+        "docker-compose.yml",
+        "docker-compose.two-container.yml",
+        "docker-compose.three-container.yml",
+    ):
         path = REPO / fname
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -213,7 +227,10 @@ def test_agent_service_does_not_recommend_invalid_home_mode():
         "HERMES_HOME_MODE=0660",
     )
 
-    for fname in ("docker-compose.two-container.yml", "docker-compose.three-container.yml"):
+    for fname in (
+        "docker-compose.two-container.yml",
+        "docker-compose.three-container.yml",
+    ):
         src = (REPO / fname).read_text(encoding="utf-8")
 
         # Find each agent/dashboard service block by name and slice to the next
@@ -244,7 +261,10 @@ def test_compose_files_warn_about_home_mode_asymmetry():
     """The compose files must explicitly warn about the WebUI vs agent
     HERMES_HOME_MODE semantic asymmetry so users don't copy the WebUI's
     valid 0640 value into the agent service."""
-    for fname in ("docker-compose.two-container.yml", "docker-compose.three-container.yml"):
+    for fname in (
+        "docker-compose.two-container.yml",
+        "docker-compose.three-container.yml",
+    ):
         src = (REPO / fname).read_text(encoding="utf-8").lower()
         # Look for a comment that distinguishes directory mode from credential file mode
         assert "directory" in src and "credential" in src, (

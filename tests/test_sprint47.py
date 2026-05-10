@@ -7,6 +7,7 @@ Covers:
 - boot.js primes the async skill load when typing '/'
 - the dropdown marks skill-backed entries visually
 """
+
 import pathlib
 
 
@@ -24,9 +25,10 @@ def test_skill_commands_are_loaded_from_api_skills_for_autocomplete():
 
 def test_builtin_commands_take_precedence_over_skill_slug_collisions():
     # In the combined implementation, REGISTRY (agent registry + WEBUI_ONLY) wins over skills
-    assert ("if(COMMANDS.some(c=>c.name===slug)) return null;" in COMMANDS_JS or
-            "if(REGISTRY.some(c=>c.name===slug)) return null;" in COMMANDS_JS), \
-        "Built-in commands must block skill slug collisions"
+    assert (
+        "if(COMMANDS.some(c=>c.name===slug)) return null;" in COMMANDS_JS
+        or "if(REGISTRY.some(c=>c.name===slug)) return null;" in COMMANDS_JS
+    ), "Built-in commands must block skill slug collisions"
 
 
 def test_typing_slash_primes_async_skill_command_loading():

@@ -55,22 +55,42 @@ def test_render_messages_preserve_scroll_option_uses_user_pin_state_not_stream_l
     assert "function renderMessages(options)" in render_body
     assert "const preserveScroll=!!(options&&options.preserveScroll);" in render_body
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in render_body
-    assert "const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null" in render_body
-    assert "if(preserveScroll){\n    if(_scrollPinned) scrollIfPinned();\n    else _restoreMessageScrollSnapshot(scrollSnapshot);\n    return;\n  }" in scroll_helper
-    assert "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }" in scroll_helper
+    assert (
+        "const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null"
+        in render_body
+    )
+    assert (
+        "if(preserveScroll){\n    if(_scrollPinned) scrollIfPinned();\n    else _restoreMessageScrollSnapshot(scrollSnapshot);\n    return;\n  }"
+        in scroll_helper
+    )
+    assert (
+        "if(S.activeStreamId){\n    scrollIfPinned();\n    return;\n  }"
+        in scroll_helper
+    )
 
 
 def test_cached_render_path_uses_same_scroll_policy_as_fresh_render():
     render_body = _function_body(UI_JS, "renderMessages")
-    cached_branch = render_body[render_body.index("if(sid&&sid!==_sessionHtmlCacheSid") : render_body.index("const compressionState=")]
+    cached_branch = render_body[
+        render_body.index("if(sid&&sid!==_sessionHtmlCacheSid") : render_body.index(
+            "const compressionState="
+        )
+    ]
 
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in cached_branch
-    assert "if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}" not in cached_branch
+    assert (
+        "if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}"
+        not in cached_branch
+    )
 
 
 def test_session_switch_and_idle_session_load_keep_default_bottom_pin_behavior():
     load_session = _function_body(SESSIONS_JS, "loadSession")
-    idle_branch = load_session[load_session.index("}else{\n      S.busy=false;") : load_session.index("// Sync context usage indicator")]
+    idle_branch = load_session[
+        load_session.index("}else{\n      S.busy=false;") : load_session.index(
+            "// Sync context usage indicator"
+        )
+    ]
 
     assert "syncTopbar();renderMessages();" in idle_branch
     assert "preserveScroll:true" not in idle_branch

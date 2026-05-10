@@ -1,7 +1,10 @@
 """
 Sprint 14 Tests: file rename, folder create, session archive, session tags, mermaid, timestamps.
 """
-import json, os, pathlib, shutil, tempfile, urllib.error, urllib.request
+
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -13,8 +16,9 @@ def get(path):
 
 def post(path, body=None):
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(BASE + path, data=data,
-                                headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -31,16 +35,21 @@ def make_session(created_list):
 
 # ── File rename ───────────────────────────────────────────────────────────
 
+
 def test_file_rename():
     """Renaming a file changes its name on disk."""
     created = []
     try:
         sid, sess = make_session(created)
         # Create a file first
-        post("/api/file/create", {"session_id": sid, "path": "rename_test.txt", "content": "hello"})
-        d, status = post("/api/file/rename", {
-            "session_id": sid, "path": "rename_test.txt", "new_name": "renamed.txt"
-        })
+        post(
+            "/api/file/create",
+            {"session_id": sid, "path": "rename_test.txt", "content": "hello"},
+        )
+        d, status = post(
+            "/api/file/rename",
+            {"session_id": sid, "path": "rename_test.txt", "new_name": "renamed.txt"},
+        )
         assert status == 200
         assert d["ok"] is True
         assert "renamed.txt" in d["new_path"]
@@ -55,9 +64,10 @@ def test_file_rename_rejects_path_traversal():
     try:
         sid, sess = make_session(created)
         post("/api/file/create", {"session_id": sid, "path": "safe.txt", "content": ""})
-        d, status = post("/api/file/rename", {
-            "session_id": sid, "path": "safe.txt", "new_name": "../evil.txt"
-        })
+        d, status = post(
+            "/api/file/rename",
+            {"session_id": sid, "path": "safe.txt", "new_name": "../evil.txt"},
+        )
         assert status == 400
     finally:
         for s in created:
@@ -71,9 +81,10 @@ def test_file_rename_rejects_existing():
         sid, sess = make_session(created)
         post("/api/file/create", {"session_id": sid, "path": "a.txt", "content": "a"})
         post("/api/file/create", {"session_id": sid, "path": "b.txt", "content": "b"})
-        d, status = post("/api/file/rename", {
-            "session_id": sid, "path": "a.txt", "new_name": "b.txt"
-        })
+        d, status = post(
+            "/api/file/rename",
+            {"session_id": sid, "path": "a.txt", "new_name": "b.txt"},
+        )
         assert status == 400
     finally:
         for s in created:
@@ -82,14 +93,15 @@ def test_file_rename_rejects_existing():
 
 # ── Folder create ─────────────────────────────────────────────────────────
 
+
 def test_create_dir():
     """Creating a folder succeeds."""
     created = []
     try:
         sid, sess = make_session(created)
-        d, status = post("/api/file/create-dir", {
-            "session_id": sid, "path": "test_folder"
-        })
+        d, status = post(
+            "/api/file/create-dir", {"session_id": sid, "path": "test_folder"}
+        )
         assert status == 200
         assert d["ok"] is True
     finally:
@@ -103,7 +115,9 @@ def test_create_dir_rejects_existing():
     try:
         sid, sess = make_session(created)
         post("/api/file/create-dir", {"session_id": sid, "path": "dup_folder"})
-        d, status = post("/api/file/create-dir", {"session_id": sid, "path": "dup_folder"})
+        d, status = post(
+            "/api/file/create-dir", {"session_id": sid, "path": "dup_folder"}
+        )
         assert status == 400
     finally:
         for s in created:
@@ -111,6 +125,7 @@ def test_create_dir_rejects_existing():
 
 
 # ── Session archive ───────────────────────────────────────────────────────
+
 
 def test_archive_session():
     """Archiving a session sets archived=true."""

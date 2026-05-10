@@ -39,7 +39,7 @@ def _event_handler(src: str, event_name: str) -> str:
     idx = src.find(marker)
     assert idx != -1, f"{event_name} handler not found"
     next_handler = src.find("source.addEventListener(", idx + len(marker))
-    return src[idx:next_handler if next_handler != -1 else len(src)]
+    return src[idx : next_handler if next_handler != -1 else len(src)]
 
 
 class TestSessionOwnedRuntimeInvariants:
@@ -50,7 +50,10 @@ class TestSessionOwnedRuntimeInvariants:
             "Sidebar row cancellation must target the row-owned active_stream_id, "
             "not the currently viewed pane's S.activeStreamId."
         )
-        assert "S.activeStreamId" not in body[: body.index("if(S.session&&S.session.session_id===sid)")], (
+        assert (
+            "S.activeStreamId"
+            not in body[: body.index("if(S.session&&S.session.session_id===sid)")]
+        ), (
             "cancelSessionStream must not read or clear active-pane stream state until "
             "it has proved the row session is the active pane."
         )
@@ -58,14 +61,17 @@ class TestSessionOwnedRuntimeInvariants:
     def test_done_event_does_not_clear_unrelated_active_pane_busy_state(self):
         messages = read("static/messages.js")
         done = _event_handler(messages, "done")
-        unconditional = "_queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');"
+        unconditional = (
+            "_queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');"
+        )
         assert unconditional not in done, (
             "A background session's done event must not unconditionally call setBusy(false); "
             "that can idle an unrelated active pane that is still running."
         )
         normalized = done.replace(" ", "")
         assert (
-            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
+            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])"
+            in normalized
             or "_setActivePaneIdleIfOwner();" in done
         ), (
             "The done handler should only idle composer state through an active-pane guard, "
@@ -75,13 +81,17 @@ class TestSessionOwnedRuntimeInvariants:
     def test_server_session_finalize_does_not_idle_unrelated_active_pane(self):
         messages = read("static/messages.js")
         finalize = _function_body(messages, "_restoreSettledSession")
-        assert "_queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');" not in finalize, (
+        assert (
+            "_queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');"
+            not in finalize
+        ), (
             "The fallback server-finalize path must not idle the active pane for a "
             "background session completion."
         )
         normalized = finalize.replace(" ", "")
         assert (
-            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])" in normalized
+            "if(isActiveSession||!S.session||!INFLIGHT[S.session.session_id])"
+            in normalized
             or "_setActivePaneIdleIfOwner();" in finalize
         ), (
             "The fallback server-finalize path should use the same active-pane guard as the live done event."
@@ -121,11 +131,15 @@ class TestSessionOwnedRuntimeInvariants:
         messages = read("static/messages.js")
         close_live = _function_body(messages, "closeLiveStream")
         attach_start = messages.index("function attachLiveStream")
-        attach_live = messages[attach_start:messages.index("function _isActiveSession", attach_start)]
+        attach_live = messages[
+            attach_start : messages.index("function _isActiveSession", attach_start)
+        ]
         assert "constlive=LIVE_STREAMS[sessionId]" in close_live.replace(" ", ""), (
             "LIVE_STREAMS must remain keyed by the owning session_id."
         )
-        assert "constexistingLive=LIVE_STREAMS[activeSid]" in attach_live.replace(" ", ""), (
+        assert "constexistingLive=LIVE_STREAMS[activeSid]" in attach_live.replace(
+            " ", ""
+        ), (
             "attachLiveStream should reuse the session-owned live transport for the same stream."
         )
         assert re.search(r"INFLIGHT\[activeSid\].*messages", attach_live, re.DOTALL), (

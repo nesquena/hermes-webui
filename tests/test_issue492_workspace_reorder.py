@@ -1,6 +1,6 @@
 """Tests for issue #492 — workspace drag-to-reorder."""
-import json, pytest
-from unittest.mock import patch, MagicMock, call
+
+from unittest.mock import patch, MagicMock
 from api.routes import _handle_workspace_reorder
 
 
@@ -24,9 +24,9 @@ class TestWorkspaceReorderEndpoint:
         ]
         mock_save.side_effect = lambda wss: wss
         handler = _make_handler()
-        _handle_workspace_reorder(handler, {
-            "paths": ["/home/user/c", "/home/user/a", "/home/user/b"]
-        })
+        _handle_workspace_reorder(
+            handler, {"paths": ["/home/user/c", "/home/user/a", "/home/user/b"]}
+        )
         mock_save.assert_called_once()
         saved = mock_save.call_args[0][0]
         assert saved[0]["path"] == "/home/user/c"
@@ -87,9 +87,7 @@ class TestWorkspaceReorderEndpoint:
         ]
         mock_save.side_effect = lambda wss: wss
         handler = _make_handler()
-        _handle_workspace_reorder(handler, {
-            "paths": ["/b", "/a", "/a", "/b"]
-        })
+        _handle_workspace_reorder(handler, {"paths": ["/b", "/a", "/a", "/b"]})
         saved = mock_save.call_args[0][0]
         assert len(saved) == 2
         assert saved[0]["path"] == "/b"
@@ -129,8 +127,14 @@ class TestWorkspaceReorderFrontend:
     def test_renderWorkspacesPanel_has_drag_attrs(self):
         with open("static/panels.js", "r", encoding="utf-8") as f:
             content = f.read()
-        for attr in ("draggable=true", "dragstart", "dragover", "dragend",
-                      "ws-drag-handle", "/api/workspaces/reorder"):
+        for attr in (
+            "draggable=true",
+            "dragstart",
+            "dragover",
+            "dragend",
+            "ws-drag-handle",
+            "/api/workspaces/reorder",
+        ):
             assert attr in content, f"Missing: {attr}"
 
     def test_css_drag_classes_exist(self):

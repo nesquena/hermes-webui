@@ -7,10 +7,13 @@ Python mirrors the renderMd/inlineMd pipeline at the level needed for each
 test — either source-level assertions (checking the JS source directly) or
 behavioural assertions (checking rendered HTML via a Python mirror).
 """
+
 import re
 import pathlib
 
-UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(
+    encoding="utf-8"
+)
 
 import html as _html
 
@@ -22,51 +25,76 @@ def _esc(s):
 def _inline_md(t):
     """Mirror of inlineMd() in ui.js — processes one line of text."""
     _code_stash = []
-    t = re.sub(r"`([^`\n]+)`",
-               lambda m: (_code_stash.append(f"<code>{_esc(m.group(1))}</code>")
-                          or f"\x00C{len(_code_stash)-1}\x00"), t)
-    t = re.sub(r"\*\*\*(.+?)\*\*\*", lambda m: f"<strong><em>{_esc(m.group(1))}</em></strong>", t)
-    t = re.sub(r"\*\*(.+?)\*\*",     lambda m: f"<strong>{_esc(m.group(1))}</strong>", t)
-    t = re.sub(r"\*([^*\n]+)\*",     lambda m: f"<em>{_esc(m.group(1))}</em>", t)
-    t = re.sub(r"~~(.+?)~~",         lambda m: f"<del>{_esc(m.group(1))}</del>", t)
+    t = re.sub(
+        r"`([^`\n]+)`",
+        lambda m: (
+            _code_stash.append(f"<code>{_esc(m.group(1))}</code>")
+            or f"\x00C{len(_code_stash) - 1}\x00"
+        ),
+        t,
+    )
+    t = re.sub(
+        r"\*\*\*(.+?)\*\*\*",
+        lambda m: f"<strong><em>{_esc(m.group(1))}</em></strong>",
+        t,
+    )
+    t = re.sub(r"\*\*(.+?)\*\*", lambda m: f"<strong>{_esc(m.group(1))}</strong>", t)
+    t = re.sub(r"\*([^*\n]+)\*", lambda m: f"<em>{_esc(m.group(1))}</em>", t)
+    t = re.sub(r"~~(.+?)~~", lambda m: f"<del>{_esc(m.group(1))}</del>", t)
     t = re.sub(r"\x00C(\d+)\x00", lambda m: _code_stash[int(m.group(1))], t)
     return t
 
 
 def _apply_blockquotes(src):
     """Mirror of _applyBlockquotes() — handles nested + lists + blank lines."""
+
     def replacer(m):
         block = m.group(0)
         lines = block.split("\n")
         while lines and (lines[-1].strip() in (">", "")):
             if lines[-1].strip() == ">":
-                lines.pop(); break
+                lines.pop()
+                break
             lines.pop()
         stripped = [re.sub(r"^>[ \t]?", "", l) for l in lines]
         inner_raw = "\n".join(stripped)
         if re.search(r"^>", inner_raw, re.MULTILINE):
             inner = _apply_blockquotes(inner_raw)
         elif re.search(r"^(  )?[-*+] .+", inner_raw, re.MULTILINE):
+
             def inner_list(lb):
-                ll = lb.strip().split("\n"); h = "<ul>"
+                ll = lb.strip().split("\n")
+                h = "<ul>"
                 for li in ll:
                     txt = re.sub(r"^ {0,4}[-*+] ", "", li)
-                    if re.match(r"\[x\] ", txt, re.I): ih = f"✅ {_inline_md(txt[4:])}"
-                    elif txt.startswith("[ ] "): ih = f"☐ {_inline_md(txt[4:])}"
-                    else: ih = _inline_md(txt)
+                    if re.match(r"\[x\] ", txt, re.I):
+                        ih = f"✅ {_inline_md(txt[4:])}"
+                    elif txt.startswith("[ ] "):
+                        ih = f"☐ {_inline_md(txt[4:])}"
+                    else:
+                        ih = _inline_md(txt)
                     h += f"<li>{ih}</li>"
                 return h + "</ul>"
-            inner = re.sub(r"((?:^(?:  )?[-*+] .+\n?)+)", lambda m2: inner_list(m2.group(0)),
-                           inner_raw, flags=re.MULTILINE)
+
+            inner = re.sub(
+                r"((?:^(?:  )?[-*+] .+\n?)+)",
+                lambda m2: inner_list(m2.group(0)),
+                inner_raw,
+                flags=re.MULTILINE,
+            )
         else:
-            inner = "\n".join("<br>" if l.strip() == "" else _inline_md(l) for l in stripped)
+            inner = "\n".join(
+                "<br>" if l.strip() == "" else _inline_md(l) for l in stripped
+            )
         return f"<blockquote>{inner}</blockquote>"
+
     return re.sub(r"((?:^>[^\n]*(?:\n|$))+)", replacer, src, flags=re.MULTILINE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source-level structural checks (JS must contain these patterns)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSourceStructure:
     """Verify key patterns are present in ui.js."""
@@ -90,7 +118,7 @@ class TestSourceStructure:
         # SAFE_INLINE is used inside inlineMd
         safe_inline_idx = UI_JS.find("SAFE_INLINE")
         assert safe_inline_idx >= 0
-        window = UI_JS[safe_inline_idx: safe_inline_idx + 100]
+        window = UI_JS[safe_inline_idx : safe_inline_idx + 100]
         assert "del" in window, "<del> must be in SAFE_INLINE"
 
     def test_task_list_checked_handled(self):
@@ -123,7 +151,9 @@ class TestSourceStructure:
             assert f"<{h}>" in UI_JS or f"`<{h}>" in UI_JS
 
     def test_ordered_list_value_attr(self):
-        assert 'value=' in UI_JS, "Ordered list items must use value= to preserve numbering"
+        assert "value=" in UI_JS, (
+            "Ordered list items must use value= to preserve numbering"
+        )
 
     def test_table_handler_present(self):
         assert "<table>" in UI_JS and "<thead>" in UI_JS
@@ -133,15 +163,17 @@ class TestSourceStructure:
 
     def test_autolink_present(self):
         # JS stores regex slashes as \/ — search for both forms
-        assert ("https?:\\/\\/" in UI_JS or "https?://" in UI_JS) and "target=\"_blank\"" in UI_JS
+        assert (
+            "https?:\\/\\/" in UI_JS or "https?://" in UI_JS
+        ) and 'target="_blank"' in UI_JS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Behavioural: inline formatting
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestInlineFormatting:
 
+class TestInlineFormatting:
     def test_bold(self):
         assert _inline_md("**bold**") == "<strong>bold</strong>"
 
@@ -189,8 +221,8 @@ class TestInlineFormatting:
 # Behavioural: blockquotes
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestBlockquotes:
 
+class TestBlockquotes:
     def test_single_line(self):
         out = _apply_blockquotes("> Hello")
         assert out.count("<blockquote>") == 1
@@ -252,7 +284,7 @@ class TestBlockquotes:
     def test_blockquote_followed_by_paragraph(self):
         out = _apply_blockquotes("> Quoted\n\nNormal text")
         assert out.count("<blockquote>") == 1
-        after = out[out.index("</blockquote>"):]
+        after = out[out.index("</blockquote>") :]
         assert "Normal text" in after
 
 
@@ -260,8 +292,8 @@ class TestBlockquotes:
 # Behavioural: task lists
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestTaskLists:
 
+class TestTaskLists:
     def _apply_list(self, block):
         lines = block.strip().split("\n")
         html = "<ul>"
@@ -305,8 +337,8 @@ class TestTaskLists:
 # Behavioural: strikethrough edge cases
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestStrikethrough:
 
+class TestStrikethrough:
     def test_basic(self):
         assert _inline_md("~~text~~") == "<del>text</del>"
 
@@ -329,8 +361,8 @@ class TestStrikethrough:
 # Edge-case combinations
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_empty_string(self):
         out = _apply_blockquotes("")
         assert out == ""

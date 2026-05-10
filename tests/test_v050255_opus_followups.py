@@ -26,7 +26,6 @@ The v0.50.255 batch (#1390 + #1405) had four Opus advisor findings:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -64,6 +63,7 @@ def test_rollback_validates_checkpoint_id_against_path_traversal():
 def test_rollback_validate_checkpoint_id_runtime_behavior():
     """End-to-end test of the validator: traversal attempts raise ValueError."""
     import sys
+
     sys.path.insert(0, str(REPO))
     from api.rollback import _validate_checkpoint_id
 
@@ -122,6 +122,7 @@ def test_redact_session_data_threads_enabled_once_across_recursion():
     of api_redact_enabled, not N. We verify by counting load_settings calls
     via monkeypatch."""
     import sys
+
     sys.path.insert(0, str(REPO))
     from api import helpers
 
@@ -135,6 +136,7 @@ def test_redact_session_data_threads_enabled_once_across_recursion():
     # The from-import inside redact_session_data resolves at call time, so
     # patch in api.config where it lives.
     from api import config
+
     original = config.load_settings
     config.load_settings = counting_load_settings
     try:
@@ -142,8 +144,7 @@ def test_redact_session_data_threads_enabled_once_across_recursion():
         session = {
             "title": "Test session",
             "messages": [
-                {"role": "user", "content": "hello world " * 10}
-                for _ in range(20)
+                {"role": "user", "content": "hello world " * 10} for _ in range(20)
             ],
             "tool_calls": [
                 {"name": "tool", "args": {"x": "y", "z": ["a", "b", "c"]}}

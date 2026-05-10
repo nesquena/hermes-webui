@@ -6,7 +6,6 @@ need to prevent the UI getting stuck in "Thinking…" during dangerous commands.
 """
 
 import json
-import threading
 import uuid
 import urllib.request
 import urllib.error
@@ -28,6 +27,7 @@ try:
         _ApprovalEntry,
         submit_pending,
     )
+
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
     # and removed the polling-mode pop_pending. Routes now check _pending
@@ -37,8 +37,7 @@ except ImportError:
     APPROVAL_AVAILABLE = False
 
 pytestmark = pytest.mark.skipif(
-    not APPROVAL_AVAILABLE,
-    reason="tools.approval not available in this environment"
+    not APPROVAL_AVAILABLE, reason="tools.approval not available in this environment"
 )
 
 from tests._pytest_port import BASE
@@ -53,8 +52,9 @@ def get(path):
 def post(path, body=None):
     url = BASE + path
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(url, data=data,
-          headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()), r.status
@@ -63,6 +63,7 @@ def post(path, body=None):
 
 
 # ── Unit tests (in-process, no HTTP server needed) ──────────────────────────
+
 
 class TestGatewayApprovalUnblocking:
     """Unit tests for the gateway queue unblocking mechanism."""
@@ -159,6 +160,7 @@ class TestGatewayApprovalUnblocking:
         # Step 1: streaming.py registers the notify callback
         def _approval_notify_cb(approval_data):
             approval_events_sent.append(approval_data)  # would be put('approval', ...)
+
         register_gateway_notify(sid, _approval_notify_cb)
 
         # Step 2: check_all_command_guards fires the callback and queues an entry
@@ -176,7 +178,9 @@ class TestGatewayApprovalUnblocking:
             cb = _gateway_notify_cbs.get(sid)
         cb(approval_data)
 
-        assert len(approval_events_sent) == 1, "approval SSE event should have been queued"
+        assert len(approval_events_sent) == 1, (
+            "approval SSE event should have been queued"
+        )
 
         # Step 3: user responds via /api/approval/respond → resolve_gateway_approval
         resolved = resolve_gateway_approval(sid, "once")
@@ -192,31 +196,41 @@ class TestGatewayApprovalUnblocking:
 
 # ── Symbol existence tests ───────────────────────────────────────────────────
 
+
 class TestApprovalModuleExports:
     """Verify the module exports all symbols that streaming.py and routes.py need."""
 
     def test_register_gateway_notify_exported(self):
         import tools.approval as ap
-        assert hasattr(ap, "register_gateway_notify"), \
+
+        assert hasattr(ap, "register_gateway_notify"), (
             "tools.approval must export register_gateway_notify"
+        )
 
     def test_unregister_gateway_notify_exported(self):
         import tools.approval as ap
-        assert hasattr(ap, "unregister_gateway_notify"), \
+
+        assert hasattr(ap, "unregister_gateway_notify"), (
             "tools.approval must export unregister_gateway_notify"
+        )
 
     def test_resolve_gateway_approval_exported(self):
         import tools.approval as ap
-        assert hasattr(ap, "resolve_gateway_approval"), \
+
+        assert hasattr(ap, "resolve_gateway_approval"), (
             "tools.approval must export resolve_gateway_approval"
+        )
 
     def test_approval_entry_exported(self):
         import tools.approval as ap
-        assert hasattr(ap, "_ApprovalEntry"), \
+
+        assert hasattr(ap, "_ApprovalEntry"), (
             "tools.approval must export _ApprovalEntry"
+        )
 
 
 # ── HTTP regression tests (test server, port 8788) ───────────────────────────
+
 
 class TestApprovalHTTPEndpoints:
     """
@@ -228,10 +242,13 @@ class TestApprovalHTTPEndpoints:
     def test_respond_returns_ok_no_pending(self):
         """respond with no pending entry returns ok (no crash, no 500)."""
         sid = f"http-no-pending-{uuid.uuid4().hex[:8]}"
-        result, status = post("/api/approval/respond", {
-            "session_id": sid,
-            "choice": "deny",
-        })
+        result, status = post(
+            "/api/approval/respond",
+            {
+                "session_id": sid,
+                "choice": "deny",
+            },
+        )
         assert status == 200
         assert result["ok"] is True
 
@@ -240,17 +257,22 @@ class TestApprovalHTTPEndpoints:
         sid = f"http-clear-{uuid.uuid4().hex[:8]}"
         cmd = "rm -rf /tmp/testdir"
 
-        inject = get(f"/api/approval/inject_test?session_id={urllib.parse.quote(sid)}"
-                     f"&pattern_key=recursive+delete&command={urllib.parse.quote(cmd)}")
+        inject = get(
+            f"/api/approval/inject_test?session_id={urllib.parse.quote(sid)}"
+            f"&pattern_key=recursive+delete&command={urllib.parse.quote(cmd)}"
+        )
         assert inject["ok"] is True
 
         data = get(f"/api/approval/pending?session_id={urllib.parse.quote(sid)}")
         assert data["pending"] is not None
 
-        result, status = post("/api/approval/respond", {
-            "session_id": sid,
-            "choice": "deny",
-        })
+        result, status = post(
+            "/api/approval/respond",
+            {
+                "session_id": sid,
+                "choice": "deny",
+            },
+        )
         assert status == 200
         assert result["ok"] is True
 
@@ -259,10 +281,13 @@ class TestApprovalHTTPEndpoints:
 
     def test_respond_rejects_invalid_choice(self):
         """respond with an unknown choice returns 400."""
-        result, status = post("/api/approval/respond", {
-            "session_id": "some-session",
-            "choice": "INVALID",
-        })
+        result, status = post(
+            "/api/approval/respond",
+            {
+                "session_id": "some-session",
+                "choice": "INVALID",
+            },
+        )
         assert status == 400
 
     def test_respond_requires_session_id(self):
@@ -273,14 +298,19 @@ class TestApprovalHTTPEndpoints:
     def test_respond_session_choice_clears_pending(self):
         """Inject pending, respond with 'session', verify cleared."""
         sid = f"http-session-{uuid.uuid4().hex[:8]}"
-        inject = get(f"/api/approval/inject_test?session_id={urllib.parse.quote(sid)}"
-                     f"&pattern_key=force+kill+processes&command=pkill+-9+something")
+        inject = get(
+            f"/api/approval/inject_test?session_id={urllib.parse.quote(sid)}"
+            f"&pattern_key=force+kill+processes&command=pkill+-9+something"
+        )
         assert inject["ok"] is True
 
-        result, status = post("/api/approval/respond", {
-            "session_id": sid,
-            "choice": "session",
-        })
+        result, status = post(
+            "/api/approval/respond",
+            {
+                "session_id": sid,
+                "choice": "session",
+            },
+        )
         assert status == 200
         assert result["choice"] == "session"
 

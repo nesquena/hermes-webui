@@ -1,8 +1,6 @@
 """Tests for issue #1195: sessions must route to the correct profile directory
 even when that profile directory does not exist yet on disk."""
 
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +8,7 @@ import pytest
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
 
 def _make_hermes_home(base: Path, profile_name: str | None = None) -> Path:
     """Create a temp HERMES_HOME (with optional profile dir) and return it."""
@@ -21,6 +20,7 @@ def _make_hermes_home(base: Path, profile_name: str | None = None) -> Path:
 
 
 # ── tests ────────────────────────────────────────────────────────────────────
+
 
 class TestGetHermesHomeForProfile:
     """get_hermes_home_for_profile() must return the profile path regardless of

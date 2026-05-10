@@ -20,14 +20,21 @@ def test_load_earlier_expands_local_window_before_server_pagination_and_preserve
     assert "prevScrollTop=container?container.scrollTop:0" in UI_JS
     assert "container.scrollTop=prevScrollTop+(newScrollH-prevScrollH)" in UI_JS
     assert "if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();" in UI_JS
-    assert "else if(typeof _loadOlderMessages==='function') _loadOlderMessages();" in UI_JS
+    assert (
+        "else if(typeof _loadOlderMessages==='function') _loadOlderMessages();" in UI_JS
+    )
 
 
 def test_windowed_render_keeps_streaming_and_tool_activity_anchored_to_rendered_messages():
     assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in UI_JS
-    assert "const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);" in UI_JS
+    assert (
+        "const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);" in UI_JS
+    )
     assert "if(aIdx<assistantIdxs[0]) continue;" in UI_JS
-    assert "const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);" in UI_JS
+    assert (
+        "const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);"
+        in UI_JS
+    )
     assert "const seg=assistantSegments.get(mi);" in UI_JS
 
 

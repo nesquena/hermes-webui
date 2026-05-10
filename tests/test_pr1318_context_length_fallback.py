@@ -17,7 +17,7 @@ Tests:
 4. Fallback exception is silently swallowed (older agent builds)
 5. Fallback runs before s.save() so the value is persisted
 """
-import re
+
 from pathlib import Path
 
 STREAMING = Path(__file__).resolve().parent.parent / "api" / "streaming.py"
@@ -73,7 +73,7 @@ def test_fallback_exception_is_swallowed():
     bad provider config), the fallback must not break s.save()."""
     block = _persistence_block()
     # Must wrap the import + call in try/except
-    fallback_section = block[block.find("Fallback"):]
+    fallback_section = block[block.find("Fallback") :]
     assert "try:" in fallback_section, "Fallback must use try/except"
     # except Exception: pass-style — old agent builds may not have this helper at all
     assert "except Exception:" in fallback_section, (
@@ -96,7 +96,7 @@ def test_fallback_runs_before_save():
 def test_fallback_assigns_context_length_when_resolved():
     """The fallback must assign s.context_length when get_model_context_length returns a non-zero value."""
     block = _persistence_block()
-    fallback_section = block[block.find("Fallback"):]
+    fallback_section = block[block.find("Fallback") :]
     # Must have an `if _resolved_cl:` guard followed by `s.context_length = _resolved_cl`
     assert "_resolved_cl" in fallback_section, "Fallback must capture the result"
     assert "s.context_length = _resolved_cl" in fallback_section, (

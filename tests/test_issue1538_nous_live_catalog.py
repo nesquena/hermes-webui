@@ -69,8 +69,10 @@ def _install_fake_hermes_cli(monkeypatch, *, nous_ids=None, raise_on_lookup=Fals
     fake_models = types.ModuleType("hermes_cli.models")
     fake_models.list_available_providers = lambda: []
     if raise_on_lookup:
+
         def _raise(_pid):
             raise RuntimeError("simulated hermes_cli failure")
+
         fake_models.provider_model_ids = _raise
     else:
         ids = list(nous_ids) if nous_ids is not None else []
@@ -120,14 +122,28 @@ def _scrub_provider_env(monkeypatch):
     """Drop every provider env var so detection only sees what we install
     via the fake hermes_cli stubs (not unrelated keys leaked from the runner)."""
     for var in (
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
-        "DEEPSEEK_API_KEY", "XAI_API_KEY", "GROQ_API_KEY",
-        "MISTRAL_API_KEY", "OPENROUTER_API_KEY",
-        "OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY",
-        "GLM_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
-        "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
-        "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
-        "NOUS_API_KEY", "NVIDIA_API_KEY", "LM_API_KEY", "LMSTUDIO_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OLLAMA_CLOUD_API_KEY",
+        "OLLAMA_API_KEY",
+        "GLM_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "NOUS_API_KEY",
+        "NVIDIA_API_KEY",
+        "LM_API_KEY",
+        "LMSTUDIO_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -136,7 +152,9 @@ class TestNousLiveCatalog:
     """When the Nous live catalog is available, the dropdown must surface it
     in full (>=20 entries) — not the four-entry static fallback (#1538)."""
 
-    def test_nous_models_live_fetch_when_hermes_cli_available(self, monkeypatch, tmp_path):
+    def test_nous_models_live_fetch_when_hermes_cli_available(
+        self, monkeypatch, tmp_path
+    ):
         _scrub_provider_env(monkeypatch)
         _install_fake_hermes_cli(monkeypatch, nous_ids=SAMPLE_NOUS_LIVE_IDS)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
@@ -144,7 +162,9 @@ class TestNousLiveCatalog:
         restore = _swap_in_test_config({"model": {"provider": "nous"}})
         try:
             data = config.get_available_models()
-            nous_groups = [g for g in data.get("groups", []) if g.get("provider_id") == "nous"]
+            nous_groups = [
+                g for g in data.get("groups", []) if g.get("provider_id") == "nous"
+            ]
             assert len(nous_groups) == 1, (
                 f"Expected exactly one Nous group, got {len(nous_groups)}: "
                 f"{[g.get('provider_id') for g in data.get('groups', [])]}"
@@ -236,7 +256,9 @@ class TestNousStaticFallback:
         restore = _swap_in_test_config({"model": {"provider": "nous"}})
         try:
             data = config.get_available_models()
-            nous_groups = [g for g in data.get("groups", []) if g.get("provider_id") == "nous"]
+            nous_groups = [
+                g for g in data.get("groups", []) if g.get("provider_id") == "nous"
+            ]
             assert nous_groups, (
                 "Nous group must still appear when hermes_cli fails — the "
                 "branch should fall back to the curated static list."
@@ -258,16 +280,22 @@ class TestFormatNousLabel:
 
     def test_strips_vendor_namespace(self):
         from api.config import _format_nous_label
-        assert _format_nous_label("anthropic/claude-opus-4.7") == "Claude Opus 4.7 (via Nous)"
+
+        assert (
+            _format_nous_label("anthropic/claude-opus-4.7")
+            == "Claude Opus 4.7 (via Nous)"
+        )
         assert _format_nous_label("openai/gpt-5.4-mini") == "GPT 5.4 Mini (via Nous)"
 
     def test_handles_missing_vendor(self):
         from api.config import _format_nous_label
+
         # Defensive: id without slash should still render a sane label.
         assert _format_nous_label("kimi-k2.6") == "Kimi K2.6 (via Nous)"
 
     def test_handles_variant_after_colon(self):
         from api.config import _format_nous_label
+
         # Variant rendered in parentheses, mirroring _format_ollama_label.
         out = _format_nous_label("minimax/minimax-m2.5:free")
         assert out.endswith(" (via Nous)")
@@ -276,12 +304,14 @@ class TestFormatNousLabel:
 
     def test_minimax_renders_mixed_case(self):
         from api.config import _format_nous_label
+
         # Live wire returns lowercase 'minimax/minimax-...' but the curated
         # convention is mixed-case 'MiniMax'.
         assert _format_nous_label("minimax/minimax-m2.7").startswith("MiniMax M2.7")
 
     def test_label_always_ends_with_via_nous_suffix(self):
         from api.config import _format_nous_label
+
         for sample in [
             "anthropic/claude-opus-4.7",
             "openai/gpt-5.5",
@@ -300,6 +330,7 @@ class TestStaticListPreservedAsFallback:
 
     def test_static_list_present(self):
         from api.config import _PROVIDER_MODELS
+
         assert _PROVIDER_MODELS.get("nous"), (
             "The curated static Nous list must remain in _PROVIDER_MODELS as "
             "a fallback for environments where hermes_cli is unavailable."
@@ -309,5 +340,6 @@ class TestStaticListPreservedAsFallback:
         # Keep parity with tests/test_nous_portal_routing.py — ensures the
         # static fallback path produces correctly-routable ids when used.
         from api.config import _PROVIDER_MODELS
+
         for m in _PROVIDER_MODELS["nous"]:
             assert m["id"].startswith("@nous:"), m["id"]

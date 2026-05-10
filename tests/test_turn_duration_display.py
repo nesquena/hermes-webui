@@ -3,6 +3,7 @@
 The WebUI should expose how long an agent turn took, using backend timing so
 reload/reconnect does not lose the measurement.
 """
+
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -73,9 +74,9 @@ def test_active_compact_activity_elapsed_timer_uses_persisted_start_time():
         "send() should copy chat-start pending_started_at into S.session before "
         "attaching the live stream."
     )
-    assert "function _formatActiveElapsedTimer" in UI_JS and "padStart(2,'0')" in UI_JS, (
-        "ui.js should format the running timer in MM:SS form."
-    )
+    assert (
+        "function _formatActiveElapsedTimer" in UI_JS and "padStart(2,'0')" in UI_JS
+    ), "ui.js should format the running timer in MM:SS form."
     assert "data-turn-started-at" in UI_JS and "data-active-turn-elapsed" in UI_JS, (
         "Live compact Activity groups need stable start-time and active-elapsed "
         "hooks for browser QA and reconnect/rerender safety."

@@ -13,6 +13,7 @@ This is a static check (source ordering) rather than a runtime test, because
 mocking the entire agent stack to reach the call site would be brittle and
 miss the actual lexical ordering that's the load-bearing fix.
 """
+
 from pathlib import Path
 import re
 
@@ -68,9 +69,9 @@ def test_discover_mcp_tools_only_called_once_in_streaming():
     later refactor reintroduces a pre-mutation call site, this test catches it.
     """
     call_lines = [
-        line for line in STREAMING_PY.splitlines()
-        if "discover_mcp_tools()" in line
-        and not line.lstrip().startswith("#")
+        line
+        for line in STREAMING_PY.splitlines()
+        if "discover_mcp_tools()" in line and not line.lstrip().startswith("#")
     ]
     assert len(call_lines) == 1, (
         f"Expected exactly 1 `discover_mcp_tools()` call line in api/streaming.py "

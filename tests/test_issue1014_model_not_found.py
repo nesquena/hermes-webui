@@ -8,6 +8,7 @@ Covers:
   4. static/i18n.js: model_not_found_label key present in all locales
   5. streaming.py: model_not_found checked after auth but before generic error
 """
+
 import pathlib
 import re
 
@@ -19,6 +20,7 @@ def _read(rel_path: str) -> str:
 
 
 # ── 1. streaming.py: model-not-found error detection ─────────────────────────
+
 
 class TestStreamingModelNotFoundDetection:
     """streaming.py must classify 404/model-not-found errors as model_not_found."""
@@ -43,7 +45,7 @@ class TestStreamingModelNotFoundDetection:
         src = _read("api/streaming.py")
         idx = src.find("_exc_is_not_found")
         assert idx != -1, "_exc_is_not_found not found"
-        block = src[idx:idx + 600]
+        block = src[idx : idx + 600]
         assert "'404'" in block or '"404"' in block, (
             "'404' not in model-not-found detection block"
         )
@@ -52,7 +54,7 @@ class TestStreamingModelNotFoundDetection:
         """'not found' must be part of the detection logic."""
         src = _read("api/streaming.py")
         idx = src.find("_exc_is_not_found")
-        block = src[idx:idx + 600]
+        block = src[idx : idx + 600]
         assert "not found" in block.lower(), (
             "'not found' not in model-not-found detection block"
         )
@@ -61,7 +63,7 @@ class TestStreamingModelNotFoundDetection:
         """'does not exist' must be part of the detection logic."""
         src = _read("api/streaming.py")
         idx = src.find("_exc_is_not_found")
-        block = src[idx:idx + 600]
+        block = src[idx : idx + 600]
         assert "does not exist" in block.lower(), (
             "'does not exist' not in model-not-found detection block"
         )
@@ -70,7 +72,7 @@ class TestStreamingModelNotFoundDetection:
         """'invalid model' must be part of the detection logic."""
         src = _read("api/streaming.py")
         idx = src.find("_exc_is_not_found")
-        block = src[idx:idx + 600]
+        block = src[idx : idx + 600]
         assert "invalid model" in block.lower(), (
             "'invalid model' not in model-not-found detection block"
         )
@@ -79,7 +81,7 @@ class TestStreamingModelNotFoundDetection:
         """The model_not_found hint must mention Settings or hermes model."""
         src = _read("api/streaming.py")
         idx = src.find("model_not_found")
-        block = src[idx:idx + 500]
+        block = src[idx : idx + 500]
         assert "Settings" in block or "hermes model" in block, (
             "model_not_found hint must mention Settings or hermes model command"
         )
@@ -98,6 +100,7 @@ class TestStreamingModelNotFoundDetection:
 
 
 # ── 2. streaming.py: HTML sanitization ───────────────────────────────────────
+
 
 class TestStreamingHtmlSanitization:
     """Provider error messages containing HTML must be stripped."""
@@ -121,13 +124,14 @@ class TestStreamingHtmlSanitization:
         """Stripped HTML must have whitespace collapsed."""
         src = _read("api/streaming.py")
         sanitize_idx = src.find("re.sub(r'<[^>]+>'")
-        block = src[sanitize_idx:sanitize_idx + 300]
+        block = src[sanitize_idx : sanitize_idx + 300]
         assert r"\s+" in block, (
             "Whitespace normalization (\\s+) not found after HTML strip"
         )
 
 
 # ── 3. static/messages.js: apperror handler ──────────────────────────────────
+
 
 class TestApperrorModelNotFound:
     """messages.js apperror handler must handle model_not_found type."""
@@ -156,6 +160,7 @@ class TestApperrorModelNotFound:
 
 # ── 4. static/i18n.js: all locales ───────────────────────────────────────────
 
+
 class TestI18nModelNotFound:
     """All locales must have model_not_found_label."""
 
@@ -172,7 +177,7 @@ class TestI18nModelNotFound:
         return names
 
     def _count_key(self, src: str, key: str) -> int:
-        return len(re.findall(r'\b' + re.escape(key) + r'\b', src))
+        return len(re.findall(r"\b" + re.escape(key) + r"\b", src))
 
     def test_all_locales_have_model_not_found_label(self):
         """model_not_found_label must appear in all locales."""
@@ -192,7 +197,7 @@ class TestI18nModelNotFound:
         en_block = src[en_start:es_start]
         assert self.REQUIRED_KEY in en_block, "Key not in en block"
         idx = en_block.find(self.REQUIRED_KEY)
-        line = en_block[idx:idx + 200]
+        line = en_block[idx : idx + 200]
         assert "=>" not in line, (
             "model_not_found_label should be a plain string, not an arrow function"
         )

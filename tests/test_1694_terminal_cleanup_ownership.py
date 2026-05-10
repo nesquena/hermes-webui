@@ -5,6 +5,7 @@ active pane. The owning session's persisted/runtime stream marker can be cleared
 but global pane state such as ``clearInflight()``, approval/clarify polling, and
 ``setBusy(false)`` must be gated to the session that owns the active pane/card.
 """
+
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -87,7 +88,10 @@ def test_reconnect_settled_and_error_paths_keep_cleanup_session_scoped():
     error_body = _function_body("_handleStreamError")
     combined = restore_body + "\n" + error_body
     assert combined.count("_clearOwnerInflightState();") >= 2
-    assert "delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid)" not in combined
+    assert (
+        "delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid)"
+        not in combined
+    )
     assert "stopApprovalPolling();stopClarifyPolling();" not in combined
     assert "renderSessionList();setBusy(false)" not in combined
     assert "_setActivePaneIdleIfOwner" in combined

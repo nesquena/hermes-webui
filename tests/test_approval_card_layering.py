@@ -14,6 +14,7 @@ approval buttons. The fix raises `.approval-card.visible` to z-index 3.
 This test pins the invariant: approval-card.visible z-index must be strictly
 greater than queue-card z-index.
 """
+
 import re
 from pathlib import Path
 

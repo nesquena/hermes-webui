@@ -28,7 +28,9 @@ def _post(path, body=None):
     """POST helper — returns (parsed_json, status_code)."""
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
-        BASE + path, data=data, headers={"Content-Type": "application/json"},
+        BASE + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -62,6 +64,7 @@ def _install_fake_hermes_cli(monkeypatch):
     # Flush the 60-second TTL model cache so no prior test's result bleeds in.
     try:
         from api.config import invalidate_models_cache
+
         invalidate_models_cache()
     except Exception:
         pass
@@ -88,6 +91,7 @@ class TestGetProviders:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             assert "providers" in result
@@ -118,10 +122,11 @@ class TestGetProviders:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"
@@ -148,20 +153,27 @@ class TestGetProviders:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             for p in result["providers"]:
                 if p["id"] in ("copilot", "nous", "openai-codex"):
-                    assert p["configurable"] is False, f"{p['id']} should not be configurable"
+                    assert p["configurable"] is False, (
+                        f"{p['id']} should not be configurable"
+                    )
                 # ollama-cloud is now configurable (uses OLLAMA_API_KEY)
                 if p["id"] == "ollama-cloud":
-                    assert p["configurable"] is True, "ollama-cloud should be configurable"
+                    assert p["configurable"] is True, (
+                        "ollama-cloud should be configurable"
+                    )
         finally:
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
 
-    def test_openai_codex_provider_card_prefers_live_catalog(self, monkeypatch, tmp_path):
+    def test_openai_codex_provider_card_prefers_live_catalog(
+        self, monkeypatch, tmp_path
+    ):
         """OpenAI Codex provider cards should not advertise stale static fallback models.
 
         /api/models already uses hermes_cli/Codex cache discovery for Codex.  The
@@ -193,6 +205,7 @@ class TestGetProviders:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             codex = next(p for p in result["providers"] if p["id"] == "openai-codex")
@@ -233,6 +246,7 @@ class TestSetProviderKey:
             config._cfg_mtime = 0.0
 
         from api.providers import set_provider_key
+
         try:
             result = set_provider_key("anthropic", "sk-ant-test-key-12345678")
             assert result["ok"] is True
@@ -241,7 +255,9 @@ class TestSetProviderKey:
 
             # Verify .env file was written
             env_path = tmp_path / ".env"
-            assert env_path.exists(), f".env not written to {env_path}; HERMES_HOME={__import__('os').environ.get('HERMES_HOME')!r}"
+            assert env_path.exists(), (
+                f".env not written to {env_path}; HERMES_HOME={__import__('os').environ.get('HERMES_HOME')!r}"
+            )
             content = env_path.read_text()
             assert "ANTHROPIC_API_KEY=sk-ant-test-key-12345678" in content
         finally:
@@ -264,6 +280,7 @@ class TestSetProviderKey:
             config._cfg_mtime = 0.0
 
         from api.providers import set_provider_key
+
         try:
             # First set a key
             set_provider_key("anthropic", "sk-ant-test-key-12345678")
@@ -296,6 +313,7 @@ class TestSetProviderKey:
             config._cfg_mtime = 0.0
 
         from api.providers import set_provider_key
+
         try:
             result = set_provider_key("copilot", "some-key")
             assert result["ok"] is False
@@ -320,6 +338,7 @@ class TestSetProviderKey:
             config._cfg_mtime = 0.0
 
         from api.providers import set_provider_key
+
         try:
             result = set_provider_key("anthropic", "short")
             assert result["ok"] is False
@@ -332,6 +351,7 @@ class TestSetProviderKey:
     def test_empty_provider_id_rejected(self, monkeypatch, tmp_path):
         """Empty provider ID should be rejected."""
         from api.providers import set_provider_key
+
         result = set_provider_key("", "some-key")
         assert result["ok"] is False
         assert "required" in result["error"]
@@ -339,6 +359,7 @@ class TestSetProviderKey:
     def test_newline_in_key_rejected(self, monkeypatch, tmp_path):
         """API keys with newlines should be rejected."""
         from api.providers import set_provider_key
+
         result = set_provider_key("anthropic", "sk-ant-key\nINJECTED=evil")
         assert result["ok"] is False
         assert "newline" in result["error"]
@@ -347,7 +368,9 @@ class TestSetProviderKey:
 class TestRemoveProviderKey:
     """Unit tests for remove_provider_key() wrapper."""
 
-    def test_clean_provider_key_uses_late_bound_config_path(self, monkeypatch, tmp_path):
+    def test_clean_provider_key_uses_late_bound_config_path(
+        self, monkeypatch, tmp_path
+    ):
         """Config cleanup must honor api.config._get_config_path monkeypatches.
 
         PR #1597 fixed provider-key cleanup by resolving the config path through
@@ -371,7 +394,9 @@ class TestRemoveProviderKey:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(providers, "_get_config_path", lambda: stale_config, raising=False)
+        monkeypatch.setattr(
+            providers, "_get_config_path", lambda: stale_config, raising=False
+        )
         monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: active_config)
         monkeypatch.setattr(providers, "reload_config", lambda: None)
 
@@ -398,6 +423,7 @@ class TestRemoveProviderKey:
             config._cfg_mtime = 0.0
 
         from api.providers import remove_provider_key
+
         try:
             result = remove_provider_key("anthropic")
             assert result["ok"] is True
@@ -422,29 +448,38 @@ class TestProvidersEndpoints:
 
     def test_post_provider_set_key(self):
         """POST /api/providers with provider + api_key should set the key."""
-        body, status = _post("/api/providers", {
-            "provider": "anthropic",
-            "api_key": "sk-ant-integration-test-key-12345678",
-        })
+        body, status = _post(
+            "/api/providers",
+            {
+                "provider": "anthropic",
+                "api_key": "sk-ant-integration-test-key-12345678",
+            },
+        )
         assert status == 200
         assert body.get("ok") is True
         assert body.get("provider") == "anthropic"
 
     def test_post_provider_remove_key(self):
         """POST /api/providers with provider but no api_key should remove the key."""
-        body, status = _post("/api/providers", {
-            "provider": "anthropic",
-            "api_key": None,
-        })
+        body, status = _post(
+            "/api/providers",
+            {
+                "provider": "anthropic",
+                "api_key": None,
+            },
+        )
         assert status == 200
         assert body.get("ok") is True
         assert body.get("action") == "removed"
 
     def test_post_provider_delete(self):
         """POST /api/providers/delete should remove the key."""
-        body, status = _post("/api/providers/delete", {
-            "provider": "anthropic",
-        })
+        body, status = _post(
+            "/api/providers/delete",
+            {
+                "provider": "anthropic",
+            },
+        )
         assert status == 200
         assert body.get("ok") is True
 
@@ -475,7 +510,9 @@ class TestIssue1410OllamaEnvVarBleed:
     """
 
     def test_ollama_local_not_configured_when_only_cloud_env_var_set(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """OLLAMA_API_KEY in env should mark ollama-cloud configured but not bare ollama."""
         _install_fake_hermes_cli(monkeypatch)
@@ -492,13 +529,17 @@ class TestIssue1410OllamaEnvVarBleed:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
-            assert "ollama-cloud" in by_id, "ollama-cloud should appear in provider list"
+            assert "ollama-cloud" in by_id, (
+                "ollama-cloud should appear in provider list"
+            )
             assert "ollama" in by_id, "ollama (local) should appear in provider list"
-            assert by_id["ollama-cloud"]["has_key"] is True, \
+            assert by_id["ollama-cloud"]["has_key"] is True, (
                 "ollama-cloud should be has_key=True when OLLAMA_API_KEY is set"
+            )
             assert by_id["ollama"]["has_key"] is False, (
                 "ollama (local) must NOT be has_key=True when only the cloud env "
                 "var is set — local Ollama is keyless and shares no env var with "
@@ -515,7 +556,9 @@ class TestIssue1410OllamaEnvVarBleed:
             config._cfg_mtime = old_mtime
 
     def test_ollama_local_still_configured_via_config_yaml(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """providers.ollama.api_key in config.yaml should still mark local ollama configured."""
         _install_fake_hermes_cli(monkeypatch)
@@ -534,6 +577,7 @@ class TestIssue1410OllamaEnvVarBleed:
             config._cfg_mtime = 0.0
 
         from api.providers import get_providers
+
         try:
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}

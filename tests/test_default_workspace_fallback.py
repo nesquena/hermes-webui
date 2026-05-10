@@ -1,10 +1,11 @@
 import json
-from pathlib import Path
 
 import api.config as config
 
 
-def test_resolve_default_workspace_falls_back_to_existing_home_work(monkeypatch, tmp_path):
+def test_resolve_default_workspace_falls_back_to_existing_home_work(
+    monkeypatch, tmp_path
+):
     preferred = tmp_path / "work"
     preferred.mkdir()
     state_dir = tmp_path / "state"
@@ -18,8 +19,9 @@ def test_resolve_default_workspace_falls_back_to_existing_home_work(monkeypatch,
     assert resolved == preferred.resolve()
 
 
-
-def test_save_settings_rewrites_bad_default_workspace_to_fallback(monkeypatch, tmp_path):
+def test_save_settings_rewrites_bad_default_workspace_to_fallback(
+    monkeypatch, tmp_path
+):
     preferred = tmp_path / "work"
     preferred.mkdir()
     state_dir = tmp_path / "state"
@@ -38,7 +40,9 @@ def test_save_settings_rewrites_bad_default_workspace_to_fallback(monkeypatch, t
     assert on_disk["default_workspace"] == str(preferred.resolve())
 
 
-def test_resolve_default_workspace_creates_home_workspace_when_missing(monkeypatch, tmp_path):
+def test_resolve_default_workspace_creates_home_workspace_when_missing(
+    monkeypatch, tmp_path
+):
     """When no preferred dir exists, resolve falls back to creating ~/workspace."""
     state_dir = tmp_path / "state"
     monkeypatch.setattr(config, "HOME", tmp_path)
@@ -50,9 +54,13 @@ def test_resolve_default_workspace_creates_home_workspace_when_missing(monkeypat
     assert resolved.is_dir()
 
 
-def test_resolve_default_workspace_raises_when_all_candidates_fail(monkeypatch, tmp_path):
+def test_resolve_default_workspace_raises_when_all_candidates_fail(
+    monkeypatch, tmp_path
+):
     """RuntimeError is raised when every candidate is unwritable."""
-    import stat, pytest
+    import stat
+    import pytest
+
     # Make tmp_path read-only so mkdir inside it fails
     tmp_path.chmod(stat.S_IRUSR | stat.S_IXUSR)
     state_dir = tmp_path / "state"
@@ -95,6 +103,7 @@ def test_env_var_workspace_takes_priority_over_passed_raw(monkeypatch, tmp_path)
 def test_ensure_workspace_dir_returns_false_for_unwritable_path(monkeypatch, tmp_path):
     """_ensure_workspace_dir returns False for a path that can't be created."""
     import stat
+
     # Make parent read-only so mkdir fails
     parent = tmp_path / "ro_parent"
     parent.mkdir()

@@ -7,6 +7,7 @@ Two changes:
 2. populateModelDropdown() and loadWorkspaceList() are now parallelized via Promise.all
    instead of sequential awaits.
 """
+
 import re
 from pathlib import Path
 
@@ -23,11 +24,12 @@ class TestProfileSwitchSpinner:
         assert idx != -1, "switchToProfile not found in panels.js"
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
-            if ch == "{": depth += 1
+            if ch == "{":
+                depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return self.JS[idx: i + 1]
+                    return self.JS[idx : i + 1]
         raise AssertionError("Could not extract switchToProfile")
 
     def test_switching_class_added_on_start(self):
@@ -88,11 +90,12 @@ class TestParallelizedFetches:
         assert idx != -1
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
-            if ch == "{": depth += 1
+            if ch == "{":
+                depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    return self.JS[idx: i + 1]
+                    return self.JS[idx : i + 1]
         raise AssertionError("Could not extract switchToProfile")
 
     def test_populate_and_workspace_in_promise_all(self):
@@ -106,8 +109,7 @@ class TestParallelizedFetches:
         """The old sequential await pattern must be gone."""
         fn = self._get_switch_fn()
         sequential = re.search(
-            r"await populateModelDropdown\(\)\s*;\s*\n\s*await loadWorkspaceList",
-            fn
+            r"await populateModelDropdown\(\)\s*;\s*\n\s*await loadWorkspaceList", fn
         )
         assert not sequential, (
             "Old sequential await pattern still present — both fetches would run twice."
@@ -135,11 +137,11 @@ class TestSpinnerCss:
     def test_switching_class_has_cursor_wait(self):
         idx = self.CSS.find(".composer-profile-chip.switching")
         assert idx != -1
-        block = self.CSS[idx: idx + 200]
+        block = self.CSS[idx : idx + 200]
         assert "cursor:wait" in block
 
     def test_switching_class_has_pointer_events_none(self):
         idx = self.CSS.find(".composer-profile-chip.switching")
         assert idx != -1
-        block = self.CSS[idx: idx + 200]
+        block = self.CSS[idx : idx + 200]
         assert "pointer-events:none" in block

@@ -7,6 +7,7 @@ Validates:
     (as it would be by on_tool() during real agent execution)
   - Messages stored via pending_user_message survive a simulated server restart
 """
+
 import json
 import threading
 import time
@@ -67,7 +68,9 @@ class TestSaveSkipIndex:
         s = _make_session("s3")
         s.save(skip_index=True)
         index = models.SESSION_INDEX_FILE
-        assert not index.exists(), "Index file should not be created with skip_index=True"
+        assert not index.exists(), (
+            "Index file should not be created with skip_index=True"
+        )
 
     def test_save_without_skip_index_creates_index(self):
         """save() (default) DOES create the session index."""
@@ -153,10 +156,14 @@ class TestPeriodicCheckpoint:
 
         # Simulate on_tool() completing twice
         _checkpoint_activity[0] += 1  # first tool completes
-        assert _wait_for_save(1), f"Expected 1 save after first increment; got {save_count[0]}"
+        assert _wait_for_save(1), (
+            f"Expected 1 save after first increment; got {save_count[0]}"
+        )
 
         _checkpoint_activity[0] += 1  # second tool completes
-        assert _wait_for_save(2), f"Expected 2 saves after second increment; got {save_count[0]}"
+        assert _wait_for_save(2), (
+            f"Expected 2 saves after second increment; got {save_count[0]}"
+        )
 
         stop_event.set()
         t.join(timeout=2)
@@ -221,7 +228,9 @@ class TestPeriodicCheckpoint:
         This is the minimal guarantee for Issue #765: even if the agent produces
         no tool calls before a crash, the user's message is not silently lost.
         """
-        s = _make_session("survive1", messages=[{"role": "user", "content": "first turn"}])
+        s = _make_session(
+            "survive1", messages=[{"role": "user", "content": "first turn"}]
+        )
         s.save()  # initial full save
 
         # Simulate what routes.py does before _run_agent_streaming:
@@ -314,7 +323,9 @@ class TestIssue765FollowupHardening:
         t2.join(timeout=5)
 
         assert not errors, f"Concurrent same-session saves should not fail: {errors}"
-        assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
+        assert len(replace_sources) == 2, (
+            f"Expected 2 replace calls, got {replace_sources}"
+        )
         assert len(set(replace_sources)) == 2, (
             "Concurrent same-session saves must use distinct temp files; "
             f"got {replace_sources}"
@@ -331,8 +342,12 @@ class TestIssue765FollowupHardening:
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
             encoding="utf-8"
         )
-        stop_idx = src.find("if _checkpoint_stop is not None:\n                _checkpoint_stop.set()")
-        join_idx = src.find("if _ckpt_thread is not None:\n                _ckpt_thread.join(timeout=15)")
+        stop_idx = src.find(
+            "if _checkpoint_stop is not None:\n                _checkpoint_stop.set()"
+        )
+        join_idx = src.find(
+            "if _ckpt_thread is not None:\n                _ckpt_thread.join(timeout=15)"
+        )
         lock_idx = src.find("with _agent_lock:\n                _result_messages =")
         save_idx = src.find("s.context_messages = _next_context_messages")
 
@@ -353,7 +368,9 @@ class TestIssue765FollowupHardening:
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
             encoding="utf-8"
         )
-        outer_lock_idx = src.find("with _agent_lock:\n                _result_messages =")
+        outer_lock_idx = src.find(
+            "with _agent_lock:\n                _result_messages ="
+        )
         silent_failure_idx = src.find("if not _assistant_added and not _token_sent:")
         inner_lock_idx = src.find("with _agent_lock:", outer_lock_idx + 1)
         compression_idx = src.find("# ── Handle context compression side effects ──")
@@ -362,7 +379,8 @@ class TestIssue765FollowupHardening:
         assert silent_failure_idx != -1, "Silent-failure branch not found"
         assert compression_idx != -1, "Compression marker not found"
         assert not (
-            inner_lock_idx != -1 and silent_failure_idx < inner_lock_idx < compression_idx
+            inner_lock_idx != -1
+            and silent_failure_idx < inner_lock_idx < compression_idx
         ), "Silent-failure path must not reacquire _agent_lock inside the outer lock"
 
     def test_checkpoint_stop_initialised_before_any_raiseable_code(self):
@@ -373,7 +391,8 @@ class TestIssue765FollowupHardening:
         )
         lines = src.splitlines()
         try_line = next(
-            i for i, ln in enumerate(lines, 1)
+            i
+            for i, ln in enumerate(lines, 1)
             if ln.rstrip().endswith("try:")
             and any(
                 lines[j].strip().startswith("_checkpoint_stop = None")
@@ -383,8 +402,7 @@ class TestIssue765FollowupHardening:
         # The assignment must precede the `try:` — not sit inside the nested
         # block where an earlier line could raise before it runs.
         init_line = next(
-            i for i, ln in enumerate(lines, 1)
-            if "_checkpoint_stop = None" in ln
+            i for i, ln in enumerate(lines, 1) if "_checkpoint_stop = None" in ln
         )
         assert init_line < try_line, (
             f"_checkpoint_stop = None (line {init_line}) must precede the outer "
@@ -441,7 +459,7 @@ class TestIssue765FollowupHardening:
         # Find the _periodic_checkpoint function
         ckpt_idx = src.find("def _periodic_checkpoint():")
         assert ckpt_idx != -1, "_periodic_checkpoint function not found"
-        ckpt_block = src[ckpt_idx:ckpt_idx + 600]
+        ckpt_block = src[ckpt_idx : ckpt_idx + 600]
         assert "with _agent_lock:" in ckpt_block, (
             "_periodic_checkpoint must hold _agent_lock while calling s.save() "
             "to prevent race conditions with other session-mutating endpoints"
@@ -459,7 +477,7 @@ class TestIssue765FollowupHardening:
         )
         fn_idx = src.find("def _run_background_title_update(")
         assert fn_idx != -1, "_run_background_title_update not found"
-        fn_block = src[fn_idx:fn_idx + 3200]
+        fn_block = src[fn_idx : fn_idx + 3200]
         assert "with LOCK:" in fn_block, (
             "_run_background_title_update must acquire LOCK before rebinding "
             "to canonical cached session instance"
@@ -481,7 +499,7 @@ class TestIssue765FollowupHardening:
         # Find the session cleanup section
         cleanup_idx = cancel_block.find("Session cleanup outside STREAMS_LOCK")
         assert cleanup_idx != -1, "Session cleanup comment not found in cancel_stream"
-        cleanup_section = cancel_block[cleanup_idx:cleanup_idx + 800]
+        cleanup_section = cancel_block[cleanup_idx : cleanup_idx + 800]
         assert "_get_session_agent_lock" in cleanup_section, (
             "cancel_stream must acquire _get_session_agent_lock during "
             "session cleanup to serialise with the checkpoint thread and "
@@ -501,13 +519,15 @@ class TestIssue765FollowupHardening:
         for func_name in ("retry_last", "undo_last"):
             func_idx = src.find(f"def {func_name}(")
             assert func_idx != -1, f"{func_name} not found in session_ops.py"
-            func_block = src[func_idx:func_idx + 1200]
+            func_block = src[func_idx : func_idx + 1200]
             assert "with _get_session_agent_lock" in func_block, (
                 f"{func_name} must wrap its read-modify-save cycle in "
                 f"with _get_session_agent_lock(session_id)"
             )
 
-    def test_periodic_checkpoint_mutation_race_with_undo_last(self, tmp_path, monkeypatch):
+    def test_periodic_checkpoint_mutation_race_with_undo_last(
+        self, tmp_path, monkeypatch
+    ):
         """Run _periodic_checkpoint against a session whose messages list is
         concurrently truncated by undo_last; the on-disk JSON must remain
         parseable and internally consistent.
@@ -548,6 +568,7 @@ class TestIssue765FollowupHardening:
             _lock = threading.Lock()
 
             from api.config import _get_session_agent_lock
+
             _agent_lock = _get_session_agent_lock("race_test")
 
             def _periodic_checkpoint():
@@ -573,6 +594,7 @@ class TestIssue765FollowupHardening:
             t.start()
 
             from api.session_ops import undo_last
+
             # Collect the allowed message snapshots (each state the session
             # is in at a point where a checkpoint might observe it).
             allowed_message_snapshots = []
@@ -628,14 +650,16 @@ class TestIssue765FollowupHardening:
                 # Normalize for comparison (strip display-only metadata)
                 normalized = [
                     {k: v for k, v in m.items() if k in ("role", "content")}
-                    if isinstance(m, dict) else m
+                    if isinstance(m, dict)
+                    else m
                     for m in snap_msgs
                 ]
                 matched = False
                 for allowed in allowed_message_snapshots:
                     norm_allowed = [
                         {k: v for k, v in m.items() if k in ("role", "content")}
-                        if isinstance(m, dict) else m
+                        if isinstance(m, dict)
+                        else m
                         for m in allowed
                     ]
                     if normalized == norm_allowed:
@@ -649,7 +673,9 @@ class TestIssue765FollowupHardening:
         finally:
             models.SESSIONS.clear()
 
-    def test_cancel_stream_concurrent_checkpoint_produces_valid_json(self, tmp_path, monkeypatch):
+    def test_cancel_stream_concurrent_checkpoint_produces_valid_json(
+        self, tmp_path, monkeypatch
+    ):
         """Run cancel_stream while a _periodic_checkpoint thread is concurrently
         saving the same session; the resulting on-disk JSON must be parseable
         and active_stream_id must be None.
@@ -686,6 +712,7 @@ class TestIssue765FollowupHardening:
             _snap_lock = threading.Lock()
 
             from api.config import _get_session_agent_lock
+
             _agent_lock = _get_session_agent_lock("cancel_race")
 
             def _periodic_checkpoint():
@@ -765,7 +792,10 @@ class TestIssue765FollowupHardening:
                         "pending_user_message=None (atomic cancel cleanup "
                         "under _agent_lock)"
                     )
-                    assert snap.get("pending_attachments") == [] or snap.get("pending_attachments") is None, (
+                    assert (
+                        snap.get("pending_attachments") == []
+                        or snap.get("pending_attachments") is None
+                    ), (
                         "Snapshot with active_stream_id=None must also have "
                         "empty pending_attachments (atomic cancel cleanup "
                         "under _agent_lock)"
@@ -791,6 +821,7 @@ class TestIssue765FollowupHardening:
             SESSION_AGENT_LOCKS,
             SESSION_AGENT_LOCKS_LOCK,
         )
+
         old_sid = "pre-rotation-id"
         new_sid = "post-rotation-id"
 
@@ -835,6 +866,7 @@ class TestIssue765FollowupHardening:
             SESSION_AGENT_LOCKS,
             SESSION_AGENT_LOCKS_LOCK,
         )
+
         old_sid = "pre-rotation-pruned"
         new_sid = "post-rotation-pruned"
 
