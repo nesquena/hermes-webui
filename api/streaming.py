@@ -1536,6 +1536,87 @@ def _is_context_compression_marker(msg):
     )
 
 
+def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
+    """Normalize a text blob used in compression summary cards."""
+    if not isinstance(raw_text, str):
+        return None
+    txt = raw_text.strip()
+    if not txt:
+        return None
+    txt = re.sub(r"\s+", " ", txt).strip()
+    if len(txt) > limit:
+        txt = f"{txt[: limit - 6]}…"
+    return txt
+
+
+def _compression_anchor_message_key(message):
+    if not isinstance(message, dict):
+        return None
+    role = str(message.get('role') or '')
+    if not role or role == 'tool':
+        return None
+    content = message.get('content', '')
+    text = _message_text(content)
+    if len(text) > 160:
+        text = text[:160]
+    ts = message.get('_ts') or message.get('timestamp')
+    attachments = message.get('attachments')
+    attach_count = len(attachments) if isinstance(attachments, list) else 0
+    if not text and not attach_count and not ts:
+        return None
+    return {'role': role, 'ts': ts, 'text': text, 'attachments': attach_count}
+
+
+def _visible_messages_for_compression_anchor(messages):
+    out = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if not role or role == 'tool':
+            continue
+        content = m.get('content', '')
+        has_attachments = bool(m.get('attachments'))
+        has_tool_calls = bool(isinstance(m.get('tool_calls'), list) and m.get('tool_calls'))
+        has_tool_use = False
+        has_reasoning = bool(m.get('reasoning'))
+        if isinstance(content, list):
+            text = '\n'.join(
+                str(p.get('text') or p.get('content') or '')
+                for p in content
+                if isinstance(p, dict)
+                and p.get('type') in {'text', 'input_text', 'output_text'}
+            ).strip()
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get('type') == 'tool_use':
+                    has_tool_use = True
+            if not text:
+                has_reasoning = has_reasoning or any(
+                    isinstance(part, dict)
+                    and part.get('type') in {'thinking', 'reasoning'}
+                    for part in content
+                )
+        else:
+            text = str(content or '').strip()
+        if text or has_attachments or has_tool_calls or has_tool_use or has_reasoning:
+            out.append(m)
+    return out
+
+
+def _compression_summary_from_messages(messages):
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        if not _is_context_compression_marker(m):
+            continue
+        text = _message_text(m.get('content'))
+        if text:
+            return text
+    return None
+
+
 def _find_current_user_turn(messages, msg_text):
     needle = " ".join(str(msg_text or '').split())
     fallback = None
@@ -3001,6 +3082,17 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
+                    visible_after = _visible_messages_for_compression_anchor(s.messages)
+                    s.compression_anchor_visible_idx = (
+                        max(0, len(visible_after) - 1) if visible_after else None
+                    )
+                    s.compression_anchor_message_key = (
+                        _compression_anchor_message_key(visible_after[-1]) if visible_after else None
+                    )
+                    s.compression_anchor_summary = _compact_summary_text(
+                        _compression_summary_from_messages(s.messages)
+                        or _compression_summary_from_messages(s.context_messages)
+                    )
                     put('compressed', {
                         'message': 'Context auto-compressed to continue the conversation',
                     })
