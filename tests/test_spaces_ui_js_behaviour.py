@@ -1371,6 +1371,22 @@ async function dispatchWindowMessage(data, opts) {
       widget_id: 'weather',
       prompt: 'auth = sk-TESTSECRETLOOKING1234567890 prompt = hidden generated-code: function render(){ return "unsafe" }',
     });
+  } else if (scenario === 'runtimeSpaceSeparatedTokenPrompt') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Summarize the account token TOKEN_VALUE for tokenization dashboard',
+    });
   } else if (scenario === 'runtimeBlockedMutationMessages') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -2512,6 +2528,24 @@ def test_spaces_ui_sandbox_postmessage_redacts_auth_prompt_generated_code_and_se
     assert "generated-code:" not in prompt_and_dialog.lower()
     assert "sk-testsecretlooking" not in prompt_and_dialog.lower()
     assert "function render" not in prompt_and_dialog.lower()
+
+
+def test_spaces_ui_sandbox_postmessage_redacts_space_separated_token_marker_without_blocking_benign_labels(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeSpaceSeparatedTokenPrompt")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = body["prompt"] + " " + dialog_blob + " " + out["rootHtml"]
+
+    assert body["prompt"] == "Summarize the account [REDACTED] for tokenization dashboard"
+    assert "tokenization dashboard" in combined
+    assert "TOKEN_VALUE" not in combined
+    assert "account token" not in combined.lower()
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "<script" not in combined.lower()
+    assert "renderer" not in combined.lower()
+    assert "api_key" not in combined.lower()
+    assert "SECRET" not in combined
 
 
 def test_spaces_ui_sandbox_postmessage_blocks_data_and_raw_eval_mutations_without_network_call(driver_path):

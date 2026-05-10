@@ -933,7 +933,7 @@
     text = text.replace(/\bon[a-z]+\s*=\s*[^\s,;]+/gi, '[REDACTED]');
     text = text.replace(/SECRET[_A-Z0-9-]*/gi, '[REDACTED]');
     text = text.replace(/\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|token|authorization|password|credential(?:s)?|cookie|secret|prompt|generated[_-]?code|source|html|data)\b\s*[:=]\s*[^\s,;]*/gi, '[REDACTED]');
-    text = text.replace(/\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|authorization|password|credential(?:s)?|cookie)\b\s+[^\s,;]+/gi, '[REDACTED]');
+    text = text.replace(/\b(api[_-]?key|api[_-]?auth|auth|access[_-]?token|refresh[_-]?token|token|authorization|password|credential(?:s)?|cookie)\b\s+[^\s,;]+/gi, '[REDACTED]');
     text = text.replace(/\bbearer\s+[^\s,;]+/gi, '[REDACTED]');
     text = text.replace(standaloneSecretShape, '[REDACTED]');
     return text.replace(/\s+/g, ' ').trim().slice(0, maxLen || 500);
