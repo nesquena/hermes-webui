@@ -549,7 +549,7 @@ global.fetch = async function(path, opts = {}) {
           widget_count: 1,
           revision_event_id: 'rev-disabled-space',
           disabled: true,
-          disabled_reason: 'shell crash <script>ignored</script>',
+          disabled_reason: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK renderer <script>ignored</script>',
           renderer: '<script>bad()</script>',
           widgets: [
             { id: 'still-listed', kind: 'markdown', title: 'Still Listed', disabled: false, renderer: '<script>bad()</script>' },
@@ -584,7 +584,7 @@ global.fetch = async function(path, opts = {}) {
       kind: 'weather',
       title: (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'Weather in Prague' : '<Weather>',
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized },
-      recovery: isRecovery ? { disabled: true, disabled_reason: 'demo smoke recovery' } : undefined,
+      recovery: isRecovery ? { disabled: true, disabled_reason: 'demo smoke recovery' } : (scenario === 'list' && !isDemoWeather && !isTimeTravelRestore ? { disabled: true, disabled_reason: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK renderer <script>bad()</script>' } : undefined),
       metadata: {
         weather: {
           location: 'Prague',
@@ -2076,6 +2076,7 @@ def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
     assert "generated code" not in out["rootHtml"].lower()
     assert "raw prompt" not in out["rootHtml"].lower()
     assert "weather · weather · x12 y3 · 5×4" in out["rootHtml"]
+    assert "Recovery: disabled · [REDACTED]" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
@@ -3652,7 +3653,7 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Bad &lt;Widget&gt;" in out["recoveryHtml"]
     assert "Disabled Widget" in out["recoveryHtml"]
     assert "Disabled &lt;Space&gt;" in out["recoveryHtml"]
-    assert "Space disabled: shell crash &lt;script&gt;ignored&lt;/script&gt;" in out["recoveryHtml"]
+    assert "Space disabled: [REDACTED]" in out["recoveryHtml"]
     assert "Disable space" in out["recoveryHtml"]
     assert "Enable space" in out["recoveryHtml"]
     assert "Ask Capy to repair Space" in out["recoveryHtml"]

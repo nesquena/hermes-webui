@@ -833,8 +833,9 @@
   function renderWidgetRecoveryStatus(widget){
     const recovery = widget && widget.recovery && typeof widget.recovery === 'object' && !Array.isArray(widget.recovery) ? widget.recovery : {};
     if (!recovery.disabled) return '';
-    const reason = recovery.disabled_reason ? ' · '+String(recovery.disabled_reason).replace(/\s+/g, ' ').trim().slice(0, 160) : '';
-    return '<div class="capy-spaces-muted">Recovery: disabled'+escapeHtml(reason)+'</div>';
+    const rawReason = recovery.disabled_reason ? String(recovery.disabled_reason).replace(/\s+/g, ' ').trim().slice(0, 160) : '';
+    const safeReason = rawReason ? ' · '+safeDisplayMetadataText(rawReason, '[REDACTED]') : '';
+    return '<div class="capy-spaces-muted">Recovery: disabled'+escapeHtml(safeReason)+'</div>';
   }
 
   function renderWidgetManager(spaceId, widgets, events){
@@ -2411,7 +2412,7 @@
       const description = s.description || '';
       const widgets = Array.isArray(s.widgets) ? s.widgets : [];
       const spaceDisabled = !!s.disabled;
-      const spaceDisabledReason = s.disabled_reason ? String(s.disabled_reason) : '';
+      const spaceDisabledReason = s.disabled_reason ? safeDisplayMetadataText(String(s.disabled_reason), '[REDACTED]') : '';
       const spaceStatus = spaceDisabled ? '<div class="capy-spaces-muted">Space disabled'+(spaceDisabledReason ? ': '+escapeHtml(spaceDisabledReason) : '')+'</div>' : '';
       const spaceAction = spaceDisabled
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Enable space</button>'
@@ -2424,7 +2425,7 @@
         const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
         const kind = w && w.kind ? String(w.kind) : 'custom';
         const disabled = !!(w && w.disabled);
-        const disabledReason = w && w.disabled_reason ? String(w.disabled_reason) : '';
+        const disabledReason = w && w.disabled_reason ? safeDisplayMetadataText(String(w.disabled_reason), '[REDACTED]') : '';
         return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
           '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div>' +
           renderRecoveryWidgetEventStatus(w || {}) +
