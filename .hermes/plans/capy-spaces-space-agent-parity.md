@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-09 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-10 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: sandbox runtime contracts now explicitly advertise read-style data/asset requests (`capy:data:get`, `capy:asset:url`) as blocked alongside raw/eval/data mutation messages, aligning the visible metadata-only contract with the postMessage bridge's fail-closed behavior. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Space Agent import-result UI rendering now redacts unsafe backend-supplied display metadata for imported Space names/IDs, widget IDs/titles/kinds, and import warning API/message labels while preserving benign imported metadata. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): redact import result metadata`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving hostile import-result metadata in backend response labels (`renderer`/`source`/`html`/`script`/API-auth markers, generated-code/raw-prompt markers, and secret-looking sentinels) does not appear in `#capySpacesRoot` while safe imported Space/widget labels and benign unsupported API warnings remain visible.
+  - Hardened `renderSpaceImportResult(...)` with a dedicated display-metadata sanitizer for Space Agent import receipts so escaping is no longer the only defense for import-result labels.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`3 passed`); Spaces UI behavior + demo parity suites passed (`136 passed`); full Spaces foundation suite passed (`212 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, and `/tmp` real-static import-result browser harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_238ebacddad646fda92de8746fb1aca2.png`.
 
 - `feat(spaces): list blocked sandbox read messages`
   - Added RED/GREEN backend coverage proving `space.widget.runtime_contract` exposes `capy:data:get` and `capy:asset:url` in the metadata-only blocked-message list, so safe widget details communicate that read-style data/assets bridges are not available yet.

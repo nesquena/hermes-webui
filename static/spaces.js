@@ -596,32 +596,39 @@
       '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(spaceId || '')+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
   }
 
+  function safeImportMetadataText(value, fallback){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!text) return fallback || '';
+    const unsafePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\b|cookie\b|credential|credentials|password|secret(?:[_-][a-z0-9_-]+|\b)|token\b|<script|<\/script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt|(?:^|[._\-/\s;:@<>])(?:source|html|script|data)(?:$|[._\-/\s;:@<>]))/i;
+    return unsafePattern.test(text) ? (fallback || '') : text;
+  }
+
   function renderSpaceImportResult(data){
     const space = data && data.space && typeof data.space === 'object' ? data.space : {};
-    const spaceId = space.space_id || data && data.space_id || '';
-    const name = space.name || spaceId || 'Imported space';
+    const spaceId = safeImportMetadataText(space.space_id || data && data.space_id || '', '');
+    const name = safeImportMetadataText(space.name || '', spaceId || 'Imported space') || spaceId || 'Imported space';
     const widgets = Array.isArray(data && data.imported_widgets) ? data.imported_widgets : [];
     const widgetRows = widgets.length ? widgets.map(function(w){
-      const widgetId = w && w.id ? String(w.id) : '';
-      const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
-      const kind = w && w.kind ? String(w.kind) : (w && w.type ? String(w.type) : 'custom');
+      const widgetId = safeImportMetadataText(w && w.id ? String(w.id) : '', '');
+      const title = safeImportMetadataText(w && w.title ? String(w.title) : '', widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
+      const kind = safeImportMetadataText(w && w.kind ? String(w.kind) : (w && w.type ? String(w.type) : ''), 'custom') || 'custom';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div></div>';
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+(widgetId ? ' · '+escapeHtml(widgetId) : '')+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No imported widget metadata returned.</div>';
     const count = widgets.length;
     const warnings = Array.isArray(data && data.warnings) ? data.warnings : [];
     const warningRows = warnings.length ? '<div class="capy-spaces-card"><h3>Import warnings</h3>' +
       '<div class="capy-spaces-muted">Unsupported Space Agent API calls were not imported. Recreate them through safe Capy tools after review.</div>' +
       '<div class="capy-spaces-widget-list">' + warnings.slice(0, 8).map(function(w){
-        const api = w && w.api ? String(w.api) : 'unsupported API';
-        const message = w && w.message ? String(w.message) : 'Unsupported Space Agent API reference omitted during import.';
+        const api = safeImportMetadataText(w && w.api ? String(w.api) : '', 'unsupported API') || 'unsupported API';
+        const message = safeImportMetadataText(w && w.message ? String(w.message) : '', 'Space Agent package warning omitted pending sandbox review.') || 'Space Agent package warning omitted pending sandbox review.';
         return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(api)+'</strong>' +
           '<div class="capy-spaces-muted">'+escapeHtml(message)+'</div></div></div>';
       }).join('') + '</div></div>' : '';
     return '<div class="capy-spaces-card"><h3>Space Agent import ready</h3>' +
-      '<div class="capy-spaces-muted">Imported package metadata only. Generated widget sources remain quarantined/disabled for review by the backend.</div>' +
+      '<div class="capy-spaces-muted">Imported package metadata only. Generated widget bodies remain quarantined/disabled for review by the backend.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(name)+'</strong>' +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>' + warningRows;
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || 'redacted-import')+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>' + warningRows;
   }
 
   function renderSpaceImportError(message){
