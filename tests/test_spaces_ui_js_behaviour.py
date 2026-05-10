@@ -1103,9 +1103,10 @@ global.fetch = async function(path, opts = {}) {
       ok: true,
       space_id: body.space_id || 'lab',
       format: body.format || 'yaml',
-      filename: (body.format === 'zip') ? 'lab-space-agent.zip' : 'lab-space-agent.yaml',
+      filename: (body.space_id || 'lab') + '-space-agent.' + (body.format === 'zip' ? 'zip' : 'yaml'),
       space_yaml: 'id: lab\nname: Lab\nrenderer: <script>bad()</script>\napi_key: SECRET',
       widgets: {'widgets/weather.yaml': 'id: weather\nscript: <script>bad()</script>\ntoken: SECRET'},
+      archive_b64: body.format === 'zip' ? 'U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ=' : undefined,
       zip_b64: body.format === 'zip' ? 'U0VDUkVUX1pJUF9JTUFHSU5BUlk=' : undefined,
     });
   }
@@ -1891,6 +1892,32 @@ async function dispatchWindowMessage(data, opts) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'repairRecoverySpace', spaceId: 'broken' } };
+        }
+      }
+    });
+  } else if (scenario === 'recoveryExportSpaceYaml') {
+    await window.loadCapySpacesRecovery();
+    beforeHtml = makeElement('capySpacesRecovery').innerHTML;
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'exportRecoverySpaceYaml', spaceId: 'broken' } };
+        }
+      }
+    });
+  } else if (scenario === 'recoveryExportSpaceZip') {
+    await window.loadCapySpacesRecovery();
+    beforeHtml = makeElement('capySpacesRecovery').innerHTML;
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'exportRecoverySpaceZip', spaceId: 'broken' } };
         }
       }
     });
@@ -3845,6 +3872,48 @@ def test_spaces_ui_recovery_disable_space_fails_closed_without_shared_dialog(dri
     assert not any(call["path"] == "api/spaces/recovery/disable-space" for call in out["calls"])
 
 
+def test_spaces_ui_recovery_export_yaml_posts_space_id_and_renders_safe_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryExportSpaceYaml")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/export")
+
+    assert "Export YAML" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "format": "yaml"}
+    assert "Space Agent export ready" in out["recoveryHtml"]
+    assert "Format: yaml" in out["recoveryHtml"]
+    assert "broken-space-agent.yaml" in out["recoveryHtml"]
+    assert "space_yaml" not in out["recoveryHtml"]
+    assert "widgets/weather.yaml" not in out["recoveryHtml"]
+    assert "zip_b64" not in out["recoveryHtml"]
+    assert "archive_b64" not in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_export_zip_posts_space_id_and_renders_safe_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryExportSpaceZip")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/export")
+
+    assert "Export ZIP" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "format": "zip"}
+    assert "Space Agent export ready" in out["recoveryHtml"]
+    assert "Format: zip" in out["recoveryHtml"]
+    assert "broken-space-agent.zip" in out["recoveryHtml"]
+    assert "space_yaml" not in out["recoveryHtml"]
+    assert "widgets/weather.yaml" not in out["recoveryHtml"]
+    assert "zip_b64" not in out["recoveryHtml"]
+    assert "archive_b64" not in out["recoveryHtml"]
+    assert "U0VDUkVUX1pJUF9JTUFHSU5BUlk" not in out["recoveryHtml"]
+    assert "U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ" not in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
 def test_spaces_ui_recovery_enable_widget_uses_shared_confirm_and_refreshes(driver_path):
     out = _run_spaces_scenario(driver_path, "enableRecoveryWidget")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-widget")
@@ -4034,6 +4103,7 @@ def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(dri
     assert "space_yaml" not in out["rootHtml"]
     assert "widgets/weather.yaml" not in out["rootHtml"]
     assert "zip_b64" not in out["rootHtml"]
+    assert "archive_b64" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
@@ -4052,7 +4122,9 @@ def test_spaces_ui_export_zip_posts_space_id_and_renders_safe_metadata_only(driv
     assert "space_yaml" not in out["rootHtml"]
     assert "widgets/weather.yaml" not in out["rootHtml"]
     assert "zip_b64" not in out["rootHtml"]
+    assert "archive_b64" not in out["rootHtml"]
     assert "U0VDUkVUX1pJUF9JTUFHSU5BUlk" not in out["rootHtml"]
+    assert "U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "token" not in out["rootHtml"]

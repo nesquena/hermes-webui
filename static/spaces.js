@@ -2410,6 +2410,8 @@
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Enable space</button>'
         : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Disable space</button>';
       const spaceRepairAction = '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Ask Capy to repair Space</button>';
+      const spaceExportActions = '<button type="button" class="capy-spaces-btn" data-capy-action="exportRecoverySpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="exportRecoverySpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button>';
       const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
         const widgetId = w && w.id ? String(w.id) : '';
         const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
@@ -2431,7 +2433,7 @@
         spaceStatus +
         renderRecoverySpaceEventStatus(s || {}) +
         '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
-        '<div class="capy-spaces-actions">'+spaceAction+spaceRepairAction+'</div>' +
+        '<div class="capy-spaces-actions">'+spaceAction+spaceRepairAction+spaceExportActions+'</div>' +
         widgetRows +
         '<div class="capy-spaces-card"><h4>Recovery rollback</h4><div class="capy-spaces-muted">Restore safe metadata snapshots without rendering generated widget bodies.</div><div class="capy-spaces-widget-list">'+recoveryRows+'</div></div>' +
         '</div></div>';
@@ -2447,7 +2449,7 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'exportRecoverySpaceYaml' && action !== 'exportRecoverySpaceZip' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
     if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
       if (typeof showConfirmDialog !== 'function') return;
       const moduleId = button.dataset.moduleId || '';
@@ -2467,6 +2469,13 @@
     }
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
+    if (action === 'exportRecoverySpaceYaml' || action === 'exportRecoverySpaceZip') {
+      const format = action === 'exportRecoverySpaceZip' ? 'zip' : 'yaml';
+      const data = await postSpacesJson('api/spaces/export', {space_id: spaceId, format: format});
+      const recoveryRoot = document.getElementById('capySpacesRecovery');
+      if (recoveryRoot) recoveryRoot.innerHTML = renderSpaceExportResult(spaceId, data || {}) + recoveryRoot.innerHTML;
+      return;
+    }
     if (action === 'repairRecoverySpace') {
       if (typeof showPromptDialog !== 'function') return;
       const promptText = await showPromptDialog({
