@@ -191,7 +191,9 @@ def test_update_candidate_text_rejects_approved_candidate(tmp_path):
 def test_approve_candidate_indexes_then_marks_approved(tmp_path):
     candidate_id = _seed_candidate(tmp_path)
 
-    with patch("api.external_memory.index_candidate", return_value={"point_id": "pt-1"}) as index:
+    with patch("api.external_memory.check_write_policy", return_value={"ok": True, "stage": "policy"}), patch(
+        "api.external_memory.index_candidate", return_value={"point_id": "pt-1"}
+    ) as index:
         data = external_memory.approve_candidate(tmp_path, candidate_id)
 
     assert data["ok"] is True
@@ -227,6 +229,54 @@ def test_approve_candidate_requires_explicit_indexing_config(tmp_path):
 
     row = external_memory.get_candidate(tmp_path, candidate_id)["candidate"]
     assert row["state"] == "candidate"
+
+
+def test_policy_check_reports_missing_config_before_provider_io(tmp_path):
+    _seed_candidate(tmp_path)
+
+    try:
+        external_memory.check_write_policy(tmp_path)
+        assert False, "write policy should fail before provider I/O when indexing is not configured"
+    except external_memory.ExternalMemoryNotConfigured as exc:
+        error = exc.to_response()
+
+    assert error == {
+        "ok": False,
+        "stage": "policy",
+        "code": "indexing_not_configured",
+        "message": "external memory indexing is not configured; missing ollama_url, embed_model, qdrant_url, qdrant_collection",
+        "retryable": True,
+    }
+
+
+def test_index_candidate_requires_verified_active_qdrant_payload(tmp_path):
+    _register_provider(
+        tmp_path,
+        config={
+            "ollama_url": "http://127.0.0.1:11434",
+            "embed_model": "fixture-embed-model",
+            "qdrant_url": "http://127.0.0.1:6333",
+            "qdrant_collection": "fixture_collection",
+        },
+    )
+    candidate = {
+        "provider": "custom_store",
+        "id": "cand_verify",
+        "text": "External Memory approval requires verified active indexing.",
+        "source": "auto_capture",
+        "metadata": {},
+    }
+
+    with patch("api.external_memory.embed_text", return_value=[0.1]), patch("api.external_memory.qdrant_upsert"), patch(
+        "api.external_memory.qdrant_verify_active", return_value=False
+    ):
+        try:
+            external_memory.index_candidate(tmp_path, candidate)
+            assert False, "indexing should fail when active Qdrant payload cannot be verified"
+        except external_memory.ExternalMemoryError as exc:
+            assert exc.stage == "persistence"
+            assert exc.code == "indexing_failed"
+            assert exc.retryable is True
 
 
 def test_load_config_reads_provider_config_and_env_without_defaults(tmp_path, monkeypatch):
@@ -298,7 +348,37 @@ def test_approve_endpoint_returns_400_when_indexing_is_not_configured(tmp_path, 
     routes.handle_post(handler, urlparse(f"/api/external-memory/candidates/{candidate_id}/approve"))
 
     assert handler.status == 400
-    assert "external memory indexing is not configured" in handler.payload()["error"]
+    payload = handler.payload()
+    assert payload["ok"] is False
+    assert payload["stage"] == "policy"
+    assert payload["code"] == "indexing_not_configured"
+    assert "external memory indexing is not configured" in payload["message"]
+    assert payload["retryable"] is True
+    assert external_memory.get_candidate(tmp_path, candidate_id)["candidate"]["state"] == "candidate"
+
+
+def test_approve_endpoint_returns_structured_persistence_error(tmp_path, monkeypatch):
+    candidate_id = _seed_candidate(tmp_path)
+    monkeypatch.setattr(routes, "_active_hermes_home_for_external_memory", lambda: tmp_path)
+    handler = _FakeHandler(b"{}")
+
+    with patch("api.external_memory.check_write_policy", return_value={"ok": True, "stage": "policy"}), patch(
+        "api.external_memory.index_candidate",
+        side_effect=external_memory.ExternalMemoryError(
+            "external memory indexing did not verify an active persisted record",
+            stage="persistence",
+            code="indexing_failed",
+            retryable=True,
+        ),
+    ):
+        routes.handle_post(handler, urlparse(f"/api/external-memory/candidates/{candidate_id}/approve"))
+
+    assert handler.status == 502
+    payload = handler.payload()
+    assert payload["ok"] is False
+    assert payload["stage"] == "persistence"
+    assert payload["code"] == "indexing_failed"
+    assert payload["retryable"] is True
     assert external_memory.get_candidate(tmp_path, candidate_id)["candidate"]["state"] == "candidate"
 
 
@@ -308,7 +388,9 @@ def test_approve_and_reject_candidate_endpoints_update_state(tmp_path, monkeypat
     monkeypatch.setattr(routes, "_active_hermes_home_for_external_memory", lambda: tmp_path)
 
     approve_handler = _FakeHandler(b"{}")
-    with patch("api.external_memory.index_candidate", return_value={"point_id": "pt-route"}):
+    with patch("api.external_memory.check_write_policy", return_value={"ok": True, "stage": "policy"}), patch(
+        "api.external_memory.index_candidate", return_value={"point_id": "pt-route"}
+    ):
         routes.handle_post(approve_handler, urlparse(f"/api/external-memory/candidates/{approve_id}/approve"))
     assert approve_handler.status == 200
     assert approve_handler.payload()["candidate"]["state"] == "approved"

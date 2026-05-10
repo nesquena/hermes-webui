@@ -6363,7 +6363,9 @@ def _handle_external_memory_candidate_action(handler, path: str, body: dict):
             return j(handler, external_memory.update_candidate_text(home, candidate_id, str(body.get("text") or ""), provider=provider))
         return bad(handler, "unknown external memory candidate action", 404)
     except external_memory.ExternalMemoryNotConfigured as e:
-        return bad(handler, str(e), 400)
+        return j(handler, e.to_response(), status=400)
+    except external_memory.ExternalMemoryError as e:
+        return j(handler, e.to_response(), status=502)
     except external_memory.ExternalMemoryNotFound as e:
         return bad(handler, str(e), 404)
     except ValueError as e:

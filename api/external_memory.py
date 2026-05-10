@@ -26,7 +26,27 @@ VALID_CANDIDATE_STATES = {"candidate", "approved", "rejected"}
 
 
 class ExternalMemoryError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str = "persistence",
+        code: str = "provider_error",
+        retryable: bool = True,
+    ):
+        super().__init__(message)
+        self.stage = stage
+        self.code = code
+        self.retryable = retryable
+
+    def to_response(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "stage": self.stage,
+            "code": self.code,
+            "message": str(self),
+            "retryable": self.retryable,
+        }
 
 
 class ExternalMemoryNotFound(ExternalMemoryError):
@@ -34,7 +54,8 @@ class ExternalMemoryNotFound(ExternalMemoryError):
 
 
 class ExternalMemoryNotConfigured(ExternalMemoryError):
-    pass
+    def __init__(self, message: str):
+        super().__init__(message, stage="policy", code="indexing_not_configured", retryable=True)
 
 
 @dataclass(frozen=True)
@@ -162,6 +183,14 @@ def _require_indexing_config(cfg: dict[str, Any]) -> None:
         raise ExternalMemoryNotConfigured(
             "external memory indexing is not configured; missing " + ", ".join(missing)
         )
+
+
+def check_write_policy(hermes_home: str | Path, *, provider: str | None = None) -> dict[str, Any]:
+    """Validate that a reviewed candidate may proceed to provider I/O."""
+    provider_id = get_provider_spec(hermes_home, provider).id
+    cfg = load_config(hermes_home, provider_id)
+    _require_indexing_config(cfg)
+    return {"ok": True, "provider": provider_id, "stage": "policy"}
 
 
 def ensure_db(path: str | Path) -> Path:
@@ -316,6 +345,7 @@ def approve_candidate(hermes_home: str | Path, candidate_id: str, *, provider: s
     current = get_candidate(hermes_home, candidate_id, provider=provider_id)["candidate"]
     if not current:
         raise ExternalMemoryNotFound(f"candidate not found: {candidate_id}")
+    check_write_policy(hermes_home, provider=provider_id)
     index_result = index_candidate(hermes_home, current, provider=provider_id)
     result = _set_candidate_state(hermes_home, candidate_id, "approved", {"approved_at": time.time(), "qdrant_point_id": index_result.get("point_id", "")}, provider=provider_id)
     result["index"] = index_result
@@ -364,6 +394,24 @@ def qdrant_upsert(cfg: dict[str, Any], point_id: str, vector: list[float], paylo
     _request_json(f"{base}/collections/{collection}/points?wait=true", {"points": [{"id": point_id, "vector": vector, "payload": payload}]}, timeout=timeout, method="PUT")
 
 
+def qdrant_verify_active(cfg: dict[str, Any], point_id: str, memory_id: str) -> bool:
+    _require_indexing_config(cfg)
+    base = str(cfg["qdrant_url"]).rstrip("/")
+    collection = str(cfg["qdrant_collection"])
+    timeout = float(cfg.get("timeout", 10))
+    response = _post_json(
+        f"{base}/collections/{collection}/points",
+        {"ids": [point_id], "with_payload": True, "with_vector": False},
+        timeout=timeout,
+    )
+    points = response.get("result")
+    if not isinstance(points, list) or not points:
+        return False
+    first = points[0]
+    payload = first.get("payload") if isinstance(first, dict) else None
+    return isinstance(payload, dict) and payload.get("state") == "active" and payload.get("memory_id") == memory_id
+
+
 def index_candidate(hermes_home: str | Path, candidate: dict[str, Any], *, provider: str | None = None) -> dict[str, Any]:
     provider_id = get_provider_spec(hermes_home, provider or candidate.get("provider")).id
     cfg = load_config(hermes_home, provider_id)
@@ -384,6 +432,13 @@ def index_candidate(hermes_home: str | Path, candidate: dict[str, Any], *, provi
         "metadata": metadata,
     }
     qdrant_upsert(cfg, point_id, vector, payload)
+    if not qdrant_verify_active(cfg, point_id, candidate["id"]):
+        raise ExternalMemoryError(
+            "external memory indexing did not verify an active persisted record",
+            stage="persistence",
+            code="indexing_failed",
+            retryable=True,
+        )
     return {"point_id": point_id}
 
 
