@@ -2665,7 +2665,14 @@ function renderSessionListFromCache(){
       const lineageList=document.createElement('div');
       lineageList.className='session-lineage-segments';
       ['pointerdown','pointerup','click'].forEach(ev=>lineageList.addEventListener(ev,e=>e.stopPropagation()));
-      const sortedSegments=[...lineageSegments].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
+      const sortedSegments=[...lineageSegments].sort((a,b)=>{
+        const bSeg=Number(b&&b._compression_segment_count||0);
+        const aSeg=Number(a&&a._compression_segment_count||0);
+        if(bSeg||aSeg){
+          if(bSeg!==aSeg) return bSeg-aSeg;
+        }
+        return _sessionTimestampMs(b)-_sessionTimestampMs(a);
+      });
       for(const seg of sortedSegments){
         const row=document.createElement('button');
         row.type='button';

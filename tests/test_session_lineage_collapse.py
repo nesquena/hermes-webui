@@ -345,6 +345,8 @@ def test_lineage_segment_expansion_static_contract():
     assert "_expandedLineageKeys.delete(lineageKey)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
+    assert "const bSeg=Number(b&&b._compression_segment_count||0);" in js
+    assert "if(bSeg!==aSeg) return bSeg-aSeg;" in js
     assert "const segTitle=seg.title||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
     assert "await loadSession(seg.session_id);" in js
