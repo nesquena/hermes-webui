@@ -192,6 +192,16 @@ def test_preserved_task_list_renders_through_compression_card_path():
     assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in src
 
 
+def test_context_anchor_reference_uses_session_summary_fallback():
+    src = _read("static/ui.js")
+
+    assert "sessionCompressionSummary" in src
+    assert "const sessionCompressionSummary" in src
+    assert "referenceText=referenceMessage" in src
+    assert ": sessionCompressionSummary" in src
+    assert "!!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary)" in src
+
+
 def test_preserved_task_list_attaches_once_per_render():
     src = _read("static/ui.js")
 
