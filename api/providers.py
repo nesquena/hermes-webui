@@ -188,6 +188,7 @@ _PROVIDER_LOGO_URL: dict[str, str] = {
     "bankr":        "https://bankr.bot/favicon.svg",
     "kimi-coding":  "https://www.kimi.com/favicon.ico",
     "x-ai":         "https://x.ai/favicon.ico",
+    "nous":         "https://nousresearch.com/apple-touch-icon.png",
     # Local bundled SVGs — providers without simpleicons or favicon coverage
     "openai":       "static/provider-logos/openai.svg",
     "openai-codex": "static/provider-logos/openai.svg",

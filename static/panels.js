@@ -6235,14 +6235,21 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 // browser, and return to a successful prompt. Avoids per-provider OAuth client
 // engineering on the dashboard side — works for any provider hermes auth
 // supports without code changes.
+//
+// Closes the Settings overlay FIRST — otherwise the terminal opens behind the
+// Settings panel and the user sees nothing happen.
 async function _authenticateProvider(providerId){
   if(!providerId) return;
   const cleanId = String(providerId)
     .replace(/-acp$/i, '')      // copilot-acp -> copilot
     .replace(/-oauth$/i, '');   // qwen-oauth -> qwen
-  // Use cmdTerminal so workspace selection / new session happen the same way
-  // /terminal slash command handles them. Falls back to direct toggle if
-  // cmdTerminal isn't available (older builds).
+  // Step 1: close Settings so the composer terminal is visible.
+  if(typeof _hideSettingsPanel === 'function'){
+    try { _hideSettingsPanel(); } catch(_) {}
+  }
+  // Step 2: open the composer terminal via cmdTerminal (handles workspace
+  // checks + new session creation if no current session). Falls back to
+  // toggleComposerTerminal for older builds.
   if(typeof cmdTerminal === 'function'){
     try { await cmdTerminal(); } catch(_) {}
   } else if(typeof toggleComposerTerminal === 'function'){
@@ -6251,7 +6258,7 @@ async function _authenticateProvider(providerId){
     showToast('Terminal not available', 2600, 'error');
     return;
   }
-  // Wait for terminal session to be ready (cap: ~3s)
+  // Step 3: wait for terminal session to be ready (cap: ~3s).
   let sid = null;
   for(let i = 0; i < 20; i++){
     sid = (typeof TERMINAL_UI !== 'undefined' && TERMINAL_UI && TERMINAL_UI.sessionId)
@@ -6264,11 +6271,17 @@ async function _authenticateProvider(providerId){
     showToast('Terminal session not ready', 2600, 'error');
     return;
   }
-  // Type the command + Enter
-  await api('/api/terminal/input', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, data: 'hermes auth add ' + cleanId + '\n' }),
-  });
+  // Step 4: type the command + Enter into the terminal via the same API
+  // path that `term.onData` uses for keystrokes.
+  try {
+    await api('/api/terminal/input', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sid, data: 'hermes auth add ' + cleanId + '\n' }),
+    });
+    showToast('Running: hermes auth add ' + cleanId, 2600);
+  } catch(e){
+    showToast('Failed to type into terminal: ' + (e && e.message || e), 4000, 'error');
+  }
 }
 // <<< hermes-fork
 
