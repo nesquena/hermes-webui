@@ -1317,8 +1317,8 @@
   function renderWidgetDetailPanel(spaceId, widget, runtimeContract){
     const safeWidget = widget && typeof widget === 'object' ? widget : {};
     const widgetId = safeWidget.id || '';
-    const title = safeWidget.title || widgetId || 'Untitled widget';
-    const kind = safeWidget.kind || 'custom';
+    const title = safeDisplayMetadataText(safeWidget.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
+    const kind = safeDisplayMetadataText(safeWidget.kind, 'custom') || 'custom';
     const layout = widgetLayout(safeWidget);
     const recovery = safeWidget.recovery && typeof safeWidget.recovery === 'object' ? safeWidget.recovery : {};
     const recoveryText = recovery.disabled ? 'Recovery: disabled' : 'Recovery: enabled';

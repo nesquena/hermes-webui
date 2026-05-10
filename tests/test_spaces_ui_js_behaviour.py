@@ -790,7 +790,7 @@ global.fetch = async function(path, opts = {}) {
     return response({ widget: {
       id: 'weather',
       kind: 'markdown',
-      title: '<Weather>',
+      title: scenario === 'runtimeUnsafeWidgetTitlePrompt' ? 'renderer panel token SECRET_VALUE_DO_NOT_LEAK' : '<Weather>',
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: false },
       recovery: { disabled: false },
       revision_event_id: 'rev-weather',
@@ -1386,6 +1386,22 @@ async function dispatchWindowMessage(data, opts) {
       space_id: 'lab',
       widget_id: 'weather',
       prompt: 'Summarize the account token TOKEN_VALUE for tokenization dashboard',
+    });
+  } else if (scenario === 'runtimeUnsafeWidgetTitlePrompt') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Refresh safely',
     });
   } else if (scenario === 'runtimeBlockedMutationMessages') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2546,6 +2562,23 @@ def test_spaces_ui_sandbox_postmessage_redacts_space_separated_token_marker_with
     assert "renderer" not in combined.lower()
     assert "api_key" not in combined.lower()
     assert "SECRET" not in combined
+
+
+def test_spaces_ui_sandbox_postmessage_redacts_unsafe_widget_title_in_detail_and_prompt_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeUnsafeWidgetTitlePrompt")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = out["rootHtml"] + " " + dialog_blob
+
+    assert body["prompt"] == "Refresh safely"
+    assert "[REDACTED]" in out["beforeHtml"]
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "renderer panel" not in combined.lower()
+    assert "token SECRET_VALUE_DO_NOT_LEAK" not in combined
+    assert "SECRET" not in combined
+    assert "api_key" not in combined.lower()
+    assert "<script" not in combined.lower()
 
 
 def test_spaces_ui_sandbox_postmessage_blocks_data_and_raw_eval_mutations_without_network_call(driver_path):
