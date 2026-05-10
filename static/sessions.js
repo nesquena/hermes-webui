@@ -2910,6 +2910,7 @@ function renderSessionListFromCache(){
         _tapTimer=null;
         _lastTapTime=0;
         if(_renamingSid) return;
+        if(s.session_id===_activeSessionIdForSidebar()) return;
         // For CLI sessions, import into WebUI store first (idempotent)
         if(s.is_cli_session){
           try{

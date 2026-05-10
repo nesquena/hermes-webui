@@ -136,3 +136,15 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     assert before_idx < visible_idx < move_idx < final_idx < anchor_idx
     assert "activeIndex:-1" in render_body[before_idx:visible_idx]
     assert "activeIndex:shouldAnchorActive?activeIndex:-1" not in render_body
+
+
+def test_clicking_already_active_session_is_noop_before_reload():
+    """Clicking the selected row again should not rebuild the list and jump it."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    render_start = js.index("function renderSessionListFromCache()")
+    render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
+    render_body = js[render_start:render_end]
+
+    noop_idx = render_body.index("if(s.session_id===_activeSessionIdForSidebar()) return;")
+    load_idx = render_body.index("await loadSession(s.session_id);renderSessionListFromCache();")
+    assert noop_idx < load_idx
