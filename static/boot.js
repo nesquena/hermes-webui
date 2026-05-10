@@ -1092,6 +1092,13 @@ const _THEMES=[
   {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
 ];
 const _SKINS=[
+  // >>> hermes-fork: HermesOS skin tile (HermesOS Cloud)
+  // First in the list so it's the visual default in the Appearance picker.
+  // Gold-leaf swatch matches the dashboard's --gold-leaf accent across both
+  // light (#c5a059) and dark (#d4af37) modes. The third swatch is a deeper
+  // burnished gold so the three-dot strip reads as a coherent palette.
+  {name:'HermesOS', colors:['#d4af37','#c5a059','#8a6e26']},
+  // <<< hermes-fork
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
