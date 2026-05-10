@@ -5186,7 +5186,7 @@ const _providerCardEls = new Map(); // providerId → {card, statusDot, input, s
 // Curated picks shown when the "Recommended" tab is active. Order is also the
 // display order. All ids must exist in /api/providers; ones that don't are
 // silently dropped (so editing this list is safe).
-const _RECOMMENDED_PROVIDERS = ['venice','bankr','anthropic','openrouter','openai-codex','crof'];
+const _RECOMMENDED_PROVIDERS = ['venice','bankr','anthropic','openrouter','nous','openai-codex','crof'];
 let _providerActiveTab = 'recommended';
 // <<< hermes-fork
 
