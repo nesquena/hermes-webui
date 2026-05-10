@@ -3924,8 +3924,25 @@ def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         allowed = {"name", "description", "agent_instructions", "layout", "widgets", "capabilities", "template"}
         for key, value in (updates or {}).items():
             if key in allowed:
-                if key == "widgets" and not isinstance(value, list):
-                    raise ValueError("widgets must be a list")
+                if key == "widgets":
+                    if not isinstance(value, list):
+                        raise ValueError("widgets must be a list")
+                    existing_widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
+                    existing_by_id = {
+                        str(widget.get("id")): widget
+                        for widget in existing_widgets
+                        if isinstance(widget, dict) and widget.get("id")
+                    }
+                    normalized_widgets = []
+                    for widget in value:
+                        if not isinstance(widget, dict):
+                            continue
+                        candidate = _normalize_widget(widget)
+                        existing = existing_by_id.get(candidate["id"])
+                        if isinstance(existing, dict):
+                            candidate = _preserve_admin_disabled_widget_recovery(existing, candidate)
+                        normalized_widgets.append(candidate)
+                    value = normalized_widgets
                 if key in {"layout", "capabilities"} and not isinstance(value, dict):
                     raise ValueError(f"{key} must be an object")
                 if key == "agent_instructions":

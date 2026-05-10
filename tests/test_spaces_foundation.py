@@ -5216,6 +5216,55 @@ def test_recovery_widget_upsert_preserves_disabled_state_until_enable_control(mo
     assert spaces.read_widget(created["space_id"], "bad-widget")["recovery"]["disabled"] is False
 
 
+def test_recovery_widget_update_space_preserves_disabled_state_until_enable_control(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Widget Quarantine Space Update"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakNormalRoute()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="manual recovery quarantine")
+
+    updated = spaces.update_space(
+        created["space_id"],
+        {
+            "widgets": [
+                {
+                    "id": "bad-widget",
+                    "kind": "html",
+                    "title": "Updated Widget",
+                    "recovery": {"disabled": False, "disabled_reason": ""},
+                    "renderer": "<script>updatedBody()</script>",
+                    "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK_2"},
+                }
+            ]
+        },
+    )
+
+    stored = spaces.read_widget(created["space_id"], "bad-widget")
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps({"updated": updated, "recovery": recovery}).lower()
+
+    assert stored["title"] == "Updated Widget"
+    assert stored["recovery"] == {"disabled": True, "disabled_reason": "manual recovery quarantine"}
+    assert recovery["summary"]["disabled_widget_count"] == 1
+    assert recovery["spaces"][0]["widgets"][0]["disabled"] is True
+    assert recovery["spaces"][0]["widgets"][0]["disabled_reason"] == "manual recovery quarantine"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    enabled = spaces.enable_widget_for_recovery(created["space_id"], "bad-widget")
+    assert enabled["disabled"] is False
+    assert spaces.read_widget(created["space_id"], "bad-widget")["recovery"]["disabled"] is False
+
+
 def test_recovery_widget_patch_preserves_disabled_state_until_enable_control(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Widget Quarantine Patch"})
