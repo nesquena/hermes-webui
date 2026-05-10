@@ -245,6 +245,12 @@
   :root[data-skin="hermesos"] [style*="border-radius:50%"]{
     border-radius:50% !important;
   }
+  /* Drop the app titlebar entirely — the "↑ Chat" / "↑ Workspaces" header
+     is noise; the panel rail + sidebar already convey context. Keep the
+     markup for other skins, just hide it under HermesOS. */
+  :root[data-skin="hermesos"] .app-titlebar{
+    display:none !important;
+  }
   /* Force palette: base CSS hardcodes navy gradients (rgba 21,31,45 → 13,20,31)
      on .app-dialog, .onboarding-card, .kanban-modal, .kanban-board-switcher-menu.
      These would otherwise bleed dark-blue into our vellum/ink palette. */
