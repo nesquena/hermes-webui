@@ -291,7 +291,7 @@ def test_server():
     for _k in list(env):
         if any(_k.startswith(p) for p in (
             'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-            'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY',
+            'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY', 'XIAOMI_API_KEY',
         )):
             del env[_k]
     env.update({

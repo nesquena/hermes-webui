@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **fix(providers): detect Xiaomi MiMo from `XIAOMI_API_KEY`** ([#2025](https://github.com/nesquena/hermes-webui/issues/2025)). WebUI now treats Xiaomi like the other API-key providers: exported or `.env`-stored `XIAOMI_API_KEY` enables the Xiaomi model group, Settings provider-key detection, and onboarding help text without requiring a manual provider config entry.
+
 ## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
 
 ### Fixed
