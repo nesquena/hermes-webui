@@ -159,6 +159,110 @@
   :root[data-skin="sienna"] .session-item.active{border-left:2px solid var(--accent);}
   :root[data-skin="sienna"] .composer-box{border-radius:18px;}
 
+  /* >>> hermes-fork: HermesOS skin (HermesOS Cloud)
+     Mirrors the visual identity of dashboard.hermesos.cloud — "vellum & ink"
+     palette with gold accent, sharp corners (zero border-radius across the
+     surface), Outfit body / Playfair serif / Space Mono code. Editorial feel.
+     Marker-wrapped so the entire block can be re-applied cleanly after an
+     upstream merge. Light + dark tokens map dashboard --vellum-bg / --ink-black
+     / --gold-leaf to webui's skin variables. */
+  :root[data-skin="hermesos"]{
+    --bg:#fdfcf9;--sidebar:#faf9f6;--surface:#ffffff;
+    --border:rgba(26,26,26,0.08);--border2:rgba(26,26,26,0.14);
+    --text:#1a1a1a;--muted:rgba(26,26,26,0.45);--strong:#000000;--em:rgba(26,26,26,0.7);
+    --accent:#c5a059;--accent-hover:#b08e4a;--accent-text:#8a6e26;
+    --accent-bg:rgba(197,160,89,0.10);--accent-bg-strong:rgba(197,160,89,0.20);
+    --code-bg:rgba(26,26,26,0.04);--code-inline-bg:rgba(26,26,26,0.06);
+    --code-text:#8a6e26;--pre-text:#1a1a1a;
+    --topbar-bg:rgba(253,252,249,0.96);--main-bg:rgba(253,252,249,0.55);
+    --input-bg:rgba(26,26,26,0.035);--hover-bg:rgba(26,26,26,0.05);
+    --focus-ring:rgba(197,160,89,0.3);--focus-glow:rgba(197,160,89,0.1);
+    --blue:#2E6F9E;--gold:#c5a059;
+    --user-bubble-bg:#ffffff;--user-bubble-border:rgba(26,26,26,0.10);
+    --user-bubble-text:#1a1a1a;--user-bubble-placeholder:rgba(26,26,26,0.45);
+    --user-selection-bg:rgba(197,160,89,0.28);--user-selection-text:#1a1a1a;
+  }
+  :root.dark[data-skin="hermesos"]{
+    --bg:#0d0d0d;--sidebar:#141414;--surface:#1a1a1a;
+    --border:rgba(253,252,249,0.12);--border2:rgba(253,252,249,0.20);
+    --text:#fdfcf9;--muted:rgba(253,252,249,0.45);--strong:#ffffff;--em:rgba(253,252,249,0.75);
+    --accent:#d4af37;--accent-hover:#b8941f;--accent-text:#d4af37;
+    --accent-bg:rgba(212,175,55,0.10);--accent-bg-strong:rgba(212,175,55,0.20);
+    --code-bg:rgba(253,252,249,0.04);--code-inline-bg:rgba(253,252,249,0.06);
+    --code-text:#d4af37;--pre-text:#fdfcf9;
+    --topbar-bg:rgba(13,13,13,0.96);--main-bg:rgba(13,13,13,0.55);
+    --input-bg:rgba(253,252,249,0.035);--hover-bg:rgba(253,252,249,0.05);
+    --focus-ring:rgba(212,175,55,0.3);--focus-glow:rgba(212,175,55,0.1);
+    --blue:#5ba3d0;--gold:#d4af37;
+    --user-bubble-bg:#1a1a1a;--user-bubble-border:rgba(253,252,249,0.12);
+    --user-bubble-text:#fdfcf9;--user-bubble-placeholder:rgba(253,252,249,0.45);
+    --user-selection-bg:rgba(212,175,55,0.28);--user-selection-text:#fdfcf9;
+  }
+  /* Typography — Outfit body, Playfair Display for headings, Space Mono for code.
+     Fonts are loaded via <link> in index.html (Google Fonts CDN). */
+  :root[data-skin="hermesos"]{
+    font-family:'Outfit',system-ui,-apple-system,sans-serif;
+  }
+  :root[data-skin="hermesos"] code,
+  :root[data-skin="hermesos"] pre,
+  :root[data-skin="hermesos"] .mono,
+  :root[data-skin="hermesos"] kbd{
+    font-family:'Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  :root[data-skin="hermesos"] h1,
+  :root[data-skin="hermesos"] h2,
+  :root[data-skin="hermesos"] .serif,
+  :root[data-skin="hermesos"] .greeting-title{
+    font-family:'Playfair Display','Iowan Old Style',Georgia,serif;
+    letter-spacing:-.01em;
+  }
+  /* Boxy aesthetic — zero out border-radius across the skin's surface.
+     Keep `border-radius: 50%` for circular dots / avatars (handled by
+     `:not([style*="border-radius: 50%"])` style chains in components, which
+     we don't override). */
+  :root[data-skin="hermesos"] .tool-card,
+  :root[data-skin="hermesos"] .provider-card,
+  :root[data-skin="hermesos"] .provider-tab,
+  :root[data-skin="hermesos"] .provider-card-logo,
+  :root[data-skin="hermesos"] .composer-box,
+  :root[data-skin="hermesos"] .msg-body,
+  :root[data-skin="hermesos"] .session-item,
+  :root[data-skin="hermesos"] .modal,
+  :root[data-skin="hermesos"] .toast,
+  :root[data-skin="hermesos"] .badge,
+  :root[data-skin="hermesos"] .pill,
+  :root[data-skin="hermesos"] .dropdown,
+  :root[data-skin="hermesos"] .app-dialog,
+  :root[data-skin="hermesos"] .app-dialog-input,
+  :root[data-skin="hermesos"] .panel,
+  :root[data-skin="hermesos"] .card,
+  :root[data-skin="hermesos"] button,
+  :root[data-skin="hermesos"] input,
+  :root[data-skin="hermesos"] select,
+  :root[data-skin="hermesos"] textarea{
+    border-radius:0 !important;
+  }
+  /* Preserve circular elements (status dots, mic ring, avatars) where the
+     50% radius is integral to the affordance — selector matches inline-style
+     marker AND a small allowlist of known circular classes. */
+  :root[data-skin="hermesos"] .status-dot,
+  :root[data-skin="hermesos"] .stream-dot,
+  :root[data-skin="hermesos"] .terminal-dot,
+  :root[data-skin="hermesos"] .session-avatar,
+  :root[data-skin="hermesos"] .user-avatar,
+  :root[data-skin="hermesos"] .composer-terminal-dot{
+    border-radius:50% !important;
+  }
+  /* Greeting hero logo — give it a sharper frame matching the dashboard
+     etched-card aesthetic instead of the rounded golden tile. */
+  :root[data-skin="hermesos"] .greeting-logo,
+  :root[data-skin="hermesos"] .empty-state-logo{
+    border-radius:0;
+    background:transparent;
+    box-shadow:none;
+  }
+  /* <<< hermes-fork */
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

@@ -1,0 +1,12 @@
+<svg width="220" height="60" viewBox="0 0 220 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .brand { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 900; font-size: 32px; letter-spacing: -1.5px; fill: #ffffff; }
+      .os-box { fill: #ccff00; }
+      .os-text { font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-weight: 700; font-size: 16px; fill: #111111; letter-spacing: -0.5px; }
+    </style>
+  </defs>
+  <text x="0" y="42" class="brand">HERMES</text>
+  <rect x="130" y="16" width="36" height="30" class="os-box" rx="2" />
+  <text x="136" y="37" class="os-text">OS</text>
+</svg>
