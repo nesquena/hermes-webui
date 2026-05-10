@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-10 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space Agent import-result UI rendering now redacts unsafe backend-supplied display metadata for imported Space names/IDs, widget IDs/titles/kinds, and import warning API/message labels while preserving benign imported metadata. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Creator-loop commit receipts now fail closed when an existing-space preview goes stale before approval or a new-space preview slug is claimed before commit, preserving the previewed revision boundary and preventing unreviewed overwrites. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject stale creator preview commits`
+  - Added RED/GREEN backend coverage proving an approved creator commit refuses to overwrite an explicitly previewed existing Space when its revision changes before commit.
+  - Added RED/GREEN backend coverage proving a create-intent creator preview refuses to revise a Space whose slug appears after the preview receipt was issued.
+  - Hardened creator preview receipts with server-side `commit_base` metadata (`exists` + `revision_event_id`) and commit-time revision/slug checks while keeping the preview receipt metadata server-only and generated/source/API-auth markers out of responses.
 
 - `fix(spaces): redact import result metadata`
   - Added RED/GREEN real-`static/spaces.js` coverage proving hostile import-result metadata in backend response labels (`renderer`/`source`/`html`/`script`/API-auth markers, generated-code/raw-prompt markers, and secret-looking sentinels) does not appear in `#capySpacesRoot` while safe imported Space/widget labels and benign unsupported API warnings remain visible.

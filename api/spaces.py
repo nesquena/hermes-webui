@@ -91,6 +91,7 @@ _CREATOR_PREVIEW_TTL_SECONDS = 30 * 60
 _CREATOR_PREVIEW_CACHE_MAX = 100
 _CREATOR_PREVIEW_RECEIPTS: dict[str, dict[str, Any]] = {}
 _CREATOR_PREVIEW_RECEIPTS_LOCK = threading.RLock()
+_SPACE_MANIFEST_LOCK = threading.RLock()
 _SOURCE_SPACE_ASSETS_DIR = "assets/"
 _SOURCE_SPACE_SCRIPTS_DIR = "scripts/"
 _SPACE_DEMO_RUNS = [
@@ -291,18 +292,34 @@ def _record_event(
     return safe_event_id
 
 
-def _write_manifest(space: dict[str, Any], event_type: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    now = time.time()
-    space.setdefault("created_at", now)
-    space["updated_at"] = now
-    event_id = uuid.uuid4().hex
-    revisions = list(space.get("revision_events") or [])
-    revisions.append(event_id)
-    space["revision_events"] = revisions
-    space["revision_event_id"] = event_id
-    _record_event(space["space_id"], event_type, details, event_id=event_id, snapshot=space)
-    _atomic_write_json(_manifest_path(space["space_id"]), space)
-    return dict(space)
+def _write_manifest(
+    space: dict[str, Any],
+    event_type: str,
+    details: dict[str, Any] | None = None,
+    *,
+    allow_stale_revision: bool = False,
+) -> dict[str, Any]:
+    with _SPACE_MANIFEST_LOCK:
+        if not allow_stale_revision:
+            path = _manifest_path(space["space_id"])
+            current_revision = None
+            if path.exists():
+                current = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(current, dict):
+                    current_revision = current.get("revision_event_id")
+            if current_revision != space.get("revision_event_id"):
+                raise ValueError("Space manifest changed during mutation")
+        now = time.time()
+        space.setdefault("created_at", now)
+        space["updated_at"] = now
+        event_id = uuid.uuid4().hex
+        revisions = list(space.get("revision_events") or [])
+        revisions.append(event_id)
+        space["revision_events"] = revisions
+        space["revision_event_id"] = event_id
+        _record_event(space["space_id"], event_type, details, event_id=event_id, snapshot=space)
+        _atomic_write_json(_manifest_path(space["space_id"]), space)
+        return dict(space)
 
 
 def _recovery_reason_summary(value: Any, limit: int = 300) -> str:
@@ -1343,31 +1360,32 @@ def list_spaces() -> list[dict[str, Any]]:
 def create_space(payload: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    _ensure_dirs()
-    name = str(payload.get("name") or "Untitled Space").strip() or "Untitled Space"
-    requested_id = payload.get("space_id")
-    space_id = validate_space_id(requested_id) if requested_id else _unique_space_id(name)
-    if _manifest_path(space_id).exists():
-        raise FileExistsError("Space already exists")
-    now = time.time()
-    space = {
-        "schema_version": SCHEMA_VERSION,
-        "space_id": space_id,
-        "name": name,
-        "description": str(payload.get("description") or ""),
-        "agent_instructions": str(payload.get("agent_instructions") or payload.get("instructions") or ""),
-        "template": str(payload.get("template") or "blank"),
-        "created_at": now,
-        "updated_at": now,
-        "layout": payload.get("layout") if isinstance(payload.get("layout"), dict) else {},
-        "widgets": payload.get("widgets") if isinstance(payload.get("widgets"), list) else [],
-        "capabilities": payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {},
-        "recovery": {"safe_mode_available": True},
-        "revision_events": [],
-        "revision_event_id": None,
-    }
-    saved = _write_manifest(space, "space.created", {"name": name})
-    return read_space_detail(saved["space_id"])
+    with _SPACE_MANIFEST_LOCK:
+        _ensure_dirs()
+        name = str(payload.get("name") or "Untitled Space").strip() or "Untitled Space"
+        requested_id = payload.get("space_id")
+        space_id = validate_space_id(requested_id) if requested_id else _unique_space_id(name)
+        if _manifest_path(space_id).exists():
+            raise FileExistsError("Space already exists")
+        now = time.time()
+        space = {
+            "schema_version": SCHEMA_VERSION,
+            "space_id": space_id,
+            "name": name,
+            "description": str(payload.get("description") or ""),
+            "agent_instructions": str(payload.get("agent_instructions") or payload.get("instructions") or ""),
+            "template": str(payload.get("template") or "blank"),
+            "created_at": now,
+            "updated_at": now,
+            "layout": payload.get("layout") if isinstance(payload.get("layout"), dict) else {},
+            "widgets": payload.get("widgets") if isinstance(payload.get("widgets"), list) else [],
+            "capabilities": payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {},
+            "recovery": {"safe_mode_available": True},
+            "revision_events": [],
+            "revision_event_id": None,
+        }
+        saved = _write_manifest(space, "space.created", {"name": name})
+        return read_space_detail(saved["space_id"])
 
 
 def _safe_session_title_for_space(title: Any) -> str:
@@ -2266,6 +2284,8 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
     if not safe_space_name or safe_space_name == "[REDACTED]":
         safe_space_name = "Creator Preview"
     space_id = target_space_id or validate_space_id(_source_slugify_segment(safe_space_name, "creator-preview")[:64])
+    if target_space is None and _manifest_path(space_id).exists():
+        target_space = read_space(space_id)
     space: dict[str, Any] = {"space_id": space_id, "name": safe_space_name}
     raw_description = payload.get("description") or payload.get("summary") or (target_space.get("description") if target_space else "")
     safe_description = _payload_text_summary(raw_description or "", 300)
@@ -2300,6 +2320,11 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
         "space": space,
         "widget_payloads": widget_payloads,
         "widget_details": widget_details,
+        "commit_base": {
+            "space_id": space_id,
+            "exists": target_space is not None,
+            "revision_event_id": target_space.get("revision_event_id") if target_space is not None else None,
+        },
         "safety": {
             "prompt_echoed": False,
             "unsafe_prompt_redacted": unsafe_prompt_redacted,
@@ -2421,11 +2446,11 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
         "widget_count": len(widgets),
         "safety": draft["safety"],
     }
-    target_space_id = _space_creator_target_space_id(payload)
-    if target_space_id and _manifest_path(target_space_id).exists():
-        current_space = read_space(target_space_id)
+    commit_base = draft.get("commit_base") if isinstance(draft.get("commit_base"), dict) else {}
+    if commit_base.get("exists") and _manifest_path(draft["space"]["space_id"]).exists():
+        current_space = read_space(draft["space"]["space_id"])
         candidate = _space_creator_revision_candidate(draft, current_space)
-        response["revision_preview"] = _restore_preview_summary(candidate, target_space_id)
+        response["revision_preview"] = _restore_preview_summary(candidate, draft["space"]["space_id"])
         response["revision_diff"] = _restore_diff_summary(candidate, current_space)
     return response
 
@@ -2458,35 +2483,48 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
     }
     revision_preview: dict[str, Any] | None = None
     revision_diff: dict[str, Any] | None = None
-    if _manifest_path(space["space_id"]).exists():
-        if not spaces_enabled():
-            raise RuntimeError("Capy Spaces is disabled")
-        existing = read_space(space["space_id"])
-        revised_manifest = {
-            "schema_version": SCHEMA_VERSION,
-            "space_id": space["space_id"],
-            "name": space["name"],
-            "description": space.get("description", ""),
-            "agent_instructions": "",
-            "template": "creator-loop",
-            "created_at": existing.get("created_at") or time.time(),
-            "updated_at": existing.get("updated_at") or time.time(),
-            "layout": create_payload["layout"],
-            "widgets": create_payload["widgets"],
-            "capabilities": create_payload["capabilities"],
-            "recovery": existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"safe_mode_available": True},
-            "revision_events": list(existing.get("revision_events") or []),
-            "revision_event_id": existing.get("revision_event_id"),
-        }
-        created = _write_manifest(
-            revised_manifest,
-            "space.creator.committed",
-            {"mode": "metadata-only", "widget_count": len(draft["widget_payloads"])},
-        )
-        revision_preview = _restore_preview_summary(created, created["space_id"])
-        revision_diff = _restore_diff_summary(created, existing)
-    else:
-        created = create_space(create_payload)
+    with _SPACE_MANIFEST_LOCK:
+        manifest_exists = _manifest_path(space["space_id"]).exists()
+        commit_base = draft.get("commit_base") if isinstance(draft.get("commit_base"), dict) else {}
+        base_exists = bool(commit_base.get("exists"))
+        if base_exists:
+            if not manifest_exists:
+                raise ValueError("Creator preview is stale; target Space revision changed")
+            current = read_space(space["space_id"])
+            if current.get("revision_event_id") != commit_base.get("revision_event_id"):
+                raise ValueError("Creator preview is stale; target Space revision changed")
+        elif manifest_exists:
+            raise ValueError("Creator preview is stale; target Space already exists")
+
+        if manifest_exists:
+            if not spaces_enabled():
+                raise RuntimeError("Capy Spaces is disabled")
+            existing = read_space(space["space_id"])
+            revised_manifest = {
+                "schema_version": SCHEMA_VERSION,
+                "space_id": space["space_id"],
+                "name": space["name"],
+                "description": space.get("description", ""),
+                "agent_instructions": "",
+                "template": "creator-loop",
+                "created_at": existing.get("created_at") or time.time(),
+                "updated_at": existing.get("updated_at") or time.time(),
+                "layout": create_payload["layout"],
+                "widgets": create_payload["widgets"],
+                "capabilities": create_payload["capabilities"],
+                "recovery": existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"safe_mode_available": True},
+                "revision_events": list(existing.get("revision_events") or []),
+                "revision_event_id": existing.get("revision_event_id"),
+            }
+            created = _write_manifest(
+                revised_manifest,
+                "space.creator.committed",
+                {"mode": "metadata-only", "widget_count": len(draft["widget_payloads"])},
+            )
+            revision_preview = _restore_preview_summary(created, created["space_id"])
+            revision_diff = _restore_diff_summary(created, existing)
+        else:
+            created = create_space(create_payload)
     widgets = [read_widget_detail(created["space_id"], widget["id"]) for widget in draft["widget_payloads"]]
     space_detail = read_space_detail(created["space_id"])
     space_detail["widget_count"] = len(widgets)
@@ -3817,7 +3855,7 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
         if rev not in merged_revision_events:
             merged_revision_events.append(rev)
     restored["revision_events"] = merged_revision_events
-    saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id})
+    saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id}, allow_stale_revision=True)
     return {
         "ok": True,
         "space": read_space_detail(sid),
@@ -3881,31 +3919,33 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
 def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    space = read_space(space_id)
-    allowed = {"name", "description", "agent_instructions", "layout", "widgets", "capabilities", "template"}
-    for key, value in (updates or {}).items():
-        if key in allowed:
-            if key == "widgets" and not isinstance(value, list):
-                raise ValueError("widgets must be a list")
-            if key in {"layout", "capabilities"} and not isinstance(value, dict):
-                raise ValueError(f"{key} must be an object")
-            if key == "agent_instructions":
-                value = str(value or "")
-            space[key] = value
-    saved = _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
-    return read_space_detail(saved["space_id"])
+    with _SPACE_MANIFEST_LOCK:
+        space = read_space(space_id)
+        allowed = {"name", "description", "agent_instructions", "layout", "widgets", "capabilities", "template"}
+        for key, value in (updates or {}).items():
+            if key in allowed:
+                if key == "widgets" and not isinstance(value, list):
+                    raise ValueError("widgets must be a list")
+                if key in {"layout", "capabilities"} and not isinstance(value, dict):
+                    raise ValueError(f"{key} must be an object")
+                if key == "agent_instructions":
+                    value = str(value or "")
+                space[key] = value
+        saved = _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
+        return read_space_detail(saved["space_id"])
 
 
 def delete_space(space_id: str) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    sid = validate_space_id(space_id)
-    path = _space_dir(sid)
-    if not path.exists():
-        raise FileNotFoundError("Space not found")
-    event_id = _record_event(sid, "space.deleted")
-    shutil.rmtree(path)
-    return {"deleted": True, "space_id": sid, "revision_event_id": event_id}
+    with _SPACE_MANIFEST_LOCK:
+        sid = validate_space_id(space_id)
+        path = _space_dir(sid)
+        if not path.exists():
+            raise FileNotFoundError("Space not found")
+        event_id = _record_event(sid, "space.deleted")
+        shutil.rmtree(path)
+        return {"deleted": True, "space_id": sid, "revision_event_id": event_id}
 
 
 def _load_yaml_mapping(text: str, label: str) -> dict[str, Any]:
@@ -4475,26 +4515,27 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
     clean_widget = _normalize_widget(widget)
     wid = clean_widget["id"]
 
-    space = read_space(space_id)
-    widgets = space.get("widgets") or []
-    if not isinstance(widgets, list):
-        raise ValueError("widgets must be a list")
-    replaced = False
-    for idx, existing in enumerate(widgets):
-        if isinstance(existing, dict) and existing.get("id") == wid:
-            widgets[idx] = clean_widget
-            replaced = True
-            break
-    if not replaced:
-        widgets.append(clean_widget)
-    space["widgets"] = widgets
-    event_type = "widget.updated" if replaced else "widget.created"
-    saved = _write_manifest(space, event_type, {"widget_id": wid})
-    return {
-        "space_id": saved["space_id"],
-        "widget": clean_widget,
-        "revision_event_id": saved["revision_event_id"],
-    }
+    with _SPACE_MANIFEST_LOCK:
+        space = read_space(space_id)
+        widgets = space.get("widgets") or []
+        if not isinstance(widgets, list):
+            raise ValueError("widgets must be a list")
+        replaced = False
+        for idx, existing in enumerate(widgets):
+            if isinstance(existing, dict) and existing.get("id") == wid:
+                widgets[idx] = clean_widget
+                replaced = True
+                break
+        if not replaced:
+            widgets.append(clean_widget)
+        space["widgets"] = widgets
+        event_type = "widget.updated" if replaced else "widget.created"
+        saved = _write_manifest(space, event_type, {"widget_id": wid})
+        return {
+            "space_id": saved["space_id"],
+            "widget": clean_widget,
+            "revision_event_id": saved["revision_event_id"],
+        }
 
 
 def _stream_title(value: Any) -> str:

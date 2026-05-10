@@ -2,6 +2,7 @@ import base64
 import importlib
 import io
 import json
+import threading
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -2058,6 +2059,226 @@ def test_creator_commit_requires_preview_receipt_even_when_gates_pass(monkeypatc
         )
 
     assert spaces.list_spaces() == []
+
+
+def test_creator_commit_rejects_stale_existing_space_preview_without_overwrite(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "stale-creator-lab", "name": "Stale Creator Lab"})
+    spaces.upsert_widget("stale-creator-lab", {"id": "old-panel", "title": "Old Panel", "kind": "markdown"})
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": "stale-creator-lab",
+            "spaceName": "Stale Creator Lab Revised",
+            "widgets": [{"widgetId": "new-panel", "title": "New Panel", "kind": "markdown"}],
+        },
+    )
+
+    spaces.upsert_widget(
+        "stale-creator-lab",
+        {"id": "concurrent-panel", "title": "Concurrent Panel", "kind": "markdown"},
+    )
+    concurrent = spaces.read_space("stale-creator-lab")
+
+    with pytest.raises(ValueError, match="stale|changed|revision"):
+        spaces.run_space_tool(
+            "space.creator.commit",
+            {
+                "preview_id": preview["preview_id"],
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "approve_commit": True,
+            },
+        )
+
+    assert spaces.read_space("stale-creator-lab") == concurrent
+    assert [widget["id"] for widget in concurrent["widgets"]] == ["old-panel", "concurrent-panel"]
+
+
+def test_creator_commit_rejects_new_preview_when_space_slug_appears(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Collision Lab",
+            "widgets": [{"widgetId": "draft-panel", "title": "Draft Panel", "kind": "markdown"}],
+        },
+    )
+
+    spaces.create_space({"space_id": "collision-lab", "name": "Human Created Collision Lab"})
+    existing = spaces.read_space("collision-lab")
+
+    with pytest.raises(ValueError, match="stale|changed|exists|revision"):
+        spaces.run_space_tool(
+            "space.creator.commit",
+            {
+                "preview_id": preview["preview_id"],
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "approve_commit": True,
+            },
+        )
+
+    assert spaces.read_space("collision-lab") == existing
+
+
+def test_creator_commit_does_not_overwrite_mutation_between_stale_check_and_write(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "atomic-creator-lab", "name": "Atomic Creator Lab"})
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": "atomic-creator-lab",
+            "spaceName": "Atomic Creator Lab Revised",
+            "description": "Creator revised description",
+            "widgets": [{"widgetId": "creator-panel", "title": "Creator Panel", "kind": "markdown"}],
+        },
+    )
+
+    original_read_space = spaces.read_space
+    commit_read_count = {"count": 0}
+    commit_in_window = threading.Event()
+    continue_commit = threading.Event()
+    update_started = threading.Event()
+    update_done = threading.Event()
+    commit_result: dict[str, object] = {}
+    update_result: dict[str, object] = {}
+
+    def wrapped_read_space(space_id):
+        result = original_read_space(space_id)
+        if space_id == "atomic-creator-lab" and threading.current_thread().name == "creator-commit-thread":
+            commit_read_count["count"] += 1
+            if commit_read_count["count"] == 2:
+                commit_in_window.set()
+                assert continue_commit.wait(3), "creator commit did not resume"
+        return result
+
+    monkeypatch.setattr(spaces, "read_space", wrapped_read_space)
+
+    def run_commit():
+        try:
+            commit_result["value"] = spaces.run_space_tool(
+                "space.creator.commit",
+                {
+                    "preview_id": preview["preview_id"],
+                    "sandbox_previewed": True,
+                    "visual_qa_passed": True,
+                    "approve_commit": True,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports below
+            commit_result["error"] = exc
+
+    def run_concurrent_update():
+        update_started.set()
+        try:
+            update_result["value"] = spaces.update_space(
+                "atomic-creator-lab",
+                {"description": "Concurrent safe update"},
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports below
+            update_result["error"] = exc
+        finally:
+            update_done.set()
+
+    commit_thread = threading.Thread(target=run_commit, name="creator-commit-thread")
+    commit_thread.start()
+    assert commit_in_window.wait(3), "creator commit did not reach the read/write window"
+
+    update_thread = threading.Thread(target=run_concurrent_update, name="creator-update-thread")
+    update_thread.start()
+    assert update_started.wait(3), "concurrent update did not start"
+    update_done.wait(0.25)
+    continue_commit.set()
+    commit_thread.join(3)
+    update_thread.join(3)
+
+    assert not commit_thread.is_alive()
+    assert not update_thread.is_alive()
+    assert "error" not in commit_result
+    assert "error" not in update_result
+    final_space = spaces.read_space("atomic-creator-lab")
+    assert final_space["description"] == "Concurrent safe update"
+    assert [widget["id"] for widget in final_space["widgets"]] == ["creator-panel"]
+
+
+def test_creator_commit_delete_cannot_resurrect_space_after_stale_check(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "delete-race-creator-lab", "name": "Delete Race Creator Lab"})
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": "delete-race-creator-lab",
+            "spaceName": "Delete Race Creator Lab Revised",
+            "widgets": [{"widgetId": "creator-panel", "title": "Creator Panel", "kind": "markdown"}],
+        },
+    )
+
+    original_read_space = spaces.read_space
+    commit_read_count = {"count": 0}
+    commit_in_window = threading.Event()
+    continue_commit = threading.Event()
+    delete_started = threading.Event()
+    delete_done = threading.Event()
+    commit_result: dict[str, object] = {}
+    delete_result: dict[str, object] = {}
+
+    def wrapped_read_space(space_id):
+        result = original_read_space(space_id)
+        if space_id == "delete-race-creator-lab" and threading.current_thread().name == "creator-delete-commit-thread":
+            commit_read_count["count"] += 1
+            if commit_read_count["count"] == 2:
+                commit_in_window.set()
+                assert continue_commit.wait(3), "creator commit did not resume"
+        return result
+
+    monkeypatch.setattr(spaces, "read_space", wrapped_read_space)
+
+    def run_commit():
+        try:
+            commit_result["value"] = spaces.run_space_tool(
+                "space.creator.commit",
+                {
+                    "preview_id": preview["preview_id"],
+                    "sandbox_previewed": True,
+                    "visual_qa_passed": True,
+                    "approve_commit": True,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - assertion reports below
+            commit_result["error"] = exc
+
+    def run_delete():
+        delete_started.set()
+        try:
+            delete_result["value"] = spaces.delete_space("delete-race-creator-lab")
+        except Exception as exc:  # pragma: no cover - assertion reports below
+            delete_result["error"] = exc
+        finally:
+            delete_done.set()
+
+    commit_thread = threading.Thread(target=run_commit, name="creator-delete-commit-thread")
+    commit_thread.start()
+    assert commit_in_window.wait(3), "creator commit did not reach the read/write window"
+
+    delete_thread = threading.Thread(target=run_delete, name="creator-delete-thread")
+    delete_thread.start()
+    assert delete_started.wait(3), "concurrent delete did not start"
+    delete_done.wait(0.25)
+    continue_commit.set()
+    commit_thread.join(3)
+    delete_thread.join(3)
+
+    assert not commit_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert "error" not in commit_result
+    assert "error" not in delete_result
+    with pytest.raises(FileNotFoundError):
+        spaces.read_space("delete-race-creator-lab")
 
 
 def test_creator_preview_redacts_widget_titles_prompts_and_description_fallback(monkeypatch, tmp_path):
