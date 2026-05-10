@@ -65,8 +65,8 @@ function makeElement(id) {
     },
   });
 }
-function response(data) {
-  return { ok: true, status: 200, json: async () => data };
+function response(data, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => data };
 }
 
 global.window = {
@@ -451,6 +451,17 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.commit') {
+      if (scenario === 'creatorCommitStaleFailure') {
+        return response({
+          ok: false,
+          error: 'Creator preview is stale; target Space revision changed; renderer source data api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          source: 'generated source body',
+          data: { api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          raw_prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+        }, 400);
+      }
       const existingSpaceCommit = scenario === 'creatorCommitExistingSpaceReceipt';
       return response({
         ok: true,
@@ -2047,7 +2058,7 @@ async function dispatchWindowMessage(data, opts) {
     await click('previewCreatorSpec', {});
     beforeHtml = root.innerHTML;
     await click('commitCreatorSpec', { previewId: 'preview-existing-safe-1' });
-  } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId') {
+  } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId' || scenario === 'creatorCommitStaleFailure') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
@@ -4514,6 +4525,34 @@ def test_creator_commit_omits_followup_actions_for_unsafe_space_id(driver_path):
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_stale_failure_renders_safe_blocked_status(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitStaleFailure")
+
+    commit_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"])
+    assert json.loads(commit_call["body"]) == {
+        "action": "space.creator.commit",
+        "preview_id": "preview-safe-1",
+        "sandbox_previewed": True,
+        "visual_qa_passed": True,
+        "approve_commit": True,
+    }
+    assert out["dialogs"]
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Creator commit blocked" in out["rootHtml"]
+    assert "Preview expired or target changed; refresh preview before committing." in out["rootHtml"]
+    assert "Creator commit saved" not in out["rootHtml"]
+    assert "Open committed Space" not in out["rootHtml"]
+    assert "Manage committed widgets" not in out["rootHtml"]
+    assert "Creator preview is stale" not in out["rootHtml"]
+    assert "target Space revision changed" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
 
 
 def test_creator_commit_fails_closed_without_shared_confirm_dialog(driver_path):

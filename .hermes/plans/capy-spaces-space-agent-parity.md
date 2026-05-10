@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-10 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Creator-loop commit receipts now fail closed when an existing-space preview goes stale before approval or a new-space preview slug is claimed before commit, preserving the previewed revision boundary and preventing unreviewed overwrites. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Creator-loop UI commit failures now render a safe blocked status when a preview expires or the target changes before approval, preserving the metadata-only preview card and avoiding stale backend error-body leaks. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): show stale creator commit block`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving a stale/failed `space.creator.commit` response renders `Creator commit blocked`, keeps the prior metadata-only preview visible, avoids saved-commit follow-up actions, and omits stale backend error details plus renderer/source/API-auth/generated-code/raw-prompt markers and secret-looking sentinels from DOM.
+  - Hardened the creator commit click path to catch failed commit POSTs locally and prepend a fixed safe status card instead of throwing an unhandled rejection or rendering backend error bodies.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); focused creator regressions passed (`8 passed`); Spaces UI behavior + demo parity suites passed (`139 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, and `/tmp` real-static creator-commit-stale harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_6f6cd7c3f94544a6a9d65741a7de9c9f.png`.
 
 - `fix(spaces): reject stale creator preview commits`
   - Added RED/GREEN backend coverage proving an approved creator commit refuses to overwrite an explicitly previewed existing Space when its revision changes before commit.

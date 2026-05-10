@@ -474,6 +474,12 @@
       '</div>'+actions+'</div></div></div>';
   }
 
+  function renderCreatorCommitBlockedResult(){
+    return '<div class="capy-spaces-card capy-spaces-danger-card" role="status"><h3>Creator commit blocked</h3>' +
+      '<div class="capy-spaces-muted">Preview expired or target changed; refresh preview before committing.</div>' +
+      '</div>';
+  }
+
   async function loadSpaceWidgets(spaceId){
     const root = document.getElementById('capySpacesRoot');
     if (!root) return;
@@ -1604,13 +1610,20 @@
         danger: true,
       });
       if (!confirmed) return;
-      const data = await postSpacesJson('api/spaces/tool', {
-        action: 'space.creator.commit',
-        preview_id: previewId,
-        sandbox_previewed: true,
-        visual_qa_passed: true,
-        approve_commit: true,
-      });
+      let data;
+      try {
+        data = await postSpacesJson('api/spaces/tool', {
+          action: 'space.creator.commit',
+          preview_id: previewId,
+          sandbox_previewed: true,
+          visual_qa_passed: true,
+          approve_commit: true,
+        });
+      } catch (commitErr) {
+        const refreshedRoot = document.getElementById('capySpacesRoot');
+        if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitBlockedResult() + refreshedRoot.innerHTML;
+        return;
+      }
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitResult(data || {}) + refreshedRoot.innerHTML;
