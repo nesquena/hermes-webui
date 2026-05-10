@@ -4507,6 +4507,16 @@ def read_widget_detail(space_id: str, widget_id: str) -> dict[str, Any]:
     return detail
 
 
+def _preserve_admin_disabled_widget_recovery(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep recovery/admin quarantine state owned by explicit recovery controls."""
+    existing_recovery = existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {}
+    if not existing_recovery.get("disabled"):
+        return candidate
+    preserved = dict(candidate)
+    preserved["recovery"] = copy.deepcopy(existing_recovery)
+    return preserved
+
+
 def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
@@ -4523,6 +4533,7 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
         replaced = False
         for idx, existing in enumerate(widgets):
             if isinstance(existing, dict) and existing.get("id") == wid:
+                clean_widget = _preserve_admin_disabled_widget_recovery(existing, clean_widget)
                 widgets[idx] = clean_widget
                 replaced = True
                 break
@@ -4671,6 +4682,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
     idx = _widget_index(space, wid)
     widgets = list(space.get("widgets") or [])
     widget = dict(widgets[idx])
+    existing_widget = copy.deepcopy(widget)
 
     allowed = {
         "title",
@@ -4719,6 +4731,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
 
     widget["id"] = wid
     widget = _normalize_widget(widget)
+    widget = _preserve_admin_disabled_widget_recovery(existing_widget, widget)
     widgets[idx] = widget
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.patched", {"widget_id": wid, "fields": sorted(set(changed_fields))})
