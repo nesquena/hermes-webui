@@ -270,7 +270,7 @@ def main() -> None:
     within_container = False
     # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
     try:
-        with open("/.within_container", "r") as f:
+        with open("/.within_container", "r"):
             within_container = True
     except FileNotFoundError:
         pass
