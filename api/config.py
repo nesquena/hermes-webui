@@ -657,6 +657,13 @@ _PROVIDER_DISPLAY = {
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
+    # >>> hermes-fork: first-class providers (HermesOS Cloud)
+    "venice": "Venice",
+    "crof": "CrofAI",
+    "bankr": "Bankr",
+    "cometapi": "CometAPI",
+    "xiaomi": "Xiaomi MiMo",
+    # <<< hermes-fork
 }
 
 # Provider alias → canonical slug.  Users configure providers using the

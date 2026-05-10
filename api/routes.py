@@ -696,6 +696,13 @@ _OPENAI_COMPAT_ENDPOINTS = {
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "nvidia": "https://integrate.api.nvidia.com/v1",
+    # >>> hermes-fork: first-class providers (HermesOS Cloud)
+    "venice": "https://api.venice.ai/api/v1",
+    "crof": "https://crof.ai/v1",
+    "bankr": "https://gateway.bankr.bot/v1",
+    "cometapi": "https://api.cometapi.com/v1",
+    "xiaomi": "https://api.xiaomi.com/v1",
+    # <<< hermes-fork
 }
 # NOTE: "openai-codex" is excluded because it maps to the same endpoint as
 # the base "openai" provider (api.openai.com/v1).  When both are configured

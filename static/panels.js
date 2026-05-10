@@ -5207,6 +5207,29 @@ async function loadProvidersPanel(){
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+e.message+'</div>';
   }
+  // >>> hermes-fork: Voice/STT panel attached to Providers section
+  // Appended once after providers load. Re-running loadProvidersPanel() will
+  // refresh Voice fields too via loadVoicePanel(). The container is created
+  // lazily so we don't need to touch index.html.
+  try {
+    const list2 = document.getElementById('providersList');
+    if(list2 && !document.getElementById('voicePanelSection')){
+      const wrap = document.createElement('div');
+      wrap.id = 'voicePanelSection';
+      wrap.className = 'settings-section';
+      wrap.style.marginTop = '24px';
+      wrap.innerHTML = `
+        <div class="settings-section-title">${esc((typeof t === 'function' && t('voice_section_title')) || 'Voice / Transcription')}</div>
+        <div class="settings-section-desc" style="margin-bottom:12px;font-size:12px;color:var(--muted)">
+          ${esc((typeof t === 'function' && t('voice_section_desc')) || 'Speech-to-text provider for the mic button. Local = free but slow on small VMs; Groq is the fastest cloud option.')}
+        </div>
+        <div id="voicePanelBody"></div>
+      `;
+      list2.parentElement.appendChild(wrap);
+    }
+    if(typeof loadVoicePanel === 'function') await loadVoicePanel();
+  } catch(_) {}
+  // <<< hermes-fork
 }
 
 function _formatProviderQuotaMoney(value){
@@ -5319,11 +5342,25 @@ function _buildProviderCard(p){
   metaParts.push(sourceLabel);
   const metaText=metaParts.join(' · ');
 
+  // >>> hermes-fork: provider logo
+  // Render an icon next to the provider name. Falls back to a generic glyph
+  // when logo_url is missing or fails to load (clearbit returns 404 for
+  // niche providers). The fallback is inline SVG so we never show a broken
+  // image. Marker-wrapped to keep upstream merges clean.
+  const logoUrl = (p && typeof p.logo_url === 'string' && p.logo_url) ? p.logo_url : '';
+  const logoSlug = (p && p.id ? String(p.id) : '').replace(/[^a-z0-9]/gi,'-').toLowerCase();
+  const logoFallback = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" width="28" height="28"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>';
+  const logoHtml = logoUrl
+    ? `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"><img src="${esc(logoUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.parentElement.innerHTML='${logoFallback}';"/></span>`
+    : `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true">${logoFallback}</span>`;
+  // <<< hermes-fork
+
   // Clickable header (toggles body)
   const header=document.createElement('button');
   header.type='button';
   header.className='provider-card-header';
   header.innerHTML=`
+    ${logoHtml}
     <div class="provider-card-info">
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
@@ -5351,6 +5388,29 @@ function _buildProviderCard(p){
       hint.style.color='var(--muted)';
     }
     body.appendChild(hint);
+    // >>> hermes-fork: OAuth Authenticate button (Option A — terminal pretype)
+    // Opens the inline composer terminal and pre-types
+    // `hermes auth add <provider>`. The user reads the OAuth URL from terminal
+    // output, clicks it, completes the flow in their browser, returns to
+    // terminal and finishes any callback prompt. After the flow completes,
+    // the provider card refreshes and shows "Configured".
+    const authRow = document.createElement('div');
+    authRow.className = 'provider-card-row provider-card-auth-row';
+    const authBtn = document.createElement('button');
+    authBtn.type = 'button';
+    authBtn.className = 'provider-card-btn provider-card-btn-primary';
+    authBtn.textContent = p.has_key
+      ? (t('providers_reauthenticate') || 'Re-authenticate')
+      : (t('providers_authenticate') || 'Authenticate');
+    authBtn.onclick = (e) => {
+      e.stopPropagation();
+      _authenticateProvider(p.id).catch((err) => {
+        try { showToast('Authenticate failed: ' + (err && err.message || err), 4000, 'error'); } catch(_){}
+      });
+    };
+    authRow.appendChild(authBtn);
+    body.appendChild(authRow);
+    // <<< hermes-fork
     card.appendChild(body);
     header.addEventListener('click',()=>card.classList.toggle('open'));
     return card;
@@ -6117,3 +6177,119 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
 }
+
+// >>> hermes-fork: OAuth Authenticate helper (Option A — terminal pretype)
+// Opens the composer terminal and types `hermes auth add <provider>` for the
+// user. They watch the URL appear, click it, complete the OAuth flow in their
+// browser, and return to a successful prompt. Avoids per-provider OAuth client
+// engineering on the dashboard side — works for any provider hermes auth
+// supports without code changes.
+async function _authenticateProvider(providerId){
+  if(!providerId) return;
+  const cleanId = String(providerId)
+    .replace(/-acp$/i, '')      // copilot-acp -> copilot
+    .replace(/-oauth$/i, '');   // qwen-oauth -> qwen
+  // Use cmdTerminal so workspace selection / new session happen the same way
+  // /terminal slash command handles them. Falls back to direct toggle if
+  // cmdTerminal isn't available (older builds).
+  if(typeof cmdTerminal === 'function'){
+    try { await cmdTerminal(); } catch(_) {}
+  } else if(typeof toggleComposerTerminal === 'function'){
+    try { await toggleComposerTerminal(true); } catch(_) {}
+  } else {
+    showToast('Terminal not available', 2600, 'error');
+    return;
+  }
+  // Wait for terminal session to be ready (cap: ~3s)
+  let sid = null;
+  for(let i = 0; i < 20; i++){
+    sid = (typeof TERMINAL_UI !== 'undefined' && TERMINAL_UI && TERMINAL_UI.sessionId)
+      || (typeof S !== 'undefined' && S && S.session && S.session.session_id)
+      || null;
+    if(sid) break;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  if(!sid){
+    showToast('Terminal session not ready', 2600, 'error');
+    return;
+  }
+  // Type the command + Enter
+  await api('/api/terminal/input', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, data: 'hermes auth add ' + cleanId + '\n' }),
+  });
+}
+// <<< hermes-fork
+
+// >>> hermes-fork: Voice/STT settings panel
+// Renders a small section below Providers letting users pick a transcription
+// provider (local | groq | openai), set the model, and store the API key.
+// Writes via the existing /api/claude-config PATCH (config.yaml stt.* keys).
+async function loadVoicePanel(){
+  const container = document.getElementById('voicePanelBody');
+  if(!container) return;
+  let cfg = {};
+  try {
+    const data = await api('/api/claude-config');
+    cfg = (data && data.config) || {};
+  } catch(_) {}
+  const stt = (cfg.stt && typeof cfg.stt === 'object') ? cfg.stt : {};
+  const env = (data => data && data.env || {})(null);  // env values come back masked; we only read stt config
+
+  const provider = stt.provider || 'local';
+  const model = stt.model || (provider === 'groq' ? 'whisper-large-v3-turbo' : provider === 'openai' ? 'whisper-1' : 'base');
+
+  container.innerHTML = `
+    <div class="provider-card-field">
+      <label class="provider-card-label">${esc((typeof t === 'function' && t('voice_provider_label')) || 'Transcription provider')}</label>
+      <select id="voiceProvider" class="provider-card-input">
+        <option value="local"  ${provider === 'local'  ? 'selected' : ''}>Local (faster-whisper, free)</option>
+        <option value="groq"   ${provider === 'groq'   ? 'selected' : ''}>Groq (Whisper Large V3 Turbo, fastest)</option>
+        <option value="openai" ${provider === 'openai' ? 'selected' : ''}>OpenAI (Whisper / gpt-4o-transcribe)</option>
+      </select>
+    </div>
+    <div class="provider-card-field">
+      <label class="provider-card-label">${esc((typeof t === 'function' && t('voice_model_label')) || 'Model')}</label>
+      <input id="voiceModel" type="text" class="provider-card-input" value="${esc(model)}" placeholder="e.g. whisper-large-v3-turbo"/>
+    </div>
+    <div class="provider-card-field" id="voiceKeyField" ${provider === 'local' ? 'style="display:none"' : ''}>
+      <label class="provider-card-label">${esc((typeof t === 'function' && t('voice_key_label')) || 'API key')}</label>
+      <input id="voiceKey" type="password" class="provider-card-input" autocomplete="off" placeholder="${esc((typeof t === 'function' && t('providers_key_placeholder_replace')) || 'Set API key')}"/>
+    </div>
+    <div class="provider-card-row">
+      <button type="button" id="voiceSaveBtn" class="provider-card-btn provider-card-btn-primary">${esc((typeof t === 'function' && t('providers_save')) || 'Save')}</button>
+    </div>
+  `;
+  const providerSel = document.getElementById('voiceProvider');
+  const keyField = document.getElementById('voiceKeyField');
+  if(providerSel && keyField){
+    providerSel.addEventListener('change', () => {
+      keyField.style.display = providerSel.value === 'local' ? 'none' : '';
+    });
+  }
+  const saveBtn = document.getElementById('voiceSaveBtn');
+  if(saveBtn){
+    saveBtn.onclick = async () => {
+      saveBtn.disabled = true;
+      try {
+        const newProvider = providerSel ? providerSel.value : 'local';
+        const newModel = (document.getElementById('voiceModel') || {}).value || '';
+        const newKey = (document.getElementById('voiceKey') || {}).value || '';
+        const body = { config: { stt: { provider: newProvider, model: newModel || null } } };
+        if(newKey){
+          const envVar = newProvider === 'groq' ? 'GROQ_API_KEY'
+                        : newProvider === 'openai' ? 'VOICE_TOOLS_OPENAI_KEY'
+                        : null;
+          if(envVar) body.env = { [envVar]: newKey };
+        }
+        await api('/api/claude-config', { method: 'PATCH', body: JSON.stringify(body) });
+        try { showToast((typeof t === 'function' && t('voice_saved')) || 'Voice settings saved', 2200); } catch(_){}
+      } catch(e){
+        try { showToast('Save failed: ' + (e.message || e), 3200, 'error'); } catch(_){}
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
+  }
+}
+// <<< hermes-fork

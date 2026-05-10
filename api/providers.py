@@ -104,6 +104,13 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "x-ai": "XAI_API_KEY",
     "opencode-zen": "OPENCODE_ZEN_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
+    # >>> hermes-fork: first-class providers (HermesOS Cloud)
+    "venice": "VENICE_API_KEY",
+    "crof": "CROF_API_KEY",
+    "bankr": "BANKR_API_KEY",
+    "cometapi": "COMETAPI_API_KEY",
+    "xiaomi": "XIAOMI_API_KEY",
+    # <<< hermes-fork
     # NOTE: bare "ollama" (local) deliberately omitted — local Ollama is keyless
     # by default and the runtime in hermes_cli/runtime_provider.py only consumes
     # OLLAMA_API_KEY when the base URL hostname is ollama.com (Ollama Cloud).
@@ -147,6 +154,46 @@ _OAUTH_PROVIDERS = frozenset({
     "openai-codex",
     "qwen-oauth",
 })
+
+# >>> hermes-fork: provider logos (HermesOS Cloud)
+# Surfaced in /api/providers payload as logo_url. Frontend renders an <img>;
+# clearbit may return 404 for some — frontend falls back to a generic icon.
+# Adding a new provider here is purely additive and never blocks upstream merge.
+_PROVIDER_LOGO_URL: dict[str, str] = {
+    "venice":       "https://logo.clearbit.com/venice.ai",
+    "crof":         "https://logo.clearbit.com/crof.ai",
+    "bankr":        "https://logo.clearbit.com/bankr.bot",
+    "cometapi":     "https://logo.clearbit.com/cometapi.com",
+    "xiaomi":       "https://logo.clearbit.com/mi.com",
+    "anthropic":    "https://logo.clearbit.com/anthropic.com",
+    "openai":       "https://logo.clearbit.com/openai.com",
+    "openai-codex": "https://logo.clearbit.com/openai.com",
+    "openrouter":   "https://logo.clearbit.com/openrouter.ai",
+    "deepseek":     "https://logo.clearbit.com/deepseek.com",
+    "google":       "https://logo.clearbit.com/google.com",
+    "gemini":       "https://logo.clearbit.com/google.com",
+    "x-ai":         "https://logo.clearbit.com/x.ai",
+    "mistralai":    "https://logo.clearbit.com/mistral.ai",
+    "nvidia":       "https://logo.clearbit.com/nvidia.com",
+    "alibaba":      "https://logo.clearbit.com/alibabagroup.com",
+    "huggingface":  "https://logo.clearbit.com/huggingface.co",
+    "ollama":       "https://logo.clearbit.com/ollama.com",
+    "ollama-cloud": "https://logo.clearbit.com/ollama.com",
+    "minimax":      "https://logo.clearbit.com/minimax.chat",
+    "minimax-cn":   "https://logo.clearbit.com/minimax.chat",
+    "kimi-coding":  "https://logo.clearbit.com/moonshot.cn",
+    "zai":          "https://logo.clearbit.com/z.ai",
+    "qwen":         "https://logo.clearbit.com/qwen.ai",
+    "qwen-oauth":   "https://logo.clearbit.com/qwen.ai",
+    "lmstudio":     "https://logo.clearbit.com/lmstudio.ai",
+    "copilot":      "https://logo.clearbit.com/github.com",
+    "copilot-acp":  "https://logo.clearbit.com/github.com",
+    "nous":         "https://logo.clearbit.com/nousresearch.com",
+    "meta-llama":   "https://logo.clearbit.com/meta.com",
+    "opencode-zen": "https://logo.clearbit.com/opencode.com",
+    "opencode-go":  "https://logo.clearbit.com/opencode.com",
+}
+# <<< hermes-fork
 
 # SECTION: Helper functions
 
@@ -899,6 +946,9 @@ def get_providers() -> dict[str, Any]:
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,
+            # >>> hermes-fork: provider logo
+            "logo_url": _PROVIDER_LOGO_URL.get(pid),
+            # <<< hermes-fork
             "models": models,
             # models_total reflects the complete catalog size (e.g. 396 for
             # an enterprise Nous Portal account), even when "models" is
@@ -934,8 +984,12 @@ def get_providers() -> dict[str, Any]:
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
+                # >>> hermes-fork: surface custom_providers as configurable
                 "has_key": cp_has_key,
-                "configurable": False,  # custom providers managed via config.yaml
+                "configurable": True,
+                "is_oauth": False,
+                "logo_url": _PROVIDER_LOGO_URL.get(cp_name.lower().replace(" ", "")),
+                # <<< hermes-fork
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
             })
