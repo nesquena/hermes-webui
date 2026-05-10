@@ -1,13 +1,14 @@
 """Tests for clarify prompt unblocking and HTTP endpoints."""
 
 import json
-import threading
 import uuid
 import urllib.request
 import urllib.error
 import urllib.parse
 
 import pytest
+
+from tests._pytest_port import BASE
 
 try:
     from api.clarify import (
@@ -29,8 +30,6 @@ pytestmark = pytest.mark.skipif(
     not CLARIFY_AVAILABLE,
     reason="api.clarify not available in this environment",
 )
-
-from tests._pytest_port import BASE
 
 
 def get(path):
@@ -95,9 +94,24 @@ class TestClarifyUnblocking:
         sid = f"unit-submit-{uuid.uuid4().hex[:8]}"
         data = {"question": "Pick", "choices_offered": ["one", "two"], "session_id": sid}
         entry = submit_pending(sid, data)
-        assert entry.data == data
+        assert entry.data["question"] == data["question"]
+        assert entry.data["choices_offered"] == data["choices_offered"]
+        assert entry.data["session_id"] == data["session_id"]
         with _lock:
             assert sid in _gateway_queues
+
+        clear_pending(sid)
+
+    def test_submit_pending_adds_timeout_metadata(self):
+        sid = f"unit-timeout-{uuid.uuid4().hex[:8]}"
+        entry = submit_pending(sid, {"question": "Wait", "choices_offered": []})
+
+        assert isinstance(entry.data["requested_at"], (int, float))
+        assert entry.data["timeout_seconds"] == 120
+        assert entry.data["expires_at"] == pytest.approx(
+            entry.data["requested_at"] + 120,
+            abs=0.1,
+        )
 
         clear_pending(sid)
 

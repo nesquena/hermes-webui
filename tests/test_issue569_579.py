@@ -36,11 +36,11 @@ def test_569_autodetect_before_usermod():
     detect_pos = INIT_SH.find("stat -c '%u'")
     if detect_pos == -1:
         detect_pos = INIT_SH.find("stat -c")
-    usermod_pos = INIT_SH.find("sudo usermod")
+    usermod_pos = INIT_SH.find("usermod -o -u")
     assert detect_pos != -1, "stat UID detection not found"
-    assert usermod_pos != -1, "sudo usermod not found"
+    assert usermod_pos != -1, "usermod not found"
     assert detect_pos < usermod_pos, (
-        "UID auto-detect must occur before 'sudo usermod' so the correct UID "
+        "UID auto-detect must occur before 'usermod' so the correct UID "
         "is used when remapping the hermeswebui user"
     )
 

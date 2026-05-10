@@ -1,24 +1,37 @@
 # Three-container Docker Compose: Hermes Agent + Dashboard + WebUI
 #
+# QUICK START:
+#   docker compose -f docker-compose.three-container.yml up -d
+#   Open http://localhost:8787 (chat) and http://localhost:9119 (dashboard)
+#
 # This extends the two-container setup with the Hermes Dashboard for
 # monitoring agent activity, sessions, and resource usage.
 #
-# Usage:
-#   docker compose -f docker-compose.three-container.yml up -d
-#
 # Services:
-#   hermes-agent   — gateway API on port 8642 (CLI, Telegram, cron, tools)
+#   hermes-agent     — gateway API on port 8642 (CLI, Telegram, cron, tools)
 #   hermes-dashboard — monitoring dashboard on port 9119
-#   hermes-webui   — browser chat interface on port 8787
+#   hermes-webui     — browser chat interface on port 8787
 #
 # All three share the same hermes-home volume so config, sessions,
 # skills, and memory are consistent across all surfaces.
 #
+# WHEN NOT TO USE THIS:
+#   - You hit "Permission denied" trying to share an existing ~/.hermes directory
+#     → use docker-compose.yml (single-container) instead, OR
+#     → keep this file but switch to NAMED VOLUMES (the default) instead of bind mounts
+#   - You're on Podman 3.4 or older without keep-id namespace support
+#     → see https://github.com/sunnysktsang/hermes-suite for an all-in-one image
+#
+# KNOWN LIMITATION (#681): tools triggered from the WebUI run in the WebUI
+# container, not the agent container. See docker-compose.two-container.yml
+# for context.
+#
 # NOTE ON VOLUMES:
 #   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
-#   work out of the box. If you prefer bind mounts (e.g. to an existing directory),
-#   see the two-container compose file for a bind-mount example.
-#   When using bind mounts, ALL containers must mount the same host path.
+#   work out of the box. If you prefer bind mounts (e.g. to an existing
+#   directory), see docker-compose.two-container.yml for a bind-mount example.
+#   When using bind mounts, ALL THREE containers must mount the same host path
+#   AND run as the same UID/GID (set via the UID/GID env vars below).
 
 services:
   hermes-agent:
@@ -34,8 +47,19 @@ services:
       - hermes-agent-src:/opt/hermes
     environment:
       - HERMES_HOME=/home/hermes/.hermes
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
+      # Align UID/GID across containers sharing the hermes-home volume.
+      # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
+      # Bind-mount permission handling for the agent — narrow set of overrides.
+      # NOTE: The agent's HERMES_HOME_MODE applies to the HERMES_HOME *directory*
+      # mode (default 0700) — NOT to credential files like the WebUI's variant.
+      # If you set this, you MUST keep the owner-execute bit so the agent can
+      # traverse its own home directory. 0640 BREAKS the agent (no x bit → no
+      # traversal). Use 0750 for group-traversable or 0701 for x-only.
+      # The agent's container detection (/.dockerenv) already auto-skips
+      # credential chmod inside Docker, so HERMES_SKIP_CHMOD is redundant here.
+      # - HERMES_HOME_MODE=0750
     restart: unless-stopped
     deploy:
       resources:
@@ -55,8 +79,10 @@ services:
       - hermes-home:/home/hermes/.hermes
     environment:
       - HERMES_HOME=/home/hermes/.hermes
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
+      # Align UID/GID across containers sharing the hermes-home volume.
+      # Defaults to 1000 to match WANTED_UID/WANTED_GID in the webui service.
+      - HERMES_UID=${UID:-1000}
+      - HERMES_GID=${GID:-1000}
       # Dashboard connects to the gateway for health/session data
       - GATEWAY_HEALTH_URL=http://hermes-agent:8642
     depends_on:
@@ -108,6 +134,13 @@ services:
       # to match the agent container's UID, or use a named Docker volume (preferred).
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-secret-password
+      # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
+      # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
+      # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's
+      # which applies to the HERMES_HOME directory itself. 0640 is correct
+      # for the WebUI; do NOT copy this value to the agent service block.
+      # - HERMES_SKIP_CHMOD=1
+      # - HERMES_HOME_MODE=0640
     restart: unless-stopped
     networks:
       - hermes-net

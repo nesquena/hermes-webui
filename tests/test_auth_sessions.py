@@ -132,3 +132,83 @@ class TestSessionInvalidation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionTtlResolution(unittest.TestCase):
+    """Verify the three-layer TTL resolution (env > settings > default)."""
+
+    def setUp(self):
+        # Snapshot environment + load_settings so each test starts clean.
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("HERMES_WEBUI_SESSION_TTL",)
+        }
+        os.environ.pop("HERMES_WEBUI_SESSION_TTL", None)
+        self._saved_load_settings = auth.load_settings
+
+    def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        auth.load_settings = self._saved_load_settings
+
+    def test_env_var_overrides_settings(self):
+        """HERMES_WEBUI_SESSION_TTL env var should take priority."""
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
+        from api.auth import _resolve_session_ttl
+        self.assertEqual(_resolve_session_ttl(), 3600)
+
+    def test_clamps_minimum(self):
+        """Values below 60 seconds fall through to settings/default (do not honor)."""
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = "10"
+        auth.load_settings = lambda: {}
+        from api.auth import _resolve_session_ttl
+        # Out-of-range env values are rejected; falls through to default 30 days.
+        self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
+
+    def test_clamps_maximum(self):
+        """Values above 1 year fall through to settings/default (do not honor)."""
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = "100000000"
+        auth.load_settings = lambda: {}
+        from api.auth import _resolve_session_ttl
+        # Out-of-range env values are rejected; falls through to default 30 days.
+        self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
+
+    def test_invalid_env_falls_through(self):
+        """Non-integer env var falls through to default."""
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = "not-a-number"
+        auth.load_settings = lambda: {}
+        from api.auth import _resolve_session_ttl
+        self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
+
+    def test_empty_env_falls_through(self):
+        """Empty env var falls through to default."""
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = ""
+        auth.load_settings = lambda: {}
+        from api.auth import _resolve_session_ttl
+        self.assertEqual(_resolve_session_ttl(), auth.SESSION_TTL)
+
+    def test_settings_path_returns_value(self):
+        """settings.json session_ttl_seconds path works when env is unset."""
+        os.environ.pop("HERMES_WEBUI_SESSION_TTL", None)
+        auth.load_settings = lambda: {"session_ttl_seconds": 7200}
+        from api.auth import _resolve_session_ttl
+        self.assertEqual(_resolve_session_ttl(), 7200)
+
+    def test_session_uses_dynamic_ttl(self):
+        """Newly created sessions should honor the resolved TTL."""
+        auth._sessions.clear()
+        os.environ["HERMES_WEBUI_SESSION_TTL"] = "3600"
+        token_hex = auth.create_session().split(".")[0]
+        from api.auth import _sessions
+        for t, exp in _sessions.items():
+            if t == token_hex:
+                # The resolved env-var value (3600s) should be applied, not
+                # the SESSION_TTL fallback default.
+                expected = time.time() + 3600
+                self.assertAlmostEqual(exp, expected, delta=5)
+                break
+        else:
+            self.fail("Session token not found in _sessions")

@@ -41,7 +41,7 @@ def test_thinking_card_toggle_and_body_use_animation_friendly_state():
 def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
     assert "<span class=\"thinking-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
     assert "<span class=\"tool-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
-    assert "<div class=\"thinking-card open\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
+    assert "<div class=\"thinking-card\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
 
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():

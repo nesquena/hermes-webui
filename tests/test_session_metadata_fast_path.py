@@ -39,7 +39,7 @@ def test_session_switch_defers_model_resolution_without_blocking():
     assert "messages=0&resolve_model=1" in src
     assert "_modelResolutionDeferred=true" in src
     assert "deferModelCorrection" in ui
-    assert "if(!deferModelCorrection)" in ui
+    assert "if(fallback&&!deferModelCorrection)" in ui
 
 
 def test_boot_does_not_block_session_restore_on_model_catalog():

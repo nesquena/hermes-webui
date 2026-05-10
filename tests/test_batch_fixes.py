@@ -194,10 +194,16 @@ class TestSystemTheme:
 
     def test_panels_reverts_via_apply_theme(self):
         src = read("static/panels.js")
-        assert "_applyTheme(_settingsThemeOnOpen)" in src or \
-               "_applyTheme(" in src, (
-            "_revertSettingsPreview must call _applyTheme() so 'system' "
-            "is correctly re-activated on settings discard"
+        block = re.search(r"function _revertSettingsPreview\(\)\{.*?\n\}", src, re.DOTALL)
+        assert block, "_revertSettingsPreview() should be present"
+        assert "_applyTheme(" not in block.group(0), (
+            "_revertSettingsPreview must no longer call _applyTheme() since Appearance now autosaves"
+        )
+
+    def test_system_theme_apply_path_uses_apply_theme(self):
+        src = read("static/boot.js")
+        assert "_applyTheme(appearance.theme)" in src, (
+            "System theme still must be activated through _applyTheme() in boot/theme application"
         )
 
     def test_panels_saves_system_string_not_resolved(self):

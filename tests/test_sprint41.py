@@ -327,6 +327,19 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             "Substantive answer text on a tool_call row must be preserved",
         )
 
+    def test_fallback_title_preserves_unicode_letters(self):
+        """Local fallback title generation must not strip German umlauts."""
+        from api.streaming import _fallback_title_from_exchange
+
+        title = _fallback_title_from_exchange(
+            "Bitte führe ein Selbst-Audit durch. Wo ist überall noch Gemini-2.5-flash als Modell im Einsatz? Sei gründlich",
+            "Ich prüfe live statt aus Bauchgefühl.",
+        )
+
+        self.assertIsNotNone(title)
+        self.assertIn("führe", title)
+        self.assertNotIn("hre", title.split())
+
     def test_title_snippet_skips_tool_call_preamble_only_rows(self):
         """Tool-call rows whose content is empty or meta-reasoning preamble
         ('Let me check my memory first.') must still be skipped — those are

@@ -37,6 +37,9 @@ global.document = { createElement: () => ({ innerHTML: '', textContent: '' }) };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -51,6 +54,8 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+eval(extractFunc('_matchBacktickFenceLine'));
+eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -282,6 +287,49 @@ class TestBugFencedCodeInBlockquote:
         assert "x = 1" in out
 
 
+class TestFencedCodeFenceLength:
+    """CommonMark §4.5 requires the closer to be at least as long as the opener."""
+
+    def test_five_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
+        src = (
+            "- optionally also support fenced code blocks\n\n"
+            "`````md\n"
+            "`md\n"
+            "```novelcrafter\n"
+            "{#if novel.hasSeries}\n"
+            "...\n"
+            "{#endif}\n"
+            "```\n"
+            "`````\n\n"
+            "That is much more correct than pretending"
+        )
+        out = _render(driver_path, src)
+        assert out.count("<pre>") == 1
+        assert out.count("</pre>") == 1
+        assert '<div class="pre-header">md</div>' in out
+        assert "```novelcrafter" in out
+        assert "{#if novel.hasSeries}" in out
+        assert "That is much more correct than pretending" in out
+        assert "<p>`````" not in out
+        assert "<br>`````" not in out
+
+    def test_four_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
+        out = _render(driver_path, "````md\n```inner\nfoo\n```\n````\n")
+        assert out.count("<pre>") == 1
+        assert out.count("</pre>") == 1
+        assert '<div class="pre-header">md</div>' in out
+        assert "```inner" in out
+        assert "foo" in out
+        assert "<p>````" not in out
+
+    def test_three_backtick_fence_still_renders_language_class(self, driver_path):
+        out = _render(driver_path, "```js\nconsole.log('ok')\n```")
+        assert out.count("<pre>") == 1
+        assert '<div class="pre-header">js</div>' in out
+        assert 'class="language-js"' in out
+        assert "console.log(&#39;ok&#39;)" in out
+
+
 class TestBugBlankContinuationInBlockquote:
     """Bug 2: blank > lines between paragraphs fragmented the blockquote into
     separate elements with literal > characters between them."""
@@ -500,6 +548,51 @@ class TestBlockquoteEntityEncodedInput:
         assert "<pre>" in out, f"Fenced code inside entity-encoded blockquote must render: {out!r}"
 
 
+class TestMermaidToolOutputGuard:
+    """Line-numbered tool excerpts must not be auto-rendered as Mermaid."""
+
+    def test_line_numbered_mermaid_fence_renders_as_code_block(self, driver_path):
+        src = "```mermaid\n23|flowchart TB\n24|    A --> B\n```"
+        out = _render(driver_path, src)
+        assert 'class="mermaid-block"' not in out, (
+            f"Line-numbered read_file excerpts are not valid Mermaid and must not auto-render: {out!r}"
+        )
+        assert '<div class="pre-header">mermaid</div>' in out
+        assert '<pre><code class="language-mermaid">' in out
+        assert '23|flowchart TB' in out
+
+    def test_valid_mermaid_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\nflowchart TB\n    A --> B\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid Mermaid fences should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'flowchart TB' in out
+
+    def test_valid_mermaid_c4_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\nC4Context\n    title System Context\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid C4 Mermaid fences should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'C4Context' in out
+
+    def test_valid_mermaid_frontmatter_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\n---\ntitle: Demo\n---\nflowchart TB\n    A --> B\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid Mermaid fences with frontmatter should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'title: Demo' in out
+
+    def test_prose_mention_of_mermaid_fence_renders_as_code_block(self, driver_path):
+        src = "```mermaid\n` fence should not be auto-rendered too aggressively.\n\nSome prose, not a diagram.\n```"
+        out = _render(driver_path, src)
+        assert 'class="mermaid-block"' not in out, (
+            f"Prose captured by a mermaid fence is not valid Mermaid and must not auto-render: {out!r}"
+        )
+        assert '<div class="pre-header">mermaid</div>' in out
+        assert '<pre><code class="language-mermaid">' in out
+        assert 'Some prose, not a diagram.' in out
+
+
 class TestRawPreCodePreservation:
     """Raw <pre><code> HTML from model output should remain structurally intact."""
 
@@ -525,3 +618,32 @@ class TestRawPreCodePreservation:
             f"<code> content inside <pre> must not be rewritten to backticks: {out!r}"
         )
         assert "After paragraph." in out and "Done." in out
+
+
+class TestHeadingLevelsH1ThroughH6:
+    """Issue #1258 — `####`, `#####`, `######` previously fell through the
+    heading pass and emitted as literal text starting with `#`.  Pin all six
+    levels so a future edit cannot silently regress h4–h6 again."""
+
+    def test_all_six_heading_levels_render(self, driver_path):
+        src = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6"
+        out = _render(driver_path, src)
+        assert "<h1>H1</h1>" in out, f"h1 missing: {out!r}"
+        assert "<h2>H2</h2>" in out, f"h2 missing: {out!r}"
+        assert "<h3>H3</h3>" in out, f"h3 missing: {out!r}"
+        assert "<h4>H4</h4>" in out, f"h4 missing: {out!r}"
+        assert "<h5>H5</h5>" in out, f"h5 missing: {out!r}"
+        assert "<h6>H6</h6>" in out, f"h6 missing: {out!r}"
+
+    def test_h6_does_not_partial_match_as_lower_level(self, driver_path):
+        """Replacers must run longest-first; otherwise `###### H6` could be
+        captured by the `^### ` rule and emit `<h3>### H6</h3>`."""
+        out = _render(driver_path, "###### H6")
+        assert "<h6>H6</h6>" in out, f"h6 must not be partial-matched: {out!r}"
+        assert "<h3>" not in out and "###" not in out
+
+    def test_h4_inline_markdown_still_processes(self, driver_path):
+        out = _render(driver_path, "#### **bold** in h4")
+        assert "<h4><strong>bold</strong> in h4</h4>" in out, (
+            f"inline markdown inside h4 must still render: {out!r}"
+        )

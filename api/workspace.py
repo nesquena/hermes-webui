@@ -10,6 +10,7 @@ paths are used as fallback when no profile module is available.
 import json
 import logging
 import os
+import stat
 import subprocess
 import concurrent.futures
 from pathlib import Path
@@ -92,7 +93,8 @@ def _profile_default_workspace() -> str:
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
-    - Remove entries whose paths no longer exist on disk.
+    - Preserve saved paths even when they are currently missing or inaccessible;
+      picker state must not be destroyed by a transient stat/permission failure.
     - Remove entries whose paths live inside another profile's directory
       (e.g. ~/.hermes/profiles/X/... should not appear on a different profile).
     - Rename any entry whose name is literally 'default' to 'Home' (avoids
@@ -104,10 +106,9 @@ def _clean_workspace_list(workspaces: list) -> list:
     for w in workspaces:
         path = w.get('path', '')
         name = w.get('name', '')
-        p = Path(path).resolve() if path else Path('/')
-        # Skip paths that no longer exist
-        if not p.is_dir():
+        if not path:
             continue
+        p = _safe_resolve(Path(path).expanduser())
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -128,6 +129,32 @@ def _clean_workspace_list(workspaces: list) -> list:
             name = 'Home'
         result.append({'path': str(p), 'name': name})
     return result
+
+
+def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
+    """Return a user-facing validation error for an unusable workspace path.
+
+    ``Path.exists()`` can collapse permission/stat failures into a generic falsey
+    result on some Python/OS combinations, which produced misleading "does not
+    exist" messages for macOS/TCC-denied directories.  Probe with ``stat()`` so
+    missing paths, non-directories, and permission-denied paths can be reported
+    separately.
+    """
+    try:
+        st = candidate.stat()
+    except FileNotFoundError:
+        return f"{missing_label}: {candidate}"
+    except PermissionError as exc:
+        return (
+            f"Cannot access path: {candidate}. The server process could not inspect "
+            f"this directory ({exc}). On macOS, grant Full Disk Access or Files and "
+            f"Folders permission to the Hermes/WebUI app or server process, then try again."
+        )
+    except OSError as exc:
+        return f"Cannot access path: {candidate}. The server process could not inspect this path ({exc})."
+    if not stat.S_ISDIR(st.st_mode):
+        return f"Path is not a directory: {candidate}"
+    return None
 
 
 def _migrate_global_workspaces() -> list:
@@ -292,6 +319,81 @@ def _is_blocked_system_path(candidate: Path) -> bool:
             return True
     return False
 
+
+def _workspace_blocked_resolved_subtrees() -> tuple[Path, ...]:
+    roots = list(_workspace_blocked_roots()) + [Path('/private/etc')]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            p = root.expanduser().resolve()
+        except Exception:
+            p = root
+        if p not in resolved:
+            resolved.append(p)
+    return tuple(resolved)
+
+
+def _workspace_blocked_exact_roots() -> tuple[Path, ...]:
+    roots = [Path('/'), Path('/private/var')]
+    for root in _workspace_blocked_roots():
+        try:
+            roots.append(root.expanduser().resolve())
+        except Exception:
+            roots.append(root)
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
+
+
+def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = None) -> bool:
+    """Return True when candidate points at a known OS/system directory.
+
+    Compare both the original spelling and the resolved path.  This closes the
+    macOS /etc -> /private/etc bypass without globally banning temporary pytest
+    paths under /private/var/folders.
+    """
+    raw = None
+    if raw_path not in (None, ""):
+        try:
+            raw = Path(raw_path).expanduser()
+        except Exception:
+            raw = None
+
+    exact = _workspace_blocked_exact_roots()
+    if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
+        return True
+
+    for tmp in _USER_TMP_PREFIXES:
+        if _is_within(candidate, tmp) or (raw is not None and _is_within(raw, tmp)):
+            return False
+
+    # Raw paths under literal roots (e.g. /etc/ssh, /var/db) are always blocked.
+    if raw is not None:
+        for blocked in _workspace_blocked_roots():
+            if _is_within(raw, blocked):
+                return True
+
+    # Resolved subtree checks catch symlink aliases such as /private/etc.  The
+    # macOS temp root /private/var/folders is intentionally allowed for pytest
+    # and per-user temporary workspaces; other direct /private/var system data
+    # such as /private/var/db and /private/var/log remains blocked.
+    allowed_private_var = (Path('/private/var/folders'), Path('/private/var/tmp'))
+    for blocked in _workspace_blocked_resolved_subtrees():
+        if blocked == Path('/private/var'):
+            if candidate == blocked:
+                return True
+            if any(_is_within(candidate, allowed) for allowed in allowed_private_var):
+                continue
+            if _is_within(candidate, blocked):
+                return True
+            continue
+        if _is_within(candidate, blocked):
+            return True
+    return False
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -312,7 +414,7 @@ def _trusted_workspace_roots() -> list[Path]:
             return
         if not p.exists() or not p.is_dir():
             return
-        if _is_blocked_system_path(p):
+        if _is_blocked_workspace_path(p, candidate):
             return
         if p not in roots:
             roots.append(p)
@@ -435,10 +537,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home().
     # Must be checked before system roots to allow unusual but valid homes such
@@ -451,8 +552,8 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         except ValueError:
             pass
 
-    # Block known system roots and their children
-    if _is_blocked_system_path(candidate):
+    # Block known system roots and their children.
+    if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
@@ -485,6 +586,25 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
 
 
+def _strip_surrounding_quotes(path: str) -> str:
+    """Strip a single pair of surrounding single or double quotes from a path string.
+
+    macOS Finder's "Copy as Pathname" (Cmd+Option+C) returns paths wrapped in
+    single quotes, e.g. ``'/Users/x/Documents/foo'``. Other shells and OS file
+    managers do similar things with double quotes. Users routinely paste these
+    quoted strings into the Add Space input expecting them to "just work" —
+    the only reason they didn't was a missing strip.
+
+    Only paired quotes are stripped (matching opener and closer). One-sided quotes
+    are preserved on the slim chance a path legitimately contains a literal quote
+    character.
+    """
+    s = path.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
 def validate_workspace_to_add(path: str) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
@@ -494,13 +614,17 @@ def validate_workspace_to_add(path: str) -> Path:
 
     The stricter ``resolve_trusted_workspace`` is used when *using* an existing workspace
     (file reads/writes) to prevent path traversal after the list is built.
+
+    Surrounding quotes (single or double) are stripped before validation —
+    macOS Finder's "Copy as Pathname" wraps paths in single quotes by default,
+    and users routinely paste those into the Add Space input.
     """
+    path = _strip_surrounding_quotes(path)
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
@@ -508,8 +632,8 @@ def validate_workspace_to_add(path: str) -> Path:
     if _home != Path("/") and _is_within(candidate, _home):
         return candidate
 
-    # Block known system roots and their immediate children
-    if _is_blocked_system_path(candidate):
+    # Block known system roots and their immediate children.
+    if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate

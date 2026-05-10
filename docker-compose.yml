@@ -1,4 +1,15 @@
-version: "3.8"
+# Hermes WebUI — single-container Docker Compose
+#
+# QUICK START (most users):
+#   1. (Optional) Copy .env.docker.example to .env and edit values
+#   2. docker compose up -d
+#   3. Open http://localhost:8787
+#
+# This is the simplest setup: one WebUI container that runs the agent in-process.
+# The WebUI auto-detects host UID/GID from the mounted .hermes volume.
+#
+# For multi-container setups (separate agent + webui or agent+webui+dashboard),
+# see docker-compose.two-container.yml or docker-compose.three-container.yml.
 
 services:
   hermes-webui:
@@ -33,5 +44,14 @@ services:
 #      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-secret-password
+      #
+      # Bind-mount permission handling (fixes #1389, #1399):
+      #   When you mount an EXISTING ~/.hermes directory (the common case),
+      #   the WebUI's startup credential-permission fixer can clash with
+      #   your host file modes (e.g. 0640 group-readable .env files).
+      #   Set HERMES_SKIP_CHMOD=1 to bypass the fixer entirely, OR set
+      #   HERMES_HOME_MODE=0640 to allow group bits while still stripping
+      #   world-readable. Both are documented in api/startup.py.
+      # - HERMES_SKIP_CHMOD=1
+      # - HERMES_HOME_MODE=0640
     restart: unless-stopped
-

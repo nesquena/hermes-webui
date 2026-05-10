@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from api.config import REPO_ROOT
+from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 
 # Lazy -- may be None if agent not found
 try:
@@ -26,6 +26,32 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+
+
+def _active_stream_count() -> int:
+    """Return the current in-memory chat stream count.
+
+    Self-update schedules an in-process re-exec after git pull/reset.  That is
+    restart-equivalent for live streams, even when systemd does not see a unit
+    restart.  Refuse update/force-update while a stream exists so a browser
+    update click cannot recreate the pending-message loss class fixed in #1543.
+    """
+    with STREAMS_LOCK:
+        return len(STREAMS)
+
+
+def _restart_blocked_response(target: str, active_streams: int) -> dict:
+    plural = "s" if active_streams != 1 else ""
+    return {
+        'ok': False,
+        'message': (
+            f'Cannot update {target} while {active_streams} active chat stream{plural} '
+            'is running. Wait for the response to finish, then retry the update.'
+        ),
+        'target': target,
+        'restart_blocked': True,
+        'active_streams': active_streams,
+    }
 
 
 def _run_git(args, cwd, timeout=10):
@@ -91,8 +117,56 @@ def _detect_webui_version() -> str:
     return 'unknown'
 
 
+def _detect_agent_version() -> str:
+    """Detect the running Hermes Agent version for UI display."""
+    if _AGENT_DIR is None:
+        return 'not detected'
+
+    version_file = Path(_AGENT_DIR) / "VERSION"
+    try:
+        if version_file.exists():
+            text = version_file.read_text(encoding='utf-8').strip()
+            if text:
+                return text
+    except Exception:
+        pass
+
+    # Fallback: infer from git describe when the checkout exists but no VERSION
+    # file is available (common in source checkouts and developer environments).
+    if not Path(_AGENT_DIR).exists():
+        return 'not detected'
+    # Symmetric with _detect_webui_version() above — `--dirty` flags a
+    # locally-modified checkout so operators can see when their agent has
+    # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
+    out, ok = _run_git(['describe', '--tags', '--always', '--dirty'], _AGENT_DIR, timeout=3)
+    if ok and out:
+        return out
+
+    return 'not detected'
+
+
 # Resolved once at import time — tags cannot change without a process restart.
 WEBUI_VERSION: str = _detect_webui_version()
+AGENT_VERSION: str = _detect_agent_version()
+
+
+def _normalize_remote_url(remote_url):
+    """Return the browser-facing repository URL for update compare links.
+
+    Git remotes may be HTTPS or SSH and may include a literal ``.git`` suffix.
+    Strip only that literal suffix — never use ``str.rstrip('.git')`` because it
+    treats the argument as a character set and can truncate ``hermes-webui`` to
+    ``hermes-webu``.
+    """
+    if not remote_url:
+        return remote_url
+    remote_url = remote_url.strip()
+    if remote_url.startswith('git@'):
+        remote_url = remote_url.replace(':', '/', 1).replace('git@', 'https://', 1)
+    remote_url = remote_url.rstrip('/')
+    if remote_url.endswith('.git'):
+        remote_url = remote_url[:-4]
+    return remote_url.rstrip('/')
 
 
 def _split_remote_ref(ref):
@@ -146,9 +220,40 @@ def _check_repo(path, name):
     out, ok = _run_git(['rev-list', '--count', f'HEAD..{compare_ref}'], path)
     behind = int(out) if ok and out.isdigit() else 0
 
-    # Get short SHAs for display
-    current, _ = _run_git(['rev-parse', '--short', 'HEAD'], path)
+    # Get short SHAs for display.
+    #
+    # latest_sha = upstream tip (compare_ref). Always exists on github.com
+    # because it is literally the commit `git fetch` just pulled.
+    #
+    # current_sha is trickier. The intuitive choice — local HEAD — breaks
+    # the "What's new?" compare URL whenever HEAD is not a public commit:
+    # unpushed work, dirty stage branches, forks, in-flight rebases, or
+    # release-time merge commits whose SHA only lives in the maintainer's
+    # checkout. We saw exactly this in #1579: a banner reporting "17 updates"
+    # linked to /compare/<localHEAD>...<upstream> and 404'd because <localHEAD>
+    # was never pushed to the canonical repo.
+    #
+    # The right base is the merge-base between HEAD and the upstream ref —
+    # that's the most recent commit both sides agree on, and (because
+    # `git fetch` succeeded above) it is guaranteed to be present upstream.
+    # If a user is 17 commits behind with no local-only commits, merge-base
+    # equals local HEAD and the URL is identical to what we shipped before;
+    # if they ARE ahead with local-only commits, the URL still resolves to
+    # the public history they share with upstream. If merge-base fails for
+    # any reason (e.g. shallow clone where the bases diverge before the
+    # cutoff), fall back to None so the JS link guard suppresses the link
+    # rather than emitting a known-broken URL.
+    mb_full, mb_ok = _run_git(['merge-base', 'HEAD', compare_ref], path)
+    if mb_ok and mb_full:
+        short, ok = _run_git(['rev-parse', '--short', mb_full], path)
+        current = short if (ok and short) else None
+    else:
+        current = None
     latest, _ = _run_git(['rev-parse', '--short', compare_ref], path)
+
+    # Get repo URL for "What's new?" link
+    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    remote_url = _normalize_remote_url(remote_url)
 
     return {
         'name': name,
@@ -156,6 +261,7 @@ def _check_repo(path, name):
         'current_sha': current,
         'latest_sha': latest,
         'branch': compare_ref,
+        'repo_url': remote_url,
     }
 
 
@@ -240,6 +346,10 @@ def apply_force_update(target: str) -> dict:
     response with ``conflict: True`` or ``diverged: True`` and the user
     has confirmed they want to discard local changes.
     """
+    active_streams = _active_stream_count()
+    if active_streams:
+        return _restart_blocked_response(target, active_streams)
+
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
@@ -290,6 +400,10 @@ def apply_force_update(target: str) -> dict:
 
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
+    active_streams = _active_stream_count()
+    if active_streams:
+        return _restart_blocked_response(target, active_streams)
+
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:

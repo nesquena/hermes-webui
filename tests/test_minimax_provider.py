@@ -3,13 +3,43 @@ Tests for MiniMax provider support in the model/provider discovery layer.
 
 Covers:
   - MiniMax models appear in the fallback model list
-  - MINIMAX_API_KEY env var is scanned and detected from os.environ
+  - MINIMAX_API_KEY / MINIMAX_CN_API_KEY env vars are scanned and detected
   - @minimax: provider hint routing works correctly
   - minimax/MiniMax-M2.7 (slash format) is routed via openrouter when active provider differs
 """
 import os
 import pytest
 import api.config as config
+
+
+def _force_env_fallback(monkeypatch):
+    """Force get_available_models() down the explicit env-var fallback path."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in ("hermes_cli.models", "hermes_cli.auth"):
+            raise ImportError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def _run_available_models_with_cfg(monkeypatch, tmp_path, cfg):
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    monkeypatch.setattr(config, "_models_cache_path", tmp_path / "models_cache.json")
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "missing-config.yaml")
+    config.cfg.clear()
+    config.cfg.update(cfg)
+    config._cfg_mtime = 0.0
+    try:
+        return config.get_available_models()
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
 
 
 @pytest.fixture(autouse=True)
@@ -62,10 +92,22 @@ def test_minimax_m2_7_highspeed_in_fallback_models():
 
 
 def test_minimax_fallback_provider_label():
-    """MiniMax fallback entries must use 'MiniMax' as the provider label."""
-    minimax_entries = [m for m in config._FALLBACK_MODELS if 'minimax' in m['id'].lower()]
-    assert minimax_entries, "No MiniMax entries found in _FALLBACK_MODELS"
-    for entry in minimax_entries:
+    """MiniMax fallback entries (direct API routing) must use 'MiniMax' as
+    the provider label.
+
+    NOTE: This filters by `minimax/` ID prefix to scope strictly to the
+    direct MiniMax provider routes — `minimax-X` is the canonical pattern
+    for hermes-agent routing to api.minimax.io. OpenRouter free-tier variants
+    that happen to contain 'minimax' in their ID (e.g.
+    `minimax/minimax-m2.5:free`) are routed via OpenRouter, not direct
+    MiniMax, and correctly carry provider='OpenRouter'. See #1426.
+    """
+    direct_minimax = [
+        m for m in config._FALLBACK_MODELS
+        if m['id'].startswith('minimax/') and ':free' not in m['id']
+    ]
+    assert direct_minimax, "No direct-MiniMax entries found in _FALLBACK_MODELS"
+    for entry in direct_minimax:
         assert entry['provider'] == 'MiniMax', (
             f"Expected provider='MiniMax', got '{entry['provider']}' for {entry['id']}"
         )
@@ -89,6 +131,19 @@ def test_minimax_provider_models_has_highspeed():
     assert 'MiniMax-M2.7-highspeed' in ids, (
         f"MiniMax-M2.7-highspeed missing from _PROVIDER_MODELS['minimax']. Found: {ids}"
     )
+
+
+def test_minimax_cn_provider_models_match_hermes_agent_catalog():
+    """minimax-cn must have its own static catalog so an empty config provider still shows models."""
+    models = config._PROVIDER_MODELS.get('minimax-cn', [])
+    ids = [m['id'] for m in models]
+    assert ids == [
+        'MiniMax-M2.7',
+        'MiniMax-M2.5',
+        'MiniMax-M2.1',
+        'MiniMax-M2',
+    ]
+    assert config._PROVIDER_DISPLAY.get('minimax-cn') == 'MiniMax (China)'
 
 
 # ── MINIMAX_API_KEY env var detection ─────────────────────────────────────────
@@ -130,6 +185,55 @@ def test_minimax_detected_from_os_environ(monkeypatch):
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
+
+
+def test_minimax_cn_detected_from_os_environ(monkeypatch, tmp_path):
+    """MINIMAX_CN_API_KEY should show MiniMax (China), not the global MiniMax provider."""
+    _force_env_fallback(monkeypatch)
+    monkeypatch.delenv('MINIMAX_API_KEY', raising=False)
+    monkeypatch.setenv('MINIMAX_CN_API_KEY', 'test-cn-key-from-env')
+
+    result = _run_available_models_with_cfg(monkeypatch, tmp_path, {'model': {}})
+    groups = {g['provider_id']: g for g in result['groups']}
+
+    assert 'minimax-cn' in groups, f"minimax-cn group missing: {groups.keys()}"
+    assert groups['minimax-cn']['provider'] == 'MiniMax (China)'
+    assert {m['id'] for m in groups['minimax-cn']['models']} == {
+        'MiniMax-M2.7',
+        'MiniMax-M2.5',
+        'MiniMax-M2.1',
+        'MiniMax-M2',
+    }
+    assert 'minimax' not in groups, (
+        "MINIMAX_CN_API_KEY must not be collapsed into the global minimax provider"
+    )
+
+
+def test_minimax_cn_empty_config_provider_gets_static_models(monkeypatch, tmp_path):
+    """providers.minimax-cn: {} should still render a populated model group."""
+    _force_env_fallback(monkeypatch)
+    monkeypatch.delenv('MINIMAX_API_KEY', raising=False)
+    monkeypatch.delenv('MINIMAX_CN_API_KEY', raising=False)
+
+    result = _run_available_models_with_cfg(
+        monkeypatch,
+        tmp_path,
+        {
+            'model': {'provider': 'minimax-cn', 'default': 'MiniMax-M2.7'},
+            'providers': {'minimax-cn': {}},
+        },
+    )
+    groups = {g['provider_id']: g for g in result['groups']}
+
+    assert 'minimax-cn' in groups, f"minimax-cn group missing: {groups.keys()}"
+    assert groups['minimax-cn']['models'], "minimax-cn group must not be empty"
+
+
+def test_minimax_cn_key_can_be_managed_from_provider_settings():
+    """Provider settings should use the Hermes Agent env var for minimax-cn."""
+    from api.providers import _PROVIDER_ENV_VAR
+
+    assert _PROVIDER_ENV_VAR.get('minimax-cn') == 'MINIMAX_CN_API_KEY'
 
 
 # ── Model routing ─────────────────────────────────────────────────────────────

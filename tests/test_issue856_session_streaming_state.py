@@ -47,9 +47,11 @@ def _make_session(session_id, stream_id=None, message_count=1):
 def test_all_sessions_marks_indexed_and_in_memory_streaming_sessions():
     """Session records from both index and in-memory cache should expose is_streaming."""
     s_disk = _make_session("disk_session", stream_id="stream-1")
+    s_disk.pending_user_message = "pending disk turn"
     s_disk.save()
 
     s_memory = _make_session("memory_session", stream_id="stream-2")
+    s_memory.pending_user_message = "pending memory turn"
     with models.LOCK:
         models.SESSIONS[s_memory.session_id] = s_memory
 
@@ -62,6 +64,8 @@ def test_all_sessions_marks_indexed_and_in_memory_streaming_sessions():
     assert by_sid["disk_session"]["is_streaming"] is True
     assert by_sid["memory_session"]["is_streaming"] is True
     assert by_sid["memory_session"]["active_stream_id"] == "stream-2"
+    assert by_sid["disk_session"]["pending_user_message"] == "pending disk turn"
+    assert by_sid["memory_session"]["pending_user_message"] == "pending memory turn"
 
 
 def test_all_sessions_marks_streaming_false_when_stream_is_not_active():

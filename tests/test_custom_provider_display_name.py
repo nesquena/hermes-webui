@@ -9,6 +9,19 @@ import pytest
 import api.config as config
 
 
+def _strip_at_prefix(model_id):
+    """Strip the optional ``@provider:`` (or ``@provider:subname:``) prefix.
+
+    PR #1415 introduced provider-qualified IDs (``@custom:NAME:model``) for
+    named custom providers when the active provider differs. The bare-ID
+    assertions in this test module pre-date that change.
+    """
+    s = str(model_id or "")
+    if s.startswith("@") and ":" in s:
+        return s.rsplit(":", 1)[1]
+    return s
+
+
 @pytest.fixture(autouse=True)
 def _isolate_models_cache():
     """Invalidate the models TTL cache before and after every test in this file."""
@@ -97,7 +110,8 @@ class TestNamedCustomProviderGroup:
             (g for g in result.get("groups", []) if g["provider"] == "Agent37"), None
         )
         assert agent37_group is not None, "Expected an 'Agent37' group"
-        model_ids = [m["id"] for m in agent37_group.get("models", [])]
+        # PR #1415 prefixes IDs with @custom:NAME: when active provider differs from named slug
+        model_ids = [_strip_at_prefix(m["id"]) for m in agent37_group.get("models", [])]
         assert "my-llm" in model_ids, (
             f"Expected 'my-llm' in Agent37 group models, got {model_ids}"
         )
@@ -129,7 +143,8 @@ class TestNamedCustomProviderGroup:
         assert len(agent37_groups) == 1, (
             f"Expected exactly one 'Agent37' group, got {len(agent37_groups)}"
         )
-        model_ids = [m["id"] for m in agent37_groups[0].get("models", [])]
+        # PR #1415 prefixes IDs with @custom:NAME: when active provider differs from named slug
+        model_ids = [_strip_at_prefix(m["id"]) for m in agent37_groups[0].get("models", [])]
         assert "model-a" in model_ids
         assert "model-b" in model_ids
 

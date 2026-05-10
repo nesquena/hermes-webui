@@ -65,6 +65,9 @@ def _get_agent_sessions_from_db() -> list:
                 'created_at': row['started_at'],
                 'updated_at': row['last_activity'] or row['started_at'],
                 'source': row['source'] or 'cli',
+                'raw_source': row.get('raw_source'),
+                'session_source': row.get('session_source'),
+                'source_label': row.get('source_label'),
             })
         return sessions
     except Exception:

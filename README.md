@@ -109,6 +109,18 @@ Or keep using the shell launcher:
 ./start.sh
 ```
 
+For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecycle commands without requiring `fuser` or `pkill`:
+
+```bash
+./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
+./ctl.sh status             # PID, uptime, bound host/port, log path, /health
+./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
+./ctl.sh restart
+./ctl.sh stop
+```
+
+`ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
@@ -118,6 +130,7 @@ The bootstrap will:
 5. Drop you into a first-run onboarding wizard inside the WebUI.
 
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
+> For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 
@@ -125,156 +138,90 @@ If provider setup is still incomplete after install, the onboarding wizard will 
 
 ## Docker
 
-**Pre-built images** (amd64 + arm64) are published to GHCR on every release:
+**Pre-built images** (amd64 + arm64) are published to GHCR on every release.
 
-Make sure the `HERMES_WEBUI_STATE_DIR` (by default `~/.hermes/webui-mvp`, as detailed in the `.env.example` file) folder exist with the UID/GID of the owner of the `.hermes` folder. 
-The container will also mount your configured "workspace" (also from the example .env.example) as `/workspace`. adapt the location as needed.
+For a comprehensive setup guide covering all 3 compose files, common failure modes, and bind-mount migration, see [`docs/docker.md`](docs/docker.md). The README covers the 5-minute happy path.
 
+### 5-minute quickstart (single container)
+
+The simplest setup: one WebUI container that runs the agent in-process.
+
+```bash
+git clone https://github.com/nesquena/hermes-webui
+cd hermes-webui
+cp .env.docker.example .env
+# Edit .env if your host UID isn't 1000 (e.g. macOS where UIDs start at 501)
+docker compose up -d
+# Open http://localhost:8787
+```
+
+The container auto-detects your UID/GID from the mounted `~/.hermes` volume so files written by the agent stay readable by you on the host.
+
+To enable password protection (required if you expose the port outside `127.0.0.1`):
+
+```bash
+echo "HERMES_WEBUI_PASSWORD=change-me-to-something-strong" >> .env
+docker compose up -d --force-recreate
+```
+
+### Manual `docker run` (no compose)
 
 ```bash
 docker pull ghcr.io/nesquena/hermes-webui:latest
 docker run -d \
--e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
--v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
--v ~/workspace:/workspace \
--p 8787:8787 ghcr.io/nesquena/hermes-webui:latest
+  -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
+  -v ~/.hermes:/home/hermeswebui/.hermes \
+  -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
+  -v ~/workspace:/workspace \
+  -p 127.0.0.1:8787:8787 \
+  ghcr.io/nesquena/hermes-webui:latest
 ```
 
-Or run with Docker Compose (recommended):
-
-```bash
-# Check the docker-compose.yml and make sure to adapt as needed, at minimum WANTED_UID/WANTED_GID
-docker compose up -d
-```
-
-Or build locally:
+### Build locally
 
 ```bash
 docker build -t hermes-webui .
 docker run -d \
--e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
--v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
--v ~/workspace:/workspace \
--p 8787:8787 hermes-webui
+  -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
+  -v ~/.hermes:/home/hermeswebui/.hermes \
+  -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui \
+  -v ~/workspace:/workspace \
+  -p 127.0.0.1:8787:8787 \
+  hermes-webui
 ```
 
-Open http://localhost:8787 in your browser.
+### Multi-container setups
 
-To enable password protection:
+If you want the agent and WebUI in separate containers (for isolation, or because you're already running an agent gateway elsewhere):
 
 ```bash
-docker run -d \
--e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
--v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
--v ~/workspace:/workspace \
--p 8787:8787 -e HERMES_WEBUI_PASSWORD=your-secret ghcr.io/nesquena/hermes-webui:latest
+# Agent + WebUI
+docker compose -f docker-compose.two-container.yml up -d
+
+# Agent + Dashboard + WebUI
+docker compose -f docker-compose.three-container.yml up -d
 ```
+
+Both compose files use **named Docker volumes** by default, which solves the UID/GID problem by construction. If you need bind mounts to share an existing host directory, see [`docs/docker.md`](docs/docker.md) for the full migration recipe.
+
+> **Known limitation (#681)**: in the two-container setup, tools triggered from the WebUI run in the **WebUI container**, not the agent container. If you need git/node/etc. on the WebUI's filesystem, either use the single-container setup, extend the WebUI Dockerfile, or use the community [all-in-one image](https://github.com/sunnysktsang/hermes-suite).
+
+### Common failure modes
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `PermissionError` at startup | UID mismatch on bind mount | Set `UID=$(id -u)` in `.env` |
+| `.env: permission denied` (#1389) | `fix_credential_permissions()` enforced 0600 | Set `HERMES_SKIP_CHMOD=1` in `.env` |
+| Workspace appears empty | UID mismatch on `/workspace` mount | Set `UID=$(id -u)` in `.env` |
+| `git: command not found` in chat | Two-container architectural limit (#681) | Use single-container or extend Dockerfile |
+| WebUI can't find agent source | `hermes-agent-src` volume misconfigured | Use the named volumes from compose files as-is |
+| Podman shared `.hermes` fails | Podman 3.4 `keep-id` limitation | Use Podman 4+ or single-container |
+
+For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 
 > **Note:** By default, Docker Compose binds to `127.0.0.1` (localhost only).
 > To expose on a network, change the port to `"8787:8787"` in `docker-compose.yml`
 > and set `HERMES_WEBUI_PASSWORD` to enable authentication.
-
-### Two-container setup (Agent + WebUI)
-
-If you run the Hermes Agent in its own Docker container and want the WebUI
-in a separate container:
-
-```bash
-docker compose -f docker-compose.two-container.yml up -d
-```
-
-This starts both containers with shared volumes:
-
-- **`hermes-home`** — shared `~/.hermes` for config, sessions, skills, memory
-- **`hermes-agent-src`** — the agent's source code, mounted into the WebUI
-  container so it can install the agent's Python dependencies at startup
-
-> **Volume type:** The compose files use named Docker volumes by default.
-> If you prefer bind mounts to an existing directory (e.g. for sharing state
-> with an agent container you already run), both containers must mount the
-> same host path — the agent writes to `/root/.hermes`, the WebUI reads from
-> `/home/hermeswebui/.hermes`. See `docker-compose.two-container.yml` for
-> a bind-mount example.
-
-The WebUI's init script automatically installs hermes-agent and all its
-dependencies (openai, anthropic, etc.) into its own Python environment on
-first boot. Subsequent restarts reuse the installed packages.
-
-> **How it works:** The WebUI imports hermes-agent's Python modules directly
-> (not via HTTP). The shared volume makes the agent source available, and
-> the init script runs `uv pip install` to set up the dependencies. Both
-> containers share the same `~/.hermes` directory for config and state.
-
-See `docker-compose.two-container.yml` for the full configuration.
-
-### Running alongside hermes-dashboard (three-container setup)
-
-To run the Hermes Agent, Hermes Dashboard, and the WebUI together on a
-shared volume, use the three-container Compose file:
-
-```bash
-docker compose -f docker-compose.three-container.yml up -d
-```
-
-This brings up:
-- **`hermes-agent`** — gateway API on port 8642
-- **`hermes-dashboard`** — monitoring UI on port 9119
-- **`hermes-webui`** — browser chat interface on port 8787
-
-All three services share the same `hermes-home` named volume so config,
-sessions, skills, and memory are consistent across all surfaces.
-
-#### Why UIDs must match
-
-The `hermes-home` volume is a bind-mount in practice — all three containers
-write to the same filesystem tree under `~/.hermes`. If the containers run
-as different UIDs, whichever container creates a file first becomes its
-owner, and the others hit `PermissionError` on subsequent writes.
-
-The fix is to make all containers run as **your host user's UID and GID**.
-
-#### Variable name asymmetry
-
-> ⚠️ **The two image families use different environment variable names** for
-> the UID/GID setting:
->
-> | Image | Variable |
-> |---|---|
-> | `nousresearch/hermes-agent` (agent + dashboard) | `HERMES_UID` / `HERMES_GID` |
-> | `ghcr.io/nesquena/hermes-webui` | `WANTED_UID` / `WANTED_GID` |
->
-> You must set **both pairs** when using a `.env` file.
-
-#### Recommended setup
-
-For a standard Linux user (UID ≥ 1000):
-
-```bash
-# Create a .env file with your host UID/GID
-echo "UID=$(id -u)" >> .env
-echo "GID=$(id -g)" >> .env
-# hermes-agent / hermes-dashboard
-echo "HERMES_UID=$(id -u)" >> .env
-echo "HERMES_GID=$(id -g)" >> .env
-```
-
-For NAS/Unraid deployments where a fixed service account is preferred, use
-`10000:10000` (or your NAS service UID) instead of `$(id -u)`.
-
-If you get `PermissionError` on an **existing** `~/.hermes` directory, run
-the one-time ownership fix:
-
-```bash
-chown -R $(id -u):$(id -g) ~/.hermes
-```
-
-#### Volume mount mode
-
-The dashboard container needs **read-write** access to the shared volume
-(it writes session logs and dashboard state). Do **not** add `:ro` to the
-`hermes-home` volume in `hermes-dashboard`'s `volumes:` entry.
-
-See `docker-compose.three-container.yml` for the full reference configuration.
 
 ---
 
@@ -314,12 +261,15 @@ Full list of environment variables:
 |---|---|---|
 | `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the hermes-agent checkout |
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
-| `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address |
+| `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `~/.hermes/webui-mvp` | Where sessions and state are stored |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | `openai/gpt-5.4-mini` | Default model |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
+| `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Path to Hermes config file |
 
@@ -416,8 +366,8 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **1898 tests**
-across 53 test files.
+Production data and real cron jobs are never touched. Current count: **3309 tests**
+across 100+ test files.
 
 ---
 
@@ -585,12 +535,32 @@ State lives outside the repo at `~/.hermes/webui-mvp/` by default
 - `CHANGELOG.md` -- release notes per sprint
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
 - `THEMES.md` -- theme system documentation, custom theme guide
+- `docs/troubleshooting.md` -- diagnostic flows for common failures (e.g. "AIAgent not available")
 
 ## Contributors
 
-Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly or incorporated via rebase — shapes the project, and we're grateful to everyone who has taken the time to contribute.
+Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly or incorporated via batch release — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
-### Major contributions
+**66 contributors have shipped code that landed in a release tag** as of v0.50.245. The full credit roll lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). The highlights:
+
+### Top contributors (by merged-PR count)
+
+| # | Contributor | PRs | First → latest release |
+|---|---|---:|---|
+| 1 | [@franksong2702](https://github.com/franksong2702) | 22 | `v0.50.49` → `v0.50.245` |
+| 2 | [@bergeouss](https://github.com/bergeouss) | 18 | `v0.50.49` → `v0.50.240` |
+| 3 | [@aronprins](https://github.com/aronprins) | 8 | `v0.47.0` → `v0.50.77` |
+| 4 | [@iRonin](https://github.com/iRonin) | 6 | `v0.41.0` |
+| 5 | [@24601](https://github.com/24601) | 6 | `v0.50.201` |
+| 6 | [@KingBoyAndGirl](https://github.com/KingBoyAndGirl) | 4 | `v0.50.232` → `v0.50.237` |
+| 7 | [@renheqiang](https://github.com/renheqiang) | 4 | `v0.50.93` |
+| 8 | [@ccqqlo](https://github.com/ccqqlo) | 3 | `v0.50.83` → `v0.50.207` |
+| 9 | [@deboste](https://github.com/deboste) | 3 | `v0.16.1` |
+| 10 | [@frap129](https://github.com/frap129) | 3 | `v0.50.157` → `v0.50.166` |
+
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 66 contributors, including everyone with one or two merged PRs and the special-thanks roll for design and architectural contributions.
+
+### Notable contributions
 
 **[@aronprins](https://github.com/aronprins)** — v0.50.0 UI overhaul (PR #242)
 The biggest single contribution to the project: a complete UI redesign that moved model/profile/workspace controls into the composer footer, replaced the gear-icon settings panel with the Hermes Control Center (tabbed modal), removed the activity bar in favor of inline composer status, redesigned the session list with a `⋯` action dropdown, and added the workspace panel state machine. 26 commits, thoroughly designed and iterated through multiple review rounds.
@@ -609,8 +579,8 @@ Three interlocking improvements: workspace fallback resolution so the server rec
 **[@gabogabucho](https://github.com/gabogabucho)** — Spanish locale + onboarding wizard (PRs #275, #285)
 Full Spanish (`es`) locale covering all 175 UI strings, plus the one-shot bootstrap onboarding wizard that guides new users through provider setup on first launch — the feature most responsible for new users actually getting started.
 
-**[@bergeouss](https://github.com/bergeouss)** — Real-time gateway session sync (PR #274)
-Bridged the gateway session database (Telegram, Discord, Slack, etc.) into the WebUI sidebar with live SSE polling. Gateway sessions now appear alongside WebUI sessions in real time, without any changes to hermes-agent.
+**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + gateway sync + Docker hardening (18 PRs, `v0.50.49` → `v0.50.240`)
+Real-time gateway session sync (Telegram/Discord/Slack into the WebUI sidebar via SSE), the provider management UI for adding/editing custom providers from Settings, the two-container Docker setup docs, OAuth provider status detection, profile isolation hardening (per-profile `.env` secrets), and the bulk of what users see when they touch Settings → Providers.
 
 **[@ccqqlo](https://github.com/ccqqlo)** — Terminal approval UX + custom model discovery + mobile close button (PRs #224, #225, #238, #333)
 A run of focused quality-of-life improvements: terminal tool approval prompts that stay visible long enough to actually be read, restored custom model API key discovery, and the redundant mobile close button fix that had been confusing users on narrow screens.
@@ -621,8 +591,8 @@ Added the 7th built-in theme: pure black backgrounds with warm accents tuned to 
 **[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button + Android Chrome fixes (PRs #253, #263, #265)
 Added the Profiles entry to the mobile navigation flow, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
 
-**[@franksong2702](https://github.com/franksong2702)** — Session title guard + breadcrumb nav (PRs #301, #302)
-Two clean bug fixes / features: the session title guard that stops `title_from()` from overwriting user-renamed sessions after every turn, and clickable breadcrumb navigation in the workspace file preview panel.
+**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (22 PRs, `v0.50.49` → `v0.50.245`)
+The session title guard, breadcrumb workspace navigation, mobile workspace panel sliver fix (#1300), composer footer container queries, streaming session sidebar exemption (#1327), session sidecar repair, cron output preservation (#1295), profile default workspace persistence, and a long tail of polish across the session sidebar, mobile responsive layout, and workspace state machine.
 
 **[@betamod](https://github.com/betamod)** — Security hardening (PR #171)
 A comprehensive security audit PR covering CSRF protection, SSRF guards, XSS escaping improvements, and the env race condition between concurrent agent sessions — foundational security work that shipped in v0.39.0.

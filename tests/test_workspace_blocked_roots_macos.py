@@ -150,3 +150,26 @@ class TestNonSymlinkRootsUnchanged:
         # Use Path() not .resolve() — we want to assert the shape-based block,
         # not test whether the path actually exists on the test runner.
         assert _is_blocked_system_path(Path(subpath))
+
+
+# ── New macOS-specific blocked roots: /System and /Library ──────────────────
+
+
+class TestMacOSSystemAndLibraryBlocked:
+    """macOS has /System and /Library as top-level OS directories that must be
+    blocked even on Linux (where they don't exist) since the path shapes are
+    meaningful on macOS and should always be rejected.
+    """
+
+    @pytest.mark.parametrize("path", [
+        '/Library',
+        '/Library/Application Support',
+        '/Library/Preferences',
+        '/System',
+        '/System/Library',
+        '/System/Library/CoreServices',
+    ])
+    def test_macos_os_roots_blocked(self, path):
+        """Paths under /Library and /System must be blocked regardless of platform."""
+        from api.workspace import _is_blocked_workspace_path
+        assert _is_blocked_workspace_path(Path(path))

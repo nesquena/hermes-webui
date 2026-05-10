@@ -66,4 +66,45 @@ document.addEventListener('DOMContentLoaded', function () {
       doLogin(e);
     }
   });
+
+  // On page load, probe the server so we can distinguish "can't reach server"
+  // (Tailscale off, wrong network) from "session expired / need to log in".
+  // Uses /health — a public endpoint, no auth required.
+  // If unreachable, retries every 3 s and auto-reloads once the server is back.
+  (function checkConnectivity() {
+    var retryTimer = null;
+
+    function setFormDisabled(disabled) {
+      if (input) input.disabled = disabled;
+      var btn = form.querySelector('button');
+      if (btn) btn.disabled = disabled;
+    }
+
+    function probe() {
+      fetch('health', { method: 'GET', credentials: 'omit' })
+        .then(function (r) {
+          if (r.ok) {
+            // Server is reachable — if we were in retry mode, reload so the
+            // page reflects the correct auth state (expired session, etc.).
+            if (retryTimer !== null) {
+              clearTimeout(retryTimer);
+              retryTimer = null;
+              window.location.reload();
+            }
+          } else {
+            showErr(connFailed + ' (server error ' + r.status + ')');
+          }
+        })
+        .catch(function () {
+          showErr('Cannot reach server — check your VPN / Tailscale connection.');
+          setFormDisabled(true);
+          // Keep retrying so the page auto-recovers once the network is back.
+          if (retryTimer === null) {
+            retryTimer = setInterval(probe, 3000);
+          }
+        });
+    }
+
+    probe();
+  })();
 });

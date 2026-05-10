@@ -24,7 +24,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml>=6.0 pytest pytest-timeout
+          pip install pyyaml>=6.0 pytest pytest-timeout pytest-asyncio
+          # Install the `mcp` package so tests/test_mcp_server.py runs in CI.
+          # The package is an optional runtime dep of mcp_server.py — users
+          # who run the MCP integration install it themselves; CI installs
+          # it so test coverage exists. If mcp install fails (Python 3.13
+          # wheel not yet available, etc.), tests/test_mcp_server.py uses
+          # importorskip and the matrix stays green.
+          pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
 
       - name: Run tests
         run: pytest tests/ -v --timeout=60

@@ -11,7 +11,8 @@ def test_pinned_indicator_renders_inside_title_row():
     title_row_idx = SESSIONS_JS.find("titleRow.className='session-title-row';")
     assert title_row_idx != -1, "session title row construction not found"
 
-    assert "body.appendChild(_renderOneSession(s, Boolean(g.isPinned)))" in SESSIONS_JS
+    assert ("body.appendChild(_renderOneSession(s, Boolean(g.isPinned)))" in SESSIONS_JS
+            or "body.appendChild(parentEl)" in SESSIONS_JS)
     assert "function _renderOneSession(s, isPinnedGroup=false)" in SESSIONS_JS
     assert "if(s.pinned&&!isPinnedGroup){" in SESSIONS_JS
 
@@ -115,13 +116,23 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
 
 
+def test_plain_mouse_hover_does_not_mark_session_row_dragging():
+    """Pointermove fires during ordinary hover; drag styling must require an active press."""
+    assert "let _pointerActive=false;" in SESSIONS_JS
+    assert "_pointerActive=true;" in SESSIONS_JS
+    assert "if(!_pointerActive) return;" in SESSIONS_JS
+    assert "_pointerActive=false;" in SESSIONS_JS
+    assert ".session-item.dragging:hover" in STYLE_CSS
+
+
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
 
-    assert "const isLocalStreaming=Boolean(" in SESSIONS_JS
-    assert "(isActive&&S.busy)" in SESSIONS_JS
+    assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
+    assert "(isActive && S.busy)" in SESSIONS_JS
     assert "INFLIGHT[s.session_id]" in SESSIONS_JS
-    assert "const isStreaming=Boolean(s.is_streaming||isLocalStreaming);" in SESSIONS_JS
+    assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
 
 

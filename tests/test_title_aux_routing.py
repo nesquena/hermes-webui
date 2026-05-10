@@ -3,8 +3,8 @@
 Covers:
   - _aux_title_configured() broad detection (provider, model, base_url)
   - generate_title_raw_via_aux() reads timeout from config instead of hardcoding 15.0
-  - aux→agent fallback triggers on 'llm_invalid_aux' status (Comment 1)
-  - _aux_title_timeout rejects zero, negative, and non-numeric values (Comment 4)
+  - aux→agent fallback triggers on 'llm_invalid_aux' status
+  - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
 import sys
 import types
@@ -313,7 +313,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
-    """Comment 4: _aux_title_timeout must reject zero, negative, and non-numeric values."""
+    """_aux_title_timeout must reject zero, negative, and non-numeric values."""
 
     def _call(self, tg_config, default=15.0):
         from api.streaming import _aux_title_timeout
@@ -352,7 +352,7 @@ class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
 
 
 class TestAuxInvalidAuxTriggersAgentFallback(unittest.TestCase):
-    """Comment 1: when aux returns llm_invalid_aux, the agent route must be tried as fallback.
+    """When aux returns llm_invalid_aux, the agent route must be tried as fallback.
 
     Pins the behaviour so the fallback tuple in _run_background_title_update
     stays synchronised with the statuses that _generate_llm_session_title_via_aux

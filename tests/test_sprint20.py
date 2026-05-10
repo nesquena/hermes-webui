@@ -31,7 +31,10 @@ def test_mic_button_present_in_html():
 def test_mic_button_has_mic_btn_class():
     """btnMic must carry the mic-btn CSS class for styling hooks."""
     html, _ = get_text("/")
-    assert 'class="icon-btn mic-btn"' in html
+    # Tolerate additional utility classes (e.g. has-tooltip from #1775).
+    import re
+    assert re.search(r'class="[^"]*\bicon-btn\b[^"]*\bmic-btn\b[^"]*"', html), \
+        "btnMic must have both 'icon-btn' and 'mic-btn' classes"
 
 
 def test_mic_button_hidden_by_default():
@@ -280,15 +283,17 @@ def test_boot_js_mic_status_toggle():
 
 
 def test_boot_js_send_stops_mic():
-    """btnSend onclick must stop mic before sending (send guard)."""
-    js, _ = get_text("/static/boot.js")
-    # The send button onclick should check _micActive and stop recording
-    send_onclick_idx = js.find("$('btnSend').onclick")
+    """btnSend primary action path must stop mic before sending."""
+    boot_js, _ = get_text("/static/boot.js")
+    ui_js, _ = get_text("/static/ui.js")
+    send_onclick_idx = boot_js.find("$('btnSend').onclick")
     assert send_onclick_idx != -1
-    # Find the handler code — check that _micActive check appears near send assignment
-    handler_end = js.find(';', send_onclick_idx)
-    handler = js[send_onclick_idx:handler_end + 1]
-    assert '_micActive' in handler or 'stopMic' in handler.lower()
+    assert 'handleComposerPrimaryAction' in boot_js[send_onclick_idx:send_onclick_idx + 200]
+    handler_idx = ui_js.find('function handleComposerPrimaryAction')
+    assert handler_idx != -1
+    handler = ui_js[handler_idx:handler_idx + 500]
+    assert '_micActive' in handler
+    assert '_stopMic()' in handler
 
 
 def test_boot_js_btn_mic_onclick():

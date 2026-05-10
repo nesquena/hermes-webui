@@ -161,6 +161,56 @@ class TestGetProviders:
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
 
+    def test_openai_codex_provider_card_prefers_live_catalog(self, monkeypatch, tmp_path):
+        """OpenAI Codex provider cards should not advertise stale static fallback models.
+
+        /api/models already uses hermes_cli/Codex cache discovery for Codex.  The
+        provider card should share that source order so rejected stale entries
+        such as gpt-5.5-mini are not presented as currently available when the
+        live account catalog excludes them (#1807).
+        """
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        fake_models = sys.modules["hermes_cli.models"]
+        fake_models.provider_model_ids = lambda pid: (
+            ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"]
+            if pid == "openai-codex"
+            else []
+        )
+        codex_home = tmp_path / "empty-codex-home"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "openai-codex", "default": "gpt-5.5"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            codex = next(p for p in result["providers"] if p["id"] == "openai-codex")
+            model_ids = [m["id"] for m in codex["models"]]
+            assert model_ids == [
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.2",
+            ]
+            assert "gpt-5.5-mini" not in model_ids
+            assert codex["models_total"] == len(model_ids)
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
 
 class TestSetProviderKey:
     """Unit tests for set_provider_key() function."""
@@ -297,6 +347,42 @@ class TestSetProviderKey:
 class TestRemoveProviderKey:
     """Unit tests for remove_provider_key() wrapper."""
 
+    def test_clean_provider_key_uses_late_bound_config_path(self, monkeypatch, tmp_path):
+        """Config cleanup must honor api.config._get_config_path monkeypatches.
+
+        PR #1597 fixed provider-key cleanup by resolving the config path through
+        the api.config module at call time. If the implementation goes back to
+        the function imported into api.providers at module load, this test cleans
+        stale_config instead of active_config.
+        """
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        stale_config = tmp_path / "stale-config.yaml"
+        active_config = tmp_path / "active-config.yaml"
+        stale_config.write_text(
+            "providers:\n  openai:\n    api_key: stale-secret\n",
+            encoding="utf-8",
+        )
+        active_config.write_text(
+            "providers:\n  openai:\n    api_key: active-secret\nmodel:\n  provider: openai\n  api_key: active-model-secret\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(providers, "_get_config_path", lambda: stale_config, raising=False)
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: active_config)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        stale = yaml.safe_load(stale_config.read_text(encoding="utf-8"))
+        active = yaml.safe_load(active_config.read_text(encoding="utf-8"))
+        assert stale["providers"]["openai"]["api_key"] == "stale-secret"
+        assert "api_key" not in active["providers"]["openai"]
+        assert active["model"] == {"provider": "openai"}
+
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
         _install_fake_hermes_cli(monkeypatch)
@@ -372,3 +458,92 @@ class TestProvidersEndpoints:
         """POST /api/providers/delete without provider should return 400."""
         body, status = _post("/api/providers/delete", {})
         assert status == 400
+
+
+class TestIssue1410OllamaEnvVarBleed:
+    """Regression: Ollama Cloud key must not flip local Ollama to has_key=True.
+
+    Both providers used to share OLLAMA_API_KEY in _PROVIDER_ENV_VAR. After
+    a user added a key for Ollama Cloud, the local Ollama card also lit up
+    "API key configured" — incorrect because the runtime in
+    hermes_cli/runtime_provider.py only consumes OLLAMA_API_KEY when the
+    base URL hostname is ollama.com. Local Ollama is keyless by default.
+
+    Fix: drop bare "ollama" from _PROVIDER_ENV_VAR so the env-var check is
+    only applied to ollama-cloud. Local Ollama users who genuinely need a
+    key can still set providers.ollama.api_key in config.yaml.
+    """
+
+    def test_ollama_local_not_configured_when_only_cloud_env_var_set(
+        self, monkeypatch, tmp_path,
+    ):
+        """OLLAMA_API_KEY in env should mark ollama-cloud configured but not bare ollama."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("OLLAMA_API_KEY", "sk-cloud-key-xyz")
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            by_id = {p["id"]: p for p in result["providers"]}
+            assert "ollama-cloud" in by_id, "ollama-cloud should appear in provider list"
+            assert "ollama" in by_id, "ollama (local) should appear in provider list"
+            assert by_id["ollama-cloud"]["has_key"] is True, \
+                "ollama-cloud should be has_key=True when OLLAMA_API_KEY is set"
+            assert by_id["ollama"]["has_key"] is False, (
+                "ollama (local) must NOT be has_key=True when only the cloud env "
+                "var is set — local Ollama is keyless and shares no env var with "
+                "Ollama Cloud (#1410)."
+            )
+            # ollama-cloud should be configurable, but local ollama should not
+            # (it has no env var mapping — keys go through providers.ollama.api_key
+            # in config.yaml if the user explicitly opts in).
+            assert by_id["ollama-cloud"]["configurable"] is True
+            assert by_id["ollama"]["configurable"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
+    def test_ollama_local_still_configured_via_config_yaml(
+        self, monkeypatch, tmp_path,
+    ):
+        """providers.ollama.api_key in config.yaml should still mark local ollama configured."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        # Important: clear the env var so the only signal is config.yaml.
+        monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        config.cfg["providers"] = {"ollama": {"api_key": "local-token-abc"}}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            by_id = {p["id"]: p for p in result["providers"]}
+            assert by_id["ollama"]["has_key"] is True, (
+                "Local Ollama users with providers.ollama.api_key in config.yaml "
+                "should still report configured (#1410 fix must not regress this)."
+            )
+            # And ollama-cloud should NOT be configured by ollama's config entry.
+            assert by_id["ollama-cloud"]["has_key"] is False
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime

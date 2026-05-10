@@ -142,6 +142,16 @@ def test_non_cron_sessions_unaffected(fake_hermes_home):
     _make_state_db(fake_hermes_home / "state.db", [
         ("cron_cd65df6fc1a8_xx", None, "cli"),
     ])
+    # PR #1587 hides one-off default-titled CLI rows. Keep this fixture visible
+    # so the test remains focused on the cron-name guard rather than sidebar
+    # filtering.
+    conn = sqlite3.connect(str(fake_hermes_home / "state.db"))
+    conn.execute(
+        "INSERT INTO messages (session_id, timestamp) VALUES (?, ?)",
+        ("cron_cd65df6fc1a8_xx", 1700000002.0),
+    )
+    conn.commit()
+    conn.close()
 
     sessions = models.get_cli_sessions()
 

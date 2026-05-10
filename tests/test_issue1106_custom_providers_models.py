@@ -35,12 +35,32 @@ def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None
 
 
 def _all_model_ids(result):
-    """Extract all model IDs from all groups."""
+    """Extract all model IDs from all groups (raw form — may include @provider: prefix)."""
     ids = []
     for g in result.get("groups", []):
         for m in g.get("models", []):
             ids.append(m["id"])
     return ids
+
+
+def _strip_at_prefix(model_id):
+    """Strip the optional ``@provider:`` (or ``@provider:subname:``) prefix
+    from a model id so legacy assertions can compare against the bare form.
+
+    PR #1415 introduced provider-qualified IDs (``@custom:NAME:model``) for
+    named custom providers when the active provider differs. The bare-ID
+    assertions in this test module pre-date that change and need normalization
+    to keep checking the same invariant: "does model X appear in the picker".
+    """
+    s = str(model_id or "")
+    if s.startswith("@") and ":" in s:
+        return s.rsplit(":", 1)[1]
+    return s
+
+
+def _all_model_ids_bare(result):
+    """Same as _all_model_ids but with @provider: prefixes stripped."""
+    return [_strip_at_prefix(mid) for mid in _all_model_ids(result)]
 
 
 def _group_for(result, provider_name):
@@ -72,7 +92,7 @@ class TestCustomProvidersModelsDict:
                 }
             ],
         )
-        ids = _all_model_ids(result)
+        ids = _all_model_ids_bare(result)
         for expected in ["unsloth-qwen3.6-35b-a3b", "gemma4-26b", "qwen3.5-27b", "qwen3-coder-30b"]:
             assert expected in ids, f"Expected '{expected}' in model IDs, got {ids}"
 
@@ -91,7 +111,7 @@ class TestCustomProvidersModelsDict:
                 }
             ],
         )
-        ids = _all_model_ids(result)
+        ids = _all_model_ids_bare(result)
         assert "llama-3-8b" in ids
         assert "mistral-7b" in ids
 
@@ -111,7 +131,7 @@ class TestCustomProvidersModelsDict:
                 }
             ],
         )
-        ids = _all_model_ids(result)
+        ids = _all_model_ids_bare(result)
         assert ids.count("base-model") == 1, f"'base-model' should appear exactly once, got {ids.count('base-model')}"
         assert "other-model" in ids
 
@@ -145,7 +165,7 @@ class TestCustomProvidersModelsDict:
                 }
             ],
         )
-        ids = _all_model_ids(result)
+        ids = _all_model_ids_bare(result)
         assert "only-model" in ids
 
     def test_non_string_models_keys_are_skipped(self):
@@ -164,7 +184,7 @@ class TestCustomProvidersModelsDict:
                 }
             ],
         )
-        ids = _all_model_ids(result)
+        ids = _all_model_ids_bare(result)
         assert "valid-model" in ids
         assert "another-valid" in ids
 
@@ -189,10 +209,35 @@ class TestCustomProvidersModelsDict:
         group_b = _group_for(result, "Server-B")
         assert group_a is not None, "Server-A group missing"
         assert group_b is not None, "Server-B group missing"
-        ids_a = [m["id"] for m in group_a["models"]]
-        ids_b = [m["id"] for m in group_b["models"]]
+        # PR #1415 prefixes model IDs with @custom:NAME: when the active provider
+        # is different from the named slug — strip for the bare-id invariant.
+        ids_a = [_strip_at_prefix(m["id"]) for m in group_a["models"]]
+        ids_b = [_strip_at_prefix(m["id"]) for m in group_b["models"]]
         assert "model-a1" in ids_a and "model-a2" in ids_a
         assert "model-b1" in ids_b and "model-b2" in ids_b
         # No cross-contamination
         assert "model-b1" not in ids_a
         assert "model-a1" not in ids_b
+
+    def test_named_custom_models_are_prefixed_when_not_active_provider(self):
+        """Named custom provider models must carry a routing prefix when DeepSeek is active."""
+        result = _models_with_cfg(
+            model_cfg={"provider": "deepseek", "default": "deepseek-v4-pro"},
+            custom_providers=[
+                {
+                    "name": "sub2api",
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "model": "gpt-5.4-mini",
+                    "models": {
+                        "gpt-5.4-mini": {},
+                        "gpt-5.4": {},
+                    },
+                }
+            ],
+        )
+        group = _group_for(result, "sub2api")
+        assert group is not None, "sub2api group missing"
+        assert group["provider_id"] == "custom:sub2api"
+        ids = [m["id"] for m in group["models"]]
+        assert "@custom:sub2api:gpt-5.4-mini" in ids
+        assert "@custom:sub2api:gpt-5.4" in ids

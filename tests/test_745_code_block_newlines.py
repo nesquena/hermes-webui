@@ -66,7 +66,7 @@ class TestCodeBlockNewlinePreservation:
         src = get_ui_js()
         # Find the replacement regex used to populate _pre_stash
         stash_block_idx = src.index('_pre_stash=[]')
-        stash_block = src[stash_block_idx:stash_block_idx + 400]
+        stash_block = src[stash_block_idx:stash_block_idx + 1500]
         assert 'pre-header' in stash_block, \
             "pre-stash regex must match <div class=\"pre-header\"> wrappers"
 
@@ -74,7 +74,7 @@ class TestCodeBlockNewlinePreservation:
         """The stash regex must also cover mermaid-block divs."""
         src = get_ui_js()
         stash_block_idx = src.index('_pre_stash=[]')
-        stash_block = src[stash_block_idx:stash_block_idx + 400]
+        stash_block = src[stash_block_idx:stash_block_idx + 1500]
         assert 'mermaid-block' in stash_block, \
             "pre-stash regex must cover mermaid-block divs"
 
@@ -82,7 +82,7 @@ class TestCodeBlockNewlinePreservation:
         """The stash regex must also cover katex-block divs."""
         src = get_ui_js()
         stash_block_idx = src.index('_pre_stash=[]')
-        stash_block = src[stash_block_idx:stash_block_idx + 400]
+        stash_block = src[stash_block_idx:stash_block_idx + 1500]
         assert 'katex-block' in stash_block, \
             "pre-stash regex must cover katex-block divs"
 

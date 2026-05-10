@@ -141,48 +141,76 @@ def test_server_now_ms_defaults_to_date_now_when_no_skew():
 
 
 def test_server_now_ms_compensates_positive_skew():
-    """If server is behind client (skew > 0), _serverNowMs() subtracts the delta."""
+    """If server is behind client (skew > 0), _serverNowMs() subtracts the delta.
+
+    Uses a small tolerance window (±5 ms) because two consecutive Date.now() calls
+    inside Node.js can differ by 1-2 ms on a loaded system, causing `diff === 3600000`
+    to fail intermittently even though the compensation logic is correct.
+    """
     result = _run_time_case(
         """
         // Simulate: client clock is 3600s (1 hour) ahead of server
         _serverTimeDelta = 3600 * 1000;
-        const clientNow = Date.now();
-        const serverNow = _serverNowMs();
-        const diff = clientNow - serverNow;
+        const t0 = Date.now();
+        const serverNow = _serverNowMs();  // internally calls Date.now() again
+        const t1 = Date.now();
+        // Use the midpoint of t0..t1 to absorb the tiny time-of-call delta
+        const diffMs = ((t0 + t1) / 2) - serverNow;
         process.stdout.write(JSON.stringify({
-          diffMs: diff,
-          isOneHour: diff === 3600000,
+          diffMs: Math.round(diffMs),
+          isOneHour: Math.abs(diffMs - 3600000) < 5,
         }));
         """
     )
-    assert result["isOneHour"] is True
-    assert result["diffMs"] == 3_600_000
+    assert result["isOneHour"] is True, (
+        f"Expected diff ≈ 3600000 ms, got {result['diffMs']} ms. "
+        "The skew compensation is broken."
+    )
+    assert abs(result["diffMs"] - 3_600_000) < 5
 
 
 def test_server_now_ms_compensates_negative_skew():
-    """If server is ahead of client (skew < 0), _serverNowMs() adds the delta."""
+    """If server is ahead of client (skew < 0), _serverNowMs() adds the delta.
+
+    Uses midpoint averaging with ±5 ms tolerance to avoid intermittent failures
+    caused by consecutive Date.now() calls returning different values under CPU load.
+    (Same fix as the positive-skew test above.)
+    """
     result = _run_time_case(
         """
         // Simulate: client clock is 7200s (2 hours) behind server
         _serverTimeDelta = -7200 * 1000;
-        const clientNow = Date.now();
-        const serverNow = _serverNowMs();
-        const diff = serverNow - clientNow;
+        const t0 = Date.now();
+        const serverNow = _serverNowMs();  // internally calls Date.now() at T1 >= T0
+        const t1 = Date.now();
+        // serverNow = T1 + 7200000; clientNow ≈ midpoint(T0,T1)
+        const diffMs = serverNow - ((t0 + t1) / 2);
         process.stdout.write(JSON.stringify({
-          diffMs: diff,
-          isTwoHours: diff === 7200000,
+          diffMs: Math.round(diffMs),
+          isTwoHours: Math.abs(diffMs - 7200000) < 5,
         }));
         """
     )
-    assert result["isTwoHours"] is True
-    assert result["diffMs"] == 7_200_000
+    assert result["isTwoHours"] is True, (
+        f"Expected diff ≈ 7200000 ms, got {result['diffMs']} ms. "
+        "The negative-skew compensation is broken."
+    )
+    assert abs(result["diffMs"] - 7_200_000) < 5
 
 
 def test_relative_time_uses_server_clock():
     """_formatRelativeSessionTime uses _serverNowMs() when nowMs is not passed."""
     result = _run_time_case(
         """
-        // Simulate server 8 hours behind client (common WSL scenario)
+        // Simulate server 8 hours behind client (common WSL scenario).
+        // Pin Date.now() to a clock-stable instant well away from any UTC
+        // calendar boundary so the test does not depend on what time CI
+        // happens to run. With _serverTimeDelta = +8h, _serverNowMs() returns
+        // (Date.now() - 8h). If Date.now() were unpinned and CI ran near
+        // 08:00 UTC, the projected server time would be ~midnight and the
+        // "5 minutes ago" subtraction would silently cross into yesterday.
+        const _origNow = Date.now;
+        Date.now = () => new Date('2026-05-06T20:00:00Z').getTime();
         _serverTimeDelta = 8 * 3600 * 1000;
         // Session created 5 minutes ago in server time
         const serverNow = _serverNowMs();
@@ -191,6 +219,7 @@ def test_relative_time_uses_server_clock():
           relative: _formatRelativeSessionTime(fiveMinAgo),
           bucket: _sessionTimeBucketLabel(fiveMinAgo),
         }));
+        Date.now = _origNow;
         """
     )
     # Without compensation, client thinks this session is 8h5m ago.
@@ -203,9 +232,12 @@ def test_session_bucket_uses_server_clock():
     """_sessionTimeBucketLabel uses _serverNowMs() for Today/Yesterday boundaries."""
     result = _run_time_case(
         """
-        // Freeze the client clock at midday UTC so an 8-hour server skew does
-        // not make this regression test depend on the real wall-clock hour.
-        Date.now = () => Date.UTC(2026, 3, 15, 12, 0, 0);
+        // Pin the client clock away from midnight so this regression test does
+        // not depend on when CI happens to run. With an 8-hour positive server
+        // skew, an unpinned Date.now() near 16:00 UTC makes serverNow cross
+        // midnight and turns "2 hours ago" into the prior calendar day.
+        const fixedClientNow = Date.UTC(2026, 3, 15, 12, 0, 0);
+        Date.now = () => fixedClientNow;
         // Simulate server 8 hours ahead of client
         _serverTimeDelta = -8 * 3600 * 1000;
         const serverNow = _serverNowMs();

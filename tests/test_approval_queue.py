@@ -23,8 +23,8 @@ INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 
 def test_submit_pending_appends_to_list():
     """submit_pending() must append to a list, not overwrite."""
-    # The new wrapper must contain queue.append
-    assert "queue.append(entry)" in ROUTES_SRC, \
+    # The new wrapper must contain a queue append (list mutation pattern)
+    assert "queue_list.append(entry)" in ROUTES_SRC or "queue.append(entry)" in ROUTES_SRC, \
         "submit_pending() must append entry to a list queue, not overwrite _pending[sid]"
 
 
@@ -99,9 +99,9 @@ def test_approval_current_id_tracked():
 
 
 def test_polling_passes_count_to_show():
-    """The poll loop must pass pending_count to showApprovalCard."""
-    assert "showApprovalCard(data.pending, data.pending_count" in MESSAGES_JS, \
-        "Poll loop must pass data.pending_count to showApprovalCard"
+    """The poll loop must pass pending_count to the owner-aware approval renderer."""
+    assert "showApprovalForSession(sid, data.pending, data.pending_count" in MESSAGES_JS, \
+        "Poll loop must pass data.pending_count through showApprovalForSession"
 
 
 # ---------------------------------------------------------------------------

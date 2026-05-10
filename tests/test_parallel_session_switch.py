@@ -427,10 +427,11 @@ class TestMessagePaginationFrontend:
         assert "async function _ensureAllMessagesLoaded" in SESSIONS_JS
 
     def test_scroll_to_top_triggers_loading(self):
-        """Scroll event handler must trigger _loadOlderMessages near top."""
+        """Scroll event handler must trigger _loadOlderMessages near top when opt-in is enabled."""
         UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
-        assert "el.scrollTop<80" in UI_JS
+        assert "const olderPrefetchPx=Math.max(600,el.clientHeight*1.5)" in UI_JS
+        assert "_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx" in UI_JS
         assert "_loadOlderMessages" in UI_JS
 
     def test_load_older_indicator_in_render(self):
@@ -556,4 +557,54 @@ class TestSessionSwitchCancellation:
         mutation_idx = fn_body.find("S.messages = [...olderMsgs")
         assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
             "Active-session guard must run before S.messages mutation."
+        )
+
+
+# ── 6. Scroll position preservation ──────────────────────────────────────────
+
+
+class TestScrollPositionPreservation:
+    """When _loadOlderMessages prepends messages, the user's scroll position
+    must be preserved — not snapped to the bottom.
+
+    The scrollable container is #messages (overflow-y:auto), not #msgInner
+    (which is a flex column with no overflow).  Also, renderMessages() calls
+    scrollToBottom() at the end, so _scrollPinned must be reset."""
+
+    def test_uses_correct_scrollable_container(self):
+        """_loadOlderMessages must use $('messages') not $('msgInner')."""
+        SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+
+        fn_start = src.find("async function _loadOlderMessages")
+        fn_end = src.find("\n}", fn_start) + 2
+        fn_body = src[fn_start:fn_end]
+
+        assert "$('messages')" in fn_body, (
+            "_loadOlderMessages should use $('messages') as the scrollable container "
+            "(#messages has overflow-y:auto). #msgInner has no overflow and is not scrollable."
+        )
+        assert "$('msgInner')" not in fn_body, (
+            "_loadOlderMessages must NOT use $('msgInner') for scroll position — "
+            "#msgInner is a flex column with no overflow-y."
+        )
+
+    def test_resets_scroll_pinned_after_restore(self):
+        """_scrollPinned must be false after older-history scroll anchoring."""
+        SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+
+        fn_start = src.find("async function _loadOlderMessages")
+        fn_end = src.find("\n}", fn_start) + 2
+        fn_body = src[fn_start:fn_end]
+
+        assert "_scrollPinned = false" in fn_body, (
+            "Older-history paging must leave the transcript unpinned so the next "
+            "render does not snap back to the newest output."
+        )
+        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
+        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        pinned_idx = fn_body.rfind("_scrollPinned = false")
+        assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
+            "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
         )

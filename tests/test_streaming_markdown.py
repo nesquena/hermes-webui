@@ -107,6 +107,31 @@ class TestIndexHtmlSmdScript:
             "streaming-markdown must be loaded with type=\"module\" (it is an ES module)"
         )
 
+    def test_smd_vendor_import_is_mount_agnostic(self):
+        """Import must resolve relative to current document, not a bare
+        specifier (rejected by ES module spec, #1849) and not root-absolute
+        (escapes /hermes/-style subpath mounts). The `./` form is the only
+        shape that satisfies both: ES-spec-valid AND mount-agnostic.
+        """
+        assert "from './static/vendor/smd.min.js'" in INDEX_HTML, (
+            "index.html must use the './static/vendor/smd.min.js' form — "
+            "bare specifiers are rejected by the ES module spec (#1849) and "
+            "leading-/ paths break subpath deployments such as /hermes/"
+        )
+        # Forbid the bare form (#1849 broke streaming-markdown silently)
+        assert "import * as smd from 'static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "bare specifier is rejected by the ES module spec — use './static/...'"
+        )
+        # Forbid the root-absolute form (subpath deployments escape the mount)
+        assert "from '/static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
+        )
+        assert 'from "/static/vendor/smd.min.js"' not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
+        )
+
 
 # ── 2. Closure variable declarations ─────────────────────────────────────────
 
@@ -270,6 +295,17 @@ class TestScheduleRenderSmdPath:
             "renderMd fallback must still exist in _scheduleRender when smd unavailable"
         )
 
+    def test_fallback_formats_first_segment_with_render_md(self):
+        fn = self.get_fn()
+        assert fn, "_scheduleRender not found"
+        assert "const fallbackText" in fn, (
+            "_scheduleRender fallback should choose the visible segment text once"
+        )
+        assert "renderMd(fallbackText)" in fn, (
+            "When smd is unavailable, the first live segment must still be "
+            "formatted with renderMd instead of inserting raw parsed.displayText"
+        )
+
     def test_smd_new_parser_called_lazily(self):
         fn = self.get_fn()
         assert fn and "_smdNewParser(" in fn, (
@@ -380,6 +416,38 @@ class TestDoneEventSmd:
         assert raf_pos < render_messages_pos, (
             "The requestAnimationFrame (which schedules highlightCode) must appear "
             "before renderMessages() in the 'done' handler source"
+        )
+
+    def test_done_handler_preserves_bottom_follow_on_final_render(self):
+        """Final DOM replacement must keep auto-following users at the bottom.
+
+        The live stream path can be visually at bottom while _scrollPinned was
+        knocked false by history/windowing/layout preservation. On `done`, the
+        live DOM is replaced with persisted messages; if the handler blindly calls
+        renderMessages({preserveScroll:true}) while the pin flag is false, the
+        transcript can jump to the top. Capture bottom/follow intent before the
+        replacement and explicitly bottom only for those users.
+        """
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        assert "shouldFollowOnDone" in fn, (
+            "'done' handler must capture whether the viewed transcript should "
+            "continue following before replacing the live DOM."
+        )
+        follow_idx = fn.index("shouldFollowOnDone")
+        render_idx = fn.index("renderMessages({preserveScroll:true})")
+        assert follow_idx < render_idx, (
+            "Follow intent must be captured before renderMessages() replaces the "
+            "live transcript DOM."
+        )
+        after_render = fn[render_idx:render_idx + 500]
+        assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
+            "After final render, done handler must call scrollToBottom() when the "
+            "user was pinned/near-bottom before DOM replacement."
+        )
+        assert "_isMessagePaneNearBottom" in fn, (
+            "Done follow capture must include a near-bottom DOM check, not only "
+            "the possibly-stale _scrollPinned flag."
         )
 
 

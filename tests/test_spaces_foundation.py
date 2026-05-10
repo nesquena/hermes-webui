@@ -9147,7 +9147,7 @@ def test_streaming_agent_prompt_includes_active_space_context(monkeypatch, tmp_p
     session = SimpleNamespace(workspace=str(tmp_path), active_space_id="lab")
     user_message, system_message = _build_agent_prompt_inputs(session, "Update the source list")
 
-    assert user_message.startswith(f"[Workspace: {tmp_path}]")
+    assert user_message.startswith(f"[Workspace::v1: {tmp_path}]\n")
     assert "[Capy Space: lab]" in user_message
     assert "Update the source list" in user_message
     assert "## Active Capy Space" in system_message
