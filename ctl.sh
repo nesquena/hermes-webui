@@ -39,15 +39,19 @@ _load_repo_dotenv_preserving_env() {
     key="${key#export }"
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    if [[ -v ${key} ]]; then
+    if [[ -n "${!key+x}" ]]; then
       value="${!key}"
       preserved+=("${key}=${value}")
     fi
   done < "${env_file}"
 
   set -a
+  local filtered_env
+  filtered_env="$(mktemp "${TMPDIR:-/tmp}/hermes-webui-ctl-env.XXXXXX")"
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${env_file}" > "${filtered_env}" || true
   # shellcheck source=/dev/null
-  source "${env_file}"
+  source "${filtered_env}"
+  rm -f "${filtered_env}"
   set +a
 
   local assignment
@@ -215,13 +219,19 @@ start_cmd() {
   : >> "${LOG_FILE}"
   (
     cd "${REPO_ROOT}"
-    exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" "${CTL_BOOTSTRAP_ARGS[@]}"
+    if (( ${#CTL_BOOTSTRAP_ARGS[@]} )); then
+      exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" "${CTL_BOOTSTRAP_ARGS[@]}"
+    else
+      exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}"
+    fi
   ) >> "${LOG_FILE}" 2>&1 &
   pid=$!
 
   printf '%s\n' "${pid}" > "${PID_FILE}"
   _write_state "${pid}" "${CTL_HOST}" "${CTL_PORT}"
-  sleep 0.15
+  # Give the foreground bootstrap process a short scheduling window so callers
+  # can immediately inspect startup side effects (PID/log/state) after ctl returns.
+  sleep 0.3
   if ! _is_alive "${pid}"; then
     echo "[ctl] Hermes WebUI failed to stay running. Log: ${LOG_FILE}" >&2
     rm -f "${PID_FILE}" "${STATE_FILE}"

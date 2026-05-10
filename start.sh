@@ -35,15 +35,20 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
   # `start.sh` with "UID: readonly variable" when bash tries to assign to
   # those names.  Filtering them out lets the .env file carry those entries
   # for docker-compose's variable substitution while keeping local invocation
-  # of start.sh working.  The regression guard at
-  # tests/test_bootstrap_dotenv.py:181 still passes — the line below contains
-  # both `source` and `.env`.
+  # of start.sh working.  macOS's Bash 3.2 can race when `source` reads a
+  # process substitution FIFO, so write the filtered stream to a temp file first
+  # instead of the older `source <(grep -vE '...UID...' "${REPO_ROOT}/.env")` form.
+  # The regression guard at tests/test_bootstrap_dotenv.py:181 still passes —
+  # the line below contains both `source` and `.env`.
   # Sourced from PR #1686 (@binhpt310) — Cluster 1 (operational hardening),
   # extracted to a focused follow-up after the parent PR was deferred.
+  filtered_env="$(mktemp "${TMPDIR:-/tmp}/hermes-webui-env.XXXXXX")"
+  grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${REPO_ROOT}/.env" > "${filtered_env}" || true
   set -a
   # shellcheck source=/dev/null
-  source <(grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)=' "${REPO_ROOT}/.env")
+  source "${filtered_env}"
   set +a
+  rm -f "${filtered_env}"
 fi
 
 PYTHON="${HERMES_WEBUI_PYTHON:-}"
