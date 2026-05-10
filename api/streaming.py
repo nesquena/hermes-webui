@@ -2021,6 +2021,11 @@ def _run_agent_streaming(
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
+            # Keep _profile_home_path defined for downstream consumers (e.g. the
+            # hermes-fork first-run bootstrap hook) so a missing api.profiles
+            # import doesn't surface as a NameError later in the function.
+            from pathlib import Path as _Path
+            _profile_home_path = _Path(_profile_home) if _profile_home else _Path.home() / '.hermes'
             _profile_runtime_env = {}
 
         _thread_env = _build_agent_thread_env(
@@ -2657,9 +2662,39 @@ def _run_agent_streaming(
                         _personality_prompt = '\n'.join(p for p in _parts if p)
                     else:
                         _personality_prompt = str(_pval)
-            # Pass personality via ephemeral_system_prompt (agent's own mechanism)
-            if _personality_prompt:
-                agent.ephemeral_system_prompt = _personality_prompt
+            # >>> hermes-fork: first-run identity-discovery bootstrap (HermesOS Cloud)
+            #     Port of dashboard/src/components/chat/hooks/chat-bootstrap.ts to
+            #     the WebUI surface. On the first agent turn for this profile,
+            #     prepend the identity-discovery prompt so the agent introduces
+            #     itself and asks "who am I / who are you?" — then writes SOUL.md
+            #     and memories/USER.md. Sentinel file in the profile home gates
+            #     subsequent turns.
+            _first_run_prompt = None
+            try:
+                from api.bootstrap import build_first_run_system_prompt, mark_first_run_fired
+                _first_run_prompt = build_first_run_system_prompt(_profile_home_path)
+            except Exception:
+                logger.debug("first-run bootstrap check failed", exc_info=True)
+            # <<< hermes-fork
+            # Pass personality via ephemeral_system_prompt (agent's own mechanism).
+            # Combine with first-run bootstrap prompt when both are present so the
+            # agent sees personality framing first, then the identity-discovery brief.
+            _combined_ephemeral = None
+            if _personality_prompt and _first_run_prompt:
+                _combined_ephemeral = f"{_personality_prompt}\n\n{_first_run_prompt}"
+            elif _personality_prompt:
+                _combined_ephemeral = _personality_prompt
+            elif _first_run_prompt:
+                _combined_ephemeral = _first_run_prompt
+            if _combined_ephemeral:
+                agent.ephemeral_system_prompt = _combined_ephemeral
+            # >>> hermes-fork: mark bootstrap fired after handoff to the agent
+            if _first_run_prompt:
+                try:
+                    mark_first_run_fired(_profile_home_path)
+                except Exception:
+                    logger.debug("first-run sentinel write failed", exc_info=True)
+            # <<< hermes-fork
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent

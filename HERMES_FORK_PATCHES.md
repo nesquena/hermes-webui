@@ -68,6 +68,24 @@ When upstream rebases, conflicts only ever land inside these blocks. Resolve
 | `699` | `first-class providers (HermesOS Cloud)` | Add Venice / CrofAI / Bankr / Xiaomi to `_OPENAI_COMPAT_ENDPOINTS` so generic `/v1/models` live-fetch works |
 | `3879` | `refresh-models endpoint (HermesOS Cloud)` | New `POST /api/models/refresh` — the "Refresh models" button calls this. Drops cache + re-fetches via agent's `provider_model_ids()` |
 
+### `api/streaming.py`
+
+| Line | Marker | Purpose |
+|---|---|---|
+| `2022` | (no marker — defensive shim) | `_profile_home_path` fallback when `api.profiles` import fails, so the first-run bootstrap below always has a valid `Path` to gate on |
+| `2660` | `first-run identity-discovery bootstrap (HermesOS Cloud)` | Resolve `api.bootstrap.build_first_run_system_prompt(_profile_home_path)` and combine with personality prompt into `agent.ephemeral_system_prompt`; mark sentinel so it fires once per profile |
+
+### `api/bootstrap.py` (whole file is a fork addition)
+
+| Symbol | Purpose |
+|---|---|
+| `DEFAULT_FIRST_RUN_PROMPT` | Identity-discovery prompt text. Tells the agent it just came online, instructs it to ask "who am I / who are you?", then write `SOUL.md` and `memories/USER.md`. Ported from `dashboard/src/components/chat/hooks/chat-bootstrap.ts` so iframe + direct-canary-URL deploys both fire it. |
+| `get_first_run_prompt()` | Reads `HERMES_WEBUI_FIRST_RUN_PROMPT` env override; empty string disables. |
+| `should_inject_first_run_prompt(profile_home)` | True when sentinel file `<profile_home>/.bootstrap_fired` is absent AND prompt non-empty. |
+| `mark_first_run_fired(profile_home)` | Touches the sentinel; subsequent turns skip injection. |
+
+**Companion in dashboard repo (kept, scoped):** `dashboard/src/components/chat/hooks/chat-bootstrap.ts` continues to serve the legacy gateway-backend chat surface (when `instance.backend !== "webui"`). WebUI-backed deploys are handled by this module instead. Either path delivers the same prompt text.
+
 ### `static/panels.js`
 
 | Line | Marker | Purpose |
