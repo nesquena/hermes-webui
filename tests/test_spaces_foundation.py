@@ -177,6 +177,155 @@ def test_space_create_and_update_return_public_sanitized_metadata(monkeypatch, t
 
 
 
+def test_space_root_layout_and_capabilities_are_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "root-metadata-safety",
+            "name": "Root Metadata Safety",
+            "layout": {
+                "columns": 24,
+                "grid": {"label": "Safe grid label", "source": "raw source marker"},
+                "caption": "<div>raw html body</div>",
+                "renderer": "<script>bad()</script>",
+                "apiKeyValue": "SECRET_VALUE_DO_NOT_LEAK",
+                "onClick": "steal()",
+                "onclick": "steal()",
+                "onload": "boot()",
+                "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "capabilities": {
+                "metadata_only": True,
+                "label": "Safe capability label",
+                "script": "generated code body",
+                "generatedCodeText": "badcall()",
+                "onerror": "bad()",
+                "credentials": {"token": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+        }
+    )
+    updated = spaces.update_space(
+        created["space_id"],
+        {
+            "layout": {
+                "columns": 12,
+                "grid": {"label": "Updated safe grid"},
+                "html": "<script>bad()</script>",
+            },
+            "capabilities": {"metadata_only": True, "renderer": "generated code body"},
+        },
+    )
+    loaded = spaces.run_space_tool("space.get", {"space_id": created["space_id"]})
+    manifest = spaces.read_space(created["space_id"])
+    event_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in spaces.events_dir().glob("*.json")]
+    serialized = json.dumps(
+        {"created": created, "updated": updated, "loaded": loaded, "manifest": manifest, "events": event_payloads}
+    ).lower()
+
+    assert created["layout"] == {"columns": 24, "grid": {"label": "Safe grid label"}}
+    assert created["capabilities"] == {"metadata_only": True, "label": "Safe capability label"}
+    assert updated["layout"] == {"columns": 12, "grid": {"label": "Updated safe grid"}}
+    assert updated["capabilities"] == {"metadata_only": True}
+    assert loaded["space"]["layout"] == updated["layout"]
+    assert loaded["space"]["capabilities"] == updated["capabilities"]
+    assert manifest["layout"] == updated["layout"]
+    assert manifest["capabilities"] == {"metadata_only": True}
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_auth" not in serialized
+    assert "credentials" not in serialized
+    assert "<script" not in serialized
+    assert "<div" not in serialized
+    assert "raw html body" not in serialized
+    assert "generated code" not in serialized
+    assert "raw source marker" not in serialized
+    assert "renderer" not in serialized
+    assert "apikeyvalue" not in serialized
+    assert "generatedcodetext" not in serialized
+    assert "onclick" not in serialized
+    assert "onload" not in serialized
+    assert "onerror" not in serialized
+    assert '\"source\"' not in serialized
+
+
+
+def test_space_tool_create_preserves_safe_root_metadata_and_drops_unsafe_fields(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    result = spaces.run_space_tool(
+        "space.create",
+        {
+            "space_id": "tool-root-metadata",
+            "name": "Tool Root Metadata",
+            "layout": {
+                "columns": 24,
+                "grid": {"label": "Tool grid", "sourceCode": "raw source marker"},
+                "apiKeyValue": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "capabilities": {
+                "metadata_only": True,
+                "label": "Tool capability",
+                "rawPrompt": "generated code body",
+            },
+        },
+    )
+    manifest = spaces.read_space("tool-root-metadata")
+    serialized = json.dumps({"result": result, "manifest": manifest}).lower()
+
+    assert result["space"]["layout"] == {"columns": 24, "grid": {"label": "Tool grid"}}
+    assert result["space"]["capabilities"] == {"metadata_only": True, "label": "Tool capability"}
+    assert manifest["layout"] == result["space"]["layout"]
+    assert manifest["capabilities"] == result["space"]["capabilities"]
+    assert isinstance(manifest["layout"]["columns"], int)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw source marker" not in serialized
+    assert "sourcecode" not in serialized
+    assert "apikeyvalue" not in serialized
+    assert "rawprompt" not in serialized
+    assert "generated code" not in serialized
+
+
+
+def test_restore_revision_sanitizes_legacy_root_metadata_snapshot(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "restore-root-metadata",
+            "name": "Restore Root Metadata",
+            "layout": {"columns": 24},
+            "capabilities": {"metadata_only": True},
+        }
+    )
+    event_id = created["revision_event_id"]
+    event_path = spaces.events_dir() / f"{event_id}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["snapshot"]["layout"] = {
+        "columns": 6,
+        "grid": {"label": "Restored grid", "source": "raw source marker"},
+        "apiKeyValue": "SECRET_VALUE_DO_NOT_LEAK",
+    }
+    event["snapshot"]["capabilities"] = {
+        "metadata_only": True,
+        "label": "Restored capability",
+        "generatedCodeText": "generated code body",
+    }
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    restored = spaces.restore_revision("restore-root-metadata", event_id)
+    manifest = spaces.read_space("restore-root-metadata")
+    serialized = json.dumps({"restored": restored, "manifest": manifest}).lower()
+
+    assert restored["space"]["layout"] == {"columns": 6, "grid": {"label": "Restored grid"}}
+    assert restored["space"]["capabilities"] == {"metadata_only": True, "label": "Restored capability"}
+    assert manifest["layout"] == restored["space"]["layout"]
+    assert manifest["capabilities"] == restored["space"]["capabilities"]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw source marker" not in serialized
+    assert "generated code" not in serialized
+    assert "apikeyvalue" not in serialized
+    assert "generatedcodetext" not in serialized
+    assert '\"source\"' not in serialized
+
+
+
 def test_space_public_detail_redacts_unsafe_display_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

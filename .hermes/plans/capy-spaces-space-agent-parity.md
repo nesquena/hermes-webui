@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-10 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Creator-loop UI commit failures now render a safe blocked status when a preview expires or the target changes before approval, preserving the metadata-only preview card and avoiding stale backend error-body leaks. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Root Space `layout` and `capabilities` metadata now use the same metadata-only safety boundary on create/update/read as widget/event summaries, preserving safe grid/capability labels while dropping generated renderer/html/script/source/data/API-auth, credential-like, and secret-looking sentinel fields before public responses, manifests, or revision snapshots can expose them. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): sanitize root space metadata`
+  - Added RED/GREEN backend coverage proving root Space `layout` and `capabilities` metadata are sanitized at create/update time, reflected safely through `space.get`, and persisted into manifests/revision snapshots without generated renderer/html/script/source/data/API-auth, credential-like, or secret-looking sentinel fields.
+  - Hardened `create_space(...)`, `update_space(...)`, and `read_space_detail(...)` with a bounded root-metadata sanitizer that preserves benign keys such as `metadata_only`, grid labels, and numeric layout fields while dropping unsafe standalone/camel/snake marker keys and redacted values.
+  - Validation at completion: focused RED failed before implementation (`1 failed`), expanded review-gap RED failed for root metadata/tool-create/restore (`3 failed`), and compact event-handler RED failed (`1 failed`); focused GREEN passed (`3 passed`); adjacent public metadata regressions passed (`4 passed`); full Spaces foundation suite passed (`223 passed`); Spaces demo parity suite passed (`10 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, final spec/quality subagent review, and `/tmp` backend harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_51b7e9d276c64f67aac56ad420a41abc.png`.
 
 - `fix(spaces): show stale creator commit block`
   - Added RED/GREEN real-`static/spaces.js` coverage proving a stale/failed `space.creator.commit` response renders `Creator commit blocked`, keeps the prior metadata-only preview visible, avoids saved-commit follow-up actions, and omits stale backend error details plus renderer/source/API-auth/generated-code/raw-prompt markers and secret-looking sentinels from DOM.

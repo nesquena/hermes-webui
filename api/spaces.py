@@ -1142,6 +1142,91 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     return _payload_text_summary(type(value).__name__, 80)
 
 
+def _public_root_metadata_key_is_safe(key: str) -> bool:
+    text = _context_value(key, 80)
+    if not text:
+        return False
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text)
+    tokens = [part for part in re.split(r"[^a-z0-9]+", normalized.lower()) if part]
+    compact = "".join(tokens)
+    unsafe_tokens = {
+        "auth",
+        "authorization",
+        "bearer",
+        "body",
+        "cookie",
+        "credential",
+        "credentials",
+        "data",
+        "html",
+        "password",
+        "prompt",
+        "renderer",
+        "script",
+        "secret",
+        "source",
+        "token",
+    }
+    unsafe_compact_markers = (
+        "apikey",
+        "apiauth",
+        "rawprompt",
+        "generatedbody",
+        "generatedcode",
+        "widgetbody",
+    )
+    if any(token in unsafe_tokens for token in tokens):
+        return False
+    if len(tokens) > 1 and tokens[0] == "on":
+        return False
+    if compact in {"onclick", "onload", "onerror", "onmouseover", "onfocus", "onblur", "onchange", "onsubmit"}:
+        return False
+    return not any(marker in compact for marker in unsafe_compact_markers)
+
+
+def _public_root_metadata_text_summary(value: str) -> str:
+    safe = _public_display_text_summary(value, 500)
+    if safe == "[REDACTED]" or re.search(r"<\s*/?\s*[a-z][^>]*>", safe, re.IGNORECASE):
+        return "[REDACTED]"
+    return safe
+
+
+def _public_root_metadata_summary(value: Any, depth: int = 0) -> Any:
+    """Return safe root Space layout/capability metadata for persistence and public APIs."""
+    if depth > 3:
+        return None
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        for index, (raw_key, raw_child) in enumerate(value.items()):
+            if index >= 50:
+                break
+            safe_key = _context_value(raw_key, 80)
+            if not _public_root_metadata_key_is_safe(safe_key):
+                continue
+            child = _public_root_metadata_summary(raw_child, depth + 1)
+            if child in ({}, [], "", None, "[REDACTED]"):
+                continue
+            summary[safe_key] = child
+        return summary
+    if isinstance(value, list):
+        items: list[Any] = []
+        for item in value[:20]:
+            child = _public_root_metadata_summary(item, depth + 1)
+            if child in ({}, [], "", None, "[REDACTED]"):
+                continue
+            items.append(child)
+        return items
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return _public_root_metadata_text_summary(value)
+    return _public_root_metadata_text_summary(type(value).__name__)
+
+
 def _event_id_is_safe(event_id: Any) -> bool:
     return bool(re.fullmatch(r"[a-f0-9]{32}", str(event_id or "")))
 
@@ -1228,7 +1313,9 @@ def _restore_diff_summary(target_snapshot: dict[str, Any], current_snapshot: dic
         ):
             space_fields_to_update.append(field)
     for field in ("layout", "capabilities"):
-        if _payload_summary(target_snapshot.get(field) or {}) != _payload_summary(current_snapshot.get(field) or {}):
+        if _public_root_metadata_summary(target_snapshot.get(field) or {}) != _public_root_metadata_summary(
+            current_snapshot.get(field) or {}
+        ):
             space_fields_to_update.append(field)
     target_shared_data = _data_slot_summaries(target_snapshot)
     current_shared_data = _data_slot_summaries(current_snapshot)
@@ -1377,9 +1464,9 @@ def create_space(payload: dict[str, Any]) -> dict[str, Any]:
             "template": str(payload.get("template") or "blank"),
             "created_at": now,
             "updated_at": now,
-            "layout": payload.get("layout") if isinstance(payload.get("layout"), dict) else {},
+            "layout": _public_root_metadata_summary(payload.get("layout")) if isinstance(payload.get("layout"), dict) else {},
             "widgets": payload.get("widgets") if isinstance(payload.get("widgets"), list) else [],
-            "capabilities": payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {},
+            "capabilities": _public_root_metadata_summary(payload.get("capabilities")) if isinstance(payload.get("capabilities"), dict) else {},
             "recovery": {"safe_mode_available": True},
             "revision_events": [],
             "revision_event_id": None,
@@ -1487,7 +1574,10 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
         "template": space.get("template", "blank"),
         "created_at": space.get("created_at"),
         "updated_at": space.get("updated_at"),
-        "layout": space.get("layout") if isinstance(space.get("layout"), dict) else {},
+        "layout": _public_root_metadata_summary(space.get("layout")) if isinstance(space.get("layout"), dict) else {},
+        "capabilities": _public_root_metadata_summary(space.get("capabilities"))
+        if isinstance(space.get("capabilities"), dict)
+        else {},
         "revision_event_id": space.get("revision_event_id"),
         "revision_events": [event_id for event_id in (space.get("revision_events") or []) if _event_id_is_safe(event_id)],
         "recovery": {"safe_mode_available": True},
@@ -2141,9 +2231,9 @@ def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {"space_id", "name", "description", "agent_instructions", "instructions", "template"}
     clean = {key: payload[key] for key in allowed if key in payload}
     if isinstance(payload.get("layout"), dict):
-        clean["layout"] = _payload_summary(payload["layout"])
+        clean["layout"] = _public_root_metadata_summary(payload["layout"])
     if isinstance(payload.get("capabilities"), dict):
-        clean["capabilities"] = _payload_summary(payload["capabilities"])
+        clean["capabilities"] = _public_root_metadata_summary(payload["capabilities"])
     return clean
 
 
@@ -3846,8 +3936,12 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     restored["widgets"] = normalized_widgets
     if not isinstance(restored.get("layout"), dict):
         restored["layout"] = {}
+    else:
+        restored["layout"] = _public_root_metadata_summary(restored.get("layout"))
     if not isinstance(restored.get("capabilities"), dict):
         restored["capabilities"] = {}
+    else:
+        restored["capabilities"] = _public_root_metadata_summary(restored.get("capabilities"))
     snapshot_revision_events = [str(rev) for rev in (restored.get("revision_events") or []) if _event_id_is_safe(rev)]
     current_revision_events = [str(rev) for rev in (current.get("revision_events") or []) if _event_id_is_safe(rev)]
     merged_revision_events: list[str] = []
@@ -3943,8 +4037,10 @@ def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
                             candidate = _preserve_admin_disabled_widget_recovery(existing, candidate)
                         normalized_widgets.append(candidate)
                     value = normalized_widgets
-                if key in {"layout", "capabilities"} and not isinstance(value, dict):
-                    raise ValueError(f"{key} must be an object")
+                if key in {"layout", "capabilities"}:
+                    if not isinstance(value, dict):
+                        raise ValueError(f"{key} must be an object")
+                    value = _public_root_metadata_summary(value)
                 if key == "agent_instructions":
                     value = str(value or "")
                 space[key] = value
