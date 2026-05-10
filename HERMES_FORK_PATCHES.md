@@ -73,7 +73,8 @@ When upstream rebases, conflicts only ever land inside these blocks. Resolve
 | Line | Marker | Purpose |
 |---|---|---|
 | `2022` | (no marker — defensive shim) | `_profile_home_path` fallback when `api.profiles` import fails, so the first-run bootstrap below always has a valid `Path` to gate on |
-| `2660` | `first-run identity-discovery bootstrap (HermesOS Cloud)` | Resolve `api.bootstrap.build_first_run_system_prompt(_profile_home_path)` and combine with personality prompt into `agent.ephemeral_system_prompt`; mark sentinel so it fires once per profile |
+| `2660` | `first-run identity-discovery bootstrap (HermesOS Cloud)` | Resolve `api.bootstrap.build_first_run_system_prompt(_profile_home_path)` and combine with personality prompt into `agent.ephemeral_system_prompt` for the turn |
+| `~3390` | `mark first-run sentinel only after a clean done` | Sentinel write is deferred until **after** `put('done', ...)` so a buggy first message (bad API key, rate limit, provider 5xx, SSE drop) never burns the bootstrap. Subsequent retries re-fire until the agent produces a real reply. |
 
 ### `api/bootstrap.py` (whole file is a fork addition)
 

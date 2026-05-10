@@ -2669,9 +2669,16 @@ def _run_agent_streaming(
             #     itself and asks "who am I / who are you?" — then writes SOUL.md
             #     and memories/USER.md. Sentinel file in the profile home gates
             #     subsequent turns.
+            #
+            #     The sentinel is touched ONLY after the stream reaches `done` —
+            #     a buggy first message (bad API key, rate limit, network drop,
+            #     provider 5xx) bails out before then, so the next attempt
+            #     re-fires the bootstrap. This is the failure mode we explicitly
+            #     guard against: first-run shouldn't burn on an error the user
+            #     can't see was an error.
             _first_run_prompt = None
             try:
-                from api.bootstrap import build_first_run_system_prompt, mark_first_run_fired
+                from api.bootstrap import build_first_run_system_prompt
                 _first_run_prompt = build_first_run_system_prompt(_profile_home_path)
             except Exception:
                 logger.debug("first-run bootstrap check failed", exc_info=True)
@@ -2688,13 +2695,6 @@ def _run_agent_streaming(
                 _combined_ephemeral = _first_run_prompt
             if _combined_ephemeral:
                 agent.ephemeral_system_prompt = _combined_ephemeral
-            # >>> hermes-fork: mark bootstrap fired after handoff to the agent
-            if _first_run_prompt:
-                try:
-                    mark_first_run_fired(_profile_home_path)
-                except Exception:
-                    logger.debug("first-run sentinel write failed", exc_info=True)
-            # <<< hermes-fork
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
@@ -3388,6 +3388,18 @@ def _run_agent_streaming(
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            # >>> hermes-fork: mark first-run sentinel only after a clean done
+            #     (i.e. the agent actually produced a reply). If the turn
+            #     errored upstream — bad API key, rate limit, provider 5xx,
+            #     SSE drop — we never reach this point and the next attempt
+            #     re-fires the identity-discovery prompt.
+            if _first_run_prompt:
+                try:
+                    from api.bootstrap import mark_first_run_fired
+                    mark_first_run_fired(_profile_home_path)
+                except Exception:
+                    logger.debug("first-run sentinel write failed", exc_info=True)
+            # <<< hermes-fork
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
             meter_stats['session_id'] = session_id
