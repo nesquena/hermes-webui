@@ -700,7 +700,6 @@ _OPENAI_COMPAT_ENDPOINTS = {
     "venice": "https://api.venice.ai/api/v1",
     "crof": "https://crof.ai/v1",
     "bankr": "https://gateway.bankr.bot/v1",
-    "cometapi": "https://api.cometapi.com/v1",
     "xiaomi": "https://api.xiaomi.com/v1",
     # <<< hermes-fork
 }

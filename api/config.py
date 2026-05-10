@@ -661,7 +661,6 @@ _PROVIDER_DISPLAY = {
     "venice": "Venice",
     "crof": "CrofAI",
     "bankr": "Bankr",
-    "cometapi": "CometAPI",
     "xiaomi": "Xiaomi MiMo",
     # <<< hermes-fork
 }

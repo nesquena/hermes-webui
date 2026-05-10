@@ -721,6 +721,17 @@ const LOCALES = {
     providers_key_removed: 'API key removed',
     providers_key_placeholder_new: 'sk-...',
     providers_key_placeholder_replace: 'Enter new key to replace…',
+    // >>> hermes-fork: Settings UI strings
+    providers_authenticate: 'Authenticate',
+    providers_reauthenticate: 'Re-authenticate',
+    providers_refresh_models: 'Refresh models',
+    voice_section_title: 'Voice / Transcription',
+    voice_section_desc: 'Speech-to-text provider for the mic button. Local = free but slow on small VMs; Groq is the fastest cloud option.',
+    voice_provider_label: 'Transcription provider',
+    voice_model_label: 'Model',
+    voice_key_label: 'API key',
+    voice_saved: 'Voice settings saved',
+    // <<< hermes-fork
     cancel: 'Cancel',
     create_job: 'Create job',
     save_skill: 'Save skill',

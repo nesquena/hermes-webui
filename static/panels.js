@@ -5342,15 +5342,17 @@ function _buildProviderCard(p){
   metaParts.push(sourceLabel);
   const metaText=metaParts.join(' · ');
 
-  // >>> hermes-fork: provider logo
-  // Render an icon next to the provider name. Img onerror just hides the
-  // broken-image glyph — CSS `.provider-card-logo` shows a placeholder bg
-  // when the img is hidden (background works through the empty span).
-  const logoUrl = (p && typeof p.logo_url === 'string' && p.logo_url) ? p.logo_url : '';
+  // >>> hermes-fork: provider logo (deterministic first-letter glyph)
+  // No external CDN dependency. Hue from /api/providers payload colors the
+  // glyph background; first letter of display_name is the glyph text.
+  // Custom providers (id starts with "custom:") strip the prefix for the
+  // letter so "custom:Venice" shows "V", not "C".
+  const rawName = (p && (p.display_name || p.id) || '?').replace(/^custom:\s*/i, '');
+  const glyphChar = (rawName.match(/[A-Za-z0-9]/) || ['?'])[0].toUpperCase();
+  const hue = (typeof p.logo_hue === 'number') ? p.logo_hue : 220;
+  const glyphStyle = `background:linear-gradient(145deg,hsl(${hue},65%,55%),hsl(${(hue+25)%360},55%,40%));color:#fff;`;
   const logoSlug = (p && p.id ? String(p.id) : '').replace(/[^a-z0-9]/gi,'-').toLowerCase();
-  const logoHtml = logoUrl
-    ? `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"><img src="${esc(logoUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"/></span>`
-    : `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"></span>`;
+  const logoHtml = `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true" style="${glyphStyle}">${esc(glyphChar)}</span>`;
   // <<< hermes-fork
 
   // Clickable header (toggles body)

@@ -2502,25 +2502,19 @@ main.main.showing-logs > #mainLogs{display:flex;}
   transition:background .15s ease;
 }
 .provider-card-header:hover{background:var(--surface);}
-/* >>> hermes-fork: provider logo */
+/* >>> hermes-fork: provider logo (deterministic first-letter glyph) */
 .provider-card-logo{
   flex:0 0 auto;
   width:32px;height:32px;
   display:inline-flex;align-items:center;justify-content:center;
-  background:linear-gradient(145deg,rgba(255,255,255,.06),rgba(255,255,255,.02));
-  border:1px solid rgba(255,255,255,.06);
   border-radius:8px;
   overflow:hidden;
-  color:var(--muted);
-  position:relative;
+  font-weight:700;
+  font-size:14px;
+  letter-spacing:.02em;
+  text-shadow:0 1px 2px rgba(0,0,0,.35);
+  border:1px solid rgba(255,255,255,.08);
 }
-.provider-card-logo::before{
-  content:'';
-  position:absolute;inset:0;
-  background:radial-gradient(circle at center,rgba(255,200,100,.15),transparent 60%);
-  pointer-events:none;
-}
-.provider-card-logo img{width:24px;height:24px;object-fit:contain;position:relative;z-index:1;}
 .provider-card-auth-row{margin-top:8px;}
 /* <<< hermes-fork */
 .provider-card-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
