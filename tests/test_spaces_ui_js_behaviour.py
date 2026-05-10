@@ -844,7 +844,10 @@ global.fetch = async function(path, opts = {}) {
       name: 'Lab <Detail>',
       description: 'Unsafe <detail>',
       revision_event_id: 'rev1',
-      widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }],
+      widgets: [
+        { id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' },
+        { id: 'browser-card', kind: 'browser-surface', title: 'Browser card', layout: { x: 8, y: 11, w: 7, h: 5, minimized: false }, source: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      ],
       capabilities: { toolsets: ['web'] },
       recovery: { safe_mode_available: true },
       shared_data: [
@@ -2161,6 +2164,40 @@ def test_spaces_ui_widget_manager_shows_weather_observation_preview(driver_path)
     assert "partly cloudy" in out["rootHtml"]
     assert "Observation status: observation-ready" in out["rootHtml"]
     assert "Partly cloudy in Prague; refreshed through agent-mediated weather metadata." in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+
+    assert "capy-spaces-canvas-shell" in out["rootHtml"]
+    assert "capy-spaces-starfield" in out["rootHtml"]
+    assert "Current Space" in out["rootHtml"]
+    assert "Lab &lt;Detail&gt;" in out["rootHtml"]
+    assert "Home" in out["rootHtml"]
+    assert "Menu" in out["rootHtml"]
+    assert "Share" in out["rootHtml"]
+    assert "Rearrange" in out["rootHtml"]
+    assert "Docked Capy input" in out["rootHtml"]
+    assert "Ask Capy to build, edit, or repair this Space" in out["rootHtml"]
+    assert "Example prompts" in out["rootHtml"]
+    assert "Add a weather widget" in out["rootHtml"]
+    assert "Turn this into a dashboard" in out["rootHtml"]
+    assert "Repair broken widgets" in out["rootHtml"]
+    assert "data-capy-canvas-widget-id=\"weather\"" in out["rootHtml"]
+    assert "metadata-only-shell" in out["rootHtml"]
+    assert "generated code disabled" in out["rootHtml"]
+    assert "Drag" in out["rootHtml"]
+    assert "Resize" in out["rootHtml"]
+    assert "Minimize" in out["rootHtml"]
+    assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "data-capy-canvas-widget-id=\"browser-card\"" in out["rootHtml"]
+    assert "left:32%;top:48%;width:35%;min-height:30px" in out["rootHtml"]
+    assert {"path": "api/spaces/get?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/revisions?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

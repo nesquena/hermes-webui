@@ -531,7 +531,8 @@
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
-    return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
+    return renderSpaceAgentCanvasShell(space, widgets) +
+      '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
       '<h3>'+escapeHtml(name)+'</h3>' +
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
@@ -539,6 +540,65 @@
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderSharedDataSlots(spaceId, space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
+  }
+
+  function renderSpaceAgentCanvasShell(space, widgets){
+    const spaceId = safeCreatorIdText(space && space.space_id ? space.space_id : '') || '';
+    const rawName = space && space.name ? space.name : spaceId || 'Untitled Space';
+    const name = safeDisplayMetadataText(rawName, spaceId || 'Untitled Space') || spaceId || 'Untitled Space';
+    const revision = safeDisplayMetadataText(space && space.revision_event_id ? space.revision_event_id : '', 'none') || 'none';
+    const widgetCount = Array.isArray(widgets) ? widgets.length : 0;
+    const widgetCards = renderSpaceAgentCanvasWidgets(spaceId, widgets || []);
+    return '<section class="capy-spaces-canvas-shell" aria-label="Current Space canvas">' +
+      '<div class="capy-spaces-starfield" aria-hidden="true"></div>' +
+      '<div class="capy-spaces-canvas-topbar">' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="reloadSpaces">Home</button>' +
+      '<div class="capy-spaces-canvas-title"><span>Current Space</span><strong>'+escapeHtml(name)+'</strong></div>' +
+      '<div class="capy-spaces-canvas-actions">' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Menu</button>' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Share</button>' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Rearrange</button>' +
+      '</div></div>' +
+      '<div class="capy-spaces-canvas-stage">' +
+      '<div class="capy-spaces-canvas-prompt-card"><strong>Ask Capy to build, edit, or repair this Space</strong><span>Metadata-only shell · '+escapeHtml(String(widgetCount))+' widgets · revision '+escapeHtml(revision)+'</span></div>' +
+      renderSpaceAgentExamplePrompts() +
+      '<div class="capy-spaces-canvas-grid">'+widgetCards+'</div>' +
+      '</div>' +
+      '<div class="capy-spaces-canvas-dock" aria-label="Docked Capy input"><span>Docked Capy input</span><div>Ask Capy to build, edit, or repair this Space</div></div>' +
+      '</section>';
+  }
+
+  function renderSpaceAgentExamplePrompts(){
+    const prompts = ['Add a weather widget', 'Turn this into a dashboard', 'Repair broken widgets'];
+    return '<div class="capy-spaces-canvas-examples" aria-label="Example prompts"><span>Example prompts</span>' +
+      prompts.map(function(prompt){
+        return '<button type="button" class="capy-spaces-canvas-example">'+escapeHtml(prompt)+'</button>';
+      }).join('') + '</div>';
+  }
+
+  function renderSpaceAgentCanvasWidgets(spaceId, widgets){
+    const safeWidgets = Array.isArray(widgets) ? widgets.slice(0, 12) : [];
+    if (!safeWidgets.length) {
+      return '<div class="capy-spaces-canvas-empty"><strong>Start with a widget</strong><span>Describe the tool, view, or workflow Capy should add here.</span></div>';
+    }
+    return safeWidgets.map(function(w){
+      const rawWidgetId = w && w.id ? String(w.id) : '';
+      const widgetId = safeCreatorIdText(rawWidgetId) || '';
+      const layout = widgetLayout(w || {});
+      const title = safeDisplayMetadataText(w && w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
+      const kind = safeDisplayMetadataText(w && w.kind, 'custom') || 'custom';
+      const x = Math.min(95, Math.max(2, layout.x * 4));
+      const y = Math.min(48, Math.max(8, layout.y * 7));
+      const width = Math.min(48, Math.max(20, layout.w * 5));
+      const height = Math.min(44, Math.max(16, layout.h * 6));
+      return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'" style="left:'+x+'%;top:'+y+'%;width:'+width+'%;min-height:'+height+'px">' +
+        '<div class="capy-spaces-canvas-widget-bar"><span class="capy-spaces-canvas-drag-handle">Drag</span><strong>'+escapeHtml(title)+'</strong><span>'+escapeHtml(kind)+'</span></div>' +
+        '<div class="capy-spaces-canvas-widget-controls" aria-label="Widget controls"><span>Resize</span><span>Minimize</span></div>' +
+        '<div class="capy-spaces-canvas-widget-meta">'+escapeHtml(formatWidgetLayout(layout))+'</div>' +
+        '<div class="capy-spaces-canvas-widget-safe">generated code disabled · metadata-only-shell</div>' +
+        '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Inspect</button></div>' +
+        '</article>';
+    }).join('');
   }
 
   function renderSharedDataSlots(spaceId, slots){

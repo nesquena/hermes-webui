@@ -119,3 +119,222 @@
   font: inherit;
   padding: 8px 10px;
 }
+
+.capy-spaces-canvas-shell {
+  background:
+    radial-gradient(circle at 18% 20%, color-mix(in srgb, var(--accent, #60a5fa) 18%, transparent), transparent 24%),
+    radial-gradient(circle at 82% 12%, rgba(168, 85, 247, 0.18), transparent 28%),
+    linear-gradient(135deg, #050816 0%, #0b1022 52%, #111827 100%);
+  border: 1px solid color-mix(in srgb, var(--accent, #60a5fa) 32%, rgba(255, 255, 255, 0.12));
+  border-radius: 24px;
+  color: #eef4ff;
+  min-height: 520px;
+  overflow: hidden;
+  position: relative;
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.28);
+}
+
+.capy-spaces-starfield {
+  inset: 0;
+  opacity: 0.72;
+  pointer-events: none;
+  position: absolute;
+  background-image:
+    radial-gradient(circle, rgba(255,255,255,.8) 1px, transparent 1px),
+    radial-gradient(circle, rgba(125,211,252,.45) 1px, transparent 1px);
+  background-position: 0 0, 28px 34px;
+  background-size: 72px 72px, 118px 118px;
+}
+
+.capy-spaces-canvas-topbar,
+.capy-spaces-canvas-dock {
+  align-items: center;
+  backdrop-filter: blur(18px);
+  background: rgba(8, 13, 29, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  display: flex;
+  gap: 12px;
+  left: 24px;
+  position: absolute;
+  right: 24px;
+  z-index: 2;
+}
+
+.capy-spaces-canvas-topbar {
+  justify-content: space-between;
+  padding: 10px 12px;
+  top: 18px;
+}
+
+.capy-spaces-canvas-title {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.15;
+  text-align: center;
+}
+
+.capy-spaces-canvas-title span,
+.capy-spaces-canvas-dock span {
+  color: rgba(226, 232, 240, 0.68);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.capy-spaces-canvas-title strong {
+  color: #ffffff;
+  font-size: 15px;
+}
+
+.capy-spaces-canvas-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.capy-spaces-canvas-pill {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: #f8fafc;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 12px;
+}
+
+.capy-spaces-canvas-pill:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.capy-spaces-canvas-stage {
+  inset: 88px 24px 92px;
+  position: absolute;
+  z-index: 1;
+}
+
+.capy-spaces-canvas-prompt-card,
+.capy-spaces-canvas-empty,
+.capy-spaces-canvas-widget {
+  backdrop-filter: blur(14px);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 18px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.24);
+}
+
+.capy-spaces-canvas-prompt-card {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(440px, 88%);
+  padding: 14px 16px;
+}
+
+.capy-spaces-canvas-prompt-card span,
+.capy-spaces-canvas-examples > span,
+.capy-spaces-canvas-empty span,
+.capy-spaces-canvas-widget-meta,
+.capy-spaces-canvas-widget-safe,
+.capy-spaces-canvas-widget-controls {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 12px;
+}
+
+.capy-spaces-canvas-examples {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  max-width: min(720px, 96%);
+}
+
+.capy-spaces-canvas-example {
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(147, 197, 253, 0.22);
+  border-radius: 999px;
+  color: #dbeafe;
+  cursor: default;
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 10px;
+}
+
+.capy-spaces-canvas-grid {
+  bottom: 0;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 96px;
+}
+
+.capy-spaces-canvas-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 48px auto;
+  max-width: 360px;
+  padding: 18px;
+  text-align: center;
+}
+
+.capy-spaces-canvas-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+  padding: 12px;
+  position: absolute;
+}
+
+.capy-spaces-canvas-widget-bar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.capy-spaces-canvas-widget-bar span {
+  color: rgba(147, 197, 253, 0.86);
+  font-size: 12px;
+}
+
+.capy-spaces-canvas-drag-handle {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
+.capy-spaces-canvas-widget-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.capy-spaces-canvas-widget-controls span {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
+.capy-spaces-canvas-widget-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.capy-spaces-canvas-dock {
+  bottom: 18px;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  padding: 12px 16px;
+  text-align: center;
+}
+
+.capy-spaces-canvas-dock div {
+  color: #fff;
+}
