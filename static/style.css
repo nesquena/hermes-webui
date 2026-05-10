@@ -220,37 +220,29 @@
      Keep `border-radius: 50%` for circular dots / avatars (handled by
      `:not([style*="border-radius: 50%"])` style chains in components, which
      we don't override). */
-  :root[data-skin="hermesos"] .tool-card,
-  :root[data-skin="hermesos"] .provider-card,
-  :root[data-skin="hermesos"] .provider-tab,
-  :root[data-skin="hermesos"] .provider-card-logo,
-  :root[data-skin="hermesos"] .composer-box,
-  :root[data-skin="hermesos"] .msg-body,
-  :root[data-skin="hermesos"] .session-item,
-  :root[data-skin="hermesos"] .modal,
-  :root[data-skin="hermesos"] .toast,
-  :root[data-skin="hermesos"] .badge,
-  :root[data-skin="hermesos"] .pill,
-  :root[data-skin="hermesos"] .dropdown,
-  :root[data-skin="hermesos"] .app-dialog,
-  :root[data-skin="hermesos"] .app-dialog-input,
-  :root[data-skin="hermesos"] .panel,
-  :root[data-skin="hermesos"] .card,
-  :root[data-skin="hermesos"] button,
-  :root[data-skin="hermesos"] input,
-  :root[data-skin="hermesos"] select,
-  :root[data-skin="hermesos"] textarea{
+  /* Boxy everywhere — nuke ALL border-radius site-wide for this skin. */
+  :root[data-skin="hermesos"] *,
+  :root[data-skin="hermesos"] *::before,
+  :root[data-skin="hermesos"] *::after{
     border-radius:0 !important;
   }
-  /* Preserve circular elements (status dots, mic ring, avatars) where the
-     50% radius is integral to the affordance — selector matches inline-style
-     marker AND a small allowlist of known circular classes. */
+  /* Restore the few elements where circular geometry IS the affordance
+     (status dots, avatars, mic ring, etc.). Tight allowlist so anything
+     not on this list stays sharp by default. */
   :root[data-skin="hermesos"] .status-dot,
   :root[data-skin="hermesos"] .stream-dot,
   :root[data-skin="hermesos"] .terminal-dot,
   :root[data-skin="hermesos"] .session-avatar,
   :root[data-skin="hermesos"] .user-avatar,
-  :root[data-skin="hermesos"] .composer-terminal-dot{
+  :root[data-skin="hermesos"] .composer-terminal-dot,
+  :root[data-skin="hermesos"] .system-health-dot,
+  :root[data-skin="hermesos"] .mic-ring,
+  :root[data-skin="hermesos"] .voice-meter-dot,
+  :root[data-skin="hermesos"] .recording-dot,
+  :root[data-skin="hermesos"] [class*="-dot"],
+  :root[data-skin="hermesos"] [class*="-avatar"],
+  :root[data-skin="hermesos"] [style*="border-radius: 50%"],
+  :root[data-skin="hermesos"] [style*="border-radius:50%"]{
     border-radius:50% !important;
   }
   /* Greeting hero logo — give it a sharper frame matching the dashboard
