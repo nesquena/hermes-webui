@@ -1076,6 +1076,35 @@ _PROVIDER_MODELS = {
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
+    # >>> hermes-fork: first-class providers (HermesOS Cloud) — model lists
+    # Curated for the recommended-model lineup we surface in Settings.
+    # Editing here is purely additive and keeps upstream merge clean.
+    "venice": [
+        {"id": "llama-4-maverick-17b-128e-instruct", "label": "Llama 4 Maverick 17B"},
+        {"id": "llama-4-scout-17b-16e-instruct", "label": "Llama 4 Scout 17B"},
+        {"id": "venice-uncensored", "label": "Venice Uncensored (Llama 3.1 405B)"},
+        {"id": "deepseek-r1-llama-70b", "label": "DeepSeek R1 Llama 70B"},
+        {"id": "qwen-2.5-coder-32b", "label": "Qwen 2.5 Coder 32B"},
+    ],
+    "crof": [
+        {"id": "kimi-k2.6-precision", "label": "Kimi K2.6 Precision"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
+        {"id": "gpt-5.4", "label": "GPT-5.4"},
+        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+    ],
+    "bankr": [
+        {"id": "claude-sonnet-4.7", "label": "Claude Sonnet 4.7"},
+        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
+        {"id": "kimi-k2.6-precision", "label": "Kimi K2.6 Precision"},
+        {"id": "gpt-5.4", "label": "GPT-5.4"},
+        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
+    ],
+    "xiaomi": [
+        {"id": "mimo-v2-pro", "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-flash", "label": "MiMo V2 Flash"},
+        {"id": "mimo-v2-omni", "label": "MiMo V2 Omni"},
+    ],
+    # <<< hermes-fork
 }
 
 
