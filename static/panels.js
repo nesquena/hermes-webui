@@ -5660,7 +5660,20 @@ async function _refreshProviderModels(providerId, btn){
   try{
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
-      showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+      // >>> hermes-fork: zero-result refresh ≠ success
+      // Live fetch returns [] when the provider requires auth and no key is
+      // configured. Tell the user they need to add a key instead of falsely
+      // claiming the refresh succeeded.
+      const count = (typeof res.models_count === 'number') ? res.models_count : (Array.isArray(res.models) ? res.models.length : 0);
+      if(count === 0){
+        showToast(t('providers_models_refresh_empty') || 'Add an API key first — provider rejected unauthenticated request', 4200, 'warning');
+      } else {
+        showToast((t('providers_models_refreshed')||'Models refreshed') + ' — ' + count + ' model' + (count===1?'':'s'));
+        // Reload providers panel so the model count + chips reflect the new list
+        await loadProvidersPanel();
+        _refreshModelDropdownsAfterProviderChange();
+      }
+      // <<< hermes-fork
     }else{
       showToast(res.error||'Failed to refresh models');
     }
