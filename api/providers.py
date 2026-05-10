@@ -154,43 +154,63 @@ _OAUTH_PROVIDERS = frozenset({
     "qwen-oauth",
 })
 
-# >>> hermes-fork: provider logo color hint (HermesOS Cloud)
-# Frontend renders a deterministic first-letter glyph as the provider icon
-# (avoids any external CDN dependency). The color is a per-provider hue used
-# for the glyph background gradient — looks like a brand swatch without
-# fetching anything. Falls back to a neutral gradient when not listed here.
+# >>> hermes-fork: provider logos (HermesOS Cloud)
+# Real-brand logos via Simple Icons CDN (free SVG library, ~3000 brands) for
+# providers with coverage; brand-site favicons for those without; bundled
+# local SVGs in /static/provider-logos/ for the rest. Frontend tries
+# logo_url first; on load failure it falls back to a letter glyph styled
+# with logo_hue so something always renders.
+#
+# All URLs were probed for HTTP 200 at fork time. If a provider's domain or
+# Simple Icons slug changes, the broken URL will silently fall back to the
+# letter glyph — never a broken-image marker in the UI.
+_PROVIDER_LOGO_URL: dict[str, str] = {
+    # Simple Icons (real brand SVGs, white-tinted for dark UI)
+    "anthropic":    "https://cdn.simpleicons.org/claude/fff",
+    "openrouter":   "https://cdn.simpleicons.org/openrouter/fff",
+    "google":       "https://cdn.simpleicons.org/google/fff",
+    "gemini":       "https://cdn.simpleicons.org/googlegemini/fff",
+    "nvidia":       "https://cdn.simpleicons.org/nvidia/fff",
+    "huggingface":  "https://cdn.simpleicons.org/huggingface/fff",
+    "ollama":       "https://cdn.simpleicons.org/ollama/fff",
+    "ollama-cloud": "https://cdn.simpleicons.org/ollama/fff",
+    "meta-llama":   "https://cdn.simpleicons.org/meta/fff",
+    "mistralai":    "https://cdn.simpleicons.org/mistralai/fff",
+    "xiaomi":       "https://cdn.simpleicons.org/xiaomi/fff",
+    "deepseek":     "https://cdn.simpleicons.org/deepseek/fff",
+    "alibaba":      "https://cdn.simpleicons.org/alibabacloud/fff",
+    "copilot":      "https://cdn.simpleicons.org/github/fff",
+    "copilot-acp":  "https://cdn.simpleicons.org/github/fff",
+    "qwen":         "https://cdn.simpleicons.org/qwen/fff",
+    "qwen-oauth":   "https://cdn.simpleicons.org/qwen/fff",
+    # Brand-site favicons (verified 200, real provider logos)
+    "venice":       "https://venice.ai/favicon.ico",
+    "bankr":        "https://bankr.bot/favicon.svg",
+    "kimi-coding":  "https://www.kimi.com/favicon.ico",
+    "x-ai":         "https://x.ai/favicon.ico",
+    # Local bundled SVGs — providers without simpleicons or favicon coverage
+    "openai":       "static/provider-logos/openai.svg",
+    "openai-codex": "static/provider-logos/openai.svg",
+    "crof":         "static/provider-logos/crof.svg",
+    "lmstudio":     "static/provider-logos/lmstudio.svg",
+    "zai":          "static/provider-logos/zai.svg",
+    "minimax":      "static/provider-logos/minimax.svg",
+    "minimax-cn":   "static/provider-logos/minimax.svg",
+    "opencode-zen": "static/provider-logos/opencode.svg",
+    "opencode-go":  "static/provider-logos/opencode.svg",
+    "nous":         "static/provider-logos/nous.svg",
+}
+
+# Per-provider hue for the letter-glyph fallback when logo_url fails to load.
 _PROVIDER_LOGO_HUE: dict[str, int] = {
-    "venice":       12,    # red-orange
-    "crof":         200,   # cyan
-    "bankr":        140,   # green
-    "xiaomi":       18,    # orange
-    "anthropic":    28,    # warm tan
-    "openai":       150,   # green
-    "openai-codex": 150,
-    "openrouter":   270,   # purple
-    "deepseek":     220,   # blue
-    "google":       210,   # google blue
-    "gemini":       210,
-    "x-ai":         0,     # red (xAI)
-    "mistralai":    20,
-    "nvidia":       100,   # nvidia green
-    "alibaba":      30,
-    "huggingface":  45,    # yellow
-    "ollama":       180,
-    "ollama-cloud": 180,
-    "minimax":      280,
-    "minimax-cn":   280,
-    "kimi-coding":  220,
-    "zai":          330,
-    "qwen":         260,
-    "qwen-oauth":   260,
-    "lmstudio":     200,
-    "copilot":      0,     # github black -> neutral hue
-    "copilot-acp":  0,
-    "nous":         260,   # purple-ish for nous
-    "meta-llama":   210,
-    "opencode-zen": 290,
-    "opencode-go":  290,
+    "venice": 12, "crof": 200, "bankr": 140, "xiaomi": 18,
+    "anthropic": 28, "openai": 150, "openai-codex": 150, "openrouter": 270,
+    "deepseek": 220, "google": 210, "gemini": 210, "x-ai": 0,
+    "mistralai": 20, "nvidia": 100, "alibaba": 30, "huggingface": 45,
+    "ollama": 180, "ollama-cloud": 180, "minimax": 280, "minimax-cn": 280,
+    "kimi-coding": 220, "zai": 330, "qwen": 260, "qwen-oauth": 260,
+    "lmstudio": 200, "copilot": 0, "copilot-acp": 0, "nous": 260,
+    "meta-llama": 210, "opencode-zen": 290, "opencode-go": 290,
 }
 # <<< hermes-fork
 
@@ -945,7 +965,8 @@ def get_providers() -> dict[str, Any]:
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,
-            # >>> hermes-fork: provider logo (color hint for first-letter glyph)
+            # >>> hermes-fork: provider logo
+            "logo_url": _PROVIDER_LOGO_URL.get(pid),
             "logo_hue": _PROVIDER_LOGO_HUE.get(pid),
             # <<< hermes-fork
             "models": models,
@@ -987,6 +1008,7 @@ def get_providers() -> dict[str, Any]:
                 "has_key": cp_has_key,
                 "configurable": True,
                 "is_oauth": False,
+                "logo_url": _PROVIDER_LOGO_URL.get(cp_name.lower().replace(" ", "")),
                 "logo_hue": _PROVIDER_LOGO_HUE.get(cp_name.lower().replace(" ", "")),
                 # <<< hermes-fork
                 "key_source": "config_yaml" if cp_has_key else "none",

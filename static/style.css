@@ -2502,20 +2502,54 @@ main.main.showing-logs > #mainLogs{display:flex;}
   transition:background .15s ease;
 }
 .provider-card-header:hover{background:var(--surface);}
-/* >>> hermes-fork: provider logo (deterministic first-letter glyph) */
+/* >>> hermes-fork: provider logo (img with letter-glyph fallback layered underneath) */
 .provider-card-logo{
   flex:0 0 auto;
   width:32px;height:32px;
   display:inline-flex;align-items:center;justify-content:center;
   border-radius:8px;
   overflow:hidden;
+  position:relative;
   font-weight:700;
   font-size:14px;
   letter-spacing:.02em;
   text-shadow:0 1px 2px rgba(0,0,0,.35);
   border:1px solid rgba(255,255,255,.08);
 }
+.provider-card-logo-img{
+  position:absolute;inset:0;
+  width:100%;height:100%;
+  object-fit:contain;
+  padding:5px;
+  background:#161821;  /* solid bg so the letter underneath is hidden when img loads */
+  z-index:1;
+}
+.provider-card-logo-letter{
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+}
 .provider-card-auth-row{margin-top:8px;}
+/* >>> hermes-fork: Provider tabs */
+.provider-tabs{
+  display:flex;gap:6px;margin-bottom:14px;
+}
+.provider-tab{
+  background:transparent;
+  border:1px solid rgba(255,255,255,.08);
+  color:var(--muted);
+  padding:6px 14px;
+  border-radius:999px;
+  font-size:12px;
+  cursor:pointer;
+  transition:background .15s,color .15s,border-color .15s;
+}
+.provider-tab:hover{background:rgba(255,255,255,.04);color:var(--text);}
+.provider-tab.active{
+  background:rgba(124,185,255,.15);
+  color:#7cb9ff;
+  border-color:rgba(124,185,255,.3);
+}
+.provider-card.is-hidden{display:none;}
 /* <<< hermes-fork */
 .provider-card-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
 .provider-card-name{font-size:13px;font-weight:500;color:var(--text);line-height:1.2;}

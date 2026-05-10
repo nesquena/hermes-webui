@@ -5182,6 +5182,14 @@ function _buildPluginCard(plugin){
 
 const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
 
+// >>> hermes-fork: Recommended provider list (HermesOS Cloud)
+// Curated picks shown when the "Recommended" tab is active. Order is also the
+// display order. All ids must exist in /api/providers; ones that don't are
+// silently dropped (so editing this list is safe).
+const _RECOMMENDED_PROVIDERS = ['bankr','anthropic','openrouter','openai-codex','gemini','crof','venice','xiaomi'];
+let _providerActiveTab = 'recommended';
+// <<< hermes-fork
+
 async function loadProvidersPanel(){
   const list=$('providersList');
   const empty=$('providersEmpty');
@@ -5192,6 +5200,16 @@ async function loadProvidersPanel(){
     const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
     list.innerHTML='';
     _providerCardEls.clear();
+    // >>> hermes-fork: tabs row above the provider list
+    const tabsRow = document.createElement('div');
+    tabsRow.className = 'provider-tabs';
+    tabsRow.innerHTML = `
+      <button type="button" class="provider-tab" data-tab="recommended">Recommended</button>
+      <button type="button" class="provider-tab" data-tab="all">All</button>
+      <button type="button" class="provider-tab" data-tab="oauth">OAuth</button>
+    `;
+    list.appendChild(tabsRow);
+    // <<< hermes-fork
     const quotaCard=_buildProviderQuotaCard(quota);
     if(quotaCard) list.appendChild(quotaCard);
     if(providers.length===0){
@@ -5201,9 +5219,39 @@ async function loadProvidersPanel(){
     }
     if(empty) empty.style.display='none';
     list.style.display='';
-    for(const p of providers){
-      list.appendChild(_buildProviderCard(p));
+    // >>> hermes-fork: sort providers — Recommended-list order first, then alphabetical
+    const recIndex = new Map(_RECOMMENDED_PROVIDERS.map((id, i) => [id, i]));
+    const sorted = [...providers].sort((a, b) => {
+      const ai = recIndex.has(a.id) ? recIndex.get(a.id) : 9999;
+      const bi = recIndex.has(b.id) ? recIndex.get(b.id) : 9999;
+      if (ai !== bi) return ai - bi;
+      return (a.display_name || '').localeCompare(b.display_name || '');
+    });
+    // <<< hermes-fork
+    for(const p of sorted){
+      const card = _buildProviderCard(p);
+      // Tag the card with categories for tab filtering
+      card.dataset.tabCategories = [
+        recIndex.has(p.id) ? 'recommended' : '',
+        'all',
+        p.is_oauth ? 'oauth' : '',
+      ].filter(Boolean).join(' ');
+      list.appendChild(card);
     }
+    // >>> hermes-fork: tab click handlers + initial filter
+    const applyTabFilter = (tab) => {
+      _providerActiveTab = tab;
+      list.querySelectorAll('.provider-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      list.querySelectorAll('.provider-card').forEach(c => {
+        const cats = (c.dataset.tabCategories || '').split(' ');
+        c.classList.toggle('is-hidden', !cats.includes(tab));
+      });
+    };
+    tabsRow.querySelectorAll('.provider-tab').forEach(b => {
+      b.addEventListener('click', () => applyTabFilter(b.dataset.tab));
+    });
+    applyTabFilter(_providerActiveTab);
+    // <<< hermes-fork
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+e.message+'</div>';
   }
@@ -5342,17 +5390,20 @@ function _buildProviderCard(p){
   metaParts.push(sourceLabel);
   const metaText=metaParts.join(' · ');
 
-  // >>> hermes-fork: provider logo (deterministic first-letter glyph)
-  // No external CDN dependency. Hue from /api/providers payload colors the
-  // glyph background; first letter of display_name is the glyph text.
-  // Custom providers (id starts with "custom:") strip the prefix for the
-  // letter so "custom:Venice" shows "V", not "C".
+  // >>> hermes-fork: provider logo (real brand SVG via logo_url, letter-glyph fallback)
+  // logo_url comes from the backend (Simple Icons CDN, brand-site favicons,
+  // or bundled /static/provider-logos/*.svg). On <img> load failure, we
+  // hide the img — the glyph layer underneath then shows.
   const rawName = (p && (p.display_name || p.id) || '?').replace(/^custom:\s*/i, '');
   const glyphChar = (rawName.match(/[A-Za-z0-9]/) || ['?'])[0].toUpperCase();
   const hue = (typeof p.logo_hue === 'number') ? p.logo_hue : 220;
   const glyphStyle = `background:linear-gradient(145deg,hsl(${hue},65%,55%),hsl(${(hue+25)%360},55%,40%));color:#fff;`;
   const logoSlug = (p && p.id ? String(p.id) : '').replace(/[^a-z0-9]/gi,'-').toLowerCase();
-  const logoHtml = `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true" style="${glyphStyle}">${esc(glyphChar)}</span>`;
+  const logoUrl = (p && typeof p.logo_url === 'string' && p.logo_url) ? p.logo_url : '';
+  const logoImgHtml = logoUrl
+    ? `<img src="${esc(logoUrl)}" alt="" loading="lazy" onerror="this.remove()" class="provider-card-logo-img"/>`
+    : '';
+  const logoHtml = `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true" style="${glyphStyle}"><span class="provider-card-logo-letter">${esc(glyphChar)}</span>${logoImgHtml}</span>`;
   // <<< hermes-fork
 
   // Clickable header (toggles body)
