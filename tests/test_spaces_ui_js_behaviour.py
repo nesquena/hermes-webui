@@ -341,6 +341,44 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.preview') {
+      if (scenario === 'creatorPreviewUnsafeIds') {
+        return response({
+          ok: true,
+          action: 'space.creator.preview',
+          stored: false,
+          executed: false,
+          stage: 'sandbox-preview-required',
+          preview_id: 'preview/../escape',
+          gates: {
+            sandbox_preview_required: true,
+            visual_qa_required: true,
+            approve_commit_required: true,
+          },
+          spec: {
+            space: { space_id: 'creator/../lab', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            widgets: [
+              { id: '../widget', kind: 'status', title: 'Unsafe Widget', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+          },
+          revision_preview: {
+            space_id: 'creator/../lab',
+            widget_count: 2,
+            widgets: [
+              { id: '../widget', kind: 'status', title: 'Safe Widget', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+              { id: 'safe-widget', kind: 'status', title: 'Safe Widget Two', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+          },
+          revision_diff: {
+            has_changes: true,
+            widgets_to_add: ['../widget', 'safe-widget'],
+            widgets_to_remove: ['creator/../old-widget'],
+            widgets_to_update: ['safe-update', '../update-widget'],
+          },
+          raw_prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        });
+      }
       if (scenario === 'creatorPreviewExistingSpace' || scenario === 'creatorCommitExistingSpaceReceipt') {
         return response({
           ok: true,
@@ -1919,7 +1957,7 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
-  } else if (scenario === 'creatorPreviewGate') {
+  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
@@ -4159,6 +4197,31 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Approve revisioned commit" in out["rootHtml"]
     assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
     assert "Summary &lt;Widget&gt;" in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_omits_unsafe_ids_and_commit_action(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewUnsafeIds")
+
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Draft Space" in out["rootHtml"]
+    assert "Unsafe Widget" in out["rootHtml"]
+    assert "Preview: unnamed snapshot · 2 widgets · Widgets: Safe Widget / status, safe-widget / Safe Widget Two / status" in out["rootHtml"]
+    assert "Add widgets: safe-widget" in out["rootHtml"]
+    assert "Update widgets: safe-update" in out["rootHtml"]
+    assert "preview/../escape" not in out["rootHtml"]
+    assert "creator/../lab" not in out["rootHtml"]
+    assert "../widget" not in out["rootHtml"]
+    assert "creator/../old-widget" not in out["rootHtml"]
+    assert "../update-widget" not in out["rootHtml"]
+    assert "Remove widgets:" not in out["rootHtml"]
+    assert "Approve revisioned commit" not in out["rootHtml"]
+    assert "data-preview-id" not in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

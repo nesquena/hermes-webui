@@ -405,12 +405,12 @@
   function renderCreatorSpecSummary(spec){
     const safeSpec = spec && typeof spec === 'object' && !Array.isArray(spec) ? spec : {};
     const space = safeSpec.space && typeof safeSpec.space === 'object' && !Array.isArray(safeSpec.space) ? safeSpec.space : {};
-    const spaceName = safeCreatorSummaryText(space.name || space.space_id || 'Draft Space') || 'Draft Space';
-    const spaceId = safeCreatorSummaryText(space.space_id || '');
+    const spaceName = safeCreatorSummaryText(space.name) || safeCreatorIdText(space.space_id || '') || 'Draft Space';
+    const spaceId = safeCreatorIdText(space.space_id || '');
     const widgets = Array.isArray(safeSpec.widgets) ? safeSpec.widgets.slice(0, 6) : [];
     const widgetRows = widgets.map(function(widget){
       if (!widget || typeof widget !== 'object' || Array.isArray(widget)) return '';
-      const widgetId = safeCreatorSummaryText(widget.id || '');
+      const widgetId = safeCreatorIdText(widget.id || '');
       const title = safeCreatorSummaryText(widget.title || widgetId || 'Draft widget') || 'Draft widget';
       const kind = safeCreatorSummaryText(widget.kind || 'custom') || 'custom';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
@@ -438,7 +438,7 @@
   }
 
   function renderCreatorPreviewResult(data){
-    const previewId = safeCreatorSummaryText(data && data.preview_id || '');
+    const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
     const stored = data && data.stored === true ? 'true' : 'false';
     const executed = data && data.executed === true ? 'true' : 'false';
@@ -701,12 +701,12 @@
       const text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
       return text && !unsafeValuePattern.test(text) ? text : '';
     }
-    const name = safePreviewText(preview.name || preview.space_id) || 'unnamed snapshot';
+    const name = safePreviewText(preview.name) || safeCreatorIdText(preview.space_id || '') || 'unnamed snapshot';
     const count = Number(preview.widget_count || 0);
     const countLabel = count === 1 ? '1 widget' : count+' widgets';
     const widgets = Array.isArray(preview.widgets) ? preview.widgets.slice(0, 5).map(function(widget){
       if (!widget || typeof widget !== 'object' || Array.isArray(widget)) return '';
-      return [widget.id, widget.title, widget.kind].map(safePreviewText).filter(Boolean).join(' / ');
+      return [safeCreatorIdText(widget.id || ''), safePreviewText(widget.title), safePreviewText(widget.kind)].filter(Boolean).join(' / ');
     }).filter(Boolean) : [];
     return 'Preview: '+name+' · '+countLabel+(widgets.length ? ' · Widgets: '+widgets.join(', ') : '');
   }
@@ -722,13 +722,19 @@
         return text && !unsafeValuePattern.test(text) ? text : '';
       }).filter(Boolean);
     }
+    function safeIdList(value){
+      if (!Array.isArray(value)) return [];
+      return value.slice(0, 10).map(function(item){
+        return safeCreatorIdText(item || '');
+      }).filter(Boolean);
+    }
     function plural(count, singular){
       return count+' '+singular+(count === 1 ? '' : 's');
     }
     const fields = safeList(diff.space_fields_to_update);
-    const addWidgets = safeList(diff.widgets_to_add);
-    const removeWidgets = safeList(diff.widgets_to_remove);
-    const updateWidgets = safeList(diff.widgets_to_update);
+    const addWidgets = safeIdList(diff.widgets_to_add);
+    const removeWidgets = safeIdList(diff.widgets_to_remove);
+    const updateWidgets = safeIdList(diff.widgets_to_update);
     const summary = [];
     if (fields.length) summary.push('changes '+plural(fields.length, 'field'));
     if (addWidgets.length) summary.push('adds '+plural(addWidgets.length, 'widget'));
@@ -751,7 +757,8 @@
       if (!Array.isArray(list)) return;
       list.slice(0, 10).forEach(function(item){
         const text = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-        if (text && !unsafeValuePattern.test(text) && ids.indexOf(text) === -1) ids.push(text);
+        const safeId = safeCreatorIdText(text);
+        if (safeId && !unsafeValuePattern.test(safeId) && ids.indexOf(safeId) === -1) ids.push(safeId);
       });
     });
     return ids;
