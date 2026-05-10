@@ -245,6 +245,29 @@
   :root[data-skin="hermesos"] [style*="border-radius:50%"]{
     border-radius:50% !important;
   }
+  /* Force palette: base CSS hardcodes navy gradients (rgba 21,31,45 → 13,20,31)
+     on .app-dialog, .onboarding-card, .kanban-modal, .kanban-board-switcher-menu.
+     These would otherwise bleed dark-blue into our vellum/ink palette. */
+  :root[data-skin="hermesos"] .app-dialog,
+  :root[data-skin="hermesos"] .onboarding-card,
+  :root[data-skin="hermesos"] .kanban-modal,
+  :root[data-skin="hermesos"] .kanban-board-switcher-menu{
+    background:var(--surface) !important;
+    border-color:var(--border) !important;
+  }
+  :root.dark[data-skin="hermesos"] .kanban-modal-overlay,
+  :root.dark[data-skin="hermesos"] .app-dialog-overlay,
+  :root.dark[data-skin="hermesos"] .modal-overlay{
+    background:rgba(13,13,13,.62) !important;
+  }
+  :root:not(.dark)[data-skin="hermesos"] .app-dialog,
+  :root:not(.dark)[data-skin="hermesos"] .onboarding-card,
+  :root:not(.dark)[data-skin="hermesos"] .kanban-modal,
+  :root:not(.dark)[data-skin="hermesos"] .kanban-board-switcher-menu{
+    background:var(--surface) !important;
+    border-color:rgba(0,0,0,.12) !important;
+    box-shadow:0 12px 40px rgba(0,0,0,.15) !important;
+  }
   /* Greeting hero logo — give it a sharper frame matching the dashboard
      etched-card aesthetic instead of the rounded golden tile. */
   :root[data-skin="hermesos"] .greeting-logo,
