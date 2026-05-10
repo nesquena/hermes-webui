@@ -4089,7 +4089,7 @@ layout:
         },
     ]
     assert imported["imported_widgets"] == [
-        {"id": "unsafe-panel", "kind": "html", "title": "Unsafe Panel", "layout": {"x": 1, "y": 2, "w": 5, "h": 4, "minimized": False}}
+        {"id": "unsafe-panel", "kind": "[REDACTED]", "title": "Unsafe Panel", "layout": {"x": 1, "y": 2, "w": 5, "h": 4, "minimized": False}}
     ]
     assert spaces.read_widget("tool-import-demo", "unsafe-panel")["recovery"]["disabled"] is True
     assert exported["ok"] is True
@@ -5915,14 +5915,14 @@ layout:
     assert imported["imported_widgets"] == [
         {
             "id": "weather-panel",
-            "kind": "html",
+            "kind": "[REDACTED]",
             "title": "Weather <Panel>",
             "layout": {"x": 0, "y": 2, "w": 24, "h": 1, "minimized": False},
         }
     ]
     stored = spaces.read_widget("unsafe-demo", "weather-panel")
     assert stored["recovery"]["disabled"] is True
-    assert stored["recovery"]["disabled_reason"] == "imported generated source disabled pending sandbox review"
+    assert stored["recovery"]["disabled_reason"] == "imported untrusted content disabled pending sandbox review"
     assert stored["untrusted_artifact"]["status"] == "quarantined"
     assert stored["untrusted_artifact"]["omitted_field_count"] >= 3
     serialized = json.dumps(imported).lower()
@@ -5932,6 +5932,164 @@ layout:
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "untrusted_artifact" not in json.dumps(spaces.read_space_detail("unsafe-demo"))
+
+
+def test_import_space_agent_yaml_redacts_unsafe_widget_ids_titles_and_kinds(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.import_space_agent_package(
+        {
+            "space_yaml": """
+id: safe-import-redaction
+name: Source Space
+""",
+            "widgets": {
+                "widgets/api_key.yaml": """
+id: api_key
+title: SECRET_VALUE_DO_NOT_LEAK
+type: renderer
+renderer: "<script>bad()</script>"
+layout:
+  x: 0
+  y: 0
+  w: 4
+  h: 3
+""",
+                "widgets/web-panel.yaml": """
+id: safe-web-panel
+title: Generated Source
+type: html
+source: generated widget body
+layout:
+  x: 8
+  y: 0
+  w: 4
+  h: 3
+""",
+                "widgets/Source Notes.yaml": """
+id: source-notes
+title: Source Notes
+type: data-table
+layout:
+  x: 4
+  y: 0
+  w: 4
+  h: 3
+""",
+            },
+        }
+    )
+
+    assert imported["space"]["name"] == "Source Space"
+    assert imported["imported_widgets"] == [
+        {
+            "id": "source-notes",
+            "kind": "data-table",
+            "title": "Source Notes",
+            "layout": {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": False},
+        },
+        {
+            "id": "redacted-widget-1",
+            "kind": "[REDACTED]",
+            "title": "[REDACTED]",
+            "layout": {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": False},
+        },
+        {
+            "id": "safe-web-panel",
+            "kind": "[REDACTED]",
+            "title": "[REDACTED]",
+            "layout": {"x": 8, "y": 0, "w": 4, "h": 3, "minimized": False},
+        },
+    ]
+    detail = spaces.read_space_detail("safe-import-redaction")
+    assert [widget["id"] for widget in detail["widgets"]] == ["source-notes", "redacted-widget-1", "safe-web-panel"]
+    assert detail["widgets"][0]["title"] == "Source Notes"
+    assert detail["widgets"][0]["kind"] == "data-table"
+    assert detail["widgets"][2]["title"] == "[REDACTED]"
+    assert detail["widgets"][2]["kind"] == "[REDACTED]"
+    unsafe_detail = spaces.read_widget_detail("safe-import-redaction", "safe-web-panel")
+    assert unsafe_detail["recovery"]["disabled"] in (True, "True")
+    assert unsafe_detail["recovery"]["disabled_reason"] == "imported untrusted content disabled pending sandbox review"
+    serialized = json.dumps({"imported": imported, "detail": detail, "unsafe_detail": unsafe_detail}).lower()
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert '"html"' not in serialized
+    assert "generated source" not in serialized
+    assert "generated widget body" not in serialized
+
+    body_import = spaces.import_space_agent_package(
+        {
+            "space_yaml": "id: body-import-redaction\nname: Body Import Redaction\n",
+            "widgets": {
+                "widgets/body-panel.yaml": """
+id: body-panel
+title: Body Panel
+type: markdown
+body: "<script>body()</script>"
+layout:
+  x: 0
+  y: 0
+  w: 4
+  h: 3
+""",
+            },
+        }
+    )
+    assert body_import["imported_widgets"][0]["id"] == "body-panel"
+    body_widget = spaces.read_widget("body-import-redaction", "body-panel")
+    assert body_widget["recovery"]["disabled"] is True
+    assert body_widget["untrusted_artifact"]["omitted_field_count"] >= 1
+    assert "body" not in body_widget
+    assert "<script" not in json.dumps(body_import).lower()
+
+
+def test_import_space_agent_yaml_redacts_unsafe_space_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.import_space_agent_package(
+        {
+            "space_yaml": """
+id: api_key
+name: SECRET_VALUE_DO_NOT_LEAK
+description: Generated Source
+instructions: raw prompt generated widget body
+""",
+            "widgets": {},
+        }
+    )
+
+    assert imported["space"]["space_id"] == "imported-space-agent-space"
+    assert imported["space"]["name"] == "Imported Space Agent Space"
+    assert imported["space"]["description"] == "[REDACTED]"
+    assert imported["space"]["agent_instructions"] == "[REDACTED]"
+    serialized = json.dumps(imported).lower()
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "generated source" not in serialized
+    assert "raw prompt" not in serialized
+    assert "generated widget body" not in serialized
+
+
+def test_import_space_agent_yaml_redacts_unsafe_widget_error_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    with pytest.raises(ValueError) as exc_info:
+        spaces.import_space_agent_package(
+            {
+                "space_yaml": "id: invalid-widget-labels\nname: Invalid Widget Labels\n",
+                "widgets": {
+                    "widgets/api_key.yaml": "- not\n- a\n- mapping\n",
+                },
+            }
+        )
+
+    message = str(exc_info.value).lower()
+    assert "[redacted]" in message
+    assert "api_key" not in message
+    assert "token" not in message
+    assert "secret" not in message
 
 
 def test_import_space_agent_zip_warnings_redact_unsafe_labels_and_api_names(monkeypatch, tmp_path):

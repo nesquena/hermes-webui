@@ -4060,15 +4060,25 @@ def _widget_id_from_path(path: str) -> str:
     return _slugify(stem)
 
 
+def _space_agent_import_key_is_safe(key: str) -> bool:
+    text = str(key or "")
+    return _payload_key_is_safe(text) and text not in _SPACE_REPAIR_OMITTED_PAYLOAD_KEYS
+
+
 def _unsafe_import_field_count(widget: dict[str, Any]) -> int:
-    return sum(1 for key in widget if not _payload_key_is_safe(str(key)))
+    return sum(1 for key in widget if not _space_agent_import_key_is_safe(str(key)))
 
 
-def _space_agent_widget_from_yaml(path: str, text: str) -> dict[str, Any]:
-    raw = _load_yaml_mapping(text, f"widget YAML {path}")
-    wid = validate_widget_id(raw.get("id") or raw.get("widget_id") or _widget_id_from_path(path))
-    kind = str(raw.get("kind") or raw.get("type") or raw.get("component") or "custom")
-    title = str(raw.get("title") or raw.get("name") or wid)
+def _space_agent_widget_yaml_label(path: str) -> str:
+    safe_path = _space_agent_public_label(_safe_zip_entry_name(path), 180, package_tokens=True)
+    return f"widget YAML {safe_path}"
+
+
+def _space_agent_widget_from_yaml(path: str, text: str, *, widget_id: str | None = None) -> dict[str, Any]:
+    raw = _load_yaml_mapping(text, _space_agent_widget_yaml_label(path))
+    wid = validate_widget_id(widget_id or raw.get("id") or raw.get("widget_id") or _widget_id_from_path(path))
+    kind = _space_agent_public_label(raw.get("kind") or raw.get("type") or raw.get("component") or "custom", package_tokens=True)
+    title = _space_agent_public_label(raw.get("title") or raw.get("name") or wid, package_tokens=True)
     widget: dict[str, Any] = {
         "id": wid,
         "kind": kind,
@@ -4078,11 +4088,11 @@ def _space_agent_widget_from_yaml(path: str, text: str) -> dict[str, Any]:
     }
     omitted_count = _unsafe_import_field_count(raw)
     if omitted_count:
-        unsafe_payload = {str(key): raw.get(key) for key in raw if not _payload_key_is_safe(str(key))}
+        unsafe_payload = {str(key): raw.get(key) for key in raw if not _space_agent_import_key_is_safe(str(key))}
         digest = hashlib.sha256(json.dumps(unsafe_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
         widget["recovery"] = {
             "disabled": True,
-            "disabled_reason": "imported generated source disabled pending sandbox review",
+            "disabled_reason": "imported untrusted content disabled pending sandbox review",
         }
         widget["untrusted_artifact"] = {
             "status": "quarantined",
@@ -4090,6 +4100,35 @@ def _space_agent_widget_from_yaml(path: str, text: str) -> dict[str, Any]:
             "omitted_field_count": omitted_count,
         }
     return widget
+
+
+def _space_agent_import_widget_raw_id(path: str, text: str) -> str:
+    raw = _load_yaml_mapping(text, _space_agent_widget_yaml_label(path))
+    return validate_widget_id(raw.get("id") or raw.get("widget_id") or _widget_id_from_path(path))
+
+
+def _space_agent_import_widget_ids(widget_files: dict[str, str]) -> dict[str, str]:
+    raw_entries = [(path, _space_agent_import_widget_raw_id(path, text)) for path, text in sorted(widget_files.items())]
+    reserved_safe_widget_ids = {
+        raw_id for _path, raw_id in raw_entries if _space_agent_export_identifier(raw_id, "") == raw_id
+    }
+    used_widget_ids: set[str] = set()
+    assigned: dict[str, str] = {}
+    unsafe_widget_index = 0
+    for path, raw_id in raw_entries:
+        if raw_id in reserved_safe_widget_ids:
+            assigned[path] = _space_agent_unique_export_identifier(raw_id, raw_id, used_widget_ids)
+            continue
+        unsafe_widget_index += 1
+        fallback = f"redacted-widget-{unsafe_widget_index}"
+        candidate = fallback
+        counter = 2
+        while candidate in used_widget_ids or candidate in reserved_safe_widget_ids:
+            candidate = f"{fallback}-{counter}"
+            counter += 1
+        used_widget_ids.add(candidate)
+        assigned[path] = candidate
+    return assigned
 
 
 def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) -> list[dict[str, str]]:
@@ -4135,11 +4174,20 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
     source_label, space_yaml, widget_files = _space_agent_files_from_package(package)
     warnings = _space_agent_import_warnings(space_yaml, widget_files)
     space_doc = _load_yaml_mapping(space_yaml, "space.yaml")
-    name = str(space_doc.get("name") or space_doc.get("title") or space_doc.get("id") or "Imported Space Agent Space")
-    description = str(space_doc.get("description") or "Imported from Space Agent YAML package.")
-    instructions = str(space_doc.get("agent_instructions") or space_doc.get("instructions") or space_doc.get("prompt") or "")
-    base_id = space_doc.get("space_id") or space_doc.get("id") or name
-    target_id = validate_space_id(space_id) if space_id else _unique_space_id(_slugify(str(base_id)))
+    raw_name = space_doc.get("name") or space_doc.get("title") or space_doc.get("id") or "Imported Space Agent Space"
+    name = _space_agent_public_label(raw_name, package_tokens=True)
+    if name == "[REDACTED]":
+        name = "Imported Space Agent Space"
+    raw_description = space_doc.get("description") or "Imported from Space Agent YAML package."
+    description = _space_agent_public_label(raw_description, package_tokens=True)
+    instructions = _space_agent_public_label(
+        space_doc.get("agent_instructions") or space_doc.get("instructions") or space_doc.get("prompt") or "",
+        package_tokens=True,
+    )
+    base_id = _space_agent_export_identifier(space_doc.get("space_id") or space_doc.get("id") or name, "imported-space-agent-space")
+    if space_id:
+        base_id = _space_agent_export_identifier(space_id, "imported-space-agent-space")
+    target_id = validate_space_id(base_id) if space_id else _unique_space_id(_slugify(str(base_id)))
     if _manifest_path(target_id).exists():
         raise FileExistsError("Space already exists")
     created = create_space(
@@ -4154,8 +4202,9 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
         }
     )
     imported_widgets: list[dict[str, Any]] = []
+    import_widget_ids = _space_agent_import_widget_ids(widget_files)
     for path, text in sorted(widget_files.items()):
-        widget = _space_agent_widget_from_yaml(path, text)
+        widget = _space_agent_widget_from_yaml(path, text, widget_id=import_widget_ids.get(path))
         result = upsert_widget(created["space_id"], widget)
         imported_widgets.append(_widget_summary(result["widget"]))
     saved = read_space(created["space_id"])
