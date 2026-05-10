@@ -2580,8 +2580,65 @@ def _space_creator_safe_widget_input(raw_widget: dict[str, Any], index: int, use
     return safe_widget, omitted
 
 
+def _space_creator_metadata_key_is_unsafe(key: Any) -> bool:
+    """Return True when creator metadata key names generated bodies or unsafe material."""
+    text = str(key or "")
+    lowered = text.strip().lower()
+    if not lowered:
+        return True
+    split_text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    tokens = [token.lower() for token in re.split(r"[^A-Za-z0-9]+", split_text) if token]
+    unsafe_exact_tokens = {
+        "authorization",
+        "auth",
+        "bearer",
+        "body",
+        "code",
+        "cookie",
+        "credential",
+        "credentials",
+        "data",
+        "html",
+        "password",
+        "renderer",
+        "script",
+        "secret",
+        "source",
+        "token",
+    }
+    if "prompt" in lowered or (len(tokens) == 1 and tokens[0] in unsafe_exact_tokens):
+        return True
+    if any(token in {"body", "code", "html", "renderer", "script", "source"} for token in tokens):
+        return True
+    pairs = set(zip(tokens, tokens[1:]))
+    if {("api", "key"), ("api", "auth"), ("raw", "prompt")} & pairs:
+        return True
+    if any(first == "generated" and second in {"body", "code", "html", "script", "source", "widget"} for first, second in pairs):
+        return True
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text).lower()
+    return any(
+        marker in compact
+        for marker in (
+            "apikey",
+            "apiauth",
+            "bodytext",
+            "htmlbody",
+            "rawprompt",
+            "renderbody",
+            "rendercode",
+            "widgetbody",
+            "generatedbody",
+            "generatedcode",
+            "generatedhtml",
+            "generatedscript",
+            "generatedsource",
+            "generatedwidget",
+        )
+    )
+
+
 def _space_creator_strip_prompt_metadata(value: Any, depth: int = 0) -> tuple[Any, int]:
-    """Remove nested prompt-like keys from creator-preview metadata before summarizing."""
+    """Remove nested unsafe creator metadata before summarizing or storing."""
     if depth > 12:
         return "[omitted]", 1
     if isinstance(value, dict):
@@ -2590,7 +2647,7 @@ def _space_creator_strip_prompt_metadata(value: Any, depth: int = 0) -> tuple[An
         for index, (key, item) in enumerate(value.items()):
             if index >= 50:
                 break
-            if "prompt" in str(key).lower():
+            if _space_creator_metadata_key_is_unsafe(key):
                 omitted += 1
                 continue
             clean_item, nested_omitted = _space_creator_strip_prompt_metadata(item, depth + 1)

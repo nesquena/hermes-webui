@@ -1645,7 +1645,7 @@ def test_space_tool_adapter_supports_creator_loop_preview_metadata_only_without_
         "prompt_echoed": False,
         "unsafe_prompt_redacted": True,
         "generated_bodies_rendered": False,
-        "omitted_field_count": 6,
+        "omitted_field_count": 7,
     }
     assert spaces.list_spaces() == []
     assert "research dashboard" not in serialized
@@ -2323,6 +2323,89 @@ def test_creator_commit_strips_nested_generic_metadata_prompts_from_persisted_re
     assert "agent prompt" not in persisted
     assert "\"prompt\"" not in persisted
     assert "agentprompt" not in persisted
+
+
+def test_creator_commit_strips_generated_body_metadata_from_preview_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Generated Body Metadata Lab",
+            "widgets": [
+                {
+                    "widgetId": "safe-panel",
+                    "title": "Safe Panel",
+                    "kind": "markdown",
+                    "metadata": {
+                        "safe_label": "Visible safe label",
+                        "safe_nested": {"label": "Safe nested label"},
+                        "generated_code": "function render(){ return '<div>generated widget body</div>'; }",
+                        "code": "function render(){ return '<div>generated widget body from code</div>'; }",
+                        "generatedBody": "generated widget body should not persist",
+                        "bodyText": "<section>generated widget body from body text</section>",
+                        "widgetBody": "<section>generated widget body from widget body</section>",
+                        "renderCode": "function render(){ return '<div>render code generated body</div>'; }",
+                        "bodytext": "<section>compact body text generated body</section>",
+                        "widgetbody": "<section>compact widget body generated body</section>",
+                        "rendercode": "function render(){ return '<div>compact render code generated body</div>'; }",
+                        "body": "<section>generated widget body</section>",
+                        "nested": {"body": "nested generated widget body", "body_text": "nested generated body text"},
+                    },
+                }
+            ],
+        },
+    )
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+    manifest = spaces.read_space("generated-body-metadata-lab")
+    event_path = spaces.events_dir() / f"{committed['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    persisted = json.dumps(
+        {
+            "preview": preview,
+            "committed": committed,
+            "manifest": manifest,
+            "event": event,
+        }
+    ).lower()
+
+    metadata = manifest["widgets"][0]["metadata"]
+    event_snapshot_metadata = event["snapshot"]["widgets"][0]["metadata"]
+
+    assert metadata["safe_label"] == "Visible safe label"
+    assert metadata["safe_nested"] == {"label": "Safe nested label"}
+    assert "body" not in metadata
+    assert "body" not in event_snapshot_metadata
+    assert "code" not in metadata
+    assert "generated_code" not in metadata
+    assert "generatedBody" not in metadata
+    assert "bodyText" not in metadata
+    assert "widgetBody" not in metadata
+    assert "renderCode" not in metadata
+    assert "bodytext" not in metadata
+    assert "widgetbody" not in metadata
+    assert "rendercode" not in metadata
+    assert "body_text" not in metadata.get("nested", {})
+    assert "body" not in metadata.get("nested", {})
+    assert preview["safety"]["omitted_field_count"] >= 11
+    assert committed["safety"]["omitted_field_count"] >= 11
+    assert "generated_code" not in persisted
+    assert "generatedbody" not in persisted
+    assert "bodytext" not in persisted
+    assert "widgetbody" not in persisted
+    assert "rendercode" not in persisted
+    assert "function render" not in persisted
+    assert "generated widget body" not in persisted
+    assert "<section" not in persisted
 
 
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
