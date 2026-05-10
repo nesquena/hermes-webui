@@ -183,23 +183,25 @@ _PROVIDER_LOGO_URL: dict[str, str] = {
     "copilot-acp":  "https://cdn.simpleicons.org/github/fff",
     "qwen":         "https://cdn.simpleicons.org/qwen/fff",
     "qwen-oauth":   "https://cdn.simpleicons.org/qwen/fff",
-    # Brand-site favicons (verified 200, real provider logos)
-    "venice":       "https://venice.ai/favicon.ico",
-    "bankr":        "https://bankr.bot/favicon.svg",
-    "kimi-coding":  "https://www.kimi.com/favicon.ico",
-    "x-ai":         "https://x.ai/favicon.ico",
-    "nous":         "https://nousresearch.com/apple-touch-icon.png",
-    # Local bundled SVGs — providers without simpleicons or favicon coverage
-    "openai":       "static/provider-logos/openai.svg",
-    "openai-codex": "static/provider-logos/openai.svg",
-    "crof":         "static/provider-logos/crof.svg",
-    "lmstudio":     "static/provider-logos/lmstudio.svg",
-    "zai":          "static/provider-logos/zai.svg",
-    "minimax":      "static/provider-logos/minimax.svg",
-    "minimax-cn":   "static/provider-logos/minimax.svg",
-    "opencode-zen": "static/provider-logos/opencode.svg",
-    "opencode-go":  "static/provider-logos/opencode.svg",
-    "nous":         "static/provider-logos/nous.svg",
+    # DuckDuckGo's public icon service (icons.duckduckgo.com/ip3/<domain>.ico)
+    # — stable public favicon fetcher used by many projects. Covers all the
+    # providers whose own sites either don't have an .svg/.ico we can hot-link
+    # (OpenAI returns 403) or where the simpleicons slug doesn't exist.
+    # Returns the brand's real favicon at ~16-32KB.
+    "openai":       "https://icons.duckduckgo.com/ip3/openai.com.ico",
+    "openai-codex": "https://icons.duckduckgo.com/ip3/openai.com.ico",
+    "nous":         "https://icons.duckduckgo.com/ip3/nousresearch.com.ico",
+    "venice":       "https://icons.duckduckgo.com/ip3/venice.ai.ico",
+    "bankr":        "https://icons.duckduckgo.com/ip3/bankr.bot.ico",
+    "kimi-coding":  "https://icons.duckduckgo.com/ip3/kimi.com.ico",
+    "x-ai":         "https://icons.duckduckgo.com/ip3/x.ai.ico",
+    "crof":         "https://icons.duckduckgo.com/ip3/crof.ai.ico",
+    "lmstudio":     "https://icons.duckduckgo.com/ip3/lmstudio.ai.ico",
+    "zai":          "https://icons.duckduckgo.com/ip3/z.ai.ico",
+    "minimax":      "https://icons.duckduckgo.com/ip3/minimaxi.com.ico",
+    "minimax-cn":   "https://icons.duckduckgo.com/ip3/minimaxi.com.ico",
+    "opencode-zen": "https://icons.duckduckgo.com/ip3/opencode.com.ico",
+    "opencode-go":  "https://icons.duckduckgo.com/ip3/opencode.com.ico",
 }
 
 # Per-provider hue for the letter-glyph fallback when logo_url fails to load.
