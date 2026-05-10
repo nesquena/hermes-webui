@@ -87,6 +87,11 @@ def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
 
 
 def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    shutil.copy2(CTL, repo_root / "ctl.sh")
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+
     fake_python = tmp_path / "fake-python"
     fake_log = tmp_path / "fake-python.log"
     write_fake_python(fake_python)
@@ -100,6 +105,7 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
             "HERMES_WEBUI_HOST": "0.0.0.0",
             "HERMES_WEBUI_PORT": "18991",
         },
+        repo_root=repo_root,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -114,14 +120,14 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert "bootstrap.py --no-browser --foreground" in fake_output
         assert "host=0.0.0.0 port=18991" in fake_output
         assert str(hermes_home / "webui") in fake_output
-        status = run_ctl(tmp_path, "status")
+        status = run_ctl(tmp_path, "status", repo_root=repo_root)
         assert status.returncode == 0
         assert "running" in status.stdout
         assert f"PID:     {pid}" in status.stdout
         assert "Bound:   0.0.0.0:18991" in status.stdout
         assert f"Log:     {log_file}" in status.stdout
     finally:
-        stop = run_ctl(tmp_path, "stop")
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
         assert stop.returncode == 0, stop.stderr + stop.stdout
         assert_process_exits(pid)
         assert not pid_file.exists()

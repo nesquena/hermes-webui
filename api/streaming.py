@@ -1839,7 +1839,12 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
     try:
         # Guard: if a cancel was already requested, bail out — cancel_stream() has
         # already saved partial content and we must not double-append error markers.
-        if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+        # Use the live config module rather than the import-time CANCEL_FLAGS
+        # alias. Unit tests and future reload paths may replace the config-level
+        # dict; consulting a stale alias misses in-flight cancel flags.
+        from api import config as _live_config
+        cancel_flags = getattr(_live_config, 'CANCEL_FLAGS', CANCEL_FLAGS)
+        if stream_id in cancel_flags and cancel_flags[stream_id].is_set():
             return
 
         profile_home = _get_profile_home(session.profile)

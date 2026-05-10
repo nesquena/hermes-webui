@@ -49,6 +49,14 @@ def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0)
         ['git', '-C', str(seed), 'push', '--quiet', '-u', 'origin', 'master'],
     ]:
         subprocess.run(cmd, check=True)
+    # Some Git installations initialize bare repositories with HEAD pointing
+    # at the configured default branch (for example main) even when this test
+    # seeds/pushes master explicitly. Make the synthetic remote deterministic
+    # so clone checks out master instead of producing an unborn local HEAD.
+    subprocess.run(
+        ['git', '--git-dir', str(upstream), 'symbolic-ref', 'HEAD', 'refs/heads/master'],
+        check=True,
+    )
 
     # Clone FIRST — local and upstream share the initial commit only.
     local = tmp_path / 'local'

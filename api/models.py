@@ -191,8 +191,20 @@ def _write_session_index(updates=None):
 
 
 def _active_stream_ids():
+    # Include both the module aliases imported at load time and the live config
+    # objects. Some unit tests intentionally monkeypatch api.models.STREAMS to
+    # exercise model-listing behavior, while reload/test paths may replace
+    # api.config.STREAMS. Treat either mapping as authoritative so stale aliases
+    # cannot hide live streams and model-local monkeypatches still work.
+    ids = set()
     with STREAMS_LOCK:
-        return set(STREAMS.keys())
+        ids.update(STREAMS.keys())
+    live_streams = getattr(_cfg, 'STREAMS', STREAMS)
+    live_lock = getattr(_cfg, 'STREAMS_LOCK', STREAMS_LOCK)
+    if live_streams is not STREAMS:
+        with live_lock:
+            ids.update(live_streams.keys())
+    return ids
 
 
 def _is_streaming_session(active_stream_id, active_stream_ids):

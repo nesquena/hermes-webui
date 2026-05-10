@@ -67,6 +67,7 @@ os.environ['HERMES_WEBUI_TEST_PORT'] = str(TEST_PORT)
 os.environ['HERMES_WEBUI_TEST_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
 os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
+os.environ['HERMES_WEBUI_BOT_NAME'] = 'Hermes'
 os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
 os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # Hermes Agent sessions may inherit HERMES_CONFIG_PATH pointing at the live
@@ -299,6 +300,7 @@ def test_server():
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),
         "HERMES_WEBUI_DEFAULT_WORKSPACE": str(TEST_WORKSPACE),
+        "HERMES_WEBUI_BOT_NAME":          "Hermes",
         "HERMES_WEBUI_DEFAULT_MODEL":     "openai/gpt-5.4-mini",
         "HERMES_HOME":                    str(TEST_STATE_DIR),
         "HERMES_CONFIG_PATH":             str(TEST_STATE_DIR / 'config.yaml'),
@@ -361,6 +363,30 @@ def base_url():
 # same process. Tests that modify cfg in-memory won't trigger the mtime path,
 # so the cache must be explicitly invalidated after each test that exercises
 # provider/model detection.
+
+@pytest.fixture(autouse=True)
+def _restore_pytest_env_defaults():
+    """Keep per-test env mutations from leaking into later in-process tests.
+
+    Several legacy unit tests mutate HERMES_* variables directly (without
+    monkeypatch) while importing api modules. Re-assert the test sandbox before
+    and after each test so order-dependent failures cannot redirect config or
+    WebUI state back to a developer's live ~/.hermes tree.
+    """
+    defaults = {
+        'HERMES_WEBUI_TEST_PORT': str(TEST_PORT),
+        'HERMES_WEBUI_TEST_STATE_DIR': str(TEST_STATE_DIR),
+        'HERMES_WEBUI_STATE_DIR': str(TEST_STATE_DIR),
+        'HERMES_WEBUI_DEFAULT_WORKSPACE': str(TEST_WORKSPACE),
+        'HERMES_WEBUI_BOT_NAME': 'Hermes',
+        'HERMES_HOME': str(TEST_STATE_DIR),
+        'HERMES_BASE_HOME': str(TEST_STATE_DIR),
+        'HERMES_CONFIG_PATH': str(TEST_STATE_DIR / 'config.yaml'),
+    }
+    os.environ.update(defaults)
+    yield
+    os.environ.update(defaults)
+
 
 @pytest.fixture(autouse=True)
 def _invalidate_models_cache_after_test():
