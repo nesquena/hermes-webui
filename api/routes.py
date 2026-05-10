@@ -3876,6 +3876,60 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
 
+    # >>> hermes-fork: refresh-models endpoint (HermesOS Cloud)
+    # The "Refresh models" button on each provider card POSTed to /api/models/
+    # refresh and got a 404 — there was no such endpoint upstream. This drops
+    # the live-models cache for the named provider and re-fetches against the
+    # provider's /v1/models, returning the freshly-discovered ids.
+    if parsed.path == "/api/models/refresh":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        try:
+            from api.config import _resolve_provider_alias, invalidate_models_cache
+            canonical = _resolve_provider_alias(provider_id)
+            # Drop the per-provider live cache so the next /api/models/live call
+            # re-fetches. Also clears the global model-list cache so the
+            # composer / Settings dropdowns see the fresh list.
+            try:
+                cache_key = _live_models_cache_key(canonical)
+                with _LIVE_MODELS_CACHE_LOCK:
+                    _LIVE_MODELS_CACHE.pop(cache_key, None)
+            except Exception:
+                pass
+            try:
+                invalidate_models_cache()
+            except Exception:
+                pass
+            # Re-fetch synchronously so the response carries the actual model
+            # list (or the not-yet-configured fallback). We piggyback on the
+            # same agent path /api/models/live uses.
+            ids: list[str] = []
+            try:
+                import sys as _sys
+                import os as _os
+                _agent_dir = _os.path.normpath(_os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                    "..", "..", ".hermes", "hermes-agent",
+                ))
+                if _agent_dir not in _sys.path:
+                    _sys.path.insert(0, _agent_dir)
+                from hermes_cli.models import provider_model_ids as _pmi
+                fetched = _pmi(canonical)
+                if isinstance(fetched, list):
+                    ids = [str(m) for m in fetched if m]
+            except Exception as _err:
+                logger.debug("provider_model_ids failed in /api/models/refresh for %s: %s", canonical, _err)
+            return j(handler, {
+                "ok": True,
+                "provider": canonical,
+                "models_count": len(ids),
+                "models": ids,
+            })
+        except Exception as e:
+            return bad(handler, str(e), 500)
+    # <<< hermes-fork
+
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys
         # the CLI uses (display.show_reasoning, agent.reasoning_effort) so a
