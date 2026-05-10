@@ -5343,16 +5343,14 @@ function _buildProviderCard(p){
   const metaText=metaParts.join(' · ');
 
   // >>> hermes-fork: provider logo
-  // Render an icon next to the provider name. Falls back to a generic glyph
-  // when logo_url is missing or fails to load (clearbit returns 404 for
-  // niche providers). The fallback is inline SVG so we never show a broken
-  // image. Marker-wrapped to keep upstream merges clean.
+  // Render an icon next to the provider name. Img onerror just hides the
+  // broken-image glyph — CSS `.provider-card-logo` shows a placeholder bg
+  // when the img is hidden (background works through the empty span).
   const logoUrl = (p && typeof p.logo_url === 'string' && p.logo_url) ? p.logo_url : '';
   const logoSlug = (p && p.id ? String(p.id) : '').replace(/[^a-z0-9]/gi,'-').toLowerCase();
-  const logoFallback = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" width="28" height="28"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>';
   const logoHtml = logoUrl
-    ? `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"><img src="${esc(logoUrl)}" alt="" loading="lazy" onerror="this.style.display='none'; this.parentElement.innerHTML='${logoFallback}';"/></span>`
-    : `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true">${logoFallback}</span>`;
+    ? `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"><img src="${esc(logoUrl)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"/></span>`
+    : `<span class="provider-card-logo provider-card-logo-${esc(logoSlug)}" aria-hidden="true"></span>`;
   // <<< hermes-fork
 
   // Clickable header (toggles body)
