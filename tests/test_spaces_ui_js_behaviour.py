@@ -1099,6 +1099,27 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/export') {
     const body = opts.body ? JSON.parse(opts.body) : {};
+    if (scenario === 'exportSpaceHostilePackageMarkers') {
+      return response({
+        ok: true,
+        space_id: 'space_yaml-lab',
+        format: 'space-agent-yaml',
+        filename: 'widgets/panel.space_yaml-archive_b64-zip_b64-base64-sourceCode-htmlPanel-scriptWidget-dataSource-secretPanel.yaml',
+        widget_count: 3,
+      });
+    }
+    if (scenario === 'exportSpaceHostileMetadata') {
+      return response({
+        ok: true,
+        space_id: 'renderer-panel',
+        format: 'space-agent-yaml',
+        filename: 'renderer-panel-api_key-SECRET_VALUE_DO_NOT_LEAK-space-agent.yaml',
+        widget_count: 2,
+        space_yaml: 'id: renderer-panel\nname: SECRET_VALUE_DO_NOT_LEAK\nrenderer: <script>bad()</script>\n',
+        widgets: {'widgets/source.yaml': 'id: source\nscript: <script>bad()</script>\ntoken: SECRET'},
+        archive_b64: 'U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ=',
+      });
+    }
     return response({
       ok: true,
       space_id: body.space_id || 'lab',
@@ -1659,10 +1680,13 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
     await click('restoreRevision', { spaceId: 'lab', eventId: 'rev1' });
-  } else if (scenario === 'exportSpaceYaml') {
+  } else if (scenario === 'exportSpaceYaml' || scenario === 'exportSpaceHostileMetadata') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
     await click('exportSpaceYaml', { spaceId: 'lab' });
+  } else if (scenario === 'exportSpaceHostilePackageMarkers') {
+    await window.loadCapySpaces();
+    await click('exportSpaceYaml', { spaceId: '' });
   } else if (scenario === 'exportSpaceZip') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -4132,6 +4156,44 @@ def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(dri
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_export_result_redacts_unsafe_backend_display_metadata(driver_path):
+    out = _run_spaces_scenario(driver_path, "exportSpaceHostileMetadata")
+
+    assert "Space Agent export ready" in out["rootHtml"]
+    assert "Format: yaml" in out["rootHtml"]
+    assert "space-agent.yaml" in out["rootHtml"]
+    assert "Widgets: 2" in out["rootHtml"]
+    assert "renderer-panel" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "widgets/source.yaml" not in out["rootHtml"]
+    assert "archive_b64" not in out["rootHtml"]
+    assert "U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "&lt;script" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "source.yaml" not in out["rootHtml"]
+    assert "token" not in out["rootHtml"]
+
+
+def test_spaces_ui_export_result_redacts_package_marker_labels_from_backend_ids(driver_path):
+    out = _run_spaces_scenario(driver_path, "exportSpaceHostilePackageMarkers")
+
+    assert "Space Agent export ready" in out["rootHtml"]
+    assert "redacted-export-space-agent.yaml" in out["rootHtml"]
+    assert "Widgets: 3" in out["rootHtml"]
+    assert "widgets/panel" not in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "archive_b64" not in out["rootHtml"]
+    assert "zip_b64" not in out["rootHtml"]
+    assert "sourceCode" not in out["rootHtml"]
+    assert "htmlPanel" not in out["rootHtml"]
+    assert "scriptWidget" not in out["rootHtml"]
+    assert "dataSource" not in out["rootHtml"]
+    assert "secretPanel" not in out["rootHtml"]
 
 
 def test_spaces_ui_export_zip_posts_space_id_and_renders_safe_metadata_only(driver_path):

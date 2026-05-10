@@ -585,15 +585,24 @@
     }).filter(Boolean).join(' · ');
   }
 
+  function safeExportMetadataText(value, fallback){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!text) return fallback || '';
+    const unsafePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\b|cookie\b|credential|credentials|password|secret(?:[_-]?[a-z0-9_-]+|\b)|token\b|<script|<\/script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt|space[_-]?yaml|archive[_-]?b64|zip[_-]?b64|base64|widgets[\\\/][^\s<>]*\.ya?ml\b|(?:source|html|script|data)(?:code|panel|widget|source|body|text)|(?:^|[._\-/\s;:@<>])(?:source|html|script|data)(?:$|[._\-/\s;:@<>]))/i;
+    return unsafePattern.test(text) ? (fallback || '') : text;
+  }
+
   function renderSpaceExportResult(spaceId, data){
     const rawFormat = data && data.format ? String(data.format) : 'yaml';
     const format = rawFormat.indexOf('zip') >= 0 ? 'zip' : 'yaml';
-    const filename = data && data.filename ? String(data.filename) : String(spaceId || 'space') + '-space-agent.' + (format === 'zip' ? 'zip' : 'yaml');
+    const safeSpaceId = safeExportMetadataText(spaceId || (data && data.space_id) || '', 'redacted-export') || 'redacted-export';
+    const fallbackFilename = safeSpaceId + '-space-agent.' + (format === 'zip' ? 'zip' : 'yaml');
+    const filename = safeExportMetadataText(data && data.filename ? String(data.filename) : fallbackFilename, fallbackFilename) || fallbackFilename;
     const widgetCount = data && Number.isFinite(Number(data.widget_count)) ? Number(data.widget_count) : 0;
     return '<div class="capy-spaces-card"><h3>Space Agent export ready</h3>' +
       '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
-      '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(spaceId || '')+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
+      '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(safeSpaceId)+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
   }
 
   function safeImportMetadataText(value, fallback){
