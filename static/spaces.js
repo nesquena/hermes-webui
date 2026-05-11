@@ -2546,18 +2546,22 @@
       const spaceExportActions = '<button type="button" class="capy-spaces-btn" data-capy-action="exportRecoverySpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="exportRecoverySpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button>';
       const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
-        const widgetId = w && w.id ? String(w.id) : '';
-        const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
-        const kind = w && w.kind ? String(w.kind) : 'custom';
+        const rawWidgetId = w && w.id ? String(w.id) : '';
+        const widgetId = safeCreatorSummaryText(rawWidgetId);
+        const actionWidgetId = safeCreatorIdText(rawWidgetId);
+        const title = safeCreatorSummaryText(w && w.title ? String(w.title) : '') || widgetId || 'Untitled widget';
+        const kind = safeCreatorSummaryText(w && w.kind ? String(w.kind) : 'custom') || 'custom';
         const disabled = !!(w && w.disabled);
         const disabledReason = w && w.disabled_reason ? safeDisplayMetadataText(String(w.disabled_reason), '[REDACTED]') : '';
-        return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
-          '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div>' +
+        const widgetMetadata = [kind, widgetId].filter(Boolean).join(' · ');
+        const widgetActionAttrs = actionWidgetId ? ' data-widget-id="'+escapeHtml(actionWidgetId)+'"' : '';
+        const repairAction = actionWidgetId ? '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(actionWidgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy to repair</button>' : '';
+        const toggleAction = actionWidgetId ? (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(actionWidgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(actionWidgetId)+'">Disable widget</button>') : '';
+        return '<div class="capy-spaces-widget"'+widgetActionAttrs+'><div><strong>'+escapeHtml(title)+'</strong>' +
+          '<div class="capy-spaces-muted">'+escapeHtml(widgetMetadata)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div>' +
           renderRecoveryWidgetEventStatus(w || {}) +
           '</div>' +
-          '<div class="capy-spaces-actions">' +
-          '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy to repair</button>' +
-          (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
+          '<div class="capy-spaces-actions">' + repairAction + toggleAction +
           '</div></div>';
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
       const recoveryRows = renderRecoveryRevisionRows(spaceId, s.revisions || []);

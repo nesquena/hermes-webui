@@ -563,6 +563,7 @@ global.fetch = async function(path, opts = {}) {
           widgets: [
             { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>', queued_event_count: 1, latest_queued_event: { event_id: 'evt-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } } },
             { id: 'disabled-widget', kind: 'markdown', title: 'Disabled Widget', disabled: true, disabled_reason: 'render failed' },
+            { id: 'api_key', kind: 'source', title: 'renderer panel SECRET_VALUE_DO_NOT_LEAK api_key', disabled: false },
           ],
         },
         {
@@ -3992,6 +3993,9 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Safe blocked module" in out["recoveryHtml"]
     assert "Unsafe id should not become an action target" in out["recoveryHtml"]
     assert 'data-module-id="api_key"' not in out["recoveryHtml"]
+    assert 'data-widget-id="api_key"' not in out["recoveryHtml"]
+    assert "renderer panel SECRET_VALUE_DO_NOT_LEAK api_key" not in out["recoveryHtml"]
+    assert "source · api_key" not in out["recoveryHtml"]
     assert "Disabled: [REDACTED]" in out["recoveryHtml"]
     assert "/api/spaces/recovery" in out["recoveryHtml"]
     assert "/api/spaces/revision/restore-widget" in out["recoveryHtml"]
