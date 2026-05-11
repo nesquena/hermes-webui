@@ -9840,12 +9840,25 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
     )
     assert allowed["queued"] is True
 
+    camel_allowed = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "agent.prompt",
+        {"messageType": "capy:agent:prompt", "query": "safe camel prompt", "renderer": "<script>bad()</script>"},
+        prompt="safe camel sandbox prompt",
+    )
+    assert camel_allowed["queued"] is True
+
     for blocked_payload in (
         {"event_name": "capy:data:get", "payload": {"query": "read shared data"}},
         {"event_name": "agent.prompt", "payload": {"message_type": "capy:asset:url", "query": "fetch asset"}},
+        {"event_name": "agent.prompt", "payload": {"messageType": "capy:asset:url", "query": "fetch asset"}},
         {"event_name": "agent.prompt", "payload": {"type": "capy:raw:SECRET_VALUE_DO_NOT_LEAK"}},
         {"event_name": "capy:raw:eval", "payload": {"renderer": "<script>steal()</script>"}},
         {"event_name": "agent.prompt", "payload": {"message_type": "capy:debug:dump", "query": "safe prompt"}},
+        {"event_name": "agent.prompt", "payload": {"messageType": "capy:debug:dump", "query": "safe prompt"}},
+        {"event_name": "agent.prompt", "payload": {"type": "capy:agent:prompt", "messageType": "capy:raw:eval", "source": "eval(SECRET_VALUE_DO_NOT_LEAK)"}},
+        {"event_name": "agent.prompt", "payload": {"message_type": "capy:agent:prompt", "messageType": "capy:asset:url"}},
     ):
         with pytest.raises(ValueError, match="runtime contract"):
             spaces.queue_widget_event(
@@ -9864,7 +9877,7 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
             "widget_id": "sandbox",
             "event_name": "agent.prompt",
             "prompt": "Use bearer SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
-            "payload": {"message_type": "capy:debug:dump", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "payload": {"messageType": "capy:debug:dump", "apiAuth": "Bearer SECRET_VALUE_DO_NOT_LEAK", "source": "SECRET_SOURCE"},
         },
     )
     events = spaces.list_widget_events(created["space_id"], "sandbox")
@@ -9873,12 +9886,14 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
     assert handled is None
     assert status == 400
     assert "runtime contract" in body["error"]
-    assert [event["event_id"] for event in events] == [allowed["event_id"]]
+    assert [event["event_id"] for event in events] == [camel_allowed["event_id"], allowed["event_id"]]
     assert "secret_value_do_not_leak" not in serialized
     assert "bearer" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
-    assert "api_key" not in serialized
+    assert "source" not in serialized
+    assert "apiauth" not in serialized
+    assert "api_auth" not in serialized
     assert "capy:debug:dump" not in serialized
 
 

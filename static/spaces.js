@@ -1045,11 +1045,14 @@
   function runtimeMessageTypeInfo(data){
     const hasType = Object.prototype.hasOwnProperty.call(data || {}, 'type');
     const hasMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'message_type');
+    const hasCamelMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'messageType');
     const type = runtimeMessageTypeValue(data && data.type);
     const messageType = runtimeMessageTypeValue(data && data.message_type);
-    if ((hasType && !type) || (hasMessageType && !messageType)) return { type: '', blocked: true };
-    if (type && messageType && type.toLowerCase() !== messageType.toLowerCase()) return { type: '', blocked: true };
-    const selected = type || messageType;
+    const camelMessageType = runtimeMessageTypeValue(data && data.messageType);
+    if ((hasType && !type) || (hasMessageType && !messageType) || (hasCamelMessageType && !camelMessageType)) return { type: '', blocked: true };
+    const aliases = [type, messageType, camelMessageType].filter(Boolean);
+    if (aliases.some(function(value){ return value.toLowerCase() !== aliases[0].toLowerCase(); })) return { type: '', blocked: true };
+    const selected = aliases[0] || '';
     return { type: selected, blocked: isBlockedRuntimeMessageType(selected) };
   }
 

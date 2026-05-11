@@ -260,16 +260,21 @@ def _is_allowed_runtime_message_type(message_type: str) -> bool:
 def _payload_runtime_message_type(payload: dict[str, Any]) -> str:
     has_type = "type" in payload
     has_message_type = "message_type" in payload
+    has_camel_message_type = "messageType" in payload
     raw_type = re.sub(r"\s+", " ", str(payload.get("type") or "")).strip()
     type_value = _runtime_message_type_value(raw_type)
     message_type_value = _runtime_message_type_value(payload.get("message_type"))
+    camel_message_type_value = _runtime_message_type_value(payload.get("messageType"))
     if has_message_type and not message_type_value:
+        raise ValueError("Blocked by widget runtime contract")
+    if has_camel_message_type and not camel_message_type_value:
         raise ValueError("Blocked by widget runtime contract")
     if has_type and raw_type.lower().startswith("capy:") and not type_value:
         raise ValueError("Blocked by widget runtime contract")
-    if type_value and message_type_value and type_value.lower() != message_type_value.lower():
+    aliases = [value for value in (type_value, message_type_value, camel_message_type_value) if value]
+    if aliases and any(value.lower() != aliases[0].lower() for value in aliases):
         raise ValueError("Blocked by widget runtime contract")
-    return type_value or message_type_value
+    return aliases[0] if aliases else ""
 
 
 def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict[str, Any]) -> None:
