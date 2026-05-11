@@ -15,7 +15,7 @@ cross-container liveness signal.
 These tests pin every behavior the fix promises:
 
   * fresh + running gateway_state, no PID  → alive (cross-container path)
-  * stale updated_at + running              → down (no false positives)
+  * stale updated_at + running              → unknown (old gateways may not tick)
   * fresh updated_at + non-running state    → down (crash-without-cleanup case)
   * stale updated_at + stopped state        → unknown (old root gateway was
     intentionally stopped; do not nag profile-gateway users)
@@ -116,8 +116,8 @@ def test_cross_container_alive_path_does_not_leak_raw_process_fields(monkeypatch
 # -- Stale / missing / malformed timestamps -----------------------------------
 
 
-def test_stale_updated_at_reports_down_even_when_gateway_state_running(monkeypatch):
-    """A long-dead gateway with a fossilised state file must surface as down."""
+def test_stale_updated_at_with_running_state_reports_unknown(monkeypatch):
+    """Older gateways may not refresh the file while still processing messages."""
     from api import agent_health
 
     stale_ts = _iso(datetime.now(timezone.utc) - timedelta(seconds=300))
@@ -130,9 +130,10 @@ def test_stale_updated_at_reports_down_even_when_gateway_state_running(monkeypat
 
     payload = agent_health.build_agent_health_payload()
 
-    assert payload["alive"] is False
-    assert payload["details"]["state"] == "down"
-    assert payload["details"]["reason"] == "gateway_not_running"
+    assert payload["alive"] is None
+    assert payload["details"]["state"] == "unknown"
+    assert payload["details"]["reason"] == "gateway_stale_running_state"
+    assert payload["details"]["gateway_state"] == "running"
 
 
 def test_fresh_updated_at_with_non_running_state_reports_down(monkeypatch):
