@@ -252,6 +252,12 @@ function _hermesDefaultProfileLabelInput(value){
     }
     // Re-render the dropdown's active row if it's currently open.
     if(typeof renderProfileDropdownFromCache === 'function') try{ renderProfileDropdownFromCache(); }catch(_){}
+    // If the user is currently viewing the Profiles panel, re-render it
+    // so the cards + detail title pick up the new nickname without a
+    // panel switch.
+    if(typeof loadProfilesPanel === 'function' && typeof _currentPanel !== 'undefined' && _currentPanel === 'profiles'){
+      try{ loadProfilesPanel(); }catch(_){}
+    }
   }catch(_){}
 }
 /* <<< hermes-fork */

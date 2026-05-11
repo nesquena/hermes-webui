@@ -4069,10 +4069,15 @@ async function loadProfilesPanel() {
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      // >>> hermes-fork: render the localStorage-backed nickname when present.
+      const _displayName = (typeof _hermesDisplayProfileName === 'function')
+        ? _hermesDisplayProfileName(p.name)
+        : p.name;
+      // <<< hermes-fork
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(_displayName)}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;
@@ -4097,7 +4102,11 @@ function _renderProfileDetail(p, activeName){
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = p.name;
+  // >>> hermes-fork: detail header uses the nickname when set.
+  title.textContent = (typeof _hermesDisplayProfileName === 'function')
+    ? _hermesDisplayProfileName(p.name)
+    : p.name;
+  // <<< hermes-fork
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
   const statusBadge = isActive
