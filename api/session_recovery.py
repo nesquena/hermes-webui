@@ -289,6 +289,31 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     return {"status": overall, "summary": summary, "items": items}
 
 
+def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
+    """Run safe, deterministic session recovery repairs.
+
+    This mutates only repairable classes already handled by startup recovery:
+    shrunken live sidecars and orphan backups that are not tombstoned by a
+    readable state.db. Unsafe audit findings remain for manual review.
+    """
+    before = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    repair = recover_all_sessions_on_startup(
+        session_dir,
+        rebuild_index=True,
+        state_db_path=state_db_path,
+    )
+    after = audit_session_recovery(session_dir, state_db_path=state_db_path)
+    unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
+    repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
+    return {
+        "ok": unsafe_remaining == 0 and repairable_remaining == 0,
+        "repaired": int(repair.get("restored") or 0),
+        "before": before,
+        "repair": repair,
+        "after": after,
+    }
+
+
 def recover_all_sessions_on_startup(
     session_dir: Path,
     rebuild_index: bool = False,
@@ -350,10 +375,14 @@ def _main() -> int:
     parser.add_argument("--audit", action="store_true", help="run a read-only recovery audit")
     parser.add_argument("--session-dir", type=Path, required=True, help="path to WebUI sessions directory")
     parser.add_argument("--state-db", type=Path, default=None, help="optional Hermes state.db path")
+    parser.add_argument("--repair-safe", action="store_true", help="run safe deterministic repairs after auditing")
     args = parser.parse_args()
-    if not args.audit:
-        parser.error("currently only --audit is supported")
-    report = audit_session_recovery(args.session_dir, state_db_path=args.state_db)
+    if args.repair_safe:
+        report = repair_safe_session_recovery(args.session_dir, state_db_path=args.state_db)
+    elif args.audit:
+        report = audit_session_recovery(args.session_dir, state_db_path=args.state_db)
+    else:
+        parser.error("choose --audit or --repair-safe")
     print(json.dumps(report, sort_keys=True))
     return 0
 

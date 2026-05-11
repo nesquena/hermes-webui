@@ -3217,6 +3217,10 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         return j(handler, report)
 
+    if parsed.path == "/api/session/recovery/audit":
+        from api.session_recovery import audit_session_recovery
+        return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
+
     if parsed.path == "/api/session/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -3769,6 +3773,11 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if parsed.path == "/api/session/recovery/repair-safe":
+        from api.session_recovery import repair_safe_session_recovery
+        result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
+        return j(handler, result, status=200 if result.get("ok") else 409)
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
