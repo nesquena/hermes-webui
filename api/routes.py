@@ -5578,6 +5578,8 @@ def _handle_media(handler, parsed):
     - Only image MIME types are served inline; all others force download
     - SVG always served as attachment (XSS risk)
     - No path traversal: resolved path must stay within an allowed root
+    - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
+      (colon-separated list of absolute paths)
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -5621,6 +5623,21 @@ def _handle_media(handler, parsed):
             allowed_roots.append(ws)
     except Exception:
         pass
+
+    # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
+    # (colon-separated list of absolute paths, e.g. /home/user/models:/home/user/Pictures)
+    extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
+    if extra_roots:
+        for root in extra_roots.split(":"):
+            root = root.strip()
+            if root:
+                try:
+                    rp = Path(root).resolve()
+                    if rp.is_dir():
+                        allowed_roots.append(rp)
+                except Exception:
+                    pass
+
     within_allowed = any(
         _os.path.commonpath([str(target), str(root)]) == str(root)
         for root in allowed_roots

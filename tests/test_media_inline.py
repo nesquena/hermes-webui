@@ -235,6 +235,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
+    def test_media_allowed_roots_env_var_referenced(self):
+        """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("MEDIA_ALLOWED_ROOTS", routes_src,
+                      "MEDIA_ALLOWED_ROOTS env var must be parsed in _handle_media")
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)

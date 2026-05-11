@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **MEDIA_ALLOWED_ROOTS env var** — Configurable colon-separated list of absolute
+  paths to add to the `/api/media` file-serving whitelist. The built-in allowed
+  roots (`~/.hermes`, `/tmp`, active workspace) remain the default; setting
+  `MEDIA_ALLOWED_ROOTS=/home/user/models:/home/user/Pictures` extends the
+  whitelist at runtime without code changes. Resolves the "local MEDIA: path
+  blocked outside allowed roots" usability gap for power users. Added static
+  unit test for env var presence in source. (`api/routes.py`, `tests/test_media_inline.py`)
+
 ## [v0.51.41] — 2026-05-11 — Release Q (3-PR contributor batch — session recovery audit + run-lifecycle health + transcript dedup)
 
 ### Fixed
