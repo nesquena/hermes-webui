@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **fix(sessions): preserve distinct retried messages when merging transcripts** ([#2027](https://github.com/nesquena/hermes-webui/issues/2027)). Messaging session transcript merges now use `id`/`message_id` when present before falling back to the legacy role/content/timestamp/tool metadata key, so repeated turns with identical visible text are not silently collapsed.
+
 ## [v0.51.40] — 2026-05-11 — Release P (4-PR contributor batch — quota subprocess hardening + env-lock prewarm + cron one-shot warning + Xiaomi env key)
 
 ### Fixed
@@ -21,7 +25,6 @@
 ### Notes
 
 - 4 PRs from 3 different authors. `api/providers.py` was touched by #2030 (+110/-7 in quota probe path) and #2034 (+1 in `_PROVIDER_ENV_VAR` map) with disjoint hunks. `CHANGELOG.md` Unreleased section was the only true conflict (#2033 + #2034 both added bullets); resolved by keeping both entries. Stage merge otherwise clean.
-
 
 ## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
 
