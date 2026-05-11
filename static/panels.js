@@ -733,6 +733,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
             ${deliverOpt('local', t('cron_deliver_local') || 'Local (save output only)')}
             ${deliverOpt('discord','Discord')}
             ${deliverOpt('telegram','Telegram')}
+            ${deliverOpt('slack','Slack')}
           </select>
         </div>
         <div class="detail-form-row">
