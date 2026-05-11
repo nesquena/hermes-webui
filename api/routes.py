@@ -4988,7 +4988,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/disable-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("id")
+        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
         if not module_id:
             return bad(handler, "Missing module_id")
         try:
@@ -5008,7 +5008,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/enable-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("id")
+        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
         if not module_id:
             return bad(handler, "Missing module_id")
         try:
@@ -5028,7 +5028,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/repair-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("id")
+        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
         if not module_id:
             return bad(handler, "Missing module_id")
         payload = body["payload"] if "payload" in body else {}

@@ -8963,6 +8963,66 @@ def test_recovery_disable_enable_module_routes_return_metadata_only(monkeypatch,
     assert "secret_value_do_not_leak" not in recovery_serialized
 
 
+def test_recovery_module_routes_accept_camelcase_module_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "route-camel-module",
+            "name": "Route Camel Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "export const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+
+    handled, status, disabled = _route_post(
+        "/api/spaces/recovery/disable-module",
+        {"moduleId": "route-camel-module", "reason": "renderer api_auth bearer placeholder"},
+    )
+    handled_repair, status_repair, repaired = _route_post(
+        "/api/spaces/recovery/repair-module",
+        {
+            "moduleId": "route-camel-module",
+            "prompt": "Repair generated source without leaking SECRET_VALUE_DO_NOT_LEAK",
+            "payload": {"action": "repair-module", "renderer": "<script>bad()</script>"},
+            "session_id": "session token SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    handled_enable, status_enable, enabled = _route_post(
+        "/api/spaces/recovery/enable-module",
+        {"moduleId": "route-camel-module"},
+    )
+
+    assert handled is None
+    assert handled_repair is None
+    assert handled_enable is None
+    assert status == 200
+    assert status_repair == 200
+    assert status_enable == 200
+    assert disabled["module_id"] == "route-camel-module"
+    assert disabled["disabled"] is True
+    assert disabled["disabled_reason"] == "[REDACTED]"
+    assert repaired["module_id"] == "route-camel-module"
+    assert repaired["queued"] is True
+    assert repaired["event_name"] == "agent.repair"
+    assert repaired["prompt_preview"] == "[REDACTED]"
+    assert repaired["payload_summary"] == {"action": "repair-module"}
+    assert enabled["module_id"] == "route-camel-module"
+    assert enabled["disabled"] is False
+    events = spaces.list_recovery_module_repair_events("route-camel-module")
+    assert events and events[0]["event_id"] == repaired["event_id"]
+    serialized = json.dumps({"disabled": disabled, "repaired": repaired, "enabled": enabled, "events": events}).lower()
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_current_space_helper_and_route_return_metadata_only_active_space(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
