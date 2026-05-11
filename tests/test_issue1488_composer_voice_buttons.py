@@ -123,7 +123,7 @@ class TestComposerVoiceButtonI18n:
         "voice_mode_toggle_active",
     )
 
-    LOCALES = ("en", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
+    LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
 
     def test_legacy_voice_toggle_key_removed(self):
         """The old key whose string was 'Voice input' caused the duplicate-
@@ -212,9 +212,9 @@ class TestVoiceModePreferenceGate:
         src = _src("i18n.js")
         for key in ("settings_label_voice_mode", "settings_desc_voice_mode"):
             count = len(re.findall(rf'\b{re.escape(key)}\s*:', src))
-            assert count == 9, (
+            assert count == len(self.LOCALES), (
                 f"Preferences i18n key {key!r} appears {count} times — "
-                f"expected 9 (one per locale)."
+                f"expected {len(self.LOCALES)} (one per locale)."
             )
 
     def test_panels_js_wires_voice_mode_pref(self):

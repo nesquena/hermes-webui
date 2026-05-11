@@ -43,8 +43,8 @@ def test_sf1_session_meta_children_present_in_all_locales():
         f"session_meta_messages appears {msg_count} times but "
         f"session_meta_children appears {child_count} — must be in every locale"
     )
-    # Sanity: 9 known locales (en, ja, ru, es, de, zh, zh-Hant, plus the legacy zh-tw/zh-hk aliases)
-    assert child_count >= 9, f"expected >=9 locales with session_meta_children, got {child_count}"
+    # Sanity: 10 known locales (en, it, ja, ru, es, de, zh, zh-Hant, plus the legacy zh-tw/zh-hk aliases)
+    assert child_count >= 10, f"expected >=10 locales with session_meta_children, got {child_count}"
 
 
 # --- SF-2 (#1462): duplicate carries per-session settings ---

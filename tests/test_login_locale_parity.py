@@ -260,10 +260,10 @@ def test_every_i18n_locale_has_login_locale_entry():
 
 
 def test_login_locale_count_matches_or_exceeds_floor():
-    """_LOGIN_LOCALE must contain at least the 9 launch locales (en, es, de, ru, zh, zh-Hant, ja, pt, ko)."""
+    """_LOGIN_LOCALE must contain at least the 10 launch locales (en, it, es, de, ru, zh, zh-Hant, ja, pt, ko)."""
     login = _load_login_locale()
-    assert len(login) >= 9, f"_LOGIN_LOCALE shrank: only {len(login)} entries"
-    for k in ("en", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"):
+    assert len(login) >= 10, f"_LOGIN_LOCALE shrank: only {len(login)} entries"
+    for k in ("en", "it", "es", "de", "ru", "zh", "zh-Hant", "ja", "pt", "ko"):
         assert k in login, f"_LOGIN_LOCALE missing core locale {k!r}"
 
 
