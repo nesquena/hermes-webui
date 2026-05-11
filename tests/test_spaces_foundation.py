@@ -5049,6 +5049,56 @@ def test_restore_widget_revision_preserves_disabled_state_until_enable_control(m
 
 
 
+def test_restore_revision_preserves_disabled_widget_state_until_enable_control(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Full Rollback Quarantine"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Original Disabled Widget",
+            "layout": {"x": 1, "y": 2, "w": 4, "h": 3},
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(
+        created["space_id"],
+        "bad-widget",
+        {"title": "Patched While Broken", "layout": {"x": 5, "y": 6, "w": 7, "h": 4}},
+    )
+    spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="manual recovery quarantine")
+
+    restored = spaces.restore_revision(created["space_id"], original["revision_event_id"])
+
+    stored = spaces.read_widget(created["space_id"], "bad-widget")
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps({"restored": restored, "recovery": recovery}).lower()
+
+    assert restored["ok"] is True
+    assert restored["space"]["widgets"][0]["title"] == "Original Disabled Widget"
+    assert restored["space"]["widgets"][0]["layout"] == {"x": 1, "y": 2, "w": 4, "h": 3, "minimized": False}
+    assert stored["title"] == "Original Disabled Widget"
+    assert stored["layout"] == {"x": 1, "y": 2, "w": 4, "h": 3, "minimized": False}
+    assert stored["recovery"] == {"disabled": True, "disabled_reason": "manual recovery quarantine"}
+    assert recovery["summary"]["disabled_widget_count"] == 1
+    assert recovery["spaces"][0]["widgets"][0]["disabled"] is True
+    assert recovery["spaces"][0]["widgets"][0]["disabled_reason"] == "manual recovery quarantine"
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret" not in serialized
+
+    enabled = spaces.enable_widget_for_recovery(created["space_id"], "bad-widget")
+    assert enabled["disabled"] is False
+    assert spaces.read_widget(created["space_id"], "bad-widget")["recovery"]["disabled"] is False
+
+
+
 def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Broken Widgets"})

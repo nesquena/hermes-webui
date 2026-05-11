@@ -3984,10 +3984,19 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     restored.setdefault("created_at", current.get("created_at") or time.time())
     if not isinstance(restored.get("widgets"), list):
         restored["widgets"] = []
+    current_widgets_by_id = {
+        str(widget.get("id")): widget
+        for widget in (current.get("widgets") if isinstance(current.get("widgets"), list) else [])
+        if isinstance(widget, dict) and widget.get("id")
+    }
     normalized_widgets: list[dict[str, Any]] = []
     for widget in restored.get("widgets") or []:
         if isinstance(widget, dict):
-            normalized_widgets.append(_normalize_widget(widget))
+            normalized = _normalize_widget(widget)
+            existing = current_widgets_by_id.get(normalized.get("id"))
+            if isinstance(existing, dict):
+                normalized = _preserve_admin_disabled_widget_recovery(existing, normalized)
+            normalized_widgets.append(normalized)
     restored["widgets"] = normalized_widgets
     if not isinstance(restored.get("layout"), dict):
         restored["layout"] = {}

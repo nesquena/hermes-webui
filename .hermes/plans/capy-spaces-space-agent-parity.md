@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Widget-level rollback now preserves explicit recovery/admin quarantine state when restoring an older revision snapshot, so time-travel cannot silently re-enable a disabled generated widget; explicit recovery enable controls remain the only way to clear quarantine. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Full-Space rollback now preserves explicit recovery/admin widget quarantine state while restoring older safe widget metadata, so time-travel cannot silently re-enable disabled generated widgets; explicit recovery enable controls remain the only way to clear quarantine. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): preserve quarantine on full rollback`
+  - Added RED/GREEN backend coverage proving `restore_revision(...)` restores older safe widget title/layout metadata while preserving the trusted current `recovery.disabled` / `disabled_reason` envelope until the explicit enable recovery control runs.
+  - Hardened full-Space rollback to merge current admin-owned disabled recovery envelopes into normalized snapshot widgets before writing the restored manifest, keeping recovery snapshots metadata-only and omitting generated renderer/source/API-auth markers plus secret-looking sentinel values.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related rollback/quarantine regressions passed (`7 passed, 222 deselected`); full Spaces foundation suite passed (`229 passed`); Spaces UI behavior + demo parity suites passed (`149 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static recovery harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_552f689c94504505956500200d2a4943.png`.
 
 - `fix(spaces): preserve widget quarantine on rollback`
   - Added RED/GREEN backend coverage proving `restore_widget_revision(...)` restores a widget's safe title/layout from a revision snapshot while preserving the trusted current `recovery.disabled` / `disabled_reason` envelope until the explicit enable recovery control runs.
