@@ -3598,6 +3598,74 @@ def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkey
     assert "secret" not in serialized
 
 
+def test_space_tool_runtime_contract_accepts_space_agent_camelcase_payloads(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "runtime-camel-lab", "name": "Runtime Camel Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-html",
+            "kind": "html",
+            "title": "Unsafe HTML",
+            "runtime_contract": {
+                "allowed_messages": ["capy:raw:eval", "capy:agent:prompt"],
+                "token": "SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>bad()</script>",
+            },
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    baseline = spaces.run_space_tool(
+        "space.widget.runtime_contract",
+        {"space_id": created["space_id"], "widget_id": "unsafe-html"},
+    )
+    explicit_camel = spaces.run_space_tool(
+        "space.widget.runtime_contract",
+        {"spaceId": created["space_id"], "widgetId": "unsafe-html", "renderer": "<script>ignore()</script>"},
+    )
+    current_camel = spaces.run_space_tool(
+        "space.current.widget.runtime_contract",
+        {"activeSpaceId": created["space_id"], "widgetId": "unsafe-html", "api_key": "***"},
+    )
+    positional = spaces.run_space_tool(
+        "widget.runtime_contract",
+        {"space_id": created["space_id"], "args": ["unsafe-html"]},
+    )
+    serialized = json.dumps(
+        {
+            "baseline": baseline,
+            "explicit_camel": explicit_camel,
+            "current_camel": current_camel,
+            "positional": positional,
+        }
+    ).lower()
+
+    assert explicit_camel["ok"] is True
+    assert explicit_camel["active_space_id"] == created["space_id"]
+    assert explicit_camel["contract"] == baseline["contract"]
+    assert explicit_camel["contract"]["widget_id"] == "unsafe-html"
+    assert current_camel["ok"] is True
+    assert current_camel["active_space_id"] == created["space_id"]
+    assert current_camel["contract"] == baseline["contract"]
+    assert positional["contract"] == baseline["contract"]
+    assert "capy:raw:eval" in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+    with pytest.raises(ValueError, match="Invalid widget_id"):
+        spaces.run_space_tool(
+            "space.current.widget.runtime_contract",
+            {"activeSpaceId": created["space_id"], "widgetId": "../escape"},
+        )
+
+
 def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-alias-lab", "name": "Widget Alias Lab"})

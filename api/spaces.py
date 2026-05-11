@@ -3236,8 +3236,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": list_widget_events(space_id, widget_id, data.get("limit", 5)),
         }
     if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
-        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         widget = read_widget(space_id, widget_id)
         return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
     if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:

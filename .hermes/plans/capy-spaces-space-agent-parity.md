@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Full-Space rollback now preserves explicit recovery/admin widget quarantine state while restoring older safe widget metadata, so time-travel cannot silently re-enable disabled generated widgets; explicit recovery enable controls remain the only way to clear quarantine. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Runtime-contract tool aliases now accept Space Agent-style camelCase `spaceId`/`activeSpaceId` + `widgetId` payloads and positional widget args through the shared safe ID resolvers, while preserving metadata-only sandbox contract summaries. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): accept runtime contract widgetId aliases`
+  - Added RED/GREEN backend coverage proving `space.widget.runtime_contract`, `space.current.widget.runtime_contract`, and `widget.runtime_contract` accept Space Agent-style camelCase/positional selectors while continuing to reject unsafe widget IDs and omit renderer/source/API-auth markers plus secret-looking sentinels from serialized contract responses.
+  - Hardened the runtime-contract tool branch to reuse `_space_tool_current_id(...)` and `_space_tool_widget_id(...)`, matching adjacent widget read/see aliases instead of requiring snake_case selectors.
+  - Validation at completion: focused RED failed with `Invalid space_id`; focused GREEN passed (`1 passed`); targeted runtime/widget alias regressions passed (`3 passed`); full Spaces foundation suite passed (`231 passed`); Spaces UI behavior + demo parity suites passed (`149 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static runtime-contract harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_866e421e2ee547b9a4f7b7e3ff89e662.png`.
 
 - `fix(spaces): preserve quarantine on full rollback`
   - Added RED/GREEN backend coverage proving `restore_revision(...)` restores older safe widget title/layout metadata while preserving the trusted current `recovery.disabled` / `disabled_reason` envelope until the explicit enable recovery control runs.
