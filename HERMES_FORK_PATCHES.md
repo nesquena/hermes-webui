@@ -49,7 +49,9 @@ When upstream rebases, conflicts only ever land inside these blocks. Resolve
 
 | Line | Marker | Purpose |
 |---|---|---|
-| `660` | `first-class providers (HermesOS Cloud)` | Add Venice / CrofAI / Bankr / Xiaomi MiMo to `_PROVIDER_DISPLAY` |
+| `660` | `first-class providers (HermesOS Cloud)` | Add Venice / CrofAI / Bankr / Xiaomi MiMo / CometAPI to `_PROVIDER_DISPLAY` |
+| `~668` | `built-in base-URL → canonical-slug map (HermesOS Cloud)` | `_BUILTIN_BASE_URL_PROVIDERS` table + `_builtin_provider_slug_for_base_url()` helper. Substring-match on hostname so `https://api.crof.ai/v1` and `https://crof.ai/v1` both resolve to slug `crof`. Covers crof/venice/bankr/cometapi/openrouter/anthropic/openai/groq/deepseek/minimax/moonshot/together/fireworks. |
+| `~897` | `built-in base-URL fallback (HermesOS Cloud)` | `_named_custom_provider_slug_for_base_url()` consults the built-in table AFTER the config.yaml lookup misses, so users hitting a known aggregator endpoint via `OPENAI_BASE_URL=…` auto-get the friendly group name in the dropdown — no `custom_providers:` block required in YAML. |
 | `1079` | `first-class providers (HermesOS Cloud)` | Empty model lists (placeholder keys in `_PROVIDER_MODELS`; live fetch is source of truth) |
 
 ### `api/providers.py`

@@ -662,8 +662,59 @@ _PROVIDER_DISPLAY = {
     "crof": "CrofAI",
     "bankr": "Bankr",
     "xiaomi": "Xiaomi MiMo",
+    "cometapi": "CometAPI",
     # <<< hermes-fork
 }
+
+# >>> hermes-fork: built-in base-URL → canonical-slug map (HermesOS Cloud)
+#
+# Without this table, any user pointing OPENAI_BASE_URL at a known
+# OpenAI-compatible aggregator (CrofAI, CometAPI, Venice, etc.) sees their
+# entire model list labelled "Custom" in the picker AND every model row
+# tagged with the generic "Custom" chip — because the upstream slug-resolver
+# only looks at config.yaml's `custom_providers:` entries. Users would have
+# to hand-write a custom_providers block in YAML to get a friendly name.
+#
+# This table is the auto-detect fallback consulted AFTER the config.yaml
+# lookup misses. Hostnames are normalised to lowercase and matched against
+# the substring of the request URL's netloc (so "api.crof.ai" and "crof.ai"
+# both hit the "crof" entry, no per-subdomain enumeration needed).
+#
+# Keys are substrings; values must be a canonical id present in
+# _PROVIDER_DISPLAY above so the group inherits a friendly display name.
+_BUILTIN_BASE_URL_PROVIDERS = (
+    ("crof.ai",              "crof"),
+    ("venice.ai",            "venice"),
+    ("bankr.com",            "bankr"),
+    ("cometapi.com",         "cometapi"),
+    ("openrouter.ai",        "openrouter"),
+    ("api.anthropic.com",    "anthropic"),
+    ("api.openai.com",       "openai"),
+    ("api.groq.com",         "groq"),
+    ("api.deepseek.com",     "deepseek"),
+    ("api.minimaxi.com",     "minimax"),
+    ("api.moonshot.cn",      "kimi-coding"),
+    ("api.together.xyz",     "together"),
+    ("api.fireworks.ai",     "fireworks"),
+)
+
+
+def _builtin_provider_slug_for_base_url(base_url: object) -> str:
+    """Resolve a base_url to a canonical provider slug using the built-in
+    aggregator dictionary. Returns "" if no entry matches.
+
+    Substring match against the URL's host so "https://api.crof.ai/v1" and
+    "https://crof.ai/v1" both resolve to "crof".
+    """
+    target = _normalize_base_url_for_match(base_url)
+    if not target:
+        return ""
+    target_lower = target.lower()
+    for hostname_fragment, slug in _BUILTIN_BASE_URL_PROVIDERS:
+        if hostname_fragment in target_lower:
+            return slug
+    return ""
+# <<< hermes-fork
 
 # Provider alias → canonical slug.  Users configure providers using the
 # dotted/hyphenated form they see on the provider website (``z.ai``,
@@ -902,6 +953,15 @@ def _named_custom_provider_slug_for_base_url(
         if entry_base_url != target:
             continue
         return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+    # >>> hermes-fork: built-in base-URL fallback (HermesOS Cloud)
+    #     Auto-rename "Custom" to a known aggregator slug (crof, venice,
+    #     bankr, cometapi, …) when the user hasn't bothered to write a
+    #     custom_providers: block in config.yaml. See
+    #     _BUILTIN_BASE_URL_PROVIDERS above for the full table.
+    builtin = _builtin_provider_slug_for_base_url(base_url)
+    if builtin:
+        return builtin
+    # <<< hermes-fork
     return ""
 
 
