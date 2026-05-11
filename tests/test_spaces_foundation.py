@@ -9845,6 +9845,7 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
         {"event_name": "agent.prompt", "payload": {"message_type": "capy:asset:url", "query": "fetch asset"}},
         {"event_name": "agent.prompt", "payload": {"type": "capy:raw:SECRET_VALUE_DO_NOT_LEAK"}},
         {"event_name": "capy:raw:eval", "payload": {"renderer": "<script>steal()</script>"}},
+        {"event_name": "agent.prompt", "payload": {"message_type": "capy:debug:dump", "query": "safe prompt"}},
     ):
         with pytest.raises(ValueError, match="runtime contract"):
             spaces.queue_widget_event(
@@ -9863,7 +9864,7 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
             "widget_id": "sandbox",
             "event_name": "agent.prompt",
             "prompt": "Use bearer SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
-            "payload": {"message_type": "capy:data:put", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "payload": {"message_type": "capy:debug:dump", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
     events = spaces.list_widget_events(created["space_id"], "sandbox")
@@ -9878,6 +9879,7 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
+    assert "capy:debug:dump" not in serialized
 
 
 def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeypatch, tmp_path):

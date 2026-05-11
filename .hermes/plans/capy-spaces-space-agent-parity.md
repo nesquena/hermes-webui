@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Runtime-contract tool aliases now accept Space Agent-style camelCase `spaceId`/`activeSpaceId` + `widgetId` payloads and positional widget args through the shared safe ID resolvers, while preserving metadata-only sandbox contract summaries. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Backend sandbox/postMessage event queueing now enforces the published runtime contract allowlist and rejects unknown/unlisted `capy:*` message types such as `capy:debug:dump` before recording metadata-only widget events. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject unknown sandbox messages`
+  - Added RED/GREEN backend coverage proving an unlisted runtime message type (`capy:debug:dump`) is rejected through both direct `queue_widget_event(...)` and `/api/spaces/widget/event`, while the already-advertised `capy:agent:prompt` path remains queueable and rejected route responses/events omit renderer/source/API-auth markers plus secret-looking sentinels.
+  - Hardened the runtime-contract gate by centralizing the advertised allowlist (`capy:ready`, `capy:resize`, `capy:agent:prompt`) and rejecting every detected `capy:*` event/payload discriminator that is not explicitly allowed, before any widget event is persisted.
+  - Validation at completion: focused RED failed with `Failed: DID NOT RAISE <class 'ValueError'>`; focused GREEN passed (`1 passed`); targeted runtime/widget contract regressions passed (`3 passed`); full Spaces foundation suite passed (`231 passed`); Spaces UI behavior + demo parity suites passed (`149 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static runtime-contract backend harness leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_637c1b8e5b9945c6a2ace8473b3078b3.png`.
 
 - `fix(spaces): accept runtime contract widgetId aliases`
   - Added RED/GREEN backend coverage proving `space.widget.runtime_contract`, `space.current.widget.runtime_contract`, and `widget.runtime_contract` accept Space Agent-style camelCase/positional selectors while continuing to reject unsafe widget IDs and omit renderer/source/API-auth markers plus secret-looking sentinels from serialized contract responses.

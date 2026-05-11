@@ -232,6 +232,8 @@ def validate_event_name(event_name: str) -> str:
 
 
 _RUNTIME_MESSAGE_TYPE_RE = re.compile(r"^capy:[a-z0-9:._-]+$", re.IGNORECASE)
+_ALLOWED_RUNTIME_MESSAGE_TYPES = ("capy:ready", "capy:resize", "capy:agent:prompt")
+_ALLOWED_RUNTIME_MESSAGE_TYPE_SET = frozenset(_ALLOWED_RUNTIME_MESSAGE_TYPES)
 
 
 def _runtime_message_type_value(value: Any) -> str:
@@ -248,6 +250,11 @@ def _is_blocked_runtime_message_type(message_type: str) -> bool:
         or bool(re.match(r"^capy:eval(?::|$)", text))
         or bool(re.match(r"^capy:data:(get|put|patch|post|set|delete|remove|merge|write|mutate)$", text))
     )
+
+
+def _is_allowed_runtime_message_type(message_type: str) -> bool:
+    text = str(message_type or "").strip().lower()
+    return text in _ALLOWED_RUNTIME_MESSAGE_TYPE_SET
 
 
 def _payload_runtime_message_type(payload: dict[str, Any]) -> str:
@@ -269,7 +276,9 @@ def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict
     event_type = _runtime_message_type_value(event_name)
     payload_type = _payload_runtime_message_type(payload)
     for message_type in (event_type, payload_type):
-        if _is_blocked_runtime_message_type(message_type):
+        if message_type and (
+            _is_blocked_runtime_message_type(message_type) or not _is_allowed_runtime_message_type(message_type)
+        ):
             raise ValueError("Blocked by widget runtime contract")
 
 
@@ -900,7 +909,7 @@ def _widget_runtime_contract_summary(widget: dict[str, Any]) -> dict[str, Any]:
         "mode": "sandbox-contract-draft",
         "widget_id": clean_widget["id"],
         "execution": "generated-code-disabled",
-        "allowed_messages": ["capy:ready", "capy:resize", "capy:agent:prompt"],
+        "allowed_messages": list(_ALLOWED_RUNTIME_MESSAGE_TYPES),
         "blocked_messages": [
             "capy:raw:eval",
             "capy:data:put",
