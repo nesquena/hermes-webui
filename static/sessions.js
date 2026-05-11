@@ -283,10 +283,20 @@ function _markSessionCompletedInList(session, previousSid = null) {
   };
   _sessionStreamingById.set(finalSid, false);
   _forgetObservedStreamingSession(finalSid);
+  // Clear stale INFLIGHT cache for completed sessions that were not the
+  // active pane when the stream ended — otherwise _isSessionLocallyStreaming
+  // keeps returning true and the sidebar spinner sticks forever (#2066).
+  if (typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[finalSid]) {
+    delete INFLIGHT[finalSid];
+    if (typeof clearInflightState === 'function') clearInflightState(finalSid);
+  }
   if (previousSid && previousSid !== finalSid) {
     _sessionStreamingById.delete(previousSid);
     _forgetObservedStreamingSession(previousSid);
     _sessionListSnapshotById.delete(previousSid);
+    if (typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[previousSid]) {
+      delete INFLIGHT[previousSid];
+    }
   }
   _sessionListSnapshotById.set(finalSid, {
     message_count: messageCount,
