@@ -28,9 +28,9 @@ class TestRunCronTrackedImport:
     """_run_cron_tracked must be self-contained — it runs in a worker thread."""
 
     def test_run_job_imported_inside_function(self):
-        """run_job must be imported inside _run_cron_tracked, not relied on
+        """run_job must be imported inside the subprocess target, not relied on
         from a caller's local scope."""
-        src = _get_function_source("_run_cron_tracked")
+        src = _get_function_source("_cron_job_subprocess_main")
         tree = ast.parse(src)
         names_used = set()
 
@@ -86,7 +86,12 @@ class TestRunCronTrackedImport:
             "_run_cron_tracked to avoid the NameError in worker threads."
         )
 
-    def test_run_cron_tracked_calls_run_job(self):
-        """Sanity: the function still actually calls run_job."""
+    def test_run_cron_tracked_calls_run_job_helper(self):
+        """Sanity: the function still delegates to the cron job runner."""
         src = _get_function_source("_run_cron_tracked")
-        assert "run_job" in src, "_run_cron_tracked should call run_job"
+        assert "_run_cron_job_in_profile_subprocess" in src
+
+    def test_cron_subprocess_target_calls_run_job(self):
+        """Sanity: the subprocess target still actually calls run_job."""
+        src = _get_function_source("_cron_job_subprocess_main")
+        assert "run_job" in src, "cron subprocess target should call run_job"

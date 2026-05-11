@@ -7,9 +7,9 @@ patterns for pre-installed uv and workspace permission fixes.
 Two problems fixed:
 1. uv was downloaded at container startup; fails in air-gapped / firewalled environments.
    Fix: pre-install uv in the Docker image at build time (system-wide in /usr/local/bin).
-2. workspace directory created with plain mkdir (as root); bind-mount dirs created by
-   Docker as root are unwritable by the hermeswebui user.
-   Fix: sudo mkdir + sudo chown for workspace directory.
+2. workspace directory setup must happen before the server drops privileges;
+   bind-mount dirs created by Docker as root are unwritable by hermeswebui.
+   Fix: root init mkdir/chown, then runtime verifies access without sudo.
 """
 import pathlib
 import re
@@ -133,57 +133,60 @@ class TestInitScriptUvSkip:
 
 class TestWorkspacePermissions:
 
-    def test_workspace_uses_sudo_mkdir(self):
-        """docker_init.bash must use 'sudo mkdir' for the workspace directory.
+    def test_workspace_uses_root_init_mkdir(self):
+        """docker_init.bash must create missing workspaces during root init.
 
         Docker auto-creates bind-mount directories as root if they don't exist,
-        leaving them unwritable by hermeswebui. sudo mkdir + chown fixes this.
+        leaving them unwritable by hermeswebui. The production image no longer
+        ships sudo, so root init handles mkdir before dropping privileges.
         """
-        # Find the workspace section
-        ws_section = INIT_SCRIPT[
-            INIT_SCRIPT.find("HERMES_WEBUI_DEFAULT_WORKSPACE"):
-            INIT_SCRIPT.find("HERMES_WEBUI_DEFAULT_WORKSPACE") + 800
+        root_section = INIT_SCRIPT[
+            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then'):
+            INIT_SCRIPT.find('exec su')
         ]
-        assert "sudo mkdir" in ws_section, (
-            "docker_init.bash must use 'sudo mkdir -p' for the workspace directory "
-            "to handle the case where Docker created the bind-mount dir as root (#357)"
+        assert 'mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in root_section, (
+            "docker_init.bash must mkdir the workspace during root init "
+            "to handle Docker-created bind-mount dirs (#357)"
         )
 
-    def test_workspace_uses_sudo_chown(self):
-        """docker_init.bash must chown the workspace to hermeswebui when writable.
+    def test_workspace_uses_root_init_chown(self):
+        """docker_init.bash must chown the workspace before dropping privileges.
 
-        The chown is now conditional on the workspace being writable, to allow
-        read-only (:ro) workspace mounts without crashing (#670). The sudo chown
-        must still be present in the script (just guarded by [ -w ]).
+        The server runtime does not have sudo; the privileged init phase may
+        chown writable bind mounts, while read-only mounts continue with a warning.
         """
-        assert 'sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in INIT_SCRIPT, (
-            "docker_init.bash must 'sudo chown hermeswebui:hermeswebui' the workspace "
-            "when it is writable, so the app user can write to it (#357)"
+        root_section = INIT_SCRIPT[
+            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then'):
+            INIT_SCRIPT.find('exec su')
+        ]
+        assert 'chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in root_section, (
+            "docker_init.bash must chown the workspace during root init "
+            "so the app user can write to it when possible (#357)"
         )
 
     def test_workspace_mkdir_before_chown(self):
-        """sudo mkdir must come before sudo chown in docker_init.bash."""
-        mkdir_pos = INIT_SCRIPT.find('sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
-        chown_pos = INIT_SCRIPT.find('sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
-        assert mkdir_pos != -1, "sudo mkdir for workspace not found"
-        assert chown_pos != -1, "sudo chown for workspace not found"
-        assert mkdir_pos < chown_pos, "sudo mkdir must come before sudo chown"
+        """Root init mkdir must come before root init chown in docker_init.bash."""
+        mkdir_pos = INIT_SCRIPT.find('mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
+        chown_pos = INIT_SCRIPT.find('chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
+        assert mkdir_pos != -1, "root init mkdir for workspace not found"
+        assert chown_pos != -1, "root init chown for workspace not found"
+        assert mkdir_pos < chown_pos, "root init mkdir must come before root init chown"
 
     def test_workspace_error_exit_on_mkdir_failure(self):
-        """sudo mkdir must call error_exit on failure."""
-        assert 'sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit' in INIT_SCRIPT, (
-            "sudo mkdir for workspace must call error_exit on failure"
+        """Root init mkdir must call error_exit on failure."""
+        assert 'mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit' in INIT_SCRIPT, (
+            "workspace mkdir must call error_exit on failure"
         )
 
-    def test_workspace_chown_is_conditional_on_writable(self):
-        """chown and write-test must be skipped for read-only workspace mounts (#670).
+    def test_workspace_write_test_is_conditional_on_writable(self):
+        """Write-test must be skipped for read-only workspace mounts (#670).
 
-        The script must check [ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ] before
-        attempting chown or a write test, so :ro bind-mounts don't crash startup.
+        The runtime phase must check [ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ] before
+        attempting a write test, so :ro bind-mounts don't crash startup.
         """
         assert '[ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]' in INIT_SCRIPT, (
-            "docker_init.bash must guard chown with [ -w ] to support read-only "
-            "workspace mounts (:ro) without crashing (#670)"
+            "docker_init.bash must guard the workspace write-test with [ -w ] "
+            "to support read-only workspace mounts (:ro) without crashing (#670)"
         )
         # Read-only path must log a clear message rather than calling error_exit
         assert "read-only workspace is supported" in INIT_SCRIPT, (

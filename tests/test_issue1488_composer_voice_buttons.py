@@ -41,9 +41,11 @@ class TestComposerVoiceButtonHTML:
         assert 'data-i18n-title="voice_dictate"' in tag, \
             "btnMic must have data-i18n-title=\"voice_dictate\" — without " \
             "it the tooltip stays as the static fallback and ignores locale."
-        # Static fallback should also match (read by users with stale i18n)
-        assert 'title="Dictate"' in tag, \
-            "btnMic static title fallback must say 'Dictate' (not 'Voice input')."
+        # Static fallback should also match (read by users with stale i18n).
+        # Accept either the legacy `title="Dictate"` or the custom-tooltip
+        # variant `data-tooltip="Dictate"` introduced in #1775.
+        assert 'title="Dictate"' in tag or 'data-tooltip="Dictate"' in tag, \
+            "btnMic static tooltip fallback must say 'Dictate' (not 'Voice input')."
 
     def test_voice_mode_button_has_voice_mode_i18n_key(self):
         """btnVoiceMode must bind data-i18n-title="voice_mode_toggle"."""
@@ -63,20 +65,27 @@ class TestComposerVoiceButtonHTML:
             "Stale voice_toggle reference still on btnVoiceMode — must be voice_mode_toggle."
 
     def test_buttons_have_distinct_static_titles(self):
-        """The static title attributes must differ as a fallback for users
-        whose i18n hasn't loaded yet (e.g. very early page load)."""
+        """The static title/tooltip attributes must differ as a fallback for
+        users whose i18n hasn't loaded yet (e.g. very early page load)."""
         html = _src("index.html")
         mic = re.search(r'<button[^>]*\bid="btnMic"[^>]*>', html, re.DOTALL)
         vm = re.search(r'<button[^>]*\bid="btnVoiceMode"[^>]*>', html, re.DOTALL)
         assert mic and vm
-        mic_title = re.search(r'\btitle="([^"]+)"', mic.group(0)).group(1)
-        vm_title = re.search(r'\btitle="([^"]+)"', vm.group(0)).group(1)
+        # Accept either `title=` (legacy) or `data-tooltip=` (custom tooltip
+        # introduced in #1775) as the static fallback string.
+        def _static_tooltip(tag: str) -> str:
+            m = re.search(r'\bdata-tooltip="([^"]+)"', tag) \
+                or re.search(r'\btitle="([^"]+)"', tag)
+            assert m, f"no static tooltip on {tag[:120]}"
+            return m.group(1)
+        mic_title = _static_tooltip(mic.group(0))
+        vm_title = _static_tooltip(vm.group(0))
         assert mic_title != vm_title, \
-            f"Static titles must differ; both say {mic_title!r}"
+            f"Static tooltips must differ; both say {mic_title!r}"
         assert "voice input" not in mic_title.lower(), \
-            f"btnMic static title still says 'Voice input': {mic_title!r}"
+            f"btnMic static tooltip still says 'Voice input': {mic_title!r}"
         assert "voice input" not in vm_title.lower(), \
-            f"btnVoiceMode static title still says 'Voice input': {vm_title!r}"
+            f"btnVoiceMode static tooltip still says 'Voice input': {vm_title!r}"
 
     def test_voice_mode_uses_audio_lines_glyph(self):
         """btnVoiceMode SVG must use the audio-lines (waveform) shape.

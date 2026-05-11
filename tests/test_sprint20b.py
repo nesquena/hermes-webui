@@ -54,11 +54,17 @@ def test_send_button_has_svg_icon():
 
 
 def test_send_button_has_title_attribute():
-    """btnSend must have a title attribute for accessibility (replaces text label)."""
+    """btnSend must have a tooltip for accessibility (replaces text label).
+
+    Accepts either the legacy `title=` attribute or the custom-tooltip
+    `data-tooltip=` attribute introduced in #1775 (faster ~150ms display
+    vs the native ~1.5s delay)."""
     html, _ = get_text("/")
     btn_match = re.search(r'id="btnSend"[^>]*>', html)
     assert btn_match
-    assert 'title=' in btn_match.group(0)
+    tag = btn_match.group(0)
+    assert 'title=' in tag or 'data-tooltip=' in tag, \
+        "btnSend must have a tooltip (native title= or custom data-tooltip= per #1775)"
 
 
 def test_send_button_svg_arrow_up():
@@ -317,7 +323,10 @@ def test_auto_resize_calls_update_send_btn():
 def test_send_button_still_has_send_btn_class():
     """btnSend must still carry class='send-btn' for CSS targeting."""
     html, _ = get_text("/")
-    assert 'class="send-btn"' in html
+    # Tolerate additional utility classes (e.g. has-tooltip from #1775).
+    import re
+    assert re.search(r'class="[^"]*\bsend-btn\b[^"]*"', html), \
+        "btnSend must still carry the 'send-btn' class for CSS targeting"
 
 
 def test_ui_js_set_busy_calls_update_send_btn():

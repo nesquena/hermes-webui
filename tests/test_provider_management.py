@@ -161,6 +161,56 @@ class TestGetProviders:
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
 
+    def test_openai_codex_provider_card_prefers_live_catalog(self, monkeypatch, tmp_path):
+        """OpenAI Codex provider cards should not advertise stale static fallback models.
+
+        /api/models already uses hermes_cli/Codex cache discovery for Codex.  The
+        provider card should share that source order so rejected stale entries
+        such as gpt-5.5-mini are not presented as currently available when the
+        live account catalog excludes them (#1807).
+        """
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        fake_models = sys.modules["hermes_cli.models"]
+        fake_models.provider_model_ids = lambda pid: (
+            ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"]
+            if pid == "openai-codex"
+            else []
+        )
+        codex_home = tmp_path / "empty-codex-home"
+        codex_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "openai-codex", "default": "gpt-5.5"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+        try:
+            result = get_providers()
+            codex = next(p for p in result["providers"] if p["id"] == "openai-codex")
+            model_ids = [m["id"] for m in codex["models"]]
+            assert model_ids == [
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.2",
+            ]
+            assert "gpt-5.5-mini" not in model_ids
+            assert codex["models_total"] == len(model_ids)
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+
 
 class TestSetProviderKey:
     """Unit tests for set_provider_key() function."""
@@ -296,6 +346,42 @@ class TestSetProviderKey:
 
 class TestRemoveProviderKey:
     """Unit tests for remove_provider_key() wrapper."""
+
+    def test_clean_provider_key_uses_late_bound_config_path(self, monkeypatch, tmp_path):
+        """Config cleanup must honor api.config._get_config_path monkeypatches.
+
+        PR #1597 fixed provider-key cleanup by resolving the config path through
+        the api.config module at call time. If the implementation goes back to
+        the function imported into api.providers at module load, this test cleans
+        stale_config instead of active_config.
+        """
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        stale_config = tmp_path / "stale-config.yaml"
+        active_config = tmp_path / "active-config.yaml"
+        stale_config.write_text(
+            "providers:\n  openai:\n    api_key: stale-secret\n",
+            encoding="utf-8",
+        )
+        active_config.write_text(
+            "providers:\n  openai:\n    api_key: active-secret\nmodel:\n  provider: openai\n  api_key: active-model-secret\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(providers, "_get_config_path", lambda: stale_config, raising=False)
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: active_config)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("openai")
+
+        stale = yaml.safe_load(stale_config.read_text(encoding="utf-8"))
+        active = yaml.safe_load(active_config.read_text(encoding="utf-8"))
+        assert stale["providers"]["openai"]["api_key"] == "stale-secret"
+        assert "api_key" not in active["providers"]["openai"]
+        assert active["model"] == {"provider": "openai"}
 
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""

@@ -235,6 +235,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
+    def test_media_allowed_roots_env_var_referenced(self):
+        """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("MEDIA_ALLOWED_ROOTS", routes_src,
+                      "MEDIA_ALLOWED_ROOTS env var must be parsed in _handle_media")
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
@@ -326,6 +332,39 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertEqual(status, 206)
             self.assertEqual(body, b"RIFF")
             self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_html_media_endpoint_inline_requires_csp_sandbox(self):
+        """HTML opens inline only when requested and always carries CSP sandbox."""
+        html_bytes = b"<!doctype html><title>Hermes</title><script>window.ok=1</script>"
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(html_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("attachment", headers.get("Content-Disposition", ""))
+            self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
+            self.assertFalse(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get_all("X-Frame-Options", []), [])
+            self.assertTrue(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 

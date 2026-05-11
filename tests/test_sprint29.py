@@ -522,6 +522,12 @@ class TestSkillsPathTraversal:
         # Should succeed (200) or need auth (401/403) — not path error (400)
         assert status in (200, 401, 403, 404), \
             f"Valid skill save got unexpected status {status}: {body}"
+        # Clean up the saved skill so it doesn't pollute later tests'
+        # SKILLS_DIR enumeration (sprint3 skills tests in particular).
+        try:
+            post("/api/skills/delete", {"name": "test-security-skill"})
+        except Exception:
+            pass
 
 
 # ── 8. Content-Disposition for Dangerous MIME Types ───────────────────────

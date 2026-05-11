@@ -457,14 +457,14 @@ class TestCancelInProgressGuard:
 
 
 class TestEmptyMessagesGuard:
-    """_apply_core_sync_or_error_marker bails out when session.messages is
-    non-empty, preventing it from clobbering in-memory mutations made by the
-    streaming thread or cancel path."""
+    """_apply_core_sync_or_error_marker preserves existing messages when
+    session.messages is non-empty, while still recovering the pending user turn
+    before clearing stale stream runtime fields."""
 
     def test_pending_cleared_when_messages_nonempty_direct(self, hermes_home, monkeypatch):
         """When _apply_core_sync_or_error_marker is called on a session with
-        non-empty messages and pending set, it clears the pending fields and
-        appends an error marker, returning True."""
+        non-empty messages and pending set, it recovers the pending user turn,
+        clears the pending fields, and appends an error marker."""
         s = _make_session(messages=[{"role": "user", "content": "hello"}])
         s.pending_user_message = "Another question"
         s.active_stream_id = "stream_1"
@@ -477,11 +477,14 @@ class TestEmptyMessagesGuard:
             )
 
         assert result is True
-        # Original message should be untouched
-        assert len(s.messages) == 2  # original + error marker
+        # Original message should be untouched, pending turn recovered, then marker appended
+        assert len(s.messages) == 3  # original + recovered user turn + error marker
         assert s.messages[0]["content"] == "hello"
+        assert s.messages[1]["role"] == "user"
+        assert s.messages[1]["content"] == "Another question"
+        assert s.messages[1].get("_recovered") is True
         # Error marker appended
-        assert s.messages[1].get("_error") is True
+        assert s.messages[2].get("_error") is True
         # Pending fields cleared
         assert s.pending_user_message is None
         assert s.active_stream_id is None
@@ -517,13 +520,13 @@ class TestEmptyMessagesGuard:
 
 class TestNonEmptyMessagesPendingCleared:
     """When messages is non-empty and pending is stuck, _last_resort_sync_from_core
-    clears the pending fields and appends exactly one error marker without
-    clobbering existing messages or syncing from core."""
+    preserves existing messages, recovers the pending user turn, and appends
+    exactly one error marker without syncing from core."""
 
     def test_pending_cleared_when_messages_nonempty(self, hermes_home, monkeypatch):
         """_last_resort_sync_from_core on a session with both messages and
-        pending_user_message clears pending fields and appends exactly one
-        error marker."""
+        pending_user_message recovers that pending turn before clearing runtime
+        fields and appending exactly one error marker."""
         s = _make_session(messages=[{"role": "user", "content": "existing turn"}])
         s.pending_user_message = "Stuck draft"
         s.pending_attachments = [{"type": "image", "name": "screenshot.png"}]
@@ -543,9 +546,9 @@ class TestNonEmptyMessagesPendingCleared:
 
         streaming._last_resort_sync_from_core(s, "stale_stream", agent_lock)
 
-        # Existing messages preserved untouched
-        assert len(s.messages) == 2, (
-            f"Expected 2 messages (original + error marker), got {len(s.messages)}"
+        # Existing messages preserved untouched, pending turn recovered, error marker appended
+        assert len(s.messages) == 3, (
+            f"Expected 3 messages (original + recovered turn + error marker), got {len(s.messages)}"
         )
         assert s.messages[0]["role"] == "user"
         assert s.messages[0]["content"] == "existing turn"
@@ -553,14 +556,17 @@ class TestNonEmptyMessagesPendingCleared:
             "Core transcript must NOT be synced when messages is non-empty"
         )
 
+        # Exactly one recovered user turn
+        recovered_msgs = [m for m in s.messages if m.get("_recovered")]
+        assert len(recovered_msgs) == 1
+        assert recovered_msgs[0]["role"] == "user"
+        assert recovered_msgs[0]["content"] == "Stuck draft"
+        assert recovered_msgs[0]["attachments"] == [{"type": "image", "name": "screenshot.png"}]
+
         # Exactly one error marker
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
         assert "Previous turn did not complete" in error_msgs[0]["content"]
-
-        # No recovered user turn (messages is non-empty, so skip that)
-        recovered_msgs = [m for m in s.messages if m.get("_recovered")]
-        assert len(recovered_msgs) == 0
 
         # Pending fields fully cleared
         assert s.pending_user_message is None
@@ -719,14 +725,18 @@ class TestRepairStalePendingIntegration:
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
 
-    def test_skips_when_messages_nonempty(self, hermes_home, monkeypatch):
-        """Pre-check: if messages is non-empty, repair is skipped entirely."""
+    def test_recovers_when_messages_nonempty(self, hermes_home, monkeypatch):
+        """Pre-check: if messages is non-empty, repair still preserves the
+        pending user turn instead of silently discarding it."""
         s = _make_session(messages=[{"role": "user", "content": "hi"}])
         s.pending_user_message = "more"
         s.active_stream_id = "stream_1"
 
         result = _repair_stale_pending(s)
-        assert result is False
+        assert result is True
+        assert [m["content"] for m in s.messages if m["role"] == "user"] == ["hi", "more"]
+        assert s.messages[1].get("_recovered") is True
+        assert any(m.get("_error") for m in s.messages)
 
     def test_skips_when_stream_alive(self, hermes_home, monkeypatch):
         """Pre-check: if the stream is still alive in STREAMS, repair is skipped."""

@@ -6,7 +6,7 @@ Verifies:
   3. Frontend /branch slash command is registered
   4. forkFromMessage function exists in commands.js
   5. Fork button (git-branch icon) is rendered in ui.js message actions
-  6. Parent session indicator (⑂) is rendered in sessions.js sidebar
+  6. Parent session indicator uses a subtle git-branch icon in sessions.js sidebar
   7. i18n keys exist for all branch-related strings
   8. git-branch icon exists in icons.js
 """
@@ -68,6 +68,32 @@ def test_branch_creates_session_with_parent():
         "Branch handler should set parent_session_id to source session"
 
 
+def test_branch_marks_explicit_forks_as_fork_sessions():
+    """Explicit branches must not be mistaken for compression lineage rows."""
+    with open('api/routes.py') as f:
+        src = f.read()
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match
+    block = branch_match.group(1)
+    assert 'session_source="fork"' in block, \
+        "Branch handler should mark explicit forks with session_source='fork'"
+
+
+def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
+    """Forks remain selectable rows even if their parent is not in the current list."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    fn = re.search(r'function _sessionLineageKey\(.*?\n\}', src, re.DOTALL)
+    assert fn, "Could not find _sessionLineageKey"
+    block = fn.group(0)
+    assert "if(s.session_source==='fork') return null;" in block, \
+        "Explicit fork sessions should not collapse via parent_session_id"
+    assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+
+
 def test_branch_keep_count_support():
     """Verify the branch endpoint supports keep_count parameter."""
     with open('api/routes.py') as f:
@@ -115,11 +141,14 @@ def test_session_compact_includes_parent():
     """Verify compact() includes parent_session_id."""
     with open('api/models.py') as f:
         src = f.read()
-    # Use simpler search - find the compact method and check for parent_session_id after it
+    # Find the compact method and scan its full body for parent_session_id.
+    # PR #1591 (May 2026) added a has_pending_user_message recompute block at
+    # the top of compact() which pushed the parent_session_id field beyond a
+    # 1500-char window — widen the scan to 3000 chars to cover the full
+    # return-dict body without re-tightening every time compact() grows.
     compact_def_match = re.search(r"def compact\(self", src)
     assert compact_def_match, "Could not find compact() method"
-    # Check the next 1000 chars after def compact for parent_session_id
-    snippet = src[compact_def_match.start():compact_def_match.start() + 1500]
+    snippet = src[compact_def_match.start():compact_def_match.start() + 3000]
     assert "'parent_session_id'" in snippet, \
         "compact() should include parent_session_id"
 
@@ -225,12 +254,14 @@ def test_sidebar_parent_indicator():
         "sessions.js should check parent_session_id"
     assert 'session-branch-indicator' in src, \
         "Should have session-branch-indicator class"
-    assert '\\u2482' in src, \
-        "Should use ⑂ character for parent indicator"
+    assert "li('git-branch',12)" in src, \
+        "Sidebar parent indicator should use the git-branch icon"
+    assert '\\u2442' not in src, \
+        "Sidebar parent indicator should not use the opaque OCR double-backslash glyph"
 
 
-def test_parent_indicator_clickable():
-    """Verify parent indicator navigates to parent session on click."""
+def test_parent_indicator_not_clickable():
+    """Verify parent indicator is informational, not hidden navigation."""
     with open('static/sessions.js') as f:
         src = f.read()
     # Find the parent indicator block
@@ -240,8 +271,34 @@ def test_parent_indicator_clickable():
     )
     assert parent_block, "Could not find parent indicator block"
     block = parent_block.group(0)
-    assert 'loadSession(' in block, \
-        "Parent indicator should call loadSession on click"
+    assert 'loadSession(' not in block, \
+        "Parent indicator should not navigate to the parent from the sidebar"
+    assert 'onclick' not in block, \
+        "Parent indicator should not register a hidden click target"
+
+
+def test_parent_indicator_tooltip_uses_parent_title_fallback():
+    """Tooltip should prefer a parent title and only fall back to a short id."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    assert 'function _sessionTitleForForkParent' in src, \
+        "sessions.js should resolve a user-facing parent title"
+    assert 'function _truncatedSessionId' in src, \
+        "sessions.js should fall back to a truncated id, not raw session_id"
+    assert "_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id)" in src, \
+        "parent indicator tooltip must prefer title and fall back to truncated id"
+
+
+def test_parent_indicator_hover_only_style():
+    """The sidebar lineage indicator should be visually subdued until row hover/focus."""
+    with open('static/style.css') as f:
+        src = f.read()
+    assert '.session-branch-indicator' in src, \
+        "Missing session branch indicator CSS"
+    assert 'opacity:.35' in src, \
+        "Fork lineage indicator should be subdued at rest"
+    assert '.session-item:hover .session-branch-indicator' in src, \
+        "Fork lineage indicator should become visible on row hover"
 
 
 # ── Frontend: i18n keys ────────────────────────────────────────────────────────

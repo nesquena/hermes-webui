@@ -7,23 +7,30 @@ UI_JS = os.path.join(os.path.dirname(__file__), '..', 'static', 'ui.js')
 
 
 def _extract_js_functions():
-    """Extract esc and _renderUserFencedBlocks from ui.js by line numbers."""
-    lines = open(UI_JS).read().split('\n')
-    # esc is on line 52 (0-indexed: 51)
-    esc_def = lines[51]
-    # _renderUserFencedBlocks starts at line 61 (0-indexed: 60)
-    # Find the end by matching closing brace at column 0
-    fn_lines = []
-    i = 60  # 0-indexed
-    depth = 0
-    while i < len(lines):
-        fn_lines.append(lines[i])
-        depth += lines[i].count('{') - lines[i].count('}')
-        if depth <= 0:
-            break
+    """Extract esc, fence helpers, and _renderUserFencedBlocks from ui.js."""
+    src = open(UI_JS).read()
+
+    def extract_function(name):
+        start = src.find(f"function {name}(")
+        if start < 0:
+            raise AssertionError(f"{name} not found in ui.js")
+        i = src.find("{", start)
+        depth = 1
         i += 1
-    fn_def = '\n'.join(fn_lines)
-    return esc_def, fn_def
+        while i < len(src) and depth:
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+            i += 1
+        return src[start:i]
+
+    esc_line = next(line for line in src.split("\n") if line.startswith("const esc="))
+    helper_defs = "\n".join(
+        extract_function(name)
+        for name in ("_matchBacktickFenceLine", "_isBacktickFenceClose", "_renderUserFencedBlocks")
+    )
+    return esc_line, helper_defs
 
 
 def _run_user_render(text_input):
@@ -115,6 +122,16 @@ class TestUserFencedBlocks:
         out = _run_user_render("Check https://example.com for details")
         assert '<a ' not in out
         assert 'https://example.com' in out
+
+    def test_four_backtick_outer_fence_preserves_inner_triple_fence(self):
+        """User-message code fences should follow CommonMark fence-length matching too."""
+        out = _run_user_render("````md\n```inner\nfoo\n```\n````")
+        assert out.count("<pre>") == 1
+        assert out.count("</pre>") == 1
+        assert '<div class="pre-header">md</div>' in out
+        assert "```inner" in out
+        assert "foo" in out
+        assert "<br>````" not in out
 
     def test_inline_backticks_not_touched(self):
         """Inline backticks (single backtick, not fenced block) should remain escaped as text."""

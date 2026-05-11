@@ -61,27 +61,28 @@ def render_md(raw):
         fence_stash.append(m.group())
         return "\x00F" + str(len(fence_stash) - 1) + "\x00"
 
-    # Fence regex line-anchored to match JS fix for #1438 (allows empty fence)
-    s = re.sub(r"(?:^|\n)[ ]{0,3}```(?:[\s\S]*?\n)?[ ]{0,3}```(?=\n|$)|`[^`\n]+`", stash, s)
+    # Fence regex line-anchored to match JS fix for #1438 and fence-length fix for #1696
+    s = re.sub(r"(?:^|\n)[ ]{0,3}(`{3,})[^\n`]*\n(?:[\s\S]*?\n)?[ ]{0,3}\1`*(?=\n|$)|`[^`\n]+`", stash, s)
     s = re.sub(r"<strong>([\s\S]*?)</strong>", lambda m: "**" + m.group(1) + "**", s, flags=re.I)
     s = re.sub(r"<b>([\s\S]*?)</b>",           lambda m: "**" + m.group(1) + "**", s, flags=re.I)
     s = re.sub(r"<em>([\s\S]*?)</em>",          lambda m: "*"  + m.group(1) + "*",  s, flags=re.I)
     s = re.sub(r"<i>([\s\S]*?)</i>",            lambda m: "*"  + m.group(1) + "*",  s, flags=re.I)
     s = re.sub(r"<code>([^<]*?)</code>",         lambda m: "`"  + m.group(1) + "`",  s, flags=re.I)
     s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
-    # Glued-bold-heading lift (issue #1446) — must mirror static/ui.js position:
-    # after raw <pre> restore, before fence_stash restore. Lifts a sentence-glued
-    # bold "stub heading" out into its own paragraph when followed by a blank line.
+    # Glued-bold-heading lift (issue #1446) — must mirror static/ui.js behavior:
+    # protected code/pre placeholders stay hidden while a sentence-glued bold
+    # "stub heading" is lifted into its own paragraph when followed by a blank line.
     s = re.sub(r"([.!?])\*\*([^*\n]{1,80})\*\*\n\n", r"\1\n\n**\2**\n\n", s)
     s = re.sub(r"\x00F(\d+)\x00", lambda m: fence_stash[int(m.group(1))], s)
 
     # Fenced code blocks
     def fenced(m):
-        lang, code = m.group(1), (m.group(2) or "").rstrip("\n")
+        info, code = (m.group(2) or "").strip(), (m.group(3) or "").rstrip("\n")
+        lang = info.lower() if re.match(r"^\w[\w+-]*$", info) else ""
         h = f'<div class="pre-header">{esc(lang)}</div>' if lang else ""
         return h + "<pre><code>" + esc(code) + "</code></pre>"
-    # Fenced code blocks (line-anchored, fixes #1438; allows empty fence)
-    s = re.sub(r"(?:^|\n)[ ]{0,3}```([\w+-]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)", fenced, s)
+    # Fenced code blocks (line-anchored, fixes #1438; fence-length matching fixes #1696)
+    s = re.sub(r"(?:^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\1`*(?=\n|$)", fenced, s)
     s = re.sub(r"`([^`\n]+)`", lambda m: "<code>" + esc(m.group(1)) + "</code>", s)
 
     # Inline formatting (top-level, outside list items)
@@ -356,6 +357,52 @@ def test_render_md_fenced_code_protects_html(cleanup_test_sessions):
     # The raw content should still be present (stash/restore worked)
     assert "<strong>not bold</strong>" in out or "&lt;strong&gt;" in out, \
         "Fenced code content was lost after stash/restore"
+
+
+def test_render_md_fenced_code_with_five_backtick_outer_preserves_inner_triples(cleanup_test_sessions):
+    """CommonMark §4.5: a 5-backtick fence must not close at an inner triple fence."""
+    src = (
+        "- optionally also support fenced code blocks\n\n"
+        "`````md\n"
+        "`md\n"
+        "```novelcrafter\n"
+        "{#if novel.hasSeries}\n"
+        "...\n"
+        "{#endif}\n"
+        "```\n"
+        "`````\n\n"
+        "That is much more correct than pretending"
+    )
+    out = render_md(src)
+    assert out.count("<pre>") == 1
+    assert out.count("</pre>") == 1
+    assert '<div class="pre-header">md</div>' in out
+    assert "```novelcrafter" in out
+    assert "{#if novel.hasSeries}" in out
+    assert "That is much more correct than pretending" in out
+    assert "<p>`````" not in out
+    assert "<br>`````" not in out
+
+
+def test_render_md_fenced_code_with_four_backtick_outer_preserves_inner_triples(cleanup_test_sessions):
+    """A 4-backtick outer fence should also require a 4+ backtick closer."""
+    src = "````md\n```inner\nfoo\n```\n````\n"
+    out = render_md(src)
+    assert out.count("<pre>") == 1
+    assert out.count("</pre>") == 1
+    assert '<div class="pre-header">md</div>' in out
+    assert "```inner" in out
+    assert "foo" in out
+    assert "<p>````" not in out
+
+
+def test_render_md_fenced_code_three_backtick_path_still_renders_language(cleanup_test_sessions):
+    """The common 3-backtick path must keep rendering a single language-tagged block."""
+    src = "```js\nconsole.log('ok')\n```"
+    out = render_md(src)
+    assert out.count("<pre>") == 1
+    assert '<div class="pre-header">js</div>' in out
+    assert "console.log(&#39;ok&#39;)" in out or "console.log(&#x27;ok&#x27;)" in out
 
 
 # ── Security: XSS must be blocked ─────────────────────────────────────────────

@@ -207,6 +207,51 @@ class TestBusySendButton:
             "boot.js should wire btnSend to handleComposerPrimaryAction(), not directly to send()"
         )
 
+    def test_send_refreshes_primary_button_after_clearing_active_stream_id(self):
+        """send() must call updateSendBtn after resetting activeStreamId for a new turn.
+
+        getComposerPrimaryAction maps to Stop only when S.activeStreamId is set; after
+        nulling the id, btnSend must refresh so a stale Stop icon cannot linger until
+        the next composer input event.
+        """
+        send_start = MESSAGES_JS.find("async function send(")
+        assert send_start >= 0, "send() not found in messages.js"
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS={}", send_start)
+        assert send_end > send_start, "could not find end of send() body"
+        send_body = MESSAGES_JS[send_start:send_end]
+        marker = "S.activeStreamId = null;  // will be set after stream starts"
+        mpos = send_body.find(marker)
+        assert mpos >= 0, "send() must reset activeStreamId before chat/start"
+        window = send_body[mpos : mpos + 200]
+        assert "updateSendBtn" in window, (
+            "send() must call updateSendBtn() after clearing activeStreamId "
+            "so btnSend state matches the pending-start phase"
+        )
+
+    def test_send_refreshes_primary_button_after_chat_start_stream_id(self):
+        """send() must call updateSendBtn in the chat/start try block after assigning streamId.
+
+        setBusy(true) already ran updateSendBtn while activeStreamId was still null, so the
+        Stop affordance did not appear until something else (e.g. typing) called
+        updateSendBtn again.
+        """
+        send_start = MESSAGES_JS.find("async function send(")
+        assert send_start >= 0, "send() not found in messages.js"
+        send_end = MESSAGES_JS.find("const LIVE_STREAMS={}", send_start)
+        assert send_end > send_start, "could not find end of send() body"
+        send_body = MESSAGES_JS[send_start:send_end]
+        assign = "S.activeStreamId = streamId;"
+        apos = send_body.find(assign)
+        assert apos >= 0, "send() must assign S.activeStreamId from startData"
+        after_assign = send_body[apos:]
+        end_try = after_assign.find("  }catch(e){")
+        assert end_try > 0, "send() outer try/catch not found after stream id assign"
+        try_after_assign = after_assign[:end_try]
+        assert "updateSendBtn" in try_after_assign, (
+            "send() must call updateSendBtn() in the chat/start try block after assigning "
+            "streamId so the primary button switches to Stop without waiting for composer input"
+        )
+
 
 class TestSendBusyBranchDispatch:
     """send()'s busy block must read window._busyInputMode and branch accordingly."""

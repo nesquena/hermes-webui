@@ -47,6 +47,36 @@ def test_session_persists_model_context_separately_from_display_transcript(tmp_p
     assert _sanitize_messages_for_api(_session_context_messages(reloaded)) == compacted_context
 
 
+def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
+    previous_display = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    previous_context = list(previous_display)
+    compacted_result = [
+        {
+            "role": "assistant",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.",
+        },
+        {"role": "user", "content": "[Workspace: /home/manfred/.hermes/workspace]\nOk, mache weiter"},
+        {"role": "assistant", "content": "continuing"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        compacted_result,
+        "Ok, mache weiter",
+    )
+
+    assert [m["role"] for m in merged] == ["user", "assistant", "assistant", "user", "assistant"]
+    assert [m["content"] for m in merged[-2:]] == [
+        "Ok, mache weiter",
+        "continuing",
+    ]
+    assert sum(1 for m in merged if m.get("role") == "user" and "Ok, mache weiter" in m.get("content", "")) == 1
+
+
 def test_compacted_agent_result_keeps_old_prompts_and_appends_current_turn():
     previous_display = [
         {"role": "user", "content": "first prompt that must remain visible"},

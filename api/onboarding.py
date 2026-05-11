@@ -53,6 +53,8 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("anthropic", [])),
         "category": "easy_start",
+        "oauth_provider": "anthropic",
+        "oauth_label": "Claude Code OAuth",
     },
     "openai": {
         "label": "OpenAI",
@@ -137,6 +139,15 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("deepseek", [])),
         "category": "specialized",
     },
+    "xiaomi": {
+        "label": "Xiaomi MiMo",
+        "env_var": "XIAOMI_API_KEY",
+        "default_model": "mimo-v2.5-pro",
+        "default_base_url": "https://api.xiaomimimo.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("xiaomi", [])),
+        "category": "specialized",
+    },
     "zai": {
         "label": "Z.AI / GLM (智谱)",
         "env_var": "GLM_API_KEY",
@@ -185,8 +196,9 @@ _PROVIDER_CATEGORIES = [
 ]
 
 _UNSUPPORTED_PROVIDER_NOTE = (
-    "OAuth and advanced provider flows such as Nous Portal, OpenAI Codex, and GitHub "
-    "Copilot are still terminal-first. Use `hermes model` for those flows."
+    "Advanced provider flows such as Nous Portal and GitHub Copilot are still "
+    "terminal-first. OpenAI Codex and Anthropic Claude Code can be authenticated in this onboarding flow "
+    "when your Hermes config selects the corresponding provider."
 )
 
 
@@ -537,7 +549,7 @@ def _provider_api_key_present(
     # var names and can check os.environ for a valid key.
     # Exclude known OAuth/token-flow providers — those are handled separately by
     # _provider_oauth_authenticated() and should not be short-circuited here.
-    _known_oauth = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
+    _known_oauth = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous", "anthropic"}
     if provider not in _SUPPORTED_PROVIDER_SETUPS and provider not in _known_oauth:
         try:
             from hermes_cli.auth import get_auth_status as _gas
@@ -581,10 +593,11 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     used by current Hermes runtime auth resolution.
     """
     provider = (provider or "").strip().lower()
+    provider = {"claude": "anthropic", "claude-code": "anthropic"}.get(provider, provider)
     if not provider:
         return False
 
-    _known_oauth_providers = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
+    _known_oauth_providers = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous", "anthropic"}
     if provider not in _known_oauth_providers:
         return False
 
@@ -606,7 +619,16 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
         if isinstance(pool_store, dict):
             entries = pool_store.get(provider)
             if isinstance(entries, list):
-                return any(_oauth_payload_has_token(entry) for entry in entries)
+                for entry in entries:
+                    if _oauth_payload_has_token(entry):
+                        return True
+                    if (
+                        provider == "anthropic"
+                        and isinstance(entry, dict)
+                        and entry.get("auth_type") == "oauth"
+                        and entry.get("source") == "claude_code_linked"
+                    ):
+                        return True
 
         return False
     except Exception:
@@ -647,6 +669,10 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
                     )
                 else:
                     provider_ready = _provider_api_key_present(provider, cfg, env_values)
+                if not provider_ready and meta.get("oauth_provider"):
+                    provider_ready = _provider_oauth_authenticated(
+                        str(meta.get("oauth_provider")), _get_active_hermes_home()
+                    )
         else:
             # Unknown provider — may be an OAuth flow (openai-codex, copilot, etc.)
             # OR an API-key provider not in the quick-setup list (minimax-cn, deepseek,
@@ -729,6 +755,8 @@ def _build_setup_catalog(cfg: dict) -> dict:
                 "models": list(meta.get("models", [])),
                 "category": meta.get("category", "easy_start"),
                 "quick": meta.get("quick", False),
+                "oauth_provider": meta.get("oauth_provider") or "",
+                "oauth_label": meta.get("oauth_label") or "",
             }
         )
 
@@ -748,9 +776,9 @@ def _build_setup_catalog(cfg: dict) -> dict:
     # Flag whether the currently-configured provider is OAuth-based (not in the
     # API-key flow).  The frontend uses this to show a confirmation card instead
     # of a key input when the user has already authenticated via 'hermes auth'.
-    current_is_oauth = current_provider not in _SUPPORTED_PROVIDER_SETUPS and bool(
-        current_provider
-    )
+    current_is_oauth = (
+        current_provider not in _SUPPORTED_PROVIDER_SETUPS and bool(current_provider)
+    ) or _provider_oauth_authenticated(current_provider, _get_active_hermes_home())
 
     return {
         "providers": providers,
@@ -915,11 +943,13 @@ def apply_onboarding_setup(body: dict) -> dict:
     if not api_key and not _provider_api_key_present(provider, cfg, env_values):
         # Providers that may run keyless (lmstudio, ollama, custom — gated by
         # `key_optional` in _SUPPORTED_PROVIDER_SETUPS) are allowed to onboard
-        # with no api_key.  The agent runtime substitutes a placeholder
-        # (LMSTUDIO_NOAUTH_PLACEHOLDER) for those, and the probe (#1499) gives
-        # the user immediate feedback if their server actually does require
-        # auth (http_4xx with status 401).  See #1499 third sub-bug from #1420.
-        if not provider_meta.get("key_optional"):
+        # with no api_key. OAuth-capable wizard providers (currently Anthropic
+        # via Claude Code) are also allowed once their server-side OAuth/link
+        # marker is present.
+        oauth_ready = bool(provider_meta.get("oauth_provider")) and _provider_oauth_authenticated(
+            str(provider_meta.get("oauth_provider")), _get_active_hermes_home()
+        )
+        if not provider_meta.get("key_optional") and not oauth_ready:
             raise ValueError(f"{provider_meta['env_var']} is required")
 
     model_cfg = cfg.get("model", {})

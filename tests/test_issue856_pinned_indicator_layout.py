@@ -116,6 +116,15 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
 
 
+def test_plain_mouse_hover_does_not_mark_session_row_dragging():
+    """Pointermove fires during ordinary hover; drag styling must require an active press."""
+    assert "let _pointerActive=false;" in SESSIONS_JS
+    assert "_pointerActive=true;" in SESSIONS_JS
+    assert "if(!_pointerActive) return;" in SESSIONS_JS
+    assert "_pointerActive=false;" in SESSIONS_JS
+    assert ".session-item.dragging:hover" in STYLE_CSS
+
+
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
 

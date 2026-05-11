@@ -90,6 +90,47 @@ def ensure_supported_platform() -> None:
         )
 
 
+def _agent_dir_from_hermes_cli() -> Path | None:
+    """Resolve the agent install root by inspecting the `hermes` CLI shebang.
+
+    The Hermes Agent installer drops a `hermes` console-script in the user's
+    PATH whose shebang points at the agent's bundled venv:
+
+        #!/path/to/hermes-agent/venv/bin/python3
+
+    Walking up the parents until we find a directory that contains
+    `run_agent.py` recovers the install root regardless of where the user
+    chose to clone the agent (e.g. ~/Projects/GitHub/hermes-agent), which
+    the hard-coded candidate list in :func:`discover_agent_dir` cannot.
+
+    Last-resort only: this is invoked after every explicit candidate
+    (`HERMES_WEBUI_AGENT_DIR`, `$HERMES_HOME/hermes-agent`, etc.) has missed.
+    A stale clone in a known location still wins over the live `hermes` CLI
+    — that's intentional, since the candidate list is treated as
+    authoritative when present, and matches existing behavior.
+    """
+    hermes_path = shutil.which("hermes")
+    if not hermes_path:
+        return None
+    try:
+        with open(hermes_path, "r", encoding="utf-8", errors="replace") as f:
+            first_line = f.readline().strip()
+    except OSError:
+        return None
+    if not first_line.startswith("#!"):
+        return None
+    interp_field = first_line[2:].strip().split(None, 1)
+    if not interp_field:
+        return None
+    interp = Path(interp_field[0])
+    if not interp.is_absolute():
+        return None
+    for parent in interp.parents:
+        if (parent / "run_agent.py").exists():
+            return parent.resolve()
+    return None
+
+
 def discover_agent_dir() -> Path | None:
     home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     candidates = [
@@ -105,7 +146,7 @@ def discover_agent_dir() -> Path | None:
         candidate = Path(raw).expanduser().resolve()
         if candidate.exists() and (candidate / "run_agent.py").exists():
             return candidate
-    return None
+    return _agent_dir_from_hermes_cli()
 
 
 def discover_launcher_python(agent_dir: Path | None) -> str:
@@ -179,7 +220,16 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
     )
     if not venv_python.exists():
         info(f"Creating local virtualenv at {venv_dir}")
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
+        # symlinks=True: some Python builds (notably mise/asdf shared-library
+        # installs on macOS) default venv to copy mode. The copied binary still
+        # uses @executable_path/../lib/libpython3.X.dylib for its load command,
+        # so the venv binary aborts with SIGABRT on first import because the
+        # dylib never gets copied into .venv/lib. Symlinking the interpreter
+        # keeps @executable_path resolving back to the original install.
+        # CPython's venv falls back to copy mode automatically when symlink
+        # creation fails (e.g. older Windows without SeCreateSymbolicLinkPrivilege),
+        # so this is safe to set unconditionally.
+        venv.EnvBuilder(with_pip=True, symlinks=True).create(venv_dir)
 
     info("Installing WebUI dependencies into local virtualenv")
     subprocess.run(

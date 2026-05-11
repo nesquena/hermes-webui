@@ -7,20 +7,21 @@
 
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
-const CACHE_NAME = 'hermes-shell-__CACHE_VERSION__';
+const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 
 // Static assets that form the app shell.
 //
-// Versioned assets (CSS + JS) include `?v=__CACHE_VERSION__` to match the
+// Versioned assets (CSS + JS) include `?v=__WEBUI_VERSION__` to match the
 // query string the page sends — see index.html. Without the version query
 // here, every cache lookup against `?v=...` URLs would miss and fall through
 // to network, defeating the pre-cache.
 //
-// Unversioned assets (`./`, manifest.json, favicons) are referenced from
-// index.html without a cache-bust query, so they stay unversioned here too.
-const VQ = '?v=__CACHE_VERSION__';
+// Do not pre-cache './' or login assets here: under password auth they can be
+// either the authenticated app shell or login code, and stale cached responses
+// can make valid password submits fail until the user clears browser cache.
+// Navigations populate './' only after a successful non-redirect network load.
+const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
-  './',
   './static/style.css' + VQ,
   './static/boot.js' + VQ,
   './static/ui.js' + VQ,
@@ -65,8 +66,10 @@ self.addEventListener('activate', (event) => {
 
 // Fetch strategy:
 // - API calls (/api/*, /stream) → always network (never cache)
-// - Shell assets → cache-first with network fallback
-// - Everything else → network-first, fall back to offline page
+// - Login assets → always network (never cache stale auth code)
+// - Page navigations → network-first so auth redirects/cookies are honored
+// - Shell assets → network-first with cache fallback
+// - Everything else → network-only
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
@@ -76,6 +79,16 @@ self.addEventListener('fetch', (event) => {
   // Never intercept the service worker script itself. Returning a cached sw.js
   // prevents the browser from seeing a new cache version after local patches.
   if (url.pathname.endsWith('/sw.js')) return;
+
+  // Login assets must always hit the network. Older login.js builds have had
+  // subpath-sensitive auth POST paths; if the service worker caches one, the
+  // password can keep failing until the user manually clears browser cache.
+  if (
+    url.pathname.endsWith('/login') ||
+    url.pathname.endsWith('/static/login.js')
+  ) {
+    return;
+  }
 
   // API and streaming endpoints — always go to network.
   // The WebUI may be mounted under a subpath such as /hermes/, so API
@@ -90,35 +103,60 @@ self.addEventListener('fetch', (event) => {
     return; // let browser handle normally
   }
 
-  // Shell assets: cache-first
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache successful GET responses for shell assets
+  // Page navigations must be network-first. A stale cached './' response can
+  // otherwise hide the server's 302-to-login after auth expiry, or ignore a
+  // freshly set login cookie until the user manually refreshes.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).then((response) => {
         if (
           event.request.method === 'GET' &&
-          response.status === 200
+          response.status === 200 &&
+          !response.redirected
         ) {
           const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+          caches.open(CACHE_NAME).then((cache) => cache.put('./', clone));
         }
         return response;
       }).catch(() => {
-        // Offline fallback for navigation requests.
-        // Note: caches.match() returns a Promise (always truthy in a `||` check),
-        // so we must await/then to unwrap it — otherwise the `new Response(...)`
-        // branch is dead code and the browser falls back to its default offline page.
-        if (event.request.mode === 'navigate') {
-          return caches.match('./').then((cached) => cached || new Response(
-            '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
-            '<h2>You are offline</h2>' +
-            '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
-            '</body></html>',
-            { headers: { 'Content-Type': 'text/html' } }
-          ));
-        }
-      });
-    })
+        return caches.match('./').then((cached) => cached || new Response(
+          '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
+          '<h2>You are offline</h2>' +
+          '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
+          '</body></html>',
+          { headers: { 'Content-Type': 'text/html' } }
+        ));
+      })
+    );
+    return;
+  }
+
+  // Only explicit shell assets are cached. Everything else should hit the
+  // network so stale one-off files (especially auth/login scripts) do not get
+  // trapped in CacheStorage until a manual cache clear.
+  const scopePath = new URL(self.registration.scope).pathname;
+  const relPath = url.pathname.startsWith(scopePath)
+    ? url.pathname.slice(scopePath.length)
+    : url.pathname.replace(/^\/+/, '');
+  const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
+  if (!SHELL_ASSETS.includes(shellPath)) return;
+
+  // Shell assets: network-first with cache fallback. This keeps offline support
+  // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
+  // has not changed yet (e.g. before a guarded restart updates the ?v token).
+  event.respondWith(
+    fetch(event.request).then((response) => {
+      if (
+        event.request.method === 'GET' &&
+        response.status === 200
+      ) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => caches.match(event.request).then((cached) => cached || new Response('Offline', {
+      status: 503,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })))
   );
 });

@@ -235,3 +235,44 @@ PID    PPID  CMD
 If PPID is ``1`` (init) when it should be the supervisor, the orphan-server
 loop is happening — re-check that ``--foreground`` (or one of the env vars)
 is reaching the process.
+
+## HTTP watchdog / deep health
+
+``KeepAlive`` / ``Restart=always`` only recover a process that exits. If the
+process is still listening on the port but request handling is wedged, pair your
+supervisor with an HTTP probe and force a restart when the probe fails.
+
+Hermes Web UI exposes two health levels:
+
+- ``/health`` — cheap liveness probe with ``active_streams``, uptime, and an
+  ``accept_loop`` heartbeat counter.
+- ``/health?deep=1`` — readiness probe that briefly acquires the stream lock,
+  reads the sidebar/session path, reads projects state, and touches Hermes
+  ``state.db`` if it exists. Use this for watchdogs.
+
+At startup the server also tries to raise its file-descriptor soft limit to
+4096 on platforms that support ``RLIMIT_NOFILE``. That is defense in depth for
+persistent hosts: leaks should still be fixed, but a higher soft limit gives
+you more diagnostic headroom before request handling falls over.
+
+Minimal macOS launchd watchdog script:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+LABEL="com.example.hermes-webui"
+BASE="http://127.0.0.1:8787"
+
+if ! curl -fsS --max-time 10 "$BASE/health?deep=1" >/dev/null; then
+  launchctl kickstart -k "gui/$(id -u)/$LABEL"
+fi
+```
+
+Run it every few minutes from a separate ``StartInterval`` LaunchAgent. For
+systemd, prefer a timer/service pair that runs the same curl probe and
+``systemctl --user restart hermes-webui.service`` on failure.
+
+The ``accept_loop.requests_total`` value should increase when probes arrive. If
+it stays flat while the process is still alive, the server accept loop is not
+making progress; capture logs/thread samples before restarting if you are
+collecting diagnostics for a bug report.

@@ -21,6 +21,23 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _extract_js_function_body(src: str, name: str) -> str:
+    start = src.find(f"function {name}(")
+    assert start >= 0, f"function {name} not found"
+    brace = src.find("{", start)
+    assert brace >= 0, f"function {name} body not found"
+    depth = 1
+    i = brace + 1
+    while depth > 0 and i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"function {name} body did not close"
+    return src[start:i]
+
+
 # ── Bug 1: workspace panel header collapse priority ──────────────────────────
 
 
@@ -53,7 +70,26 @@ class TestWorkspacePanelCollapsePriority:
             "compresses all three children simultaneously."
         )
         assert "gap:6px" in rule
-        assert "overflow:hidden" in rule
+        # Note: `.panel-header` was changed from overflow:hidden to overflow:visible
+        # in #1775 so its tooltip pseudo-elements can escape the header bar
+        # (otherwise the workspace-panel header tooltips like "New file" get
+        # clipped). The title-text ellipsis is preserved by the inner span
+        # `.panel-header > span:first-child` which has its own
+        # overflow:hidden + text-overflow:ellipsis. So we check that EITHER
+        # the parent uses overflow:hidden (legacy) or that the inner span
+        # handles its own ellipsis (current).
+        if "overflow:hidden" not in rule:
+            inner_span_idx = STYLE_CSS.find(".panel-header > span:first-child{")
+            assert inner_span_idx != -1, (
+                ".panel-header lost overflow:hidden but no inner span "
+                "rule (.panel-header > span:first-child) handles the "
+                "title-text ellipsis as a fallback."
+            )
+            inner_rule = STYLE_CSS[inner_span_idx: STYLE_CSS.find("}", inner_span_idx) + 1]
+            assert "overflow:hidden" in inner_rule and "text-overflow:ellipsis" in inner_rule, (
+                ".panel-header > span:first-child must own the ellipsis "
+                "behaviour now that the parent is overflow:visible."
+            )
 
     def test_panel_actions_pushed_right_and_never_shrinks(self):
         """`.panel-actions` must have flex-shrink:0 and margin-left:auto so
@@ -138,9 +174,7 @@ class TestProjectDotPlacement:
         of the title and timestamp), not to the title span (which truncates
         with ellipsis and would clip the dot off long titles)."""
         # Find _renderOneSession body
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         # Must append dot to titleRow
         assert "titleRow.appendChild(dot)" in body, (
             "Project dot must be appended to titleRow as a flex sibling, "
@@ -156,8 +190,7 @@ class TestProjectDotPlacement:
         """The dot is appended AFTER title.appendChild and BEFORE ts append
         — that ordering puts the dot between the title and the timestamp
         in the flex row."""
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         title_pos = body.find("titleRow.appendChild(title);")
         dot_pos = body.find("titleRow.appendChild(dot);")
         ts_pos = body.find("titleRow.appendChild(ts);")

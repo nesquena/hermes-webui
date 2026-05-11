@@ -18,6 +18,7 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
+  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
@@ -88,6 +89,22 @@ let _slashPersonalityCachePromise=null;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
+// Invalidate the /api/models slash-suggestion cache. Called by panels.js
+// after a provider is added or removed so the next /model autocomplete
+// rebuilds from a fresh /api/models response (#1539). Returning a function
+// rather than letting callers poke the module-local lets/promises directly
+// keeps the cache shape encapsulated to this module.
+function _invalidateSlashModelCache(){
+  _slashModelCache=null;
+  _slashModelCachePromise=null;
+}
+// Expose on window when available. Guarded by typeof so the module is
+// importable in headless test contexts (vm.runInContext) that don't
+// define a window global — see tests/test_cli_only_slash_commands.py.
+if(typeof window!=='undefined'){
+  window._invalidateSlashModelCache=_invalidateSlashModelCache;
+}
+
 function _normalizeSlashSubArg(value){
   return String(value||'').trim();
 }
@@ -117,6 +134,15 @@ async function _loadSlashModelSubArgs(force=false){
       const values=[];
       for(const group of (data&&data.groups)||[]){
         for(const model of (group&&group.models)||[]){
+          const id=_normalizeSlashSubArg(model&&model.id);
+          if(id) values.push(id);
+        }
+        // Include extra_models (the catalog tail that doesn't render as
+        // <option> entries when the picker is capped) so /model autocomplete
+        // covers the full catalog. The trimming is purely a dropdown
+        // scannability concern — the slash command exists precisely so
+        // power users can reach any model by typing its name. #1567.
+        for(const model of (group&&group.extra_models)||[]){
           const id=_normalizeSlashSubArg(model&&model.id);
           if(id) values.push(id);
         }
@@ -600,6 +626,63 @@ async function cmdStop(){
   else showToast(t('cancel_unavailable'));
 }
 
+async function cmdGoal(args){
+  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
+      session_id:activeSid,
+      args:args||'',
+      workspace:S.session.workspace,
+      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
+      model_provider:S.session.model_provider||null,
+      profile:S.activeProfile||S.session.profile||'default',
+    })});
+    const msg = (() => {
+      const raw = String((r && r.message) || '').trim();
+      const key = String((r && r.message_key) || '').trim();
+      const args = Array.isArray(r && r.message_args) ? r.message_args : [];
+      if (raw.includes('\n')) return raw;
+      if (key && typeof t === 'function') {
+        const translated = String(t(key, ...args));
+        if (translated && translated !== key) return translated;
+      }
+      return raw;
+    })();
+    if(msg){
+      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
+      renderMessages({preserveScroll:true});
+      showToast(msg.split('\n')[0],2600);
+    }
+    if(!r||!r.stream_id)return;
+    S.toolCalls=[];
+    if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+    appendThinking();setBusy(true);
+    setComposerStatus(t('goal_working_toward'));
+    S.activeStreamId=r.stream_id;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id=r.stream_id;
+      if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
+      if(r.effective_model)S.session.model=r.effective_model;
+      if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
+    }
+    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    startApprovalPolling(activeSid);
+    startClarifyPolling(activeSid);
+    if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
+    attachLiveStream(activeSid,r.stream_id,[]);
+    if(typeof renderSessionList==='function')void renderSessionList();
+  }catch(e){
+    const err=String((e&&e.message)||e||'Goal command failed');
+    S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
+    renderMessages({preserveScroll:true});
+    showToast(err,3000);
+  }
+}
+
 // ── Busy-input mode commands ──────────────────────────────────────────────
 // These commands let users override the default busy_input_mode setting for a
 // specific message.  They are only meaningful while the agent is running.
@@ -794,35 +877,67 @@ async function cmdBackground(args){
     if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
   }catch(e){showToast(t('bg_failed')+e.message);}
 }
-async function cmdStatus(){
+function _formatStatusTimestamp(value){
+  if(value===undefined||value===null||value==='') return t('status_unknown');
+  let date;
+  if(typeof value==='number') date=new Date(value < 1000000000000 ? value*1000 : value);
+  else date=new Date(value);
+  if(Number.isNaN(date.getTime())) return t('status_unknown');
+  return date.toLocaleString();
+}
+function _formatStatusTokens(s){
+  const lastUsage=(typeof S!=='undefined'&&(S.lastUsage||s.last_usage))||{};
+  const input=Number(s.input_tokens??lastUsage.input_tokens??0)||0;
+  const output=Number(s.output_tokens??lastUsage.output_tokens??0)||0;
+  const total=Number(s.total_tokens??lastUsage.total_tokens??(input+output))||0;
+  const cost=Number(s.estimated_cost??lastUsage.estimated_cost??0)||0;
+  if(!total&&!cost) return t('status_no_tokens');
+  const fmtNum=n=>Number(n||0).toLocaleString();
+  return `${fmtNum(input)} in / ${fmtNum(output)} out${cost?` (~$${cost.toFixed(4)})`:''}`;
+}
+function _statusProviderForSession(s){
+  if(s.model_provider) return String(s.model_provider);
+  if(window._activeProvider) return String(window._activeProvider);
+  const model=String(s.model||'');
+  return model.includes('/') ? model.split('/')[0] : '';
+}
+function _statusCardFromSession(s){
+  const provider=_statusProviderForSession(s);
+  const model=s.model||(($('modelSelect')&&$('modelSelect').value)||t('usage_default_model'));
+  const running=!!(s.active_stream_id||S.activeStreamId||S.busy);
+  const profile=s.profile||S.activeProfile||'default';
+  const workspace=s.workspace||S.currentDir||t('status_unknown');
+  const rows=[
+    {label:t('status_session_id'), value:s.session_id||t('status_unknown')},
+    {label:t('status_title'), value:s.title||t('untitled')},
+    {label:t('status_model'), value:model},
+    {label:t('status_provider'), value:provider||t('status_unknown')},
+    {label:t('status_profile'), value:profile},
+    {label:t('status_workspace'), value:workspace},
+    {label:t('status_personality'), value:s.personality||t('usage_personality_none')},
+    {label:t('status_started'), value:_formatStatusTimestamp(s.created_at)},
+    {label:t('status_updated'), value:_formatStatusTimestamp(s.updated_at||s.last_message_at)},
+    {label:t('status_tokens'), value:_formatStatusTokens(s)},
+    {label:t('status_messages'), value:String(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length)},
+    {label:t('status_agent_running'), value:running?t('status_yes'):t('status_no')},
+  ];
+  return {
+    title:t('status_heading'),
+    subtitle:t('status_ephemeral'),
+    sessionId:s.session_id||'',
+    rows,
+  };
+}
+function cmdStatus(){
   if(!S.session){showToast(t('no_active_session'));return;}
-  try{
-    const r=await api('/api/session/status?session_id='+encodeURIComponent(S.session.session_id));
-    if(r&&r.error){showToast(r.error);return;}
-    // Build status card lines matching CLI /status output
-    const provider=window._activeProvider||'';
-    const profile=r.profile||S.activeProfile||'default';
-    const started=r.created_at?new Date(r.created_at).toLocaleString():t('status_unknown');
-    const fmtNum=n=>typeof n==='number'?n.toLocaleString():'0';
-    const tokens=r.total_tokens?`${fmtNum(r.input_tokens)} in / ${fmtNum(r.output_tokens)} out`:t('status_no_tokens');
-    const cost=r.estimated_cost?` (~$${Number(r.estimated_cost).toFixed(4)})`:'';
-    const lines=[
-      `**${t('status_heading')}**`,'',
-      `\`${r.session_id}\``,'',
-      `**${t('status_title')}:** ${r.title||t('untitled')}`,
-      `**${t('status_model')}:** ${r.model||t('usage_default_model')}${provider?'  ('+provider+')':''}`,
-      `**${t('status_profile')}:** ${profile}`,
-      `**${t('status_hermes_home')}:** ${r.hermes_home||t('status_unknown')}`,
-      `**${t('status_workspace')}:** ${r.workspace}`,
-      `**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,
-      `**${t('status_started')}:** ${started}`,
-      `**${t('status_tokens')}:** ${tokens}${cost}`,
-      `**${t('status_messages')}:** ${r.message_count}`,
-      `**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,
-    ];
-    S.messages.push({role:'assistant',content:lines.join('\n')});
-    renderMessages();
-  }catch(e){showToast(t('status_load_failed')+e.message);}
+  S.messages.push({
+    role:'assistant',
+    content:'',
+    _ephemeral:true,
+    _statusCard:_statusCardFromSession(S.session),
+    _ts:Date.now()/1000,
+  });
+  renderMessages();
 }
 function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();

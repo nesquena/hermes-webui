@@ -1,5 +1,23 @@
 let _currentPanel = 'chat';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
+let _kanbanBoard = null;
+let _kanbanLatestEventId = 0;
+let _kanbanPollTimer = null;
+let _kanbanCurrentTaskId = null;
+let _kanbanLanesByProfile = false;
+// Multi-board state. _kanbanCurrentBoard is the slug of the active board
+// the UI is currently viewing. null means "use whatever the server reports
+// as active" (i.e. don't pin a specific board in API calls). The UI
+// persists the last-viewed slug to localStorage so refresh stays put.
+let _kanbanCurrentBoard = null;
+let _kanbanBoardsList = null;
+let _kanbanBoardMenuOpen = false;
+let _kanbanIsDispatching = false;
+// SSE event stream — replaces the 30s polling cadence with a long-lived
+// /api/kanban/events/stream connection. Falls back to polling when the
+// EventSource fails to connect (proxy that strips text/event-stream, etc).
+let _kanbanEventSource = null;
+let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -12,12 +30,14 @@ let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
+let _logsAutoRefreshTimer = null;
+let _lastLogsLines = [];
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
 
 /**
@@ -31,10 +51,12 @@ function syncAppTitlebar() {
   const panel = (typeof _currentPanel === 'string' && _currentPanel) ? _currentPanel : 'chat';
   let mainText = '';
   let subText = '';
+  let sourceLabel = '';
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
     if (typeof t === 'function') subText = t('n_messages', vis.length);
+    if (S.session.is_cli_session) sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
@@ -47,7 +69,17 @@ function syncAppTitlebar() {
 
   titleEl.textContent = mainText;
   if (subEl) {
-    if (subText) { subEl.textContent = subText; subEl.hidden = false; }
+    if (subText) {
+      subEl.textContent = subText;
+      if (sourceLabel) {
+        const badge = document.createElement('span');
+        badge.className = 'topbar-source-badge';
+        badge.textContent = sourceLabel + (S.session && S.session.read_only ? ' · read-only' : '');
+        subEl.appendChild(document.createTextNode(' '));
+        subEl.appendChild(badge);
+      }
+      subEl.hidden = false;
+    }
     else { subEl.textContent = ''; subEl.hidden = true; }
   }
 
@@ -55,7 +87,7 @@ function syncAppTitlebar() {
   // as double-clicking a session title in the sidebar).  Only active on the chat
   // panel when a session is open.
   titleEl.ondblclick = null;  // remove any previous handler before adding a fresh one
-  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
+  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session && !(S.session.read_only || S.session.is_read_only)) {
     titleEl.ondblclick = (e) => {
       e.stopPropagation();
       e.preventDefault();
@@ -151,11 +183,38 @@ function _consumeSettingsTargetPanel(fallback = 'chat') {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
+  // ── Desktop sidebar collapse toggle (rail-click only) ──
+  // If the click came from a rail icon AND we're on desktop, the rail icon
+  // does double duty: clicking the already-active panel collapses the sidebar;
+  // clicking any panel while collapsed expands first. Programmatic switches
+  // (no opts.fromRailClick) are unaffected so legacy callers preserve
+  // behaviour exactly.
+  if (opts.fromRailClick && typeof _isSidebarCollapsed === 'function'
+      && typeof _isDesktopWidth === 'function' && _isDesktopWidth()) {
+    if (_isSidebarCollapsed()) {
+      // Expand first, then continue to the normal panel switch below so
+      // the clicked panel becomes (or stays) active in the same gesture.
+      expandSidebar();
+    } else if (prevPanel === nextPanel) {
+      // Same panel clicked while sidebar is open → collapse and short-circuit.
+      // Skip the guard/cleanup work below; nothing about the active panel
+      // is changing, only the visibility of the panel container.
+      toggleSidebar(true);
+      return false;
+    }
+  }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
+  // Close any long-lived Kanban SSE stream when leaving the kanban panel
+  // so we don't keep a stale connection open in the background.
+  if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
+    if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
+  // Refresh aria-expanded on the newly-active rail button to mirror sidebar state.
+  if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
@@ -164,18 +223,22 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','workspaces','profiles','insights'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
+  if (nextPanel === 'logs') await loadLogs();
+  _syncLogsAutoRefresh();
+  if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
@@ -188,6 +251,26 @@ async function switchPanel(name, opts = {}) {
 function _isRecurringCronJob(job) {
   const kind = job && job.schedule && job.schedule.kind;
   return kind === 'cron' || kind === 'interval';
+}
+
+function _cronScheduleKindForInput(value) {
+  const schedule = String(value || '').trim();
+  if (!schedule) return '';
+  const lower = schedule.toLowerCase();
+  if (lower.startsWith('every ')) return 'interval';
+  if (lower.startsWith('@')) return 'cron';
+  const parts = schedule.split(/\s+/);
+  if (parts.length >= 5 && parts.slice(0, 5).every(p => /^[\d*\-,/]+$/.test(p))) return 'cron';
+  if (schedule.includes('T') || /^\d{4}-\d{2}-\d{2}/.test(schedule)) return 'once';
+  if (/^\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.test(schedule)) return 'once';
+  return '';
+}
+
+function _syncCronScheduleWarning() {
+  const input = $('cronFormSchedule');
+  const warning = $('cronFormScheduleOnceWarning');
+  if (!input || !warning) return;
+  warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
 }
 
 function _hasUnlimitedRepeat(job) {
@@ -247,6 +330,58 @@ function _cronStatusMeta(job) {
   };
 }
 
+
+function _cronProfileName(profile){
+  return (profile || '').toString().trim();
+}
+
+function _cronProfileLabel(profile){
+  const name = _cronProfileName(profile);
+  return name || (t('cron_profile_server_default') || 'server default');
+}
+
+function _cronProfileTitle(profile){
+  const name = _cronProfileName(profile);
+  if (name) return (t('cron_profile_label') || 'Profile') + ': ' + name;
+  return t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time';
+}
+
+async function loadCronProfiles(){
+  if (_cronProfilesCache) return _cronProfilesCache;
+  try {
+    const data = await api('/api/profiles');
+    _cronProfilesCache = Array.isArray(data.profiles) ? data.profiles : [];
+  } catch(e) {
+    _cronProfilesCache = [];
+  }
+  return _cronProfilesCache;
+}
+
+function _cronProfileOptions(selected){
+  const current = _cronProfileName(selected);
+  const profiles = Array.isArray(_cronProfilesCache) ? _cronProfilesCache : [];
+  const seen = new Set(['']);
+  const opts = [`<option value=""${current ? '' : ' selected'}>${esc(t('cron_profile_server_default') || 'server default')}</option>`];
+  for (const p of profiles) {
+    const name = _cronProfileName(p && p.name);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const label = p && p.is_default ? `${name} (${t('default') || 'default'})` : name;
+    opts.push(`<option value="${esc(name)}"${current === name ? ' selected' : ''}>${esc(label)}</option>`);
+  }
+  if (current && !seen.has(current)) {
+    opts.push(`<option value="${esc(current)}" selected>${esc(current)} (${esc(t('not_available') || 'not available')})</option>`);
+  }
+  return opts.join('');
+}
+
+function _refreshCronProfileSelect(selected){
+  const sel = $('cronFormProfile');
+  if (!sel) return;
+  const keep = selected === undefined ? sel.value : selected;
+  sel.innerHTML = _cronProfileOptions(keep);
+}
+
 function _cronDiagnostics(job) {
   const fields = {
     id: job.id,
@@ -274,6 +409,7 @@ async function loadCrons(animate) {
     refreshBtn.disabled = true;
   }
   try {
+    await loadCronProfiles();
     const data = await api('/api/crons');
     _cronList = data.jobs || [];
     if (!_cronList.length) {
@@ -288,10 +424,13 @@ async function loadCrons(animate) {
       item.id = 'cron-' + job.id;
       const status = _cronStatusMeta(job);
       const isNewRun = _cronNewJobIds.has(String(job.id));
+      const profileLabel = _cronProfileLabel(job.profile);
+      const profileTitle = _cronProfileTitle(job.profile);
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
+          <span class="cron-profile-badge" title="${esc(profileTitle)}">${esc(profileLabel)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
       item.onclick = () => openCronDetail(job.id, item);
@@ -326,6 +465,11 @@ function _renderCronDetail(job){
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
+  const isNoAgent = !!job.no_agent;
+  const cronJobMode = isNoAgent ? 'no-agent' : 'agent';
+  const script = job.script || '';
+  const profileLabel = _cronProfileLabel(job.profile);
+  const profileTitle = _cronProfileTitle(job.profile);
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
@@ -352,6 +496,9 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
+        <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span></div></div>
+        ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
       </div>
@@ -534,6 +681,7 @@ function duplicateCurrentCron(){
     schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
+    profile: job.profile || '',
     isEdit: false,
   });
   if (!_cronSkillsCache) {
@@ -558,6 +706,7 @@ async function deleteCurrentCron(){
 let _cronSelectedSkills=[];
 let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
+let _cronProfilesCache=null;
 
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
@@ -566,9 +715,10 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
 }
 
 function openCronEdit(job){
@@ -582,6 +732,9 @@ function openCronEdit(job){
     schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
+    profile: job.profile || '',
+    no_agent: !!job.no_agent,
+    script: job.script || '',
     isEdit: true,
   });
   if (!_cronSkillsCache) {
@@ -589,13 +742,15 @@ function openCronEdit(job){
   } else {
     _bindCronSkillPicker();
   }
+  loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=false, script='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
+  const isNoAgent = !!no_agent;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
   body.innerHTML = `
@@ -609,10 +764,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
           <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
+          <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
         </div>
-        <div class="detail-form-row">
+        <div class="detail-form-row ${isNoAgent ? 'cron-no-agent-prompt-row' : ''}">
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
-          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
+          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}"${isNoAgent ? ' disabled' : ' required'}>${esc(prompt || '')}</textarea>
+          ${isNoAgent ? `<div class="detail-form-hint cron-no-agent-hint">No-agent mode runs the configured script directly; Prompt is unused. No-agent script: <code>${esc(script || '—')}</code></div>` : ''}
         </div>
         <div class="detail-form-row">
           <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
@@ -620,7 +777,15 @@ function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
             ${deliverOpt('local', t('cron_deliver_local') || 'Local (save output only)')}
             ${deliverOpt('discord','Discord')}
             ${deliverOpt('telegram','Telegram')}
+            ${deliverOpt('slack','Slack')}
           </select>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormProfile">${esc(t('cron_profile_label') || 'Profile')}</label>
+          <select id="cronFormProfile">
+            ${_cronProfileOptions(profile)}
+          </select>
+          <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
         </div>
         <div class="detail-form-row">
           <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
@@ -638,6 +803,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _renderCronSkillTags();
+  const scheduleEl = $('cronFormSchedule');
+  if (scheduleEl) {
+    scheduleEl.addEventListener('input', _syncCronScheduleWarning);
+    scheduleEl.addEventListener('change', _syncCronScheduleWarning);
+    _syncCronScheduleWarning();
+  }
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
 }
@@ -706,18 +877,22 @@ async function saveCronForm(){
   const schEl=$('cronFormSchedule');
   const promptEl=$('cronFormPrompt');
   const delivEl=$('cronFormDeliver');
+  const profileEl=$('cronFormProfile');
   const errEl=$('cronFormError');
   if(!schEl||!promptEl||!errEl) return;
   const name=(nameEl?nameEl.value:'').trim();
   const schedule=schEl.value.trim();
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
+  const profile=profileEl?profileEl.value:'';
+  const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
-  if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, prompt};
+      const updates = {job_id: _editingCronId, schedule, profile: profile};
+      if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
@@ -729,7 +904,7 @@ async function saveCronForm(){
       if (job) openCronDetail(editedId);
       return;
     }
-    const body={schedule,prompt,deliver};
+    const body={schedule,prompt,deliver,profile: profile};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -856,6 +1031,1225 @@ async function cronResume(id) {
 
 let _editingCronId = null;
 
+// ── Kanban panel (read-only) ──
+function _kanbanColumnLabel(name){ return t('kanban_status_' + name) || name; }
+function _kanbanTaskTitle(task){ return task.title || task.summary || task.id || t('kanban_task'); }
+function _kanbanTaskBody(task){ return task.body || task.description || task.prompt || ''; }
+function _kanbanTaskMeta(task){
+  const bits = [];
+  if (task.assignee) bits.push(task.assignee);
+  if (task.tenant) bits.push(task.tenant);
+  if (task.priority !== undefined && task.priority !== null) bits.push('P' + task.priority);
+  if (task.comment_count) bits.push('💬 ' + task.comment_count);
+  if (task.link_counts && task.link_counts.children) bits.push('↳ ' + task.link_counts.children);
+  return bits;
+}
+
+function _kanbanCurrentFilters(){
+  const q = $('kanbanSearch') ? $('kanbanSearch').value.trim().toLowerCase() : '';
+  const assigneeEl = $('kanbanAssigneeFilter');
+  const tenantEl = $('kanbanTenantFilter');
+  const assignee = assigneeEl ? (assigneeEl.value || assigneeEl.dataset.defaultValue || '') : '';
+  const tenant = tenantEl ? (tenantEl.value || tenantEl.dataset.defaultValue || '') : '';
+  const includeArchived = !!($('kanbanIncludeArchived') && $('kanbanIncludeArchived').checked);
+  const onlyMine = !!($('kanbanOnlyMine') && $('kanbanOnlyMine').checked);
+  return {q, assignee, tenant, includeArchived, onlyMine};
+}
+
+function _kanbanApplyConfigDefaults(config){
+  if (!config || _kanbanConfigApplied) return;
+  if ($('kanbanTenantFilter') && config.default_tenant) $('kanbanTenantFilter').dataset.defaultValue = config.default_tenant;
+  if ($('kanbanIncludeArchived') && config.include_archived_by_default === true) $('kanbanIncludeArchived').checked = true;
+  if (config.lane_by_profile === true) _kanbanLanesByProfile = true;
+  _kanbanConfigApplied = true;
+}
+let _kanbanConfigApplied = false;
+
+function _kanbanSetSelectOptions(el, values, allLabelKey){
+  if (!el) return;
+  const current = el.value || el.dataset.defaultValue || '';
+  const opts = [`<option value="">${esc(t(allLabelKey))}</option>`]
+    .concat((values || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`));
+  el.innerHTML = opts.join('');
+  if ([...el.options].some(o => o.value === current)) el.value = current;
+}
+
+function _kanbanVisibleTasks(){
+  const filters = _kanbanCurrentFilters();
+  const columns = (_kanbanBoard && _kanbanBoard.columns) || [];
+  return columns.map(col => {
+    const tasks = (col.tasks || []).filter(task => {
+      if (!filters.q) return true;
+      const haystack = [task.id, _kanbanTaskTitle(task), _kanbanTaskBody(task), task.assignee, task.tenant]
+        .filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(filters.q);
+    });
+    return {...col, tasks};
+  });
+}
+
+function _kanbanRenderSidebar(columns){
+  const list = $('kanbanList');
+  if (!list) return;
+  const tasks = columns.flatMap(col => (col.tasks || []).map(task => ({...task, status: task.status || col.name})));
+  if (!tasks.length) {
+    list.innerHTML = `<div class="kanban-empty" data-i18n="kanban_no_matching_tasks">${esc(t('kanban_no_matching_tasks'))}</div>`;
+    return;
+  }
+  list.innerHTML = tasks.map(task => {
+    const meta = _kanbanTaskMeta(task);
+    return `<button class="kanban-list-item" onclick="loadKanbanTask('${esc(task.id)}')">
+      <span class="kanban-list-status">${esc(_kanbanColumnLabel(task.status))}</span>
+      <span class="kanban-list-title">${esc(_kanbanTaskTitle(task))}</span>
+      ${meta.length ? `<span class="kanban-meta">${esc(meta.join(' · '))}</span>` : ''}
+    </button>`;
+  }).join('');
+}
+
+
+function _kanbanRenderMarkdownInline(escaped){
+  return String(escaped || '')
+    .replace(/`([^`\n]+)`/g, (_m, code) => `<code>${code}</code>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, (_m, text) => `<strong>${text}</strong>`)
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_m, text, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+}
+
+function _kanbanRenderMarkdown(source){
+  if (!source) return '';
+  return `<div class="hermes-kanban-md">${esc(source).split(/\r?\n/).map(line => line.trim() ? `<p>${_kanbanRenderMarkdownInline(line)}</p>` : '').join('')}</div>`;
+}
+
+function _kanbanFormatDuration(seconds){
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 60) return Math.round(n) + 's';
+  if (n < 3600) return Math.round(n / 60) + 'm';
+  if (n < 86400) return Math.round(n / 3600) + 'h';
+  return Math.round(n / 86400) + 'd';
+}
+
+function _kanbanTaskAge(task){
+  const age = task && (task.age_seconds || task.age);
+  if (Number.isFinite(Number(age))) return _kanbanFormatDuration(age);
+  return '';
+}
+
+function _kanbanCardStalenessClass(task){
+  const age = Number(task && (task.age_seconds || task.age));
+  const status = task && task.status;
+  if (!Number.isFinite(age)) return '';
+  if ((status === 'running' && age > 3600) || (status === 'blocked' && age > 86400)) return 'kanban-card-stale-red';
+  if ((status === 'running' && age > 600) || (status === 'ready' && age > 3600) || (status === 'blocked' && age > 3600)) return 'kanban-card-stale-amber';
+  return '';
+}
+
+function _kanbanCardQuickActions(task){
+  const id = esc(task.id || '');
+  const status = task.status || '';
+  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
+  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
+  return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${complete}${archive}</div>`;
+}
+
+async function quickKanbanCardAction(event, taskId, status){
+  if (event) event.stopPropagation();
+  return updateKanbanTask(taskId, {status});
+}
+
+function dragKanbanTask(event, taskId){
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', taskId);
+}
+
+function allowKanbanDrop(event){
+  // Don't accept drops into the 'running' column. Entering 'running' is owned
+  // by the dispatcher/claim_task path (sets claim_lock + claim_expires +
+  // started_at + worker_pid). A drag-drop would bypass that contract and the
+  // bridge would reject the resulting PATCH with HTTP 400 anyway. Refuse the
+  // drop visually so users see immediate feedback.
+  const target = event.currentTarget;
+  if (target && target.dataset && target.dataset.kanbanStatus === 'running') {
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+}
+
+function clearKanbanDrop(event){
+  if (event && event.currentTarget) event.currentTarget.classList.remove('drop-target');
+}
+
+async function dropKanbanTask(event, status){
+  event.preventDefault();
+  clearKanbanDrop(event);
+  const taskId = event.dataTransfer ? event.dataTransfer.getData('text/plain') : '';
+  if (taskId && status) await updateKanbanTask(taskId, {status});
+}
+
+function _kanbanLaneNames(columns){
+  const names = new Set();
+  columns.forEach(col => (col.tasks || []).forEach(task => names.add(task.assignee || t('kanban_unassigned'))));
+  return Array.from(names).sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function _kanbanRenderColumn(col){
+  const tasks = col.tasks || [];
+  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, '${esc(col.name)}')">
+      <div class="kanban-column-head">
+        <span>${esc(_kanbanColumnLabel(col.name))}</span>
+        <span class="kanban-count">${tasks.length}</span>
+      </div>
+      <div class="kanban-column-body">
+        ${tasks.length ? tasks.map(task => _kanbanCard(task, col.name)).join('') : `<div class="kanban-empty">${esc(t('kanban_empty'))}</div>`}
+      </div>
+    </section>`;
+}
+
+function _kanbanRenderProfileLanes(columns){
+  const lanes = _kanbanLaneNames(columns);
+  if (!lanes.length) return columns.map(_kanbanRenderColumn).join('');
+  return `<div class="kanban-profile-lanes">${lanes.map(lane => {
+    const laneCols = columns.map(col => ({...col, tasks: (col.tasks || []).filter(task => (task.assignee || t('kanban_unassigned')) === lane)}));
+    const count = laneCols.reduce((sum, col) => sum + (col.tasks || []).length, 0);
+    return `<section class="kanban-profile-lane" data-kanban-lane="${esc(lane)}"><header class="kanban-profile-lane-head"><span>${esc(lane)}</span><span class="kanban-count">${count}</span></header><div class="kanban-board kanban-board-in-lane">${laneCols.map(_kanbanRenderColumn).join('')}</div></section>`;
+  }).join('')}</div>`;
+}
+
+function _kanbanEmptyBoardHtml(){
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_no_data'))}</div><div class="main-view-empty-sub">${esc(t('kanban_work_queue_hint'))}</div></div>`;
+}
+
+function _kanbanRenderBoard(){
+  const board = $('kanbanBoard');
+  if (!board) return;
+  if (!_kanbanBoard || !_kanbanBoard.columns) {
+    board.innerHTML = _kanbanEmptyBoardHtml();
+    return;
+  }
+  const columns = _kanbanVisibleTasks();
+  const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
+  if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
+  _kanbanRenderSidebar(columns);
+  if (total === 0) {
+    board.innerHTML = _kanbanEmptyBoardHtml();
+    return;
+  }
+  board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
+}
+
+function _kanbanCard(task, status){
+  const priority = Number(task.priority || 0);
+  const links = task.link_counts || {};
+  const linkTotal = Number(links.parents || 0) + Number(links.children || 0);
+  const comments = Number(task.comment_count || 0);
+  const age = _kanbanTaskAge(task);
+  const stale = _kanbanCardStalenessClass(task);
+  const body = _kanbanTaskBody(task);
+  const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" onclick="loadKanbanTask('${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
+    <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
+    ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
+    <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
+    ${_kanbanCardQuickActions(task)}
+  </article>`;
+}
+
+async function hardRefreshWebUIClient(){
+  try {
+    if (navigator.serviceWorker) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch(_) {}
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+  } catch(_) {}
+  window.location.reload();
+}
+
+function _kanbanLooksLikeStaleClientError(err){
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return !!(err && err.status === 404 && (
+    msg === 'not found' ||
+    msg.includes('unknown kanban endpoint') ||
+    msg.includes('stale cached bundle')
+  ));
+}
+
+function _kanbanUnavailableHtml(err){
+  const raw = String((err && err.message) || err || '');
+  if (_kanbanLooksLikeStaleClientError(err)) {
+    return `<div class="main-view-empty"><div class="main-view-empty-title">Kanban needs a hard refresh</div><div class="main-view-empty-subtitle">The server rejected an obsolete Kanban endpoint. This usually means the browser or Mac app is still running a stale cached WebUI bundle after an update.</div><button class="btn primary" type="button" onclick="hardRefreshWebUIClient()">Hard refresh now</button><div class="main-view-empty-subtitle">Original error: ${esc(raw || 'not found')}</div></div>`;
+  }
+  const msg = `${esc(t('kanban_unavailable'))}: ${esc(raw)}`;
+  return `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
+}
+
+async function loadKanban(animate){
+  const board = $('kanbanBoard');
+  const list = $('kanbanList');
+  try {
+    if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
+    // Resolve the active board before board-scoped requests. If another CLI or
+    // tab archived the previous board, /boards can fall back to default instead
+    // of leaving config/board pinned to a ghost slug.
+    await loadKanbanBoards();
+    const config = await api('/api/kanban/config' + _kanbanBoardQuery());
+    let assignees = null;
+    try { assignees = await api('/api/kanban/assignees' + _kanbanBoardQuery()); } catch(e) { assignees = null; }
+    _kanbanApplyConfigDefaults(config);
+    const filters = _kanbanCurrentFilters();
+    const params = new URLSearchParams();
+    if (filters.assignee) params.set('assignee', filters.assignee);
+    if (filters.tenant) params.set('tenant', filters.tenant);
+    if (filters.includeArchived) params.set('include_archived', '1');
+    if (filters.onlyMine) params.set('only_mine', '1');
+    if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
+    const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
+    const data = await api(path);
+    if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
+    _kanbanBoard = data || {columns: []};
+    if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
+      _kanbanBoard.columns = config.columns.map(name => ({name, tasks: []}));
+    }
+    _kanbanLatestEventId = Number(_kanbanBoard.latest_event_id || 0);
+    // Toggle the "Read-only view" banner based on the bridge's read_only flag.
+    // Bridge sets read_only=true only when the kanban_db connection cannot accept
+    // writes (e.g. dispatcher contention or library missing). Hide otherwise.
+    try {
+      const ro = document.querySelector('.kanban-readonly');
+      if (ro) ro.style.display = _kanbanBoard.read_only ? '' : 'none';
+    } catch(_) {}
+    _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
+    _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
+    await loadKanbanStats();
+    // Note: PR #1828 (v0.51.20) moved the boards refresh to the start of
+    // loadKanban() so the active board is resolved BEFORE board-scoped
+    // requests fire. The previous tail-of-function refresh has been removed
+    // to avoid doubling /api/kanban/boards traffic during SSE-driven
+    // refreshes (debounced at 250ms via _scheduleKanbanRefresh). The
+    // 30-second poll started by _kanbanStartPolling() picks up any board
+    // state changes that arrive after this render.
+    _kanbanStartPolling();
+    _kanbanRenderBoard();
+  } catch(e) {
+    const html = _kanbanUnavailableHtml(e);
+    if (board) board.innerHTML = html;
+    if (list) list.innerHTML = html;
+  }
+}
+
+function filterKanban(){ _kanbanRenderBoard(); }
+
+async function loadKanbanStats(){
+  try {
+    const stats = await api('/api/kanban/stats' + _kanbanBoardQuery());
+    const el = $('kanbanStats');
+    if (!el) return;
+    const byStatus = (stats && stats.by_status) || {};
+    const total = Object.values(byStatus).reduce((a, b) => a + Number(b || 0), 0);
+    const cells = Object.entries(byStatus).sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) =>
+      `<span class="kanban-stat-cell"><strong>${esc(String(count))}</strong> ${esc(_kanbanColumnLabel(status))}</span>`
+    ).join('');
+    el.innerHTML = `<div class="kanban-stats-grid"><span class="kanban-stat-cell total"><strong>${esc(String(total))}</strong> ${esc(t('kanban_stats'))}</span>${cells}</div>`;
+  } catch(e) { /* stats are best-effort */ }
+}
+
+async function refreshKanbanEvents(){
+  if (_currentPanel !== 'kanban' || !_kanbanLatestEventId) return;
+  try {
+    const eventsEndpoint = '/api/kanban/events';
+    const events = await api(eventsEndpoint + _kanbanBoardQuery({since: _kanbanLatestEventId}));
+    if (events && Array.isArray(events.events) && events.events.length) {
+      _kanbanLatestEventId = Number(events.latest_event_id || events.cursor || _kanbanLatestEventId);
+      await loadKanban(true);
+      if (_kanbanCurrentTaskId && events.events.some(ev => ev.task_id === _kanbanCurrentTaskId)) await loadKanbanTask(_kanbanCurrentTaskId);
+    }
+  } catch(e) { /* polling should not spam toasts */ }
+}
+
+function _kanbanStartPolling(){
+  // Prefer SSE for low-latency live updates. Fall back to polling on
+  // browsers without EventSource or after repeated stream failures.
+  if (typeof EventSource === 'undefined' || _kanbanEventSourceFailures >= 3) {
+    if (_kanbanPollTimer) return;
+    _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+    return;
+  }
+  _kanbanStartEventStream();
+}
+
+function _kanbanStopPolling(){
+  if (_kanbanPollTimer) { clearInterval(_kanbanPollTimer); _kanbanPollTimer = null; }
+  if (_kanbanEventSource) { try { _kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
+}
+
+function _kanbanStartEventStream(){
+  // Tear down any prior stream before opening a new one (board switch,
+  // login change, etc.).
+  if (_kanbanEventSource) { try { _kanbanEventSource.close(); } catch(_) {} _kanbanEventSource = null; }
+  const since = Number(_kanbanLatestEventId || 0);
+  let url = '/api/kanban/events/stream' + _kanbanBoardQuery({since: since});
+  let es;
+  try {
+    es = new EventSource(url);
+  } catch(e) {
+    _kanbanEventSourceFailures += 1;
+    if (_kanbanEventSourceFailures < 3 && !_kanbanPollTimer) {
+      _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+    }
+    return;
+  }
+  _kanbanEventSource = es;
+  es.addEventListener('hello', (ev) => {
+    // Reset the failure counter on a successful handshake.
+    _kanbanEventSourceFailures = 0;
+  });
+  es.addEventListener('events', async (ev) => {
+    if (_currentPanel !== 'kanban') return;  // ignore while user is on another panel
+    let data;
+    try { data = JSON.parse(ev.data); } catch(_) { return; }
+    if (!data || !Array.isArray(data.events) || !data.events.length) return;
+    _kanbanLatestEventId = Number(data.cursor || _kanbanLatestEventId);
+    // Re-fetch the board so the visual state reflects the new events.
+    // Throttle: if events are arriving faster than ~1/sec we coalesce.
+    _scheduleKanbanRefresh(data.events);
+  });
+  es.onerror = () => {
+    _kanbanEventSourceFailures += 1;
+    if (_kanbanEventSourceFailures >= 3) {
+      // Give up on SSE for this session — fall back to HTTP polling.
+      try { es.close(); } catch(_) {}
+      _kanbanEventSource = null;
+      if (!_kanbanPollTimer) _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+    }
+    // EventSource auto-reconnects under the hood; nothing more to do here
+    // until we hit the failure limit.
+  };
+}
+
+let _kanbanRefreshScheduled = false;
+let _kanbanRefreshPendingTaskIds = new Set();
+function _scheduleKanbanRefresh(events){
+  for (const ev of events) {
+    if (ev && ev.task_id) _kanbanRefreshPendingTaskIds.add(ev.task_id);
+  }
+  if (_kanbanRefreshScheduled) return;
+  _kanbanRefreshScheduled = true;
+  // 250ms debounce — keeps a burst of N events from triggering N reloads.
+  setTimeout(async () => {
+    _kanbanRefreshScheduled = false;
+    const taskIds = Array.from(_kanbanRefreshPendingTaskIds);
+    _kanbanRefreshPendingTaskIds.clear();
+    if (_currentPanel !== 'kanban') return;
+    try {
+      await loadKanban(true);
+      if (_kanbanCurrentTaskId && taskIds.includes(_kanbanCurrentTaskId)) {
+        await loadKanbanTask(_kanbanCurrentTaskId);
+      }
+    } catch(_) { /* swallow — SSE refresh shouldn't toast */ }
+  }, 250);
+}
+
+// Build a "?board=<slug>" or "?since=N&board=<slug>" query string fragment
+// based on the active board. Empty when the user is on the default board
+// AND nobody has explicitly switched (so we don't pin to "default" and
+// override a hypothetical server-side switch).
+function _kanbanBoardQuery(extra){
+  const params = new URLSearchParams();
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v !== null && v !== undefined && v !== '') params.set(k, String(v));
+    }
+  }
+  if (_kanbanCurrentBoard) params.set('board', _kanbanCurrentBoard);
+  const s = params.toString();
+  return s ? '?' + s : '';
+}
+
+async function nudgeKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
+  // Dry-run dispatch: show what WOULD be spawned, without actually spawning
+  // workers.  Uses ?dry_run=1 so the dispatcher reports its plan without
+  // mutating the board.  The result shape includes spawned/skipped_unassigned/
+  // skipped_nonspawnable/promoted/auto_blocked so users can diagnose why a
+  // Ready task isn't being picked up before they commit to a real run.
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
+  try {
+    const dispatchEndpoint = '/api/kanban/dispatch';
+    const result = await api(
+      dispatchEndpoint + '?dry_run=1&max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
+      {method: 'POST'},
+    );
+    showToast(_kanbanFormatDispatchResult(result, true), 'info', 6000);
+    await loadKanban(true);
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
+}
+
+async function runKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
+  // Real dispatch: claims Ready tasks and spawns worker subprocesses
+  // (one `hermes -p <assignee>` per claimed row, up to max=8 per call).
+  // Confirmation dialog first because this actually consumes API budget on
+  // each spawned worker.  Result toast surfaces what happened so users see
+  // the dispatcher actually doing work.
+  if (!_kanbanCurrentBoard) {
+    showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
+    return;
+  }
+
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
+  try {
+    const ok = await showConfirmDialog({
+      title: t('kanban_run_dispatcher') || 'Run dispatcher',
+      message: t('kanban_run_dispatcher_confirm')
+        || 'This will claim Ready tasks on this board and spawn worker subprocesses (one per task, up to 8 per click). Continue?',
+      confirmLabel: t('kanban_run_dispatcher') || 'Run dispatcher',
+    });
+    if (!ok) return;
+    const dispatchEndpoint = '/api/kanban/dispatch';
+    const result = await api(
+      dispatchEndpoint + '?max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
+      {method: 'POST'},
+    );
+    showToast(_kanbanFormatDispatchResult(result, false), 'info', 8000);
+    await loadKanban(true);
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
+}
+
+function _setKanbanDispatcherButtonsDisabled(disabled){
+  document.querySelectorAll('.kanban-run-dispatch-btn, .kanban-nudge-dispatch-btn').forEach((btn) => {
+    btn.disabled = !!disabled;
+    btn.classList.toggle('disabled', !!disabled);
+  });
+}
+
+function _kanbanFormatDispatchResult(result, dryRun){
+  // Produce a human-readable one-line summary of dispatch_once's output so
+  // users can see exactly what happened rather than a generic "OK" toast.
+  const r = result || {};
+  const spawned = (r.spawned || []).length;
+  const promoted = r.promoted || 0;
+  const reclaimed = r.reclaimed || 0;
+  const skippedUnassigned = (r.skipped_unassigned || []).length;
+  const skippedNonspawnable = (r.skipped_nonspawnable || []).length;
+  const autoBlocked = (r.auto_blocked || []).length;
+  const timedOut = (r.timed_out || []).length;
+  const crashed = (r.crashed || []).length;
+  const verb = dryRun ? (t('kanban_dispatch_preview_prefix') || 'Preview:') : (t('kanban_dispatch_run_prefix') || 'Dispatched:');
+  const parts = [];
+  parts.push(spawned + ' ' + (t('kanban_dispatch_spawned') || 'spawned'));
+  if (promoted) parts.push(promoted + ' ' + (t('kanban_dispatch_promoted') || 'promoted'));
+  if (reclaimed) parts.push(reclaimed + ' ' + (t('kanban_dispatch_reclaimed') || 'reclaimed'));
+  if (skippedUnassigned) parts.push(skippedUnassigned + ' ' + (t('kanban_dispatch_skipped_unassigned') || 'skipped (no assignee)'));
+  if (skippedNonspawnable) parts.push(skippedNonspawnable + ' ' + (t('kanban_dispatch_skipped_nonspawnable') || 'skipped (unknown profile)'));
+  if (autoBlocked) parts.push(autoBlocked + ' ' + (t('kanban_dispatch_auto_blocked') || 'auto-blocked'));
+  if (timedOut) parts.push(timedOut + ' ' + (t('kanban_dispatch_timed_out') || 'timed out'));
+  if (crashed) parts.push(crashed + ' ' + (t('kanban_dispatch_crashed') || 'crashed'));
+  return verb + ' ' + parts.join(', ');
+}
+
+function _kanbanSelectedTaskIds(){
+  const selected = Array.from(document.querySelectorAll('.kanban-card.selected')).map(card => card.dataset.kanbanTaskId).filter(Boolean);
+  return selected.length ? selected : (_kanbanCurrentTaskId ? [_kanbanCurrentTaskId] : []);
+}
+
+async function bulkUpdateKanban(){
+  const ids = _kanbanSelectedTaskIds();
+  const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
+  if (!ids.length || !status) return;
+  try {
+    await api('/api/kanban/tasks/bulk' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({ids, status})});
+    showToast(t('kanban_bulk_action'));
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function blockKanbanTask(taskId){
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/block' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({reason: 'blocked from WebUI'})});
+    await loadKanbanTask(taskId);
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function unblockKanbanTask(taskId){
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/unblock' + _kanbanBoardQuery(), {method: 'POST', body: JSON.stringify({})});
+    await loadKanbanTask(taskId);
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+function closeKanbanTaskDetail(){
+  _kanbanCurrentTaskId = null;
+  const preview = $('kanbanTaskPreview');
+  if (preview) {
+    preview.style.display = 'none';
+    preview.innerHTML = '';
+  }
+  const board = $('kanbanBoard');
+  if (board) board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
+}
+
+function _kanbanFormatTimestamp(value){
+  if (value === undefined || value === null || value === '') return '';
+  let date = null;
+  if (typeof value === 'number') date = new Date(value > 100000000000 ? value : value * 1000);
+  else if (/^\d+(?:\.\d+)?$/.test(String(value).trim())) {
+    const n = Number(value);
+    date = new Date(n > 100000000000 ? n : n * 1000);
+  } else {
+    date = new Date(value);
+  }
+  if (!date || Number.isNaN(date.getTime())) return String(value);
+  try { return date.toLocaleString(); } catch(e) { return date.toISOString(); }
+}
+
+function _kanbanEventSummary(event){
+  const kind = event.kind || event.type || 'event';
+  const payload = event.payload || event.data || {};
+  if (payload && typeof payload === 'object') {
+    const parts = [];
+    if (payload.status) parts.push(String(payload.status));
+    if (payload.reason) parts.push(String(payload.reason));
+    if (payload.summary) parts.push(String(payload.summary));
+    if (payload.fields && Array.isArray(payload.fields)) parts.push(payload.fields.join(', '));
+    if (parts.length) return `${kind}: ${parts.join(' · ')}`;
+  }
+  return String(kind);
+}
+
+function _kanbanFormatDetailValue(value){
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value, null, 2); } catch(e) { return String(value); }
+  }
+  return String(value);
+}
+
+function _kanbanDetailSection(cls, title, inner, emptyKey){
+  const content = inner || `<div class="kanban-detail-empty">${esc(t(emptyKey))}</div>`;
+  return `<section class="kanban-detail-section ${cls}">
+    <h3>${esc(title)}</h3>
+    ${content}
+  </section>`;
+}
+
+function _kanbanCommentHtml(comment){
+  const body = comment.body || comment.text || comment.content || '';
+  const by = comment.author || comment.created_by || comment.actor || '';
+  const at = _kanbanFormatTimestamp(comment.created_at || comment.ts || '');
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(body)}</div>
+    <div class="kanban-detail-row-meta">${esc([by, at].filter(Boolean).join(' · '))}</div>
+  </div>`;
+}
+
+function _kanbanEventHtml(event){
+  const at = _kanbanFormatTimestamp(event.created_at || event.ts || '');
+  const payload = _kanbanFormatDetailValue(event.payload || event.data || '');
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(_kanbanEventSummary(event))}</div>
+    ${payload ? `<pre class="kanban-detail-pre">${esc(payload)}</pre>` : ''}
+    <div class="kanban-detail-row-meta">${esc(at)}</div>
+  </div>`;
+}
+
+function _kanbanRunHtml(run){
+  const status = run.status || run.state || run.result || '';
+  const label = run.run_id || run.id || run.worker || t('kanban_task');
+  const started = _kanbanFormatTimestamp(run.started_at || run.created_at || '');
+  const finished = _kanbanFormatTimestamp(run.finished_at || run.completed_at || '');
+  const detail = run.error || run.summary || run.log_tail || '';
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(label)}${status ? ` · ${esc(status)}` : ''}</div>
+    ${detail ? `<pre class="kanban-detail-pre">${esc(_kanbanFormatDetailValue(detail))}</pre>` : ''}
+    <div class="kanban-detail-row-meta">${esc([started, finished].filter(Boolean).join(' → '))}</div>
+  </div>`;
+}
+
+function _kanbanLinksHtml(links){
+  const parents = (links && links.parents) || [];
+  const children = (links && links.children) || [];
+  if (!parents.length && !children.length) return '';
+  const item = id => `<code>${esc(id)}</code>`;
+  return `<div class="kanban-detail-links-grid">
+    <div><strong>${esc(t('kanban_parents'))}</strong><div>${parents.length ? parents.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
+    <div><strong>${esc(t('kanban_children'))}</strong><div>${children.length ? children.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
+  </div>`;
+}
+
+async function createKanbanTask(){
+  const input = document.getElementById('kanbanNewTaskTitle');
+  const title = input ? input.value.trim() : '';
+  if (!title) {
+    // Empty inline input (or a click on the panel-head "+" via openKanbanCreate)
+    // — open the full create-task modal so the user has somewhere obvious to
+    // type and configure the task. Mirrors the cron / skills pattern of routing
+    // header "+" clicks through to a clearly-modal create surface.
+    openKanbanCreate();
+    return;
+  }
+  try {
+    const created = await api('/api/kanban/tasks' + _kanbanBoardQuery(), {
+      method: 'POST',
+      body: JSON.stringify({title}),
+    });
+    if (input) input.value = '';
+    await loadKanban(true);
+    if (created && created.task && created.task.id) await loadKanbanTask(created.task.id);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Kanban: create-task modal (panel-head "+" button entry point).
+//
+// Same `.kanban-modal-overlay` shell as openKanbanCreateBoard() so the two
+// flows look and behave identically (centered card, dim backdrop, ESC closes,
+// click-on-backdrop closes). The modal markup lives in static/index.html as
+// #kanbanTaskModal — see the section just above </body>. Submit hits the
+// existing /api/kanban/tasks POST endpoint (which already accepts title, body,
+// assignee, tenant, priority, status — see api/kanban_bridge.py:306).
+// ────────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────────
+// Kanban: create-task / edit-task modal (panel-head "+" + task-detail Edit
+// button entry points).
+//
+// Single modal serves both flows.  Title + submit-button labels and the
+// underlying submit verb (POST vs PATCH) flip based on `_kanbanTaskModalMode`.
+//
+// Same `.kanban-modal-overlay` shell as openKanbanCreateBoard() so the two
+// flows look and behave identically (centered card, dim backdrop, ESC closes,
+// click-on-backdrop closes). The modal markup lives in static/index.html as
+// #kanbanTaskModal — see the section just above </body>.
+//
+// The assignee field auto-completes against the union of (a) live Hermes
+// profile names from /api/profiles and (b) historical assignees on the
+// active board, with an inline hint that explains the dispatcher claim
+// contract — most users will pick a profile name from the dropdown rather
+// than type one.
+// ────────────────────────────────────────────────────────────────────────────
+
+let _kanbanTaskModalMode = 'create';   // 'create' | 'edit'
+let _kanbanTaskModalEditingId = null;  // task id when mode === 'edit'
+let _kanbanProfileNamesCache = null;   // populated lazily on first modal open
+let _kanbanProfileNamesCacheAt = 0;
+const _KANBAN_PROFILE_NAMES_CACHE_TTL_MS = 30000;
+function _invalidateKanbanProfileCache() {
+  _kanbanProfileNamesCache = null;
+  _kanbanProfileNamesCacheAt = 0;
+}
+let _kanbanTaskModalFocusCleanup = null;
+// Status the modal *displayed* on edit-mode open.  If the user doesn't touch
+// the dropdown, we must NOT send `status` in the PATCH payload — otherwise
+// editing a task whose real status is non-editable in this dropdown
+// (running/blocked/done/archived → mapped to 'triage' for display) would
+// silently demote the task on save.  See the regression caught during PR
+// review: editing a 'running' task without touching status was reclaiming
+// the worker and moving the task back to triage.
+let _kanbanTaskModalInitialDisplayedStatus = null;
+let _kanbanBoardModalFocusCleanup = null;
+
+async function _kanbanLoadProfileNames(){
+  // Hit /api/profiles once per session and cache for a short TTL.
+  // Returns an array of profile names (sorted, default first if present).
+  const hasFreshCache = (
+    Array.isArray(_kanbanProfileNamesCache) &&
+    (Date.now() - _kanbanProfileNamesCacheAt) < _KANBAN_PROFILE_NAMES_CACHE_TTL_MS
+  );
+  if (hasFreshCache) return _kanbanProfileNamesCache;
+  try {
+    const data = await api('/api/profiles');
+    const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
+    const names = profiles.map(p => p && p.name).filter(Boolean);
+    // Stable order: default first, then alphabetical.
+    names.sort((a, b) => {
+      if (a === 'default') return -1;
+      if (b === 'default') return 1;
+      return a.localeCompare(b);
+    });
+    _kanbanProfileNamesCache = names;
+    _kanbanProfileNamesCacheAt = Date.now();
+    return names;
+  } catch(_) {
+    _kanbanProfileNamesCache = [];
+    _kanbanProfileNamesCacheAt = Date.now();
+    return [];
+  }
+}
+
+async function _kanbanPopulateAssigneeSelect(currentValue){
+  const sel = document.getElementById('kanbanTaskModalAssignee');
+  if (!sel) return;
+  // Profile names: the canonical set the dispatcher can claim.
+  const profileNames = await _kanbanLoadProfileNames();
+  // Historical assignees from the active board: include them so users who
+  // assigned to a CLI lane (e.g. orion-cc) before still see those values.
+  const historicalAssignees = (_kanbanBoard && Array.isArray(_kanbanBoard.assignees))
+    ? _kanbanBoard.assignees
+    : [];
+  // Build a final ordered list, deduping.  Profiles come first, then any
+  // historical assignees that aren't profiles (rare but keeps round-tripping
+  // correct for tasks created via CLI).
+  const seen = new Set();
+  const profiles = [];
+  for (const name of profileNames) {
+    if (!seen.has(name)) { profiles.push(name); seen.add(name); }
+  }
+  const extras = [];
+  for (const name of historicalAssignees) {
+    if (name && !seen.has(name)) { extras.push(name); seen.add(name); }
+  }
+  // If the current value isn't in either bucket (e.g. an old CLI-created
+  // assignee that's since been deleted), preserve it as a final option so
+  // editing the task doesn't silently change its assignee.
+  if (currentValue && !seen.has(currentValue)) {
+    extras.push(currentValue);
+    seen.add(currentValue);
+  }
+  // The empty value maps to null on submit (intentionally unassigned).  Keep
+  // it last so the default-selected option is the first profile, not "no one".
+  let html = '';
+  if (profiles.length) {
+    html += `<optgroup label="${esc(t('kanban_assignee_profiles_label') || 'Hermes profiles')}">`;
+    html += profiles.map(v => `<option value="${esc(v)}"${v === currentValue ? ' selected' : ''}>${esc(v)}</option>`).join('');
+    html += '</optgroup>';
+  }
+  if (extras.length) {
+    html += `<optgroup label="${esc(t('kanban_assignee_other_label') || 'Other (CLI lanes / removed profiles)')}">`;
+    html += extras.map(v => `<option value="${esc(v)}"${v === currentValue ? ' selected' : ''}>${esc(v)}</option>`).join('');
+    html += '</optgroup>';
+  }
+  // Final "no assignee" fallthrough — explicit so users know what they're choosing.
+  html += `<option value=""${(!currentValue) ? ' selected' : ''}>${esc(t('kanban_assignee_unassigned') || '— Unassigned (won\u2019t auto-run) —')}</option>`;
+  sel.innerHTML = html;
+}
+
+function openKanbanCreate(){
+  // Make sure the user is on the kanban panel so the resulting board reload is
+  // visible behind the modal.
+  if (typeof switchPanel === 'function' && _currentPanel !== 'kanban') switchPanel('kanban');
+  const modal = document.getElementById('kanbanTaskModal');
+  if (!modal) return;
+  _kanbanTaskModalMode = 'create';
+  _kanbanTaskModalEditingId = null;
+  _kanbanTaskModalInitialDisplayedStatus = null;  // create mode: always send status
+  // Default new tasks to "ready" so they're immediately claimable by the
+  // dispatcher (assuming the user picks an assignee).  Triage is for staging
+  // tasks that need human review before being marked actionable; users who
+  // want it can still pick it from the status dropdown.
+  _kanbanResetTaskModalFields({status: 'ready'});
+  _kanbanSetTaskModalStatusHint(null);
+  _kanbanSetTaskModalLabels('create');
+  _kanbanPopulateAssigneeSelect('').then(() => {
+    // After the dropdown is populated, default-select the first profile (not
+    // the "Unassigned" fallthrough).  This is the right hint: most users want
+    // to assign to *something* — they can pick "Unassigned" deliberately.
+    const sel = document.getElementById('kanbanTaskModalAssignee');
+    if (sel && sel.options.length > 0 && sel.value === '') {
+      const firstProfile = Array.from(sel.options).find(opt => opt.value !== '');
+      if (firstProfile) sel.value = firstProfile.value;
+    }
+  });
+  _kanbanPopulateTenantDatalist();
+  modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
+  setTimeout(() => {
+    const titleEl = document.getElementById('kanbanTaskModalTitleInput');
+    if (titleEl) titleEl.focus();
+  }, 50);
+  document.addEventListener('keydown', _kanbanTaskModalKey);
+}
+
+async function openKanbanEdit(taskId){
+  // Triggered by the Edit button on the task detail view.  Fetches the task
+  // (rather than relying on whatever's cached locally) so the modal always
+  // reflects authoritative server state.
+  if (!taskId) return;
+  if (typeof switchPanel === 'function' && _currentPanel !== 'kanban') switchPanel('kanban');
+  const modal = document.getElementById('kanbanTaskModal');
+  if (!modal) return;
+  let task = null;
+  try {
+    const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery());
+    task = data && data.task;
+  } catch(e) {
+    showToast((t('kanban_unavailable') || 'Kanban unavailable') + ': ' + (e.message || e), 'error');
+    return;
+  }
+  if (!task) return;
+  _kanbanTaskModalMode = 'edit';
+  _kanbanTaskModalEditingId = task.id;
+  // Track the displayed status so submitKanbanTaskModal can detect whether
+  // the user actually picked a new value vs. the dropdown's mapped default.
+  // Without this, editing a 'running'/'blocked'/'done'/'archived' task whose
+  // real status maps to 'triage' for display would silently demote the task
+  // (the mapped 'triage' would land in the PATCH payload, and _patch_task
+  // would call _set_status_direct → reclaim worker → move to triage).
+  const initialDisplayedStatus = _kanbanEditableStatusFor(task.status);
+  const originalStatus = task.status || initialDisplayedStatus;
+  _kanbanTaskModalInitialDisplayedStatus = initialDisplayedStatus;
+  _kanbanResetTaskModalFields({
+    title: task.title || '',
+    body: task.body || '',
+    status: initialDisplayedStatus,
+    tenant: task.tenant || '',
+    priority: typeof task.priority === 'number' ? task.priority : 0,
+  });
+  // Populate the assignee select AFTER reset so the option exists when we
+  // call sel.value = currentAssignee.
+  await _kanbanPopulateAssigneeSelect(task.assignee || '');
+  _kanbanSetTaskModalStatusHint(originalStatus, initialDisplayedStatus);
+  _kanbanSetTaskModalLabels('edit');
+  _kanbanPopulateTenantDatalist();
+  modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
+  setTimeout(() => {
+    const titleEl = document.getElementById('kanbanTaskModalTitleInput');
+    if (titleEl) { titleEl.focus(); titleEl.select(); }
+  }, 50);
+  document.addEventListener('keydown', _kanbanTaskModalKey);
+}
+
+function _kanbanEditableStatusFor(status){
+  // The modal's status select only offers triage/todo/ready (the user-writable
+  // states).  blocked/running/done/archived are reached via the detail-view
+  // status buttons or the dispatcher.  Map non-editable states to a sensible
+  // default so the user can still change them via the buttons after saving.
+  const editable = new Set(['triage', 'todo', 'ready']);
+  return editable.has(status) ? status : 'triage';
+}
+
+function _kanbanResetTaskModalFields(values){
+  const v = values || {};
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.value = (val == null ? '' : String(val));
+  };
+  set('kanbanTaskModalTitleInput', v.title || '');
+  set('kanbanTaskModalBody', v.body || '');
+  set('kanbanTaskModalStatus', v.status || 'triage');
+  // Assignee handled separately by _kanbanPopulateAssigneeSelect() because
+  // it's a <select> populated from /api/profiles + board history; setting
+  // .value before the options exist would silently fail.
+  set('kanbanTaskModalTenant', v.tenant || '');
+  set('kanbanTaskModalPriority', v.priority != null ? v.priority : 0);
+  const errEl = document.getElementById('kanbanTaskModalError');
+  if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
+  const submitBtn = document.getElementById('kanbanTaskModalSubmit');
+  if (submitBtn) submitBtn.disabled = false;
+}
+
+function _kanbanSetTaskModalLabels(mode){
+  const titleH = document.getElementById('kanbanTaskModalTitle');
+  const submitBtn = document.getElementById('kanbanTaskModalSubmit');
+  if (mode === 'edit') {
+    if (titleH) titleH.textContent = t('kanban_edit_task') || 'Edit task';
+    if (submitBtn) submitBtn.textContent = t('save') || 'Save';
+  } else {
+    if (titleH) titleH.textContent = t('kanban_new_task') || 'New task';
+    if (submitBtn) submitBtn.textContent = t('create') || 'Create';
+  }
+}
+
+function _kanbanSetTaskModalStatusHint(realStatus, editableStatus){
+  const hintEl = document.getElementById('kanbanTaskModalStatusOriginalHint');
+  if (!hintEl) return;
+  if (!realStatus || realStatus === editableStatus) {
+    hintEl.hidden = true;
+    hintEl.textContent = '';
+    return;
+  }
+  const statusLabel = t(`kanban_status_${realStatus}`) || realStatus;
+  hintEl.textContent = String(t('kanban_status_original_hint')).replace('{0}', statusLabel);
+  hintEl.hidden = false;
+}
+
+function _kanbanPopulateTenantDatalist(){
+  const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
+  const tList = document.getElementById('kanbanTaskModalTenantList');
+  if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _trapModalFocus(modalEl){
+  if (!modalEl) return () => {};
+  const selector = 'a[href], button, textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
+  const collect = () => {
+    const candidates = Array.from(modalEl.querySelectorAll(selector));
+    return candidates.filter((el) => {
+      if (el.disabled || el.hidden) return false;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return el.tabIndex >= 0;
+    });
+  };
+  let focusableEls = collect();
+  const onKeyDown = (ev) => {
+    if (ev.key !== 'Tab') return;
+    if (!focusableEls.length) {
+      ev.preventDefault();
+      return;
+    }
+    const current = document.activeElement;
+    let idx = focusableEls.indexOf(current);
+    if (idx === -1) {
+      ev.preventDefault();
+      focusableEls[0].focus();
+      return;
+    }
+    if (ev.shiftKey) idx -= 1;
+    else idx += 1;
+    idx = (idx + focusableEls.length) % focusableEls.length;
+    ev.preventDefault();
+    focusableEls[idx].focus();
+  };
+  modalEl.addEventListener('keydown', onKeyDown);
+  return () => {
+    modalEl.removeEventListener('keydown', onKeyDown);
+  };
+}
+
+function closeKanbanTaskModal(){
+  const modal = document.getElementById('kanbanTaskModal');
+  if (modal) modal.hidden = true;
+  _kanbanTaskModalMode = 'create';
+  _kanbanTaskModalEditingId = null;
+  _kanbanTaskModalInitialDisplayedStatus = null;
+  _kanbanSetTaskModalStatusHint(null, null);
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  document.removeEventListener('keydown', _kanbanTaskModalKey);
+}
+
+function _kanbanTaskModalKey(ev){
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    closeKanbanTaskModal();
+    return;
+  }
+  if (ev.key === 'Enter' && !ev.shiftKey) {
+    // Enter submits except when the focus is in the description textarea
+    // (where Enter should insert a newline).
+    const target = ev.target;
+    if (target && target.tagName === 'TEXTAREA') return;
+    const modal = document.getElementById('kanbanTaskModal');
+    if (modal && !modal.hidden) {
+      ev.preventDefault();
+      submitKanbanTaskModal();
+    }
+  }
+}
+
+async function submitKanbanTaskModal(){
+  const titleEl = document.getElementById('kanbanTaskModalTitleInput');
+  const bodyEl = document.getElementById('kanbanTaskModalBody');
+  const statusEl = document.getElementById('kanbanTaskModalStatus');
+  const assigneeEl = document.getElementById('kanbanTaskModalAssignee');
+  const tenantEl = document.getElementById('kanbanTaskModalTenant');
+  const priorityEl = document.getElementById('kanbanTaskModalPriority');
+  const errEl = document.getElementById('kanbanTaskModalError');
+  const submitBtn = document.getElementById('kanbanTaskModalSubmit');
+  const title = titleEl ? titleEl.value.trim() : '';
+  if (!title) {
+    if (errEl) errEl.textContent = t('kanban_title_required') || 'Title is required.';
+    if (titleEl) titleEl.focus();
+    return;
+  }
+  // Build payload — for create we omit defaulted fields so the backend chooses;
+  // for edit we send every field so users can clear assignee/tenant/body.
+  const isEdit = _kanbanTaskModalMode === 'edit';
+  const payload = {title};
+  const bodyVal = bodyEl ? bodyEl.value : '';
+  const assigneeVal = assigneeEl ? assigneeEl.value.trim() : '';
+  const tenantVal = tenantEl ? tenantEl.value.trim() : '';
+  const statusVal = statusEl ? statusEl.value : '';
+  const priorityRaw = priorityEl ? priorityEl.value : '';
+  if (isEdit) {
+    payload.body = bodyVal;
+    payload.assignee = assigneeVal || null;
+    payload.tenant = tenantVal || null;
+    // Only send status if the user actually changed the dropdown from the
+    // value the modal opened with.  Otherwise editing a 'running'/'blocked'/
+    // 'done'/'archived' task — whose real status maps to the dropdown's
+    // 'triage' default — would silently demote the task on every save.
+    if (statusVal && statusVal !== _kanbanTaskModalInitialDisplayedStatus) {
+      payload.status = statusVal;
+    }
+    const n = parseInt(priorityRaw, 10);
+    payload.priority = Number.isNaN(n) ? 0 : n;
+  } else {
+    if (bodyVal.trim()) payload.body = bodyVal;
+    if (statusVal) payload.status = statusVal;
+    if (assigneeVal) payload.assignee = assigneeVal;
+    if (tenantVal) payload.tenant = tenantVal;
+    if (priorityRaw !== '' && priorityRaw !== '0') {
+      const n = parseInt(priorityRaw, 10);
+      if (!Number.isNaN(n)) payload.priority = n;
+    }
+  }
+  // Soft warning: a Ready task with the explicit "Unassigned" option will sit
+  // forever because the dispatcher skips unassigned rows (kanban_db.py:3567).
+  // The dropdown now makes this an explicit choice (the user picked "—
+  // Unassigned (won't auto-run) —"), but we still surface a one-time confirm
+  // so they don't lose work to a typo.
+  if (statusVal === 'ready' && !assigneeVal) {
+    if (errEl && !errEl.dataset.warningShown) {
+      errEl.textContent = t('kanban_ready_needs_assignee')
+        || 'You picked Unassigned + Ready. The dispatcher will skip this task. Submit again to confirm, or pick a profile.';
+      errEl.dataset.warningShown = '1';
+      const sel = document.getElementById('kanbanTaskModalAssignee');
+      if (sel) sel.focus();
+      return;
+    }
+  }
+  if (submitBtn) submitBtn.disabled = true;
+  if (errEl) { errEl.textContent = ''; delete errEl.dataset.warningShown; }
+  try {
+    let saved;
+    if (isEdit && _kanbanTaskModalEditingId) {
+      saved = await api(
+        '/api/kanban/tasks/' + encodeURIComponent(_kanbanTaskModalEditingId) + _kanbanBoardQuery(),
+        {method: 'PATCH', body: JSON.stringify(payload)},
+      );
+    } else {
+      saved = await api('/api/kanban/tasks' + _kanbanBoardQuery(), {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    }
+    closeKanbanTaskModal();
+    await loadKanban(true);
+    const savedId = saved && saved.task && saved.task.id;
+    if (savedId) {
+      await loadKanbanTask(savedId);
+    } else if (isEdit && _kanbanTaskModalEditingId) {
+      await loadKanbanTask(_kanbanTaskModalEditingId);
+    }
+  } catch(e) {
+    if (errEl) errEl.textContent = (e.message || String(e));
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+async function updateKanbanTask(taskId, patch){
+  if (!taskId || !patch) return;
+  try {
+    const updated = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery(), {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    await loadKanban(true);
+    await loadKanbanTask((updated && updated.task && updated.task.id) || taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function addKanbanComment(taskId){
+  const input = document.getElementById('kanbanCommentInput');
+  const body = input ? input.value.trim() : '';
+  if (!taskId || !body) return;
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/comments' + _kanbanBoardQuery(), {
+      method: 'POST',
+      body: JSON.stringify({body}),
+    });
+    if (input) input.value = '';
+    await loadKanbanTask(taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+function _kanbanRenderTaskDetail(data){
+  const task = data.task || {};
+  const log = data.log || {};
+  const title = _kanbanTaskTitle(task);
+  const body = _kanbanTaskBody(task) || t('kanban_no_description');
+  const meta = _kanbanTaskMeta(task);
+  const comments = data.comments || [];
+  const events = data.events || [];
+  const links = data.links || {};
+  const runs = data.runs || [];
+  // Note: 'running' is intentionally absent — entering 'running' is the
+  // dispatcher/claim_task path's responsibility, not a user UI write. The
+  // bridge rejects PATCH status='running' with HTTP 400 to match the agent
+  // dashboard plugin's contract. UI users want to claim/promote a ready task
+  // via the dispatcher Nudge button, not flip it to running by hand.
+  const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
+    `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
+  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
+  return `<div class="kanban-task-preview-header">
+      <button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>
+      <div class="kanban-task-preview-title">${esc(title)}</div>
+      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
+    </div>
+    <div class="kanban-task-preview-body">${esc(body)}</div>
+    ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
+    <div class="kanban-status-actions">${statusButtons}</div>
+    <div class="kanban-detail-grid">
+      ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
+      ${_kanbanDetailSection('kanban-detail-events', String(t('kanban_events_count')).replace('{0}', events.length), events.map(_kanbanEventHtml).join(''), 'kanban_no_events')}
+      ${_kanbanDetailSection('kanban-detail-links', t('kanban_links'), _kanbanLinksHtml(links), 'kanban_empty')}
+      ${_kanbanDetailSection('kanban-detail-runs', String(t('kanban_runs_count')).replace('{0}', runs.length), runs.map(_kanbanRunHtml).join(''), 'kanban_no_runs')}
+      ${_kanbanDetailSection('kanban-detail-log', t('kanban_worker_log'), log.content ? `<pre class="kanban-detail-pre">${esc(log.content)}</pre>` : '', 'kanban_empty')}
+    </div>
+    <div class="kanban-comment-form">
+      <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
+      <button class="btn primary" onclick="addKanbanComment('${esc(task.id)}')">${esc(t('kanban_add_comment'))}</button>
+    </div>`;
+}
+
+async function loadKanbanTask(taskId){
+  if (!taskId) return;
+  try {
+    const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery());
+    const logEndpoint = '/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log' + _kanbanBoardQuery();
+    try { data.log = await api(logEndpoint + '?tail=65536'); } catch(e) { data.log = {}; }
+    _kanbanCurrentTaskId = taskId;
+    const task = data.task || {};
+    const title = _kanbanTaskTitle(task);
+    const board = $('kanbanBoard');
+    if (board) {
+      board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
+      Array.from(board.querySelectorAll('.kanban-card')).find(card => card.dataset.kanbanTaskId === taskId)?.classList.add('selected');
+    }
+    const preview = $('kanbanTaskPreview');
+    if (preview) {
+      preview.style.display = '';
+      preview.innerHTML = _kanbanRenderTaskDetail(data);
+    }
+    showToast(`${t('kanban_task')}: ${title}`);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
@@ -890,6 +2284,485 @@ function loadTodos() {
     </div>`).join('');
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Kanban: multi-board switcher + create/rename/archive modal
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The bridge exposes /api/kanban/boards (GET/POST), /boards/<slug>
+// (PATCH/DELETE), and /boards/<slug>/switch (POST). The UI surfaces these
+// as a "Default ▾" dropdown next to the Board title — clicking it opens
+// a menu listing every board (current first, with task counts), plus
+// actions to create / rename / archive.
+
+const KANBAN_BOARD_LS_KEY = 'hermes-kanban-active-board';
+
+function _kanbanGetSavedBoard(){
+  try { return localStorage.getItem(KANBAN_BOARD_LS_KEY) || null; } catch(_) { return null; }
+}
+
+function _kanbanSetSavedBoard(slug){
+  try {
+    if (slug && slug !== 'default') localStorage.setItem(KANBAN_BOARD_LS_KEY, slug);
+    else localStorage.removeItem(KANBAN_BOARD_LS_KEY);
+  } catch(_) {}
+}
+
+async function loadKanbanBoards(){
+  // Fetches the boards list and updates the switcher UI. Best-effort —
+  // failures hide the switcher rather than blocking the panel from rendering.
+  const switcher = document.getElementById('kanbanBoardSwitcher');
+  if (!switcher) return;
+  let data;
+  try {
+    data = await api('/api/kanban/boards');
+  } catch(e) {
+    // Hide switcher on error so the user isn't stuck with a half-broken UI.
+    switcher.hidden = true;
+    return;
+  }
+  const boards = (data && data.boards) || [];
+  const serverCurrent = (data && data.current) || 'default';
+  _kanbanBoardsList = boards;
+  // Resolution chain for the active board:
+  //   localStorage hint → server's `current` → 'default'.
+  // The localStorage hint is honoured ONLY if it points at a board that
+  // still exists; otherwise we fall back to the server's pointer.
+  const saved = _kanbanGetSavedBoard();
+  let active = serverCurrent;
+  if (saved && boards.some(b => b.slug === saved)) {
+    active = saved;
+  } else if (saved) {
+    _kanbanSetSavedBoard('default');
+  }
+  _kanbanCurrentBoard = (active === 'default') ? null : active;
+  // The switcher is visible whenever ≥1 non-default board exists OR the
+  // current board is non-default. (If you only have 'default', a switcher
+  // adds clutter without value.)
+  const hasMultiple = boards.length > 1 || (active !== 'default');
+  switcher.hidden = !hasMultiple;
+  if (!hasMultiple) return;
+  // Update the toggle label/icon
+  const activeMeta = boards.find(b => b.slug === active) || {slug: active, name: active, icon: '', color: ''};
+  const nameEl = document.getElementById('kanbanBoardSwitcherName');
+  const iconEl = document.getElementById('kanbanBoardSwitcherIcon');
+  if (nameEl) nameEl.textContent = activeMeta.name || activeMeta.slug || 'Default';
+  if (iconEl) {
+    iconEl.textContent = activeMeta.icon || '';
+    if (activeMeta.color) iconEl.style.color = activeMeta.color;
+    else iconEl.style.color = '';
+  }
+  // Re-render the menu (in case it was open or changed)
+  _renderKanbanBoardMenu(boards, active);
+}
+
+// Restrict board.color to CSS hex codes or simple named colors before
+// interpolating into a `style=""` attribute. esc() HTML-escapes but
+// does not block CSS-context injection (`color:red;background:url(...)`
+// would otherwise exfiltrate page state via an attacker-controlled URL,
+// since neither this bridge nor the agent's kanban_db validates color).
+function _kanbanSafeColor(c){
+  if (typeof c !== 'string') return '';
+  const s = c.trim();
+  if (!s) return '';
+  if (/^#[0-9a-fA-F]{3,8}$/.test(s)) return s;
+  if (/^[a-zA-Z]{3,32}$/.test(s)) return s;
+  return '';
+}
+
+function _renderKanbanBoardMenu(boards, current){
+  const menu = document.getElementById('kanbanBoardSwitcherMenu');
+  if (!menu) return;
+  const items = boards.map(b => {
+    const isCurrent = b.slug === current;
+    const total = (b.total != null) ? b.total : (b.counts ? Object.values(b.counts).reduce((a,c)=>a+Number(c||0),0) : 0);
+    const icon = b.icon ? esc(b.icon) : '';
+    const safeColor = _kanbanSafeColor(b.color);
+    const colorStyle = safeColor ? `color:${safeColor}` : '';
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+      <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
+      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
+      <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
+    </button>`;
+  }).join('');
+  // Actions row — disable rename/archive when the only option is `default`
+  // (the default board's display metadata is editable but the slug isn't,
+  // and `default` cannot be archived).
+  const renameDisabled = current === 'default';
+  const archiveDisabled = current === 'default';
+  const actions = `
+    <div class="kanban-board-switcher-divider" role="separator"></div>
+    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanCreateBoard()" data-i18n="kanban_new_board">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <span>${esc(t('kanban_new_board') || 'New board…')}</span>
+    </button>
+    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" ${renameDisabled ? 'disabled' : ''} data-i18n="kanban_rename_board">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      <span>${esc(t('kanban_rename_board') || 'Rename current board…')}</span>
+    </button>
+    <button type="button" class="kanban-board-switcher-action danger" onclick="archiveKanbanBoard()" ${archiveDisabled ? 'disabled' : ''} data-i18n="kanban_archive_board">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+      <span>${esc(t('kanban_archive_board') || 'Archive current board…')}</span>
+    </button>
+  `;
+  menu.innerHTML = items + actions;
+}
+
+function toggleKanbanBoardMenu(ev){
+  if (ev) ev.stopPropagation();
+  const menu = document.getElementById('kanbanBoardSwitcherMenu');
+  const toggle = document.getElementById('kanbanBoardSwitcherToggle');
+  if (!menu || !toggle) return;
+  _kanbanBoardMenuOpen = !_kanbanBoardMenuOpen;
+  menu.hidden = !_kanbanBoardMenuOpen;
+  toggle.setAttribute('aria-expanded', String(_kanbanBoardMenuOpen));
+  if (_kanbanBoardMenuOpen) {
+    // Click-away close
+    setTimeout(() => {
+      document.addEventListener('click', _kanbanCloseBoardMenuOnOutside, {once: true, capture: true});
+    }, 0);
+  }
+}
+
+function _kanbanCloseBoardMenuOnOutside(ev){
+  const switcher = document.getElementById('kanbanBoardSwitcher');
+  if (!switcher || !switcher.contains(ev.target)) {
+    _kanbanBoardMenuOpen = false;
+    const menu = document.getElementById('kanbanBoardSwitcherMenu');
+    const toggle = document.getElementById('kanbanBoardSwitcherToggle');
+    if (menu) menu.hidden = true;
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  } else {
+    // Re-arm the listener — the user clicked inside the switcher, possibly
+    // the toggle button which we want to handle through its own onclick.
+    setTimeout(() => {
+      document.addEventListener('click', _kanbanCloseBoardMenuOnOutside, {once: true, capture: true});
+    }, 0);
+  }
+}
+
+async function switchKanbanBoard(slug){
+  if (!slug) return;
+  const newBoard = (slug === 'default') ? null : slug;
+  if (newBoard === _kanbanCurrentBoard) {
+    // No-op switch — just close the menu.
+    _kanbanBoardMenuOpen = false;
+    const menu = document.getElementById('kanbanBoardSwitcherMenu');
+    if (menu) menu.hidden = true;
+    return;
+  }
+  _kanbanCurrentBoard = newBoard;
+  _kanbanSetSavedBoard(slug);
+  _kanbanLatestEventId = 0;  // reset cursor — new board has its own event sequence
+  _kanbanBoardMenuOpen = false;
+  const menu = document.getElementById('kanbanBoardSwitcherMenu');
+  if (menu) menu.hidden = true;
+  // Tell the server too (sets the on-disk active-board pointer for CLI/dashboard).
+  try {
+    await api('/api/kanban/boards/' + encodeURIComponent(slug) + '/switch', {method: 'POST'});
+  } catch(e) {
+    // Local UI switch still happens — the on-disk pointer is for cross-process
+    // consistency, not for our own rendering.
+  }
+  // Re-open the SSE stream on the new board.
+  _kanbanStopPolling();
+  await loadKanban(true);
+  await loadKanbanBoards();
+  _kanbanStartPolling();
+}
+
+// ── Create / rename / archive board modals ──────────────────────────────────
+
+function openKanbanCreateBoard(){
+  const modal = document.getElementById('kanbanBoardModal');
+  if (!modal) return;
+  document.getElementById('kanbanBoardModalMode').value = 'create';
+  document.getElementById('kanbanBoardModalSlug').value = '';
+  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_new_board') || 'New board';
+  document.getElementById('kanbanBoardModalName').value = '';
+  document.getElementById('kanbanBoardModalSlugInput').value = '';
+  document.getElementById('kanbanBoardModalSlugInput').disabled = false;
+  document.getElementById('kanbanBoardModalSlugRow').style.display = '';
+  document.getElementById('kanbanBoardModalDesc').value = '';
+  document.getElementById('kanbanBoardModalIcon').value = '';
+  document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  document.getElementById('kanbanBoardModalError').textContent = '';
+  modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
+  // Auto-focus name field
+  setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
+  // Auto-suggest slug from name as user types
+  const nameEl = document.getElementById('kanbanBoardModalName');
+  const slugEl = document.getElementById('kanbanBoardModalSlugInput');
+  let userEditedSlug = false;
+  slugEl.addEventListener('input', () => { userEditedSlug = true; }, {once: false});
+  const onName = () => {
+    if (!userEditedSlug) {
+      slugEl.value = String(nameEl.value || '').toLowerCase().replace(/[^a-z0-9-_ ]+/g, '').replace(/\s+/g, '-').slice(0, 48);
+    }
+  };
+  nameEl.removeEventListener('input', nameEl._kanbanOnNameInput || (() => {}));
+  nameEl._kanbanOnNameInput = onName;
+  nameEl.addEventListener('input', onName);
+  // Close on Escape
+  document.addEventListener('keydown', _kanbanBoardModalEsc);
+}
+
+function openKanbanRenameBoard(){
+  const modal = document.getElementById('kanbanBoardModal');
+  if (!modal) return;
+  const current = _kanbanCurrentBoard || 'default';
+  if (current === 'default') return;  // default's slug is immutable
+  const meta = (_kanbanBoardsList || []).find(b => b.slug === current);
+  if (!meta) return;
+  document.getElementById('kanbanBoardModalMode').value = 'rename';
+  document.getElementById('kanbanBoardModalSlug').value = current;
+  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_rename_board') || 'Rename board';
+  document.getElementById('kanbanBoardModalName').value = meta.name || '';
+  document.getElementById('kanbanBoardModalSlugInput').value = current;
+  document.getElementById('kanbanBoardModalSlugInput').disabled = true;  // slug is immutable
+  // Hide the slug row — it's locked, less visual noise.
+  document.getElementById('kanbanBoardModalSlugRow').style.display = 'none';
+  document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
+  document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
+  document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  document.getElementById('kanbanBoardModalError').textContent = '';
+  modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
+  setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
+  document.addEventListener('keydown', _kanbanBoardModalEsc);
+}
+
+function _kanbanBoardModalEsc(ev){
+  if (ev.key === 'Escape') closeKanbanBoardModal();
+}
+
+function closeKanbanBoardModal(){
+  const modal = document.getElementById('kanbanBoardModal');
+  if (modal) modal.hidden = true;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  document.removeEventListener('keydown', _kanbanBoardModalEsc);
+}
+
+async function submitKanbanBoardModal(){
+  const errEl = document.getElementById('kanbanBoardModalError');
+  errEl.textContent = '';
+  const mode = document.getElementById('kanbanBoardModalMode').value;
+  const name = (document.getElementById('kanbanBoardModalName').value || '').trim();
+  const slugInput = (document.getElementById('kanbanBoardModalSlugInput').value || '').trim();
+  const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
+  const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
+  const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const submitBtn = document.getElementById('kanbanBoardModalSubmit');
+  if (!name) {
+    errEl.textContent = t('kanban_board_name_required') || 'Name is required';
+    return;
+  }
+  if (mode === 'create') {
+    if (!slugInput) {
+      errEl.textContent = t('kanban_board_slug_required') || 'Slug is required';
+      return;
+    }
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const res = await api('/api/kanban/boards', {
+        method: 'POST',
+        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+      });
+      closeKanbanBoardModal();
+      // Switch to the new board and reload
+      const newSlug = (res && res.board && res.board.slug) || slugInput;
+      _kanbanCurrentBoard = (newSlug === 'default') ? null : newSlug;
+      _kanbanSetSavedBoard(newSlug);
+      _kanbanLatestEventId = 0;
+      _kanbanStopPolling();
+      await loadKanban(true);
+      await loadKanbanBoards();
+      _kanbanStartPolling();
+    } catch(e) {
+      errEl.textContent = (e && (e.message || e.error)) || String(e);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  } else if (mode === 'rename') {
+    const slug = document.getElementById('kanbanBoardModalSlug').value;
+    if (!slug) { errEl.textContent = 'Missing slug'; return; }
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      await api('/api/kanban/boards/' + encodeURIComponent(slug), {
+        method: 'PATCH',
+        body: JSON.stringify({name, description, icon, color}),
+      });
+      closeKanbanBoardModal();
+      await loadKanbanBoards();  // refresh switcher label/icon
+    } catch(e) {
+      errEl.textContent = (e && (e.message || e.error)) || String(e);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  }
+}
+
+async function archiveKanbanBoard(){
+  const current = _kanbanCurrentBoard || 'default';
+  if (current === 'default') return;
+  const meta = (_kanbanBoardsList || []).find(b => b.slug === current);
+  const label = meta && meta.name ? meta.name : current;
+  const ok = await showConfirmDialog({
+    title: t('kanban_archive_board') || 'Archive board',
+    message: (t('kanban_archive_board_confirm') || 'Archive board "{name}"? Tasks remain on disk and the board can be restored from kanban/boards/_archived/.').replace('{name}', label),
+    confirmLabel: t('kanban_archive_board') || 'Archive',
+    danger: true,
+    focusCancel: true,
+  });
+  if (!ok) return;
+  // CRITICAL: stop the SSE stream BEFORE the archive call. The library's
+  // kb.connect(board=<slug>) auto-creates the on-disk directory + DB on
+  // first call — so any in-flight stream that polls task_events while
+  // we're archiving will silently re-materialise the directory we just
+  // moved to _archived/. Tearing down the stream first avoids that race.
+  _kanbanStopPolling();
+  try {
+    await api('/api/kanban/boards/' + encodeURIComponent(current), {method: 'DELETE'});
+    // Server falls back to default — match that locally.
+    _kanbanCurrentBoard = null;
+    _kanbanSetSavedBoard('default');
+    _kanbanLatestEventId = 0;
+    await loadKanban(true);
+    await loadKanbanBoards();
+    _kanbanStartPolling();
+    showToast(t('kanban_board_archived') || 'Board archived');
+  } catch(e) {
+    // Restart the stream on failure so the UI doesn't go stale.
+    _kanbanStartPolling();
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  }
+}
+
+
+// ── Logs panel ──
+function _selectedLogsFile() {
+  const el = $('logsFile');
+  const value = (el && el.value) || 'agent';
+  return ['agent','errors','gateway'].includes(value) ? value : 'agent';
+}
+
+function _selectedLogsTail() {
+  const el = $('logsTail');
+  const value = Number((el && el.value) || 200);
+  return [100,200,500,1000].includes(value) ? value : 200;
+}
+
+function _logLineSeverityClass(line) {
+  const text = String(line || '').toUpperCase();
+  if (/\b(WARNING|WARN)\b/.test(text)) return 'log-line-warning';
+  if (/\b(DEBUG)\b/.test(text)) return 'log-line-debug';
+  if (/\b(INFO)\b/.test(text)) return 'log-line-info';
+  if (/\b(ERROR|CRITICAL|TRACEBACK)\b/.test(text)) return 'log-line-error';
+  return '';
+}
+
+function _syncLogsWrap() {
+  const out = $('logsOutput');
+  const wrap = $('logsWrap');
+  if (out && wrap) out.classList.toggle('wrap', !!wrap.checked);
+}
+
+async function loadLogs(animate) {
+  const box = $('logsOutput');
+  const status = $('logsStatus');
+  const refreshBtn = $('logsRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  const file = _selectedLogsFile();
+  const tail = _selectedLogsTail();
+  try {
+    if (status) status.textContent = t('logs_loading');
+    const data = await api('/api/logs?file=' + encodeURIComponent(file) + '&tail=' + encodeURIComponent(tail));
+    _renderLogs(data);
+  } catch(e) {
+    _lastLogsLines = [];
+    box.innerHTML = `<div class="logs-empty">${esc(t('error_prefix') + e.message)}</div>`;
+    if (status) status.textContent = t('logs_load_failed');
+  } finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+    _syncLogsAutoRefresh();
+  }
+}
+
+function _renderLogs(data) {
+  const box = $('logsOutput');
+  const status = $('logsStatus');
+  if (!box) return;
+  const lines = Array.isArray(data && data.lines) ? data.lines : [];
+  _lastLogsLines = lines.slice();
+  const hint = data && data.hint ? `<div class="logs-hint">${esc(data.hint)}</div>` : '';
+  const truncated = data && data.truncated ? `<div class="logs-hint warn">${esc(t('logs_truncated_hint'))}</div>` : '';
+  if (!lines.length) {
+    box.innerHTML = `${hint}${truncated}<div class="logs-empty">${esc(t('logs_empty'))}</div>`;
+  } else {
+    box.innerHTML = `${hint}${truncated}` + lines.map(line => {
+      const cls = _logLineSeverityClass(line);
+      return `<div class="log-line ${cls}">${esc(line)}</div>`;
+    }).join('');
+  }
+  _syncLogsWrap();
+  if (status) {
+    const bytes = data && Number(data.total_bytes || 0);
+    const when = data && data.mtime ? new Date(data.mtime * 1000).toLocaleString() : t('logs_no_mtime');
+    status.textContent = `${lines.length} / ${data.tail || _selectedLogsTail()} lines · ${bytes.toLocaleString()} bytes · ${when}`;
+  }
+}
+
+function _startLogsAutoRefresh() {
+  if (_logsAutoRefreshTimer) return;
+  _logsAutoRefreshTimer = setInterval(() => {
+    if (_currentPanel !== 'logs') { _stopLogsAutoRefresh(); return; }
+    const toggle = $('logsAutoRefresh');
+    if (toggle && !toggle.checked) return;
+    loadLogs(false);
+  }, 5000);
+}
+
+function _stopLogsAutoRefresh() {
+  if (_logsAutoRefreshTimer) {
+    clearInterval(_logsAutoRefreshTimer);
+    _logsAutoRefreshTimer = null;
+  }
+}
+
+function _syncLogsAutoRefresh() {
+  const toggle = $('logsAutoRefresh');
+  if (_currentPanel === 'logs' && (!toggle || toggle.checked)) _startLogsAutoRefresh();
+  else _stopLogsAutoRefresh();
+}
+
+async function copyLogsAll() {
+  const text = _lastLogsLines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(t('logs_copied'));
+  } catch(e) {
+    showToast(t('copy_failed'), 'error');
+  }
+}
+
 // ── Insights panel ──
 async function loadInsights(animate) {
   const box = $('insightsContent');
@@ -901,8 +2774,13 @@ async function loadInsights(animate) {
   }
   const period = ($('insightsPeriod') || {}).value || '30';
   try {
-    const data = await api(`/api/insights?days=${period}`);
-    _renderInsights(data, box);
+    const [data, wikiStatus] = await Promise.all([
+      api(`/api/insights?days=${period}`),
+      api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
+    ]);
+    _renderInsights(data, box, wikiStatus);
+    if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
+    if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
@@ -913,10 +2791,96 @@ async function loadInsights(animate) {
   }
 }
 
-function _renderInsights(d, box) {
-  const fmtNum = n => n.toLocaleString();
-  const fmtCost = c => c > 0 ? '$' + c.toFixed(4) : t('insights_no_cost');
-  const fmtTokens = n => n >= 1e6 ? (n/1e6).toFixed(1) + 'M' : n >= 1e3 ? (n/1e3).toFixed(1) + 'K' : fmtNum(n);
+function _formatLlmWikiTimestamp(value) {
+  if (!value) return 'Never';
+  try { return new Date(value).toLocaleString(); }
+  catch (_) { return String(value); }
+}
+
+function _renderSystemHealthPanel() {
+  return `
+    <section class="insights-card system-health-panel loading" id="systemHealthPanel" aria-label="Host resource health" aria-live="polite">
+      <div class="system-health-head">
+        <div>
+          <div class="insights-card-title">System health</div>
+          <div class="system-health-sub">Current VPS resource usage</div>
+        </div>
+        <span class="system-health-status" id="systemHealthStatus"><span class="system-health-dot" aria-hidden="true"></span>Loading…</span>
+      </div>
+      <div class="system-health-metrics">
+        <div class="system-health-metric" data-system-health-metric="cpu">
+          <div class="system-health-label"><span>CPU</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="CPU usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+        <div class="system-health-metric" data-system-health-metric="memory">
+          <div class="system-health-label"><span>RAM</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="RAM usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+        <div class="system-health-metric" data-system-health-metric="disk">
+          <div class="system-health-label"><span>Disk</span><span class="system-health-value" data-system-health-value>—</span></div>
+          <div class="system-health-bar" role="progressbar" aria-label="Disk usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="system-health-bar-fill"></div></div>
+        </div>
+      </div>
+      <div class="system-health-foot">Live snapshot only; historical resource charts can build on this surface later.</div>
+    </section>`;
+}
+
+function _renderLlmWikiStatus(d) {
+  const status = d || {status:'error'};
+  const isReady = status.available && status.status === 'ready';
+  const isEmpty = status.available && status.status === 'empty';
+  const isError = status.status === 'error';
+  const badgeClass = isReady ? 'ok' : isError ? 'err' : isEmpty ? 'warn' : 'muted';
+  const badgeText = isReady ? 'Available' : isError ? 'Error' : isEmpty ? 'Empty' : 'Unavailable';
+  const rawDocsUrl = status.docs_url || 'https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki';
+  // Guard against unsafe URL schemes (e.g. js: / data:) if docs_url ever
+  // becomes config-driven. esc() HTML-escapes but doesn't validate URL scheme.
+  const docsUrl = /^https?:\/\//i.test(rawDocsUrl) ? rawDocsUrl : '#';
+  const toggleNote = status.toggle_available
+    ? 'Toggle available from configured Hermes Agent setting.'
+    : (status.toggle_reason || 'No stable LLM Wiki on/off config flag was detected, so this panel is read-only.');
+  const statusNote = isReady
+    ? 'LLM Wiki is configured and page metadata is visible without exposing wiki content.'
+    : isEmpty
+      ? 'LLM Wiki exists but has no entity, concept, comparison, or query pages yet.'
+      : isError
+        ? `Unable to inspect LLM Wiki status${status.error ? ': ' + status.error : ''}.`
+        : 'No LLM Wiki directory was found. Set WIKI_PATH or skills.config.wiki.path to enable status visibility.';
+  return `
+    <div class="insights-card wiki-status-card" id="llmWikiStatusCard">
+      <div class="wiki-status-head">
+        <div>
+          <div class="insights-card-title">LLM Wiki</div>
+          <div class="wiki-status-sub">Knowledge-base observability</div>
+        </div>
+        <span class="wiki-status-badge ${badgeClass}">${esc(badgeText)}</span>
+      </div>
+      <div class="wiki-status-note">${esc(statusNote)}</div>
+      <div class="wiki-status-grid">
+        <div><span>Enabled</span><strong>${status.enabled ? 'Yes' : 'No'}</strong></div>
+        <div><span>Entries</span><strong>${Number(status.entry_count || 0).toLocaleString()}</strong></div>
+        <div><span>Pages</span><strong>${Number(status.page_count || 0).toLocaleString()}</strong></div>
+        <div><span>raw/ files</span><strong>${Number(status.raw_source_count || 0).toLocaleString()}</strong></div>
+        <div><span>Last updated</span><strong>${esc(_formatLlmWikiTimestamp(status.last_updated))}</strong></div>
+        <div><span>Last writer</span><strong>${esc(status.last_writer || 'Not available')}</strong></div>
+      </div>
+      <div class="wiki-status-footer">
+        <span>${esc(toggleNote)}</span>
+        <a href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">Docs</a>
+      </div>
+    </div>`;
+}
+
+function _renderInsights(d, box, wikiStatus) {
+  const fmtNum = n => Number(n || 0).toLocaleString();
+  const fmtCost = c => {
+    const value = Number(c || 0);
+    return value > 0 ? '$' + value.toFixed(value < 1 ? 4 : 2) : t('insights_no_cost');
+  };
+  const fmtTokens = n => {
+    const value = Number(n || 0);
+    return value >= 1e6 ? (value/1e6).toFixed(1) + 'M' : value >= 1e3 ? (value/1e3).toFixed(1) + 'K' : fmtNum(value);
+  };
 
   // Overview cards
   const overviewCards = [
@@ -926,16 +2890,39 @@ function _renderInsights(d, box) {
     { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
   ];
 
+  // Daily token trend
+  const dailyTokens = Array.isArray(d.daily_tokens) ? d.daily_tokens : [];
+  let dailyHtml = '';
+  if (dailyTokens.length) {
+    const maxDailyTokens = Math.max(...dailyTokens.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
+    const labelEvery = Math.max(Math.ceil(dailyTokens.length / 7), 1);
+    dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-daily-token-chart">` +
+      dailyTokens.map((r, idx) => {
+        const input = Number(r.input_tokens || 0);
+        const output = Number(r.output_tokens || 0);
+        const inputPct = Math.max((input / maxDailyTokens) * 100, input ? 2 : 0).toFixed(1);
+        const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
+        const showLabel = idx === 0 || idx === dailyTokens.length - 1 || idx % labelEvery === 0;
+        const title = `${r.date} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(String(r.date).slice(5)) : ''}</span></div>`;
+      }).join('') +
+      `</div><div class="insights-daily-legend"><span><i class="insights-daily-legend-input"></i>${esc(t('insights_input_tokens'))}</span><span><i class="insights-daily-legend-output"></i>${esc(t('insights_output_tokens'))}</span></div></div>`;
+  } else {
+    dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
+  }
+
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    const totalSess = d.models.reduce((a, m) => a + m.sessions, 0) || 1;
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table"><div class="insights-table-head"><span>Model</span><span>Sessions</span><span>Share</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
-        const pct = ((m.sessions / totalSess) * 100).toFixed(0);
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${m.sessions}</span><span>${pct}%</span></div>`;
+        const share = Number(m.cost_share || m.token_share || m.session_share || 0);
+        const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
+  } else {
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
   }
 
   // Activity by day of week
@@ -983,9 +2970,12 @@ function _renderInsights(d, box) {
     </div>`;
 
   box.innerHTML = `
+    ${_renderSystemHealthPanel()}
+    ${_renderLlmWikiStatus(wikiStatus)}
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
+    ${dailyHtml}
     <div class="insights-row">
       ${tokenCards}
       ${modelsHtml}
@@ -1647,13 +3637,81 @@ function _positionProfileDropdown(){
 function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   if(!dd)return;
   dd.innerHTML='';
-  for(const w of workspaces){
-    const opt=document.createElement('div');
-    opt.className='ws-opt'+(w.path===currentWs?' active':'');
-    opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-    opt.onclick=()=>switchToWorkspace(w.path,w.name);
-    dd.appendChild(opt);
+
+  // ── Search row ──────────────────────────────────────────────────────────
+  const searchRow=document.createElement('div');
+  searchRow.className='ws-search-row';
+  searchRow.innerHTML=`<input class="ws-search-input" type="text" placeholder="${esc(t('ws_search_placeholder')||'Search workspaces…')}" spellcheck="false" autocomplete="off"><button class="ws-search-clear" title="Clear search">${li('x',10)}</button>`;
+  const si=searchRow.querySelector('.ws-search-input');
+  const sc=searchRow.querySelector('.ws-search-clear');
+  dd.appendChild(searchRow);
+
+  // ── Workspace list ──────────────────────────────────────────────────────
+  // Sort alphabetically by name (case-insensitive) before rendering.
+  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const listContainer=document.createElement('div');
+  listContainer.className='ws-list-container';
+  dd.appendChild(listContainer);
+
+  // Pre-create noResults element so filterWs can reference it safely from the start.
+  const noResults=document.createElement('div');
+  noResults.className='ws-no-results';
+  noResults.textContent=t('ws_no_results')||'No workspaces found';
+  noResults.style.display='none';
+
+  function filterWs(term){
+    term=(term||'').trim().toLowerCase();
+    let visible=0;
+    const opts=listContainer.querySelectorAll('.ws-opt');
+    for(const opt of opts){
+      const name=(opt.dataset.name||'').toLowerCase();
+      const path=(opt.dataset.path||'').toLowerCase();
+      const show=!term||name.includes(term)||path.includes(term);
+      opt.style.display=show?'':'none';
+      if(show) visible++;
+    }
+    noResults.style.display=visible?'none':'';
   }
+
+  function renderList(){
+    listContainer.innerHTML='';
+    for(const w of sorted){
+      const opt=document.createElement('div');
+      opt.className='ws-opt'+(w.path===currentWs?' active':'');
+      opt.dataset.name=w.name||'';
+      opt.dataset.path=w.path||'';
+      opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
+      opt.onclick=()=>switchToWorkspace(w.path,w.name);
+      listContainer.appendChild(opt);
+    }
+    listContainer.appendChild(noResults);
+  }
+
+  renderList();
+  filterWs('');
+
+  si.addEventListener('input',()=>{ filterWs(si.value); });
+  sc.addEventListener('click',()=>{ si.value=''; filterWs(''); si.focus(); });
+
+  // ── Footer actions ────────────────────────────────────────────────────────
+  dd.appendChild(document.createElement('div')).className='ws-divider';
+  dd.appendChild(_renderWorkspaceAction(
+    t('workspace_new_worktree_conversation'),
+    t('workspace_new_worktree_conversation_meta'),
+    li('git-branch',12),
+    async()=>{
+      closeWsDropdown();
+      try{
+        await newSession(false,{worktree:true});
+        await renderSessionList();
+        const msg=$('msg');
+        if(msg)msg.focus();
+        showToast(t('workspace_worktree_created'));
+      }catch(e){
+        showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+      }
+    }
+  ));
   dd.appendChild(document.createElement('div')).className='ws-divider';
   dd.appendChild(_renderWorkspaceAction(
     t('workspace_choose_path'),
@@ -2316,6 +4374,7 @@ async function deleteCurrentProfile(){
   if(!_ok) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     _clearProfileDetail();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
@@ -2386,7 +4445,9 @@ window.addEventListener('resize',()=>{
 });
 
 async function switchToProfile(name) {
-  if (S.busy) { showToast(t('profiles_busy_switch')); return; }
+  // Profile switches are per-client cookie/TLS scoped, so a running stream in
+  // the current session can safely continue while this tab moves to another
+  // profile. The in-flight session stays attached to its original profile.
 
   // ── Loading indicator ───────────────────────────────────────────────────
   // Show spinner on the profile chip immediately so the user gets visual
@@ -2401,7 +4462,11 @@ async function switchToProfile(name) {
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
   // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && S.messages && S.messages.length > 0;
+  const sessionInProgress = S.session && (
+    (S.messages && S.messages.length > 0) ||
+    S.session.active_stream_id ||
+    S.session.pending_user_message
+  );
 
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
@@ -2498,6 +4563,7 @@ async function switchToProfile(name) {
     if (_currentPanel === 'skills') await loadSkills();
     if (_currentPanel === 'memory') await loadMemory();
     if (_currentPanel === 'tasks') await loadCrons();
+    if (_currentPanel === 'kanban') await loadKanban();
     if (_currentPanel === 'profiles') await loadProfilesPanel();
     if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 
@@ -2586,6 +4652,7 @@ async function saveProfileForm(){
     if (baseUrl) payload.base_url = baseUrl;
     if (apiKey) payload.api_key = apiKey;
     await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
+    _invalidateKanbanProfileCache();
     _profilePreFormDetail = null;
     await loadProfilesPanel();
     showToast(t('profile_created', name));
@@ -2606,6 +4673,7 @@ async function deleteProfile(name) {
   if(!_delProf) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }
@@ -2679,24 +4747,25 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
   // Sync mobile dropdown
   const dd=$('settingsSectionDropdown');
   if(dd && dd.value!==section) dd.value=section;
-  // Lazy-load providers when the tab is opened
+  // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
+  if(section==='plugins') loadPluginsPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -2802,6 +4871,8 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
+    session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
   };
 }
 
@@ -2849,6 +4920,11 @@ async function _autosaveAppearanceSettings(payload){
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
     }
+    if(saved){
+      window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+    }
+    window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
     console.warn('[settings] appearance autosave failed', e);
@@ -2872,6 +4948,8 @@ function _preferencesPayloadFromUi(){
   if(langSel) payload.language=langSel.value;
   const showUsageCb=$('settingsShowTokenUsage');
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
+  const showTpsCb=$('settingsShowTps');
+  if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const simplifiedToolCb=$('settingsSimplifiedToolCalling');
   if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
   const apiRedactCb=$('settingsApiRedact');
@@ -2932,7 +5010,17 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    if(payload&&payload.simplified_tool_calling!==undefined){
+      window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.show_tps!==undefined){
+      window._showTps=!!(saved&&saved.show_tps);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages();
+    }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
     // Only clear the global dirty flag and hide the unsaved-changes bar when
@@ -2966,10 +5054,17 @@ function _retryPreferencesAutosave(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
-    // Populate the version badge from the server — keeps it in sync with git
+    // Populate the version badges from the server — keeps them in sync with git
     // tags automatically without any manual release step.
-    const vbadge=document.querySelector('.settings-version-badge');
-    if(vbadge && settings.webui_version) vbadge.textContent=settings.webui_version;
+    const webuiBadge = $('settings-webui-version-badge');
+    if(webuiBadge){
+      webuiBadge.textContent = `WebUI: ${settings.webui_version || 'not detected'}`;
+    }
+    const agentBadge = $('settings-agent-version-badge');
+    if(agentBadge){
+      const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
+      agentBadge.textContent = `Agent: ${agentVersion}`;
+    }
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -2986,6 +5081,17 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
+    const jumpButtonsCb=$('settingsSessionJumpButtons');
+    if(jumpButtonsCb){
+      jumpButtonsCb.checked=!!settings.session_jump_buttons;
+      window._sessionJumpButtonsEnabled=jumpButtonsCb.checked;
+      jumpButtonsCb.onchange=function(){
+        window._sessionJumpButtonsEnabled=this.checked;
+        if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+        _scheduleAppearanceAutosave();
+      };
+    }
+    if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     // Workspace panel default-open toggle (localStorage-backed)
     // Uses a separate key (hermes-webui-workspace-panel-pref) so that
     // closing the panel via toolbar X does not clear the user's preference.
@@ -3000,6 +5106,15 @@ async function loadSettingsPanel(){
         document.documentElement.dataset.workspacePanel=open?'open':'closed';
         if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
         else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
+      };
+    }
+    const endlessScrollCb=$('settingsSessionEndlessScroll');
+    if(endlessScrollCb){
+      endlessScrollCb.checked=!!settings.session_endless_scroll;
+      window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
+      endlessScrollCb.onchange=function(){
+        window._sessionEndlessScrollEnabled=this.checked;
+        _scheduleAppearanceAutosave();
       };
     }
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
@@ -3066,6 +5181,8 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showTpsCb=$('settingsShowTps');
+    if(showTpsCb){showTpsCb.checked=!!settings.show_tps;showTpsCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
     if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
@@ -3163,17 +5280,95 @@ async function loadSettingsPanel(){
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
+    // #1560: when HERMES_WEBUI_PASSWORD env var is set, the settings password
+    // field silently no-ops. Disable it + reveal the lock banner so the UI
+    // tells the truth before a user tries (and the backend now also returns
+    // 409 as defense-in-depth).
+    const pwEnvLocked=!!settings.password_env_var;
+    const pwLockBanner=$('settingsPasswordEnvLock');
+    if(pwField){
+      pwField.disabled=pwEnvLocked;
+      if(pwEnvLocked){
+        pwField.value='';
+        pwField.placeholder=t('password_env_var_locked_placeholder')||pwField.placeholder;
+      }
+    }
+    if(pwLockBanner) pwLockBanner.style.display=pwEnvLocked?'block':'none';
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
+    // #1560: env-var-locked password also disables the Disable Auth button —
+    // clearing settings.password_hash is silent no-op when the env var is set,
+    // and the backend now returns 409 anyway, so don't offer the action.
+    // Sign Out remains available since it only clears the session cookie.
+    if(pwEnvLocked){
+      const disableBtn=$('btnDisableAuth');
+      if(disableBtn) disableBtn.style.display='none';
+    }
     _syncHermesPanelSessionActions();
+    if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
+    loadPluginsPanel(); // load plugin/hook visibility in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
   }
+}
+
+
+// ── Plugins panel (read-only plugin/hook visibility) ───────────────────────
+
+async function loadPluginsPanel(){
+  const list=$('pluginsList');
+  const empty=$('pluginsEmpty');
+  if(!list) return;
+  try{
+    const data=await api('/api/plugins');
+    const plugins=Array.isArray((data||{}).plugins)?data.plugins:[];
+    list.innerHTML='';
+    if(plugins.length===0){
+      list.style.display='none';
+      if(empty) empty.style.display='';
+      return;
+    }
+    if(empty) empty.style.display='none';
+    list.style.display='';
+    for(const plugin of plugins){
+      list.appendChild(_buildPluginCard(plugin));
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load plugins: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+function _buildPluginCard(plugin){
+  const card=document.createElement('div');
+  card.className='provider-card plugin-card';
+  card.dataset.plugin=(plugin&&plugin.key)||'';
+  const hooks=Array.isArray(plugin&&plugin.hooks)?plugin.hooks:[];
+  const hookHtml=hooks.length
+    ? hooks.map(h=>`<span class="plugin-hook-badge">${esc(h)}</span>`).join('')
+    : '<span class="plugin-hook-empty">No registered lifecycle hooks</span>';
+  const version=(plugin&&plugin.version)?` · v${esc(plugin.version)}`:'';
+  const desc=(plugin&&plugin.description)?esc(plugin.description):'No description provided.';
+  const enabled=plugin&&plugin.enabled!==false;
+  card.innerHTML=`
+    <div class="provider-card-header plugin-card-header">
+      <div class="provider-card-info">
+        <div class="provider-card-name">${esc((plugin&&plugin.name)||'Unnamed plugin')}</div>
+        <div class="provider-card-meta">${esc((plugin&&plugin.key)||'plugin')}${version}</div>
+      </div>
+      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?'Enabled':'Disabled'}</span>
+    </div>
+    <div class="provider-card-body plugin-card-body">
+      <div class="provider-card-hint">${desc}</div>
+      <div class="provider-card-label">Registered hooks</div>
+      <div class="plugin-hook-list">${hookHtml}</div>
+    </div>
+  `;
+  return card;
 }
 
 // ── Providers panel ───────────────────────────────────────────────────────
@@ -3186,9 +5381,12 @@ async function loadProvidersPanel(){
   if(!list) return;
   try{
     const data=await api('/api/providers');
+    const quota=await api('/api/provider/quota').catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||'Quota status unavailable'}));
     const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
     list.innerHTML='';
     _providerCardEls.clear();
+    const quotaCard=_buildProviderQuotaCard(quota);
+    if(quotaCard) list.appendChild(quotaCard);
     if(providers.length===0){
       list.style.display='none';
       if(empty) empty.style.display='';
@@ -3204,6 +5402,92 @@ async function loadProvidersPanel(){
   }
 }
 
+function _formatProviderQuotaMoney(value){
+  if(value===null||value===undefined||value==='') return '—';
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '—';
+  return '$'+n.toFixed(2);
+}
+
+function _formatProviderQuotaPercent(value){
+  if(value===null||value===undefined||value==='') return '—';
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '—';
+  return Math.max(0,Math.min(100,Math.round(n)))+'%';
+}
+
+function _formatProviderQuotaReset(value){
+  if(!value) return '';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return '';
+  try{return d.toLocaleString();}catch(e){return value;}
+}
+
+function _formatProviderQuotaWindowLabel(accountLimits,w){
+  const raw=((w&&w.label)||'Window').trim();
+  const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
+  if(provider==='openai-codex'){
+    if(raw.toLowerCase()==='session') return '5-hour limit';
+    if(raw.toLowerCase()==='weekly') return 'Weekly limit';
+  }
+  return raw||'Window';
+}
+
+function _buildProviderQuotaCard(status){
+  if(!status) return null;
+  const card=document.createElement('div');
+  const state=(status.status||'unavailable').replace(/[^a-z0-9_-]/gi,'').toLowerCase()||'unavailable';
+  card.className='provider-quota-card provider-quota-card-'+state;
+  const accountLimits=status.account_limits||null;
+  const providerBase=status.display_name||status.provider||'Active provider';
+  const provider=(accountLimits&&accountLimits.plan)?`${providerBase} · ${accountLimits.plan}`:providerBase;
+  const quota=status.quota||null;
+  let body='';
+  if(status.status==='available'&&accountLimits){
+    const windows=Array.isArray(accountLimits.windows)?accountLimits.windows:[];
+    const details=Array.isArray(accountLimits.details)?accountLimits.details:[];
+    const windowHtml=windows.map(w=>{
+      const used=_formatProviderQuotaPercent(w&&w.used_percent);
+      const reset=_formatProviderQuotaReset(w&&w.reset_at);
+      const meta=[];
+      if(used!=='—') meta.push(`${used} used`);
+      if(reset) meta.push(`resets ${reset}`);
+      if(w&&w.detail) meta.push(w.detail);
+      return `
+        <div class="provider-quota-metric provider-quota-window">
+          <span>${esc(_formatProviderQuotaWindowLabel(accountLimits,w))}</span>
+          <strong>${esc(_formatProviderQuotaPercent(w&&w.remaining_percent))}</strong>
+          ${meta.length?`<small>${esc(meta.join(' · '))}</small>`:''}
+        </div>
+      `;
+    }).join('');
+    const detailHtml=details.length
+      ? `<div class="provider-quota-details">${details.map(d=>`<span>${esc(d)}</span>`).join('')}</div>`
+      : '';
+    body=windowHtml+detailHtml;
+    if(!body) body=`<div class="provider-quota-message">${esc(status.message||'Account limits loaded.')}</div>`;
+  }else if(status.status==='available'&&quota){
+    body=`
+      <div class="provider-quota-metric"><span>Remaining</span><strong>${esc(_formatProviderQuotaMoney(quota.limit_remaining))}</strong></div>
+      <div class="provider-quota-metric"><span>Used</span><strong>${esc(_formatProviderQuotaMoney(quota.usage))}</strong></div>
+      <div class="provider-quota-metric"><span>Limit</span><strong>${esc(_formatProviderQuotaMoney(quota.limit))}</strong></div>
+    `;
+  }else{
+    body=`<div class="provider-quota-message">${esc(status.message||'Quota status unavailable')}</div>`;
+  }
+  card.innerHTML=`
+    <div class="provider-quota-header">
+      <div>
+        <div class="provider-quota-title">Active provider quota</div>
+        <div class="provider-quota-subtitle">${esc(provider)}</div>
+      </div>
+      <span class="provider-quota-badge">${esc(state.replace(/_/g,' '))}</span>
+    </div>
+    <div class="provider-quota-body">${body}</div>
+  `;
+  return card;
+}
+
 function _buildProviderCard(p){
   const card=document.createElement('div');
   card.className='provider-card';
@@ -3211,7 +5495,13 @@ function _buildProviderCard(p){
   // Use the is_oauth flag from the backend — it reflects _OAUTH_PROVIDERS in providers.py.
   // key_source can be 'oauth' (hermes auth), 'config_yaml' (token in config.yaml), or 'none'.
   const isOauth=p.is_oauth===true;
-  const modelCount=Array.isArray(p.models)?p.models.length:0;
+  // models_total reflects the complete catalog (e.g. 396 for a large-tier
+  // Nous Portal account). The "models" array may be trimmed to a featured
+  // subset for UI scannability — fall back to its length only when the
+  // server didn't supply models_total (older builds, custom providers).
+  const modelCount=Number.isFinite(p.models_total)
+    ? p.models_total
+    : (Array.isArray(p.models) ? p.models.length : 0);
   const sourceLabel=p.key_source==='oauth'
     ? t('providers_status_oauth')
     : p.key_source==='config_yaml'
@@ -3312,11 +5602,27 @@ function _buildProviderCard(p){
     modelSection.appendChild(modelLabel);
     const modelList=document.createElement('div');
     modelList.className='provider-card-model-tags';
-    for(const m of p.models){
+    const renderedModels=Array.isArray(p.models)?p.models:[];
+    for(const m of renderedModels){
       const tag=document.createElement('span');
       tag.className='provider-card-model-tag';
       tag.textContent=m.id||m.label||m;
       modelList.appendChild(tag);
+    }
+    // When the rendered list is a strict subset of the total catalog (Nous
+    // Portal large-tier accounts hit this with ~400-model catalogs), show
+    // a "+N more" trailing pill so the user knows the picker is intentionally
+    // capped — and they can still reach the full catalog via the /model
+    // slash command (its autocomplete consumes the un-trimmed list from
+    // /api/models's extra_models field). #1567.
+    const totalCount=Number.isFinite(p.models_total)?p.models_total:renderedModels.length;
+    const hiddenCount=Math.max(0, totalCount - renderedModels.length);
+    if(hiddenCount>0){
+      const more=document.createElement('span');
+      more.className='provider-card-model-tag provider-card-model-tag-more';
+      more.textContent='+'+hiddenCount+' more';
+      more.title='The /model slash command can autocomplete every model in this provider\'s catalog.';
+      modelList.appendChild(more);
     }
     modelSection.appendChild(modelList);
     body.appendChild(modelSection);
@@ -3364,6 +5670,11 @@ async function _saveProviderKey(providerId){
     if(res.ok){
       showToast(res.provider+' key '+res.action);
       els.input.value='';
+      // Invalidate every dropdown surface that caches /api/models so the
+      // newly-configured provider's models show up without a server restart
+      // or page reload (#1539). Server-side invalidate_models_cache() is
+      // already called by api/providers.py:set_provider_key.
+      _refreshModelDropdownsAfterProviderChange();
       await loadProvidersPanel(); // refresh list
     }else{
       showToast(res.error||'Failed to save key');
@@ -3385,6 +5696,12 @@ async function _removeProviderKey(providerId){
     const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
+      // Drop the removed provider from every cached dropdown surface so it
+      // disappears immediately — composer picker, /model slash command,
+      // Settings → Default Model, configured-model badges (#1539).
+      // Without this, a stale list from before the delete keeps offering
+      // the now-removed provider's models until the page is reloaded.
+      _refreshModelDropdownsAfterProviderChange();
       await loadProvidersPanel(); // refresh list
     }else{
       showToast(res.error||'Failed to remove key');
@@ -3393,6 +5710,28 @@ async function _removeProviderKey(providerId){
   }catch(e){
     showToast('Error: '+e.message);
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
+  }
+}
+
+// Shared dropdown-cache flush invoked after a provider add/remove. The
+// server-side TTL cache is already invalidated by /api/providers and
+// /api/providers/delete (via api/providers.py:set_provider_key); this
+// flushes the JS-side caches so the next render rebuilds from a fresh
+// /api/models response. Wrapped in a try/catch so a UI module that hasn't
+// loaded yet (e.g. during early Settings open) cannot break the save flow.
+function _refreshModelDropdownsAfterProviderChange(){
+  try{
+    if(typeof window._invalidateSlashModelCache==='function'){
+      window._invalidateSlashModelCache();
+    }
+    if(typeof populateModelDropdown==='function'){
+      // Fire-and-forget: don't block the providers panel refresh on a
+      // dropdown rebuild. The composer/Settings dropdowns will catch up
+      // on the very next paint frame.
+      Promise.resolve(populateModelDropdown()).catch(()=>{});
+    }
+  }catch(_e){
+    // Swallow — dropdown refresh is best-effort, providers panel must still update.
   }
 }
 
@@ -3423,16 +5762,20 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showTps,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
+  window._showTps=showTps;
   window._showCliSessions=showCliSessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=body.simplified_tool_calling!==false;
+  window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
+  window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
@@ -3474,8 +5817,13 @@ async function checkUpdatesNow(){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
       const parts=[];
-      if(data.webui&&data.webui.behind>0) parts.push('WebUI: '+data.webui.behind);
-      if(data.agent&&data.agent.behind>0) parts.push('Agent: '+data.agent.behind);
+      const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
+        ? _formatUpdateTargetStatus
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+      const webuiPart=formatUpdatePart('WebUI',data.webui);
+      const agentPart=formatUpdatePart('Agent',data.agent);
+      if(webuiPart) parts.push(webuiPart);
+      if(agentPart) parts.push(agentPart);
       if(parts.length){
         if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
         // Also trigger the update banner
@@ -3508,6 +5856,7 @@ async function saveSettings(andClose){
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
+  const showTps=!!($('settingsShowTps')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
@@ -3522,8 +5871,11 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
+  body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
+  body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  body.show_tps=showTps;
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
@@ -3549,7 +5901,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _settingsDirty=false;
       _resetSettingsPanelState();
@@ -3568,7 +5920,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();
@@ -3666,7 +6018,7 @@ function _clearCronUnreadForJob(jobId){
 }
 
 const _origSwitchPanel=switchPanel;
-switchPanel=async function(name){ return _origSwitchPanel(name); };
+switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
@@ -3719,99 +6071,136 @@ function dismissErrorBanner(){
 
 
 // ── MCP Server Management ──
+function _mcpStatusLabel(status){
+  const key={
+    active:'mcp_status_active',
+    configured:'mcp_status_configured',
+    disabled:'mcp_status_disabled',
+    invalid_config:'mcp_status_invalid_config',
+  }[status]||'mcp_status_unknown';
+  return t(key);
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
+  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
   api('/api/mcp/servers').then(r=>{
-    if(!r||!r.servers) return;
+    if(!r||!Array.isArray(r.servers)) return;
     if(!r.servers.length){
-      list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${t('mcp_no_servers')}</div>`;
+      list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
+    const toggleNote=r.toggle_supported?'':'<div class="mcp-readonly-note">'+esc(t('mcp_toggle_followup'))+'</div>';
     list.innerHTML=r.servers.map(s=>{
-      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+s.transport);
+      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
-      const badge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
-      const detail=s.transport==='http'?s.url:`${s.command} ${s.args?s.args.join(' '):''}`;
+      const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
+      const status=s.status||'configured';
+      const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
+      const toolCount=s.tool_count===null||typeof s.tool_count==='undefined'?'—':String(s.tool_count);
+      const detail=s.transport==='http'
+        ? (s.url||'')
+        : (s.transport==='stdio'?`${s.command||''} ${Array.isArray(s.args)?s.args.join(' '):''}`:t('mcp_status_invalid_config'));
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
       return `<div class="mcp-server-row">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="mcp-server-name">${esc(s.name)}</span>${badge}
+        <div class="mcp-server-row-head">
+          <span class="mcp-server-name">${esc(s.name)}</span>
+          ${transportBadge}
+          ${statusBadge}
         </div>
-        <div class="mcp-server-detail">${esc(detail)}${envInfo?' | '+esc(envInfo):''}</div>
-        <button class="mcp-delete-btn" data-mcp-name="${esc(s.name)}" title="Delete">&times;</button>
+        <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span><span>${esc(t(s.enabled===false?'mcp_enabled_no':'mcp_enabled_yes'))}</span></div>
       </div>`;
-    }).join('');
-  }).catch(()=>{list.innerHTML=`<div style="color:#ef4444;font-size:12px;padding:6px 0">${t('mcp_load_failed')}</div>`});
-  // Delegate delete-button clicks — uses data-mcp-name to avoid inline onclick XSS
-  if(list&&!list._mcpDeleteBound){
-    list._mcpDeleteBound=true;
-    list.addEventListener('click',function(e){
-      const btn=e.target.closest('.mcp-delete-btn');
-      if(!btn) return;
-      const name=btn.getAttribute('data-mcp-name');
-      if(name) deleteMcpServer(name);
-    });
-  }
+    }).join('')+toggleNote;
+  }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
-
-function showMcpAddForm(){
-  const wrap=$('mcpAddFormWrap');
-  if(wrap) wrap.style.display='block';
-}
-function hideMcpAddForm(){
-  const wrap=$('mcpAddFormWrap');
-  if(wrap) wrap.style.display='none';
-  ['mcpName','mcpCommand','mcpArgs','mcpUrl','mcpTimeout'].forEach(id=>{
-    const el=$(id);if(el)el.value=id==='mcpTimeout'?'120':'';
+let _mcpToolsCache=[];
+function _filterMcpToolsForSearch(tools, query){
+  const q=(query||'').trim().toLowerCase();
+  if(!q) return Array.isArray(tools)?tools:[];
+  return (Array.isArray(tools)?tools:[]).filter(tool=>{
+    const hay=[tool.name,tool.server,tool.description].map(v=>String(v||'').toLowerCase()).join(' ');
+    return hay.includes(q);
   });
-  const tr=$('mcpTransport');if(tr)tr.value='stdio';
-  mcpTransportChanged();
 }
-function mcpTransportChanged(){
-  const tr=$('mcpTransport');
-  const isHttp=tr&&tr.value==='http';
-  const cmdF=$('mcpCommandField');if(cmdF)cmdF.style.display=isHttp?'none':'';
-  const argsF=$('mcpArgsField');if(argsF)argsF.style.display=isHttp?'none':'';
-  const urlF=$('mcpUrlField');if(urlF)urlF.style.display=isHttp?'block':'none';
+function _mcpToolSchemaText(schemaSummary){
+  if(!Array.isArray(schemaSummary)||!schemaSummary.length) return t('mcp_tools_schema_empty');
+  return schemaSummary.map(p=>{
+    const req=p.required?'*':'';
+    const desc=p.description?` — ${p.description}`:'';
+    return `${p.name}${req}: ${p.type||'unknown'}${desc}`;
+  }).join('\n');
 }
-function saveMcpServer(){
-  const name=($('mcpName')||{}).value||'';
-  if(!name.trim()){showToast(t('mcp_name_required'));return;}
-  const tr=($('mcpTransport')||{}).value||'stdio';
-  const timeout=parseInt(($('mcpTimeout')||{}).value)||120;
-  const body={timeout};
-  if(tr==='http'){
-    body.url=($('mcpUrl')||{}).value||'';
-    if(!body.url.trim()){showToast(t('mcp_url_required'));return;}
-  }else{
-    body.command=($('mcpCommand')||{}).value||'';
-    if(!body.command.trim()){showToast(t('mcp_command_required'));return;}
-    const argsStr=($('mcpArgs')||{}).value||'';
-    if(argsStr.trim()) body.args=argsStr.split(',').map(a=>a.trim()).filter(Boolean);
+function _renderMcpTools(tools, query){
+  const list=$('mcpToolList');
+  if(!list) return;
+  const filtered=_filterMcpToolsForSearch(tools, query);
+  if(!filtered.length){
+    const key=query?'mcp_tools_no_matches':'mcp_tools_no_tools';
+    list.innerHTML=`<div class="mcp-tool-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t(key))}</div>`;
+    return;
   }
-  const encName=encodeURIComponent(name.trim());
-  api(`/api/mcp/servers/${encName}`,{method:'PUT',body:JSON.stringify(body)})
-    .then(r=>{
-      if(r&&r.ok){showToast(t('mcp_saved'));hideMcpAddForm();loadMcpServers();}
-      else{showToast((r&&r.error)||t('mcp_save_failed'));}
-    }).catch(()=>{showToast(t('mcp_save_failed'));});
+  list.innerHTML=filtered.map(tool=>{
+    const status=tool.status||'unknown';
+    const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
+    const schemaText=_mcpToolSchemaText(tool.schema_summary);
+    return `<div class="mcp-tool-row">
+      <div class="mcp-server-row-head">
+        <span class="mcp-tool-name">${esc(tool.name)}</span>
+        <span class="mcp-tool-server">${esc(tool.server||'unknown')}</span>
+        ${statusBadge}
+      </div>
+      <div class="mcp-server-detail">${esc(tool.description||'')}</div>
+      <pre class="mcp-tool-schema">${esc(schemaText)}</pre>
+    </div>`;
+  }).join('');
 }
-async function deleteMcpServer(name){
-  const _ok=await showConfirmDialog({title:t('mcp_delete_confirm_title'),message:t('mcp_delete_confirm_message',name),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
-  if(!_ok) return;
-  const encName=encodeURIComponent(name);
-  api(`/api/mcp/servers/${encName}`,{method:'DELETE'})
-    .then(r=>{
-      if(r&&r.ok){showToast(t('mcp_deleted'));loadMcpServers();}
-      else{showToast((r&&r.error)||t('mcp_delete_failed'));}
-    }).catch(()=>{showToast(t('mcp_delete_failed'));});
+function filterMcpTools(){
+  const input=$('mcpToolSearch');
+  _renderMcpTools(_mcpToolsCache,input?input.value:'');
+}
+function loadMcpTools(){
+  const list=$('mcpToolList');
+  if(!list) return;
+  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
+  api('/api/mcp/tools').then(r=>{
+    _mcpToolsCache=(r&&Array.isArray(r.tools))?r.tools:[];
+    filterMcpTools();
+  }).catch(()=>{list.innerHTML=`<div class="mcp-tool-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_tools_load_failed'))}</div>`});
+}
+function loadGatewayStatus(){
+  const card=$('gatewayStatusCard');
+  if(!card) return;
+  api('/api/gateway/status').then(r=>{
+    if(!r) return;
+    if(!r.configured){
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></span>Gateway not configured</div>`;
+      return;
+    }
+    if(!r.running){
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      return;
+    }
+    const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
+    let badges='';
+    if(r.platforms&&r.platforms.length){
+      badges=r.platforms.map(p=>{
+        const icon=platformIcons[p.name]||'📡';
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+      }).join(' ');
+    }
+    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">Last active: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} session${r.session_count!==1?'s':''}</span>`:'';
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">Running</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">Failed to load gateway status</div>`});
 }
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system') loadMcpServers();
+  if(name==='system'){loadMcpServers();loadMcpTools();loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────

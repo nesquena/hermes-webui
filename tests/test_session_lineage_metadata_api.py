@@ -45,14 +45,14 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None):
+def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui'):
     conn.execute(
         """
         INSERT INTO sessions
         (id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, 'webui', ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        VALUES (?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, sid, started_at or time.time(), parent, ended_at, end_reason),
     )
     conn.commit()
 
@@ -200,5 +200,37 @@ def test_cli_close_parent_preserves_cross_surface_continuation_lineage(_isolate)
 
         assert rows["lineage_api_webui_child"].get("parent_session_id") == "lineage_api_cli_parent"
         assert rows["lineage_api_webui_child"].get("_lineage_root_id") == "lineage_api_cli_parent"
+    finally:
+        conn.close()
+
+
+def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_telegram_parent", title="Telegram parent", updated_at=t0)
+        _save_webui_session("lineage_api_webui_tip", title="WebUI tip", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_api_telegram_parent",
+            source="telegram",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_webui_tip",
+            source="webui",
+            parent="lineage_api_telegram_parent",
+            started_at=t0 + 6,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+        tip = rows["lineage_api_webui_tip"]
+
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_source") == "telegram"
+        assert tip.get("_cross_surface_child_session") is True
     finally:
         conn.close()
