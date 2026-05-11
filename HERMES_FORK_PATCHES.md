@@ -135,6 +135,9 @@ The hermes-agent "default" profile name is hardcoded into the profile-resolution
 | `static/boot.js` (~`profileChipLabel.textContent =`) | Initial chip render at boot uses the helper. |
 | `static/ui.js` (~`profileChipLabel.textContent =` × 2) | Topbar + session-sync chip renders also go through the helper. Without this, those overwrite the boot-time value on every session activation and the nickname blinks back to "default". |
 | `static/panels.js` (~`profile-opt-name`) | The profile dropdown's per-row name uses `_hermesDisplayProfileName(p.name)`. Falls back to `p.name` if the helper isn't loaded yet (defensive). |
+| `static/panels.js` (~`loadProfilesPanel` ~`profile-card-name`) | The Profiles management panel's card list also routes the name through the helper, so the sidebar reads "Ash (default) ACTIVE" instead of "default (default) ACTIVE". |
+| `static/panels.js` (~`_renderProfileDetail` `title.textContent`) | The Profiles panel's detail-page title also uses the helper — so the top of the right pane reads "Ash" instead of "default". The Status row's `(default)` badge intentionally stays as-is (informative). |
+| `static/boot.js` (~`_hermesDefaultProfileLabelInput`) | Live-rerenders `loadProfilesPanel()` if the user is currently viewing the Profiles panel while typing a new nickname, so the panel updates without needing a panel switch. |
 | `static/index.html` (~`#settingsDefaultProfileLabel`) | The Settings → Preferences input that writes to localStorage on each keystroke. |
 | `static/i18n.js` | `settings_label_default_profile_label` + `settings_desc_default_profile_label`. |
 
