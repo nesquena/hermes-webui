@@ -1448,11 +1448,24 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     The #1776 peel must not treat that middle colon as part of an eaten model
     segment — otherwise ``@custom:10.8.71.41:8080:Qwen3`` wrongly becomes model
     ``8080:Qwen3``.
+
+    Also handles provider names that contain parentheses around the host:port,
+    e.g. ``Local (127.0.0.1:15721)`` → slug ``local-(127.0.0.1:15721)`` (#2047).
     """
     rest = str(rest or "").strip()
     if ":" not in rest:
         return False
     host, port_s = rest.rsplit(":", 1)
+
+    # Strip trailing ')' from port when the slug contains parenthesised host:port
+    # (e.g. 'local-(127.0.0.1:15721)' → port_s = '15721)' → '15721').
+    port_s = port_s.rstrip(")")
+
+    # Extract the host from within parentheses when present
+    # (e.g. 'local-(127.0.0.1' → '127.0.0.1').
+    if "(" in host:
+        host = host[host.rindex("(") + 1 :]
+
     if not host or ":" in host:
         return False
     if not port_s.isdigit():
