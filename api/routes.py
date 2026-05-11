@@ -8858,7 +8858,10 @@ def _handle_session_import(handler, body):
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
     title = body.get("title", "Imported session")
-    workspace = body.get("workspace", str(DEFAULT_WORKSPACE))
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
     s = Session(
         title=title,
