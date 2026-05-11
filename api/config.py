@@ -3771,6 +3771,16 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    # >>> hermes-fork: HermesOS Cloud skins server-side allowlist
+    #     Without these, `/api/claude-config` autosave normalises any unknown
+    #     skin back to "default" — meaning a user who picks HermesOS in the
+    #     Appearance picker watches localStorage flip back to "default" on
+    #     the next page load (server-state-wins race against the boot-time
+    #     skin migration). "sienna" is upstream-recognised in static/boot.js
+    #     `_VALID_SKINS` but was missing from this set too — adding both.
+    "hermesos",
+    "sienna",
+    # <<< hermes-fork
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
