@@ -300,9 +300,17 @@ try{
   }
 }catch(e){ try{ console.warn('sidebar-collapse restore failed', e); }catch(_){} }
 /* Sidebar-level click delegate so the ENTIRE 24px strip is a re-open
-   target — clicking anywhere on the collapsed sidebar expands it. The
-   chevron icon inside is just a visual cue (its own pointer-events are
-   suppressed via CSS so the click bubbles to the sidebar). */
+   target — clicking anywhere on the collapsed sidebar expands it. Two
+   important gotchas:
+     1. We use the CAPTURING phase (third arg = true) so we fire BEFORE
+        the inline `onclick="toggleSidebarCollapsed()"` on the chevron
+        button. Otherwise the button's handler would toggle to collapsed
+        first, THEN this delegate would see the now-collapsed class and
+        flip it right back — the click cycle the user reported as
+        "button doesn't even work to minimize at all".
+     2. We only intercept when CURRENTLY collapsed. In expanded state,
+        return early and let the chevron button's own onclick handle it
+        normally.  */
 (function _wireSidebarClickToExpand(){
   function bind(){
     var sb = document.querySelector('.sidebar');
@@ -311,10 +319,14 @@ try{
     sb.addEventListener('click', function(ev){
       var layout = document.querySelector('.layout');
       if(!layout || !layout.classList.contains('sidebar-collapsed')) return;
+      // Stop the chevron button's onclick from also firing (it would
+      // toggle BACK to expanded). Use stopImmediatePropagation so any
+      // sibling capture handlers on the same target also bail.
       ev.preventDefault();
       ev.stopPropagation();
+      if(typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
       toggleSidebarCollapsed(false);
-    });
+    }, true /* useCapture */);
   }
   if(document.readyState==='loading'){
     document.addEventListener('DOMContentLoaded', bind, {once:true});
