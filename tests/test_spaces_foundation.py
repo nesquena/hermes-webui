@@ -9913,6 +9913,30 @@ def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeyp
     assert status == 404
 
 
+def test_widget_event_route_rejects_falsy_non_object_payloads(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Payload Gate"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    for payload in ([], False, 0, "", None):
+        handled, status, body = _route_post(
+            "/api/spaces/widget/event",
+            {
+                "space_id": created["space_id"],
+                "widget_id": "sandbox",
+                "event_name": "agent.prompt",
+                "payload": payload,
+                "prompt": "Queue metadata-only prompt",
+            },
+        )
+        events = spaces.list_widget_events(created["space_id"], "sandbox")
+
+        assert handled is None
+        assert status == 400
+        assert body["error"] == "payload must be an object"
+        assert events == []
+
+
 def test_list_widget_events_and_route_return_safe_newest_first_inbox(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Event Inbox"})

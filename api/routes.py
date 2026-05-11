@@ -4861,13 +4861,16 @@ def handle_post(handler, parsed) -> bool:
         if not space_id or not widget_id:
             return bad(handler, "Missing space_id or widget_id")
         try:
+            payload = body["payload"] if "payload" in body else {}
+            if "payload" in body and payload is None:
+                raise ValueError("payload must be an object")
             return j(
                 handler,
                 capy_spaces.queue_widget_event(
                     space_id,
                     widget_id,
                     body.get("event_name") or "agent.prompt",
-                    body.get("payload") or {},
+                    payload,
                     prompt=body.get("prompt") or "",
                     session_id=body.get("session_id") or "",
                 ),
