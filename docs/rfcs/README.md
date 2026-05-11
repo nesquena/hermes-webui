@@ -28,6 +28,7 @@ cutting infrastructure.
 - A reviewer asks for one during code review.
 
 When in doubt, just ship the code — small features don't need RFCs.
+First-time contributor RFCs should be discussed in an issue before opening a PR.
 
 ## Current RFCs
 

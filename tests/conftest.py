@@ -152,6 +152,24 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
 
+
+# ── Environment isolation for tests ────────────────────────────────────────
+# HERMES_WEBUI_SKIP_ONBOARDING is set by hosting providers (e.g. Agent37) and
+# by some isolated test harnesses to short-circuit the onboarding wizard.
+# When it leaks into the pytest environment, tests that exercise the wizard
+# code paths (apply_onboarding_setup, etc.) fail because the function returns
+# early without writing config files.
+#
+# This autouse fixture removes the variable for the test session. Tests that
+# specifically need to validate the SKIP_ONBOARDING short-circuit can opt back
+# in with `monkeypatch.setenv("HERMES_WEBUI_SKIP_ONBOARDING", "1")`.
+@pytest.fixture(autouse=True, scope="session")
+def _strip_skip_onboarding_env():
+    prior = os.environ.pop("HERMES_WEBUI_SKIP_ONBOARDING", None)
+    yield
+    if prior is not None:
+        os.environ["HERMES_WEBUI_SKIP_ONBOARDING"] = prior
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip agent-dependent tests when hermes-agent is not available.
 
