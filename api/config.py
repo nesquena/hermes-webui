@@ -869,7 +869,16 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            # Runtime auth path: only honour explicit `custom_providers:`
+            # block entries from config.yaml. The HermesOS Cloud built-in
+            # base-URL fallback is UI-only — if it kicked in here it would
+            # flip the agent from reading OPENAI_API_KEY (which the user has)
+            # to CROF_API_KEY / VENICE_API_KEY / etc. (which they don't) and
+            # produce a misleading "Provider X is set but no API key found"
+            # error on every send.
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, include_builtin_fallback=False
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -944,6 +953,8 @@ def _normalize_base_url_for_match(value: object) -> str:
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    *,
+    include_builtin_fallback: bool = True,
 ) -> str:
     target = _normalize_base_url_for_match(base_url)
     if not target:
@@ -958,9 +969,19 @@ def _named_custom_provider_slug_for_base_url(
     #     bankr, cometapi, …) when the user hasn't bothered to write a
     #     custom_providers: block in config.yaml. See
     #     _BUILTIN_BASE_URL_PROVIDERS above for the full table.
-    builtin = _builtin_provider_slug_for_base_url(base_url)
-    if builtin:
-        return builtin
+    #
+    #     **UI-only by default**: callers in the runtime auth path
+    #     (resolve_model_provider via _resolve_configured_provider_id
+    #     resolve_alias=False) pass include_builtin_fallback=False so the
+    #     fallback doesn't change which API-key env var the agent reads.
+    #     A user with `provider: custom` + `base_url: https://crof.ai/v1`
+    #     + only OPENAI_API_KEY in .env (no CROF_API_KEY) still has their
+    #     request authenticated against OPENAI_API_KEY — the chip just
+    #     shows "CrofAI" instead of "Custom" in the dropdown.
+    if include_builtin_fallback:
+        builtin = _builtin_provider_slug_for_base_url(base_url)
+        if builtin:
+            return builtin
     # <<< hermes-fork
     return ""
 
@@ -1649,6 +1670,28 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
+        # >>> hermes-fork: protect runtime from @<built-in-slug>: leak (HermesOS Cloud)
+        #     When the model dropdown labels a group "CrofAI" / "Venice" / etc.
+        #     because the user's `model.base_url` matches the built-in aggregator
+        #     table, every model inside that group gets an `@<slug>:` prefix in
+        #     JS (see _addLiveModelsToSelect in static/ui.js). That prefix would
+        #     otherwise be treated here as an EXPLICIT runtime provider override
+        #     — which leaks the UI-only slug into the agent's auth path and
+        #     fails with "Provider 'crof' is set in config.yaml but no API key
+        #     was found" because hermes-agent doesn't have `crof` in its
+        #     PROVIDER_REGISTRY. Translate it back to `provider: custom` + the
+        #     configured `base_url` so the request authenticates against
+        #     `OPENAI_API_KEY` (the agent's `custom` provider env var).
+        #     Only fires when the user's actual config is `provider: custom`
+        #     — an explicit `provider: openrouter` user routing via
+        #     `@crof:some-model` still gets respected.
+        if (
+            config_provider == "custom"
+            and config_base_url
+            and provider_hint == _builtin_provider_slug_for_base_url(config_base_url)
+        ):
+            return bare_model, "custom", config_base_url
+        # <<< hermes-fork
         return bare_model, provider_hint, None
 
     if "/" in model_id:
