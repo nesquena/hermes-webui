@@ -724,6 +724,8 @@ const LOCALES = {
     // >>> hermes-fork: Settings UI strings
     sidebar_collapse_title: 'Hide chat list',
     sidebar_expand_title: 'Show chat list',
+    settings_label_default_profile_label: 'Default profile nickname',
+    settings_desc_default_profile_label: 'Display label for the built-in "default" profile across the UI (composer chip, profile picker). The profile\'s underlying name stays "default" — only what you see changes. Leave empty to show "default".',
     providers_authenticate: 'Authenticate',
     providers_reauthenticate: 'Re-authenticate',
     providers_refresh_models: 'Refresh models',

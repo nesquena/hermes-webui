@@ -1078,6 +1078,18 @@
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
+            <!-- >>> hermes-fork: default-profile nickname (HermesOS Cloud)
+                 The built-in "default" profile name can't be renamed (it's
+                 hardcoded into hermes-agent's profile resolution) — so we
+                 give it a UI-only display label. Stored in localStorage, no
+                 server round-trip, no risk of upstream merge conflicts.
+                 Used by the composer profile chip + profile dropdown. -->
+            <div class="settings-field">
+              <label for="settingsDefaultProfileLabel" data-i18n="settings_label_default_profile_label">Default profile nickname</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_default_profile_label">Display label for the built-in "default" profile across the UI (composer chip, profile picker). The profile's underlying name stays "default" — only what you see changes. Leave empty to show "default".</div>
+              <input type="text" id="settingsDefaultProfileLabel" placeholder="default" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px" oninput="_hermesDefaultProfileLabelInput(this.value)">
+            </div>
+            <!-- <<< hermes-fork -->
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
             <div id="settingsPreferencesAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>

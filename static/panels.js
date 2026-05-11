@@ -4207,7 +4207,13 @@ function renderProfileDropdown(data) {
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+    // >>> hermes-fork: render the localStorage-backed nickname for the
+    //     "default" profile when one is set. Falls back to p.name otherwise.
+    const _displayName = (typeof _hermesDisplayProfileName === 'function')
+      ? _hermesDisplayProfileName(p.name)
+      : p.name;
+    // <<< hermes-fork
+    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(_displayName)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
       closeProfileDropdown();

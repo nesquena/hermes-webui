@@ -241,6 +241,15 @@
   :root[data-skin="hermesos"] .recording-dot,
   :root[data-skin="hermesos"] [class*="-dot"],
   :root[data-skin="hermesos"] [class*="-avatar"],
+  /* Context-window indicator (.ctx-ring-center + container). It's a tiny
+     pie/progress ring with a percent number in the middle — the only
+     remaining place where rectangular geometry actively reads "broken"
+     to the user. Round the wrapper + the inner center; the SVG donut
+     itself is shape-by-attributes and unaffected. */
+  :root[data-skin="hermesos"] .ctx-indicator,
+  :root[data-skin="hermesos"] .ctx-indicator-wrap,
+  :root[data-skin="hermesos"] .ctx-ring,
+  :root[data-skin="hermesos"] .ctx-ring-center,
   :root[data-skin="hermesos"] [style*="border-radius: 50%"],
   :root[data-skin="hermesos"] [style*="border-radius:50%"]{
     border-radius:50% !important;

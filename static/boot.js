@@ -226,6 +226,35 @@ function closeMobileSidebar(){
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
+/* >>> hermes-fork: default-profile display nickname (HermesOS Cloud)
+   The hermes-agent "default" profile name is hardcoded into the agent's
+   profile-resolution layer and can't be renamed without affecting persistence
+   paths, session lookups, etc. So instead we let the user set a UI-only
+   nickname stored in localStorage, used wherever the profile name renders. */
+function _hermesDisplayProfileName(name){
+  try{
+    if(name === 'default'){
+      const override = (localStorage.getItem('hermes-default-profile-label')||'').trim();
+      if(override) return override;
+    }
+  }catch(_){}
+  return name || 'default';
+}
+function _hermesDefaultProfileLabelInput(value){
+  try{
+    const trimmed = String(value||'').slice(0,64).trim();
+    if(trimmed) localStorage.setItem('hermes-default-profile-label', trimmed);
+    else localStorage.removeItem('hermes-default-profile-label');
+    // Live-update the composer profile chip immediately.
+    const chip = document.getElementById('profileChipLabel');
+    if(chip && (typeof S !== 'undefined') && (!S.activeProfile || S.activeProfile === 'default')){
+      chip.textContent = _hermesDisplayProfileName('default');
+    }
+    // Re-render the dropdown's active row if it's currently open.
+    if(typeof renderProfileDropdownFromCache === 'function') try{ renderProfileDropdownFromCache(); }catch(_){}
+  }catch(_){}
+}
+/* <<< hermes-fork */
 /* >>> hermes-fork: sidebar collapse toggle (HermesOS Cloud)
    Mirrors toggleWorkspacePanel — the chat list (left .sidebar element)
    collapses to zero width via the `.sidebar-collapsed` class on .layout.
@@ -1442,7 +1471,13 @@ function applyBotName(){
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=_hermesDisplayProfileName(S.activeProfile||'default');
+  // >>> hermes-fork: hydrate the Settings nickname input from localStorage
+  try{
+    const _nickInput = document.getElementById('settingsDefaultProfileLabel');
+    if(_nickInput) _nickInput.value = (localStorage.getItem('hermes-default-profile-label')||'').trim();
+  }catch(_){}
+  // <<< hermes-fork
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
