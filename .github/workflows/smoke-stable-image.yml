@@ -1,0 +1,109 @@
+name: Smoke :stable image
+
+# Layer B of the HermesOS Cloud regression suite.
+#
+# Layer A (tests/test_hermes_fork_*.py) catches Python-level fork-patch
+# regressions BEFORE the image is built. Layer B catches "image builds
+# fine but doesn't actually boot" or "boots but auth wiring is broken
+# end-to-end" — failures the unit tests can't see because they don't
+# exercise the entrypoint script, rsync, init order, or the full
+# request → resolve_model_provider → agent → mock-provider chain.
+#
+# Triggers AFTER `Hermes Deploy Image` completes for a push to main.
+# Pulls the freshly-built `:sha-<short>` tag (not `:stable`, to avoid
+# a TOCTOU where another push lands between build and smoke). If smoke
+# fails, opens a GitHub issue so a human notices BEFORE the next
+# fleet-wide pull rolls out the broken image.
+
+on:
+  workflow_run:
+    workflows: ["Hermes Deploy Image"]
+    branches: [master, main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to smoke-test (default :stable)"
+        required: false
+        default: "stable"
+
+permissions:
+  contents: read
+  packages: read
+  issues: write  # for the failure-notification step
+
+jobs:
+  smoke:
+    name: Boot & end-to-end /api/stream
+    runs-on: ubuntu-latest
+    # Skip if the triggering build failed — no point smoke-testing a
+    # broken image, the build job's own failure already paged.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR (read-only)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tag to test
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            tag="${{ inputs.image_tag }}"
+          else
+            # workflow_run trigger — head_sha is the commit that built the image
+            tag="sha-${GITHUB_SHA::12}"
+          fi
+          image="ghcr.io/ashneil12/hermes-webui:${tag}"
+          echo "image=${image}" >>"$GITHUB_OUTPUT"
+          echo "Smoke-testing: ${image}"
+        env:
+          GITHUB_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Pull image
+        run: docker pull ${{ steps.tag.outputs.image }}
+
+      - name: Run smoke test
+        id: smoke
+        env:
+          IMAGE: ${{ steps.tag.outputs.image }}
+        run: bash scripts/smoke/smoke_stable_image.sh
+
+      - name: Open issue on smoke failure
+        if: failure() && github.event_name == 'workflow_run'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const image = "${{ steps.tag.outputs.image }}";
+            const sha = "${{ github.event.workflow_run.head_sha }}";
+            const runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}";
+            const title = `Smoke test failed for ${image}`;
+            const body = [
+              `**Image:** \`${image}\``,
+              `**Commit:** ${sha}`,
+              `**Run:** ${runUrl}`,
+              '',
+              'The freshly-built `:stable` image failed the Layer B smoke test.',
+              'Do NOT roll out to the fleet until this is investigated.',
+              '',
+              'Most likely causes:',
+              '- Init script regression (container restart-loop on /tmp perms etc.)',
+              '- Provider auth wiring leak (fork patch regression — see Layer A tests)',
+              '- /api/stream payload-shape change from upstream rebase',
+              '',
+              'See `HERMES_FORK_PATCHES.md` section 6 for the smoke test design.',
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['regression', 'smoke-test', 'fleet-blocker'],
+            });
