@@ -7,8 +7,9 @@ holding the lock during them serialises every concurrent session behind
 the slowest import.
 
 The fix introduces ``_prewarm_skill_tool_modules()`` which does the
-imports *before* the lock is acquired, and the lock body uses only
-``sys.modules.get()`` lookups (O(1) dict lookup, no import machinery).
+imports *before* the lock is acquired, and the lock body uses a shared
+helper that only performs ``sys.modules.get()`` lookups (O(1) dict lookup,
+no import machinery).
 
 These tests are AST/source-level because the actual import targets
 (``tools.skills_tool``, ``tools.skill_manager_tool``) live in the
@@ -20,6 +21,7 @@ import textwrap
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 STREAMING_PY = REPO / "api" / "streaming.py"
+PROFILES_PY = REPO / "api" / "profiles.py"
 
 
 def _read_streaming() -> str:
@@ -133,25 +135,13 @@ class TestPrewarmHelperExists:
 
 
 class TestSysModulesLookupInEnvLock:
-    """Inside the lock, the code must use ``sys.modules.get()`` instead of
-    ``import`` for the skill-tool modules."""
+    """Inside the lock, streaming must use the shared cache patch helper."""
 
-    def test_sys_modules_get_used_in_env_lock(self):
+    def test_shared_skill_home_patch_helper_used_in_env_lock(self):
         source = _read_streaming()
         bodies = _find_env_lock_with_bodies(source)
         assert bodies, "Expected at least one `with _ENV_LOCK:` block"
 
-        # Collect all string content within the lock bodies by extracting
-        # Constant/Str nodes — simpler than full AST string reconstruction.
-        lock_source_segments: list[str] = []
-        for body in bodies:
-            for node in ast.walk(ast.Module(body=body, type_ignores=[])):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    lock_source_segments.append(node.value)
-
-        # The lock body should reference sys.modules.get for both modules
-        lock_text = "\n".join(lock_source_segments)
-        # More reliable: check the raw source lines inside the lock
         lines = source.splitlines()
         in_lock = False
         lock_lines: list[str] = []
@@ -175,17 +165,38 @@ class TestSysModulesLookupInEnvLock:
                 lock_lines.append(line)
 
         lock_source = "\n".join(lock_lines)
-        assert "sys.modules.get" in lock_source, (
-            "Inside `_ENV_LOCK`, skill-tool modules must be accessed via "
-            "`sys.modules.get()` instead of `import` (#2024)"
+        assert "_patch_skill_home_modules" in lock_source, (
+            "Inside `_ENV_LOCK`, streaming must use the shared skill module "
+            "cache patch helper instead of duplicating module-specific logic "
+            "(#2023/#2024)"
         )
-        assert "tools.skills_tool" in lock_source, (
-            "tools.skills_tool must still be referenced inside `_ENV_LOCK` "
-            "for attribute patching (HERMES_HOME / SKILLS_DIR)"
+
+    def test_shared_helper_uses_sys_modules_get_for_both_skill_modules(self):
+        source = PROFILES_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        helper = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_patch_skill_home_modules"
+            ),
+            None,
         )
-        assert "tools.skill_manager_tool" in lock_source, (
-            "tools.skill_manager_tool must still be referenced inside `_ENV_LOCK` "
-            "for attribute patching (HERMES_HOME / SKILLS_DIR)"
+        assert helper is not None, "_patch_skill_home_modules() must be defined"
+
+        helper_source = ast.get_source_segment(source, helper) or ""
+        assert "sys.modules.get" in helper_source, (
+            "_patch_skill_home_modules() must use sys.modules.get(), not import, "
+            "so env-lock callers do not trigger first-time imports (#2024)"
+        )
+        assert "HERMES_HOME" in helper_source
+        assert "SKILLS_DIR" in helper_source
+        assert "tools.skills_tool" in source, (
+            "profiles.py must patch tools.skills_tool module-level caches"
+        )
+        assert "tools.skill_manager_tool" in source, (
+            "profiles.py must patch tools.skill_manager_tool module-level caches"
         )
 
     def test_no_import_statement_for_skill_tools_in_lock(self):

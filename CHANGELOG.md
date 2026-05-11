@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Harmonized profile HERMES_HOME switching so process-wide switches and per-request streaming switches patch both `tools.skills_tool` and `tools.skill_manager_tool` module-level skill paths consistently (#2023).
+
 ## [v0.51.44] — 2026-05-11 — Release T (5-PR contributor batch — security + worktree sessions + LM Studio + onboarding docs + transcript dedup, plus comprehensive test-suite network isolation)
 
 ### Added

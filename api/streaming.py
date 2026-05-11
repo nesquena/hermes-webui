@@ -2256,13 +2256,18 @@ def _run_agent_streaming(
         # two concurrent tabs on different profiles don't clobber each other via the
         # process-level active-profile global.  Falls back gracefully.
         try:
-            from api.profiles import get_hermes_home_for_profile, get_profile_runtime_env
+            from api.profiles import (
+                _patch_skill_home_modules,
+                get_hermes_home_for_profile,
+                get_profile_runtime_env,
+            )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
+            _patch_skill_home_modules = None
         
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -2315,23 +2320,8 @@ def _run_agent_streaming(
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
                 # the lock (#2024).
-                from pathlib import Path as _P
-                import sys as _sys
-                _ph = _P(_profile_home)
-                _sk = _sys.modules.get('tools.skills_tool')
-                if _sk is not None:
-                    try:
-                        _sk.HERMES_HOME = _ph
-                        _sk.SKILLS_DIR = _ph / 'skills'
-                    except AttributeError:
-                        pass
-                _sm = _sys.modules.get('tools.skill_manager_tool')
-                if _sm is not None:
-                    try:
-                        _sm.HERMES_HOME = _ph
-                        _sm.SKILLS_DIR = _ph / 'skills'
-                    except AttributeError:
-                        pass
+                if _patch_skill_home_modules is not None:
+                    _patch_skill_home_modules(Path(_profile_home))
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
