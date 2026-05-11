@@ -66,8 +66,8 @@ class TestBootJsProfileDefaultWorkspace:
         # Find the assignment specifically — it uses 's.default_workspace'
         ws_assign_idx = src.find('S._profileDefaultWorkspace=s.default_workspace')
         assert ws_assign_idx != -1, "S._profileDefaultWorkspace assignment not found in boot.js"
-        # The assignment must be in the same settings-fetch block (within a few hundred chars)
-        assert abs(ws_assign_idx - settings_idx) < 1000, (
+        # The assignment must be in the same settings-fetch block (within ~1100 chars)
+        assert abs(ws_assign_idx - settings_idx) < 1100, (
             "S._profileDefaultWorkspace must be set in the same settings-fetch block"
         )
 

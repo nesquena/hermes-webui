@@ -2591,7 +2591,7 @@ function renderSessionListFromCache(){
       titleRow.appendChild(wtInd);
     }
     // Parent session indicator for forked/branched sessions (#465)
-    if(s.parent_session_id){
+    if(s.parent_session_id&&window._lineageIndicators!==false){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);
@@ -2625,11 +2625,11 @@ function renderSessionListFromCache(){
       }
     }
     const lineageKey=_sidebarLineageKeyForRow(s);
-    const segmentCount=_sessionSegmentCount(s);
+    const segmentCount=window._lineageIndicators!==false?_sessionSegmentCount(s):0;
     const lineageSegments=Array.isArray(s._lineage_segments)?s._lineage_segments.filter(seg=>seg&&seg.session_id&&seg.session_id!==s.session_id):[];
     const canExpandLineageSegments=Boolean(lineageKey&&segmentCount>1&&lineageSegments.length>0);
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
-    if(segmentCount>0){
+    if(segmentCount>0&&window._lineageIndicators!==false){
       const segmentCountEl=document.createElement('span');
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
       const segmentLabel=t('session_meta_segments', segmentCount);

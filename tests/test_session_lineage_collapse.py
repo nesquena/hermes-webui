@@ -328,7 +328,7 @@ def test_sidebar_lineage_segment_badge_is_localized():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "session-lineage-count" in js
-    assert "const segmentCount=_sessionSegmentCount(s);" in js
+    assert "const segmentCount=window._lineageIndicators!==false?_sessionSegmentCount(s):0;" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
     assert ".session-lineage-count{" in css

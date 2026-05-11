@@ -3898,6 +3898,7 @@ _SETTINGS_DEFAULTS = {
     "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "sidebar_density": "compact",  # compact | detailed
+    "lineage_indicators": True,  # show git-branch icon and segment count on forked/continued sessions
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled

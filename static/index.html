@@ -1004,6 +1004,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_density">Controls how much metadata the session list shows in the left sidebar.</div>
             </div>
             <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsLineageIndicators" checked style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_lineage_indicators">Show session lineage indicators</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_lineage_indicators">Display the git-branch icon and segment count on forked or continued sessions in the sidebar.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsAutoTitleRefresh" data-i18n="settings_label_auto_title_refresh">Adaptive title refresh</label>
               <select id="settingsAutoTitleRefresh" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="0" data-i18n="settings_auto_title_refresh_off">Off</option>
