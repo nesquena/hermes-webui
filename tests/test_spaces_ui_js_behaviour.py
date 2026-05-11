@@ -286,7 +286,7 @@ global.fetch = async function(path, opts = {}) {
           { id: 'kanban-done', kind: 'kanban-column', title: 'Done', metadata: { kanban: { status: 'board-ready', column: 'Done', color: 'green', cards: [{ id: 'card-install', title: 'Install board template', status: 'done' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
         ], renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_research_harness_pdf_export', template: 'research', mode: 'metadata-only-smoke', space: { space_id: 'demo-research-harness-pdf-export', name: 'Research Harness', source: 'UNTRUSTED_SOURCE' }, widget_count: 5, persisted_widget_count: 5, rollback_point: true, persistence_checked: true, queued_event_count: 1, research_rollback_check: { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
-        { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true },
+        { ok: true, demo: 'demo_time_travel_restore', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true, time_travel_restore_check: { patch_applied: true, restored: true, patch_cleared: true, history_preserved: true, return_to_present_preserved: true, restored_widget_count: 1, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE', raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' } },
       ],
       renderer: '<script>bad()</script>',
       api_key: 'UNTRUSTED_VALUE',
@@ -4006,6 +4006,10 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Kanban flow: columns 3 · cards 3 · drag/drop planned · card edits metadata-only" in out["rootHtml"]
     assert "Research harness checklist" in out["rootHtml"]
     assert "Research flow: PDF export queued · rollback verified · replayed after restore · restored widgets 5" in out["rootHtml"]
+    assert "Time travel restore checklist" in out["rootHtml"]
+    assert "Time travel flow: patch applied · restored · return-to-present preserved · history preserved · restored widgets 1" in out["rootHtml"]
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "smoke patch" not in out["rootHtml"].lower()
     assert "Observation summary" not in out["rootHtml"]
     assert "What is the weather in Prague?" not in out["rootHtml"]
     assert "Prague is partly cloudy at 18 °C" not in out["rootHtml"]

@@ -2234,9 +2234,27 @@ def space_demo_run(name: str) -> dict[str, Any]:
         widgets = installed.get("installed_widgets") or []
         if widgets and before_patch:
             first = widgets[0]
-            patch_widget(space_id, first["id"], {"title": f"{first['title']} smoke patch"})
-            restore_revision(space_id, before_patch)
+            first_id = str(first["id"])
+            original_title = str(first.get("title") or "")
+            patched_title = f"{original_title} smoke patch"
+            patched = patch_widget(space_id, first_id, {"title": patched_title})
+            patch_event_id = str(patched.get("revision_event_id") or "")
+            patched_detail = read_widget_detail(space_id, first_id)
+            restored = restore_revision(space_id, before_patch)
+            restored_detail = read_widget_detail(space_id, first_id)
+            restored_widgets = (restored.get("space") or {}).get("widgets") or []
+            timeline_ids = [str(event.get("event_id") or "") for event in list_revision_events(space_id, limit=10)]
             action = "restored"
+            extra = {
+                "time_travel_restore_check": {
+                    "patch_applied": patched_detail.get("title") == patched_title,
+                    "restored": restored.get("ok") is True,
+                    "patch_cleared": restored_detail.get("title") == original_title,
+                    "history_preserved": len(timeline_ids) >= 3,
+                    "return_to_present_preserved": bool(patch_event_id and patch_event_id in timeline_ids),
+                    "restored_widget_count": len(restored_widgets),
+                }
+            }
     elif demo == "demo_safe_admin_recovery":
         widgets = installed.get("installed_widgets") or []
         if widgets:

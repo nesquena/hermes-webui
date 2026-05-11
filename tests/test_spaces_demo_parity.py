@@ -257,6 +257,34 @@ def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_
     _assert_safe_payload(events)
 
 
+def test_time_travel_demo_smoke_records_restore_check_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_time_travel_restore")
+    detail = spaces.read_space_detail(result["space"]["space_id"])
+    check = result["time_travel_restore_check"]
+    timeline_ids = [event["event_id"] for event in spaces.list_revision_events(result["space"]["space_id"], limit=10)]
+
+    assert result["action"] == "restored"
+    assert check == {
+        "patch_applied": True,
+        "restored": True,
+        "patch_cleared": True,
+        "history_preserved": True,
+        "return_to_present_preserved": True,
+        "restored_widget_count": result["widget_count"],
+    }
+    assert result["widget_count"] == 1
+    assert result["revision_event_count"] >= 3
+    assert result["rollback_point"] is True
+    assert len(timeline_ids) >= 3
+    assert detail["widgets"][0]["title"] == "Weather in Prague"
+    assert "smoke patch" not in json.dumps(result).lower()
+    assert "smoke patch" not in json.dumps(detail).lower()
+    _assert_safe_payload(result)
+    _assert_safe_payload(detail)
+
+
 def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
