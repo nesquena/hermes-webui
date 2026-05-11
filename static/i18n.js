@@ -722,6 +722,8 @@ const LOCALES = {
     providers_key_placeholder_new: 'sk-...',
     providers_key_placeholder_replace: 'Enter new key to replace…',
     // >>> hermes-fork: Settings UI strings
+    sidebar_collapse_title: 'Hide chat list',
+    sidebar_expand_title: 'Show chat list',
     providers_authenticate: 'Authenticate',
     providers_reauthenticate: 'Re-authenticate',
     providers_refresh_models: 'Refresh models',

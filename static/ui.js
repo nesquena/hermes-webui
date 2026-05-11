@@ -1148,8 +1148,19 @@ function renderModelDropdown(){
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      // Inline provider chip on every row that has a group (#1425)
-      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+      // >>> hermes-fork: provider chip — prefer the real provider name baked
+      //     into the model display name (e.g. "MoonshotAI: Kimi K2.5") over
+      //     the generic "Custom (live)" group label that every OpenAI-compat
+      //     custom endpoint sticks on its models. Without this, a deploy
+      //     using CrofAI / CometAPI / Bankr / etc. shows "Custom" next to
+      //     every model row instead of the actual upstream provider.
+      let _providerChipText=m.group||'';
+      if(/^custom(?:[:\s].*)?$/i.test(_providerChipText.trim())){
+        const _nameMatch=String(m.name||'').match(/^([^:<]{1,40}):\s/);
+        if(_nameMatch&&_nameMatch[1].trim()) _providerChipText=_nameMatch[1].trim();
+      }
+      const providerChip=_providerChipText?`<span class="model-opt-provider">${esc(_providerChipText)}</span>`:'';
+      // <<< hermes-fork
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value);
       dd.appendChild(row);

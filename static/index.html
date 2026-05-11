@@ -146,6 +146,16 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnNewChat" data-tooltip="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
+          <!-- >>> hermes-fork: collapse-sidebar button (HermesOS Cloud)
+               Mirrors the workspace panel collapse pattern. Click to hide
+               the chat list so the message view gets the full width. The
+               icon flips to a chevron-right when collapsed (via CSS) so
+               the same button re-opens. Rail icons stay visible at all
+               times — clicking any rail panel-tab also reopens. -->
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnCollapseSidebar" type="button" onclick="toggleSidebarCollapsed()" data-tooltip="Hide chat list" data-i18n-title="sidebar_collapse_title" aria-label="Hide chat list">
+            <svg class="sidebar-collapse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+          </button>
+          <!-- <<< hermes-fork -->
         </div>
       </div>
       <div class="session-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"></div>

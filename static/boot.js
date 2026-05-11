@@ -226,6 +226,50 @@ function closeMobileSidebar(){
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
+/* >>> hermes-fork: sidebar collapse toggle (HermesOS Cloud)
+   Mirrors toggleWorkspacePanel — the chat list (left .sidebar element)
+   collapses to zero width via the `.sidebar-collapsed` class on .layout.
+   Rail icons (.rail) stay visible always so the user has a re-open path
+   via switchPanel('chat'). State persists in localStorage so a reload
+   keeps the user's preference. */
+function toggleSidebarCollapsed(force){
+  const layout=document.querySelector('.layout');
+  if(!layout) return;
+  const currentlyCollapsed=layout.classList.contains('sidebar-collapsed');
+  const nextCollapsed=typeof force==='boolean'?force:!currentlyCollapsed;
+  layout.classList.toggle('sidebar-collapsed',nextCollapsed);
+  try{ localStorage.setItem('hermes-sidebar-collapsed', nextCollapsed?'1':'0'); }catch(e){}
+  const btn=document.getElementById('btnCollapseSidebar');
+  if(btn){
+    btn.setAttribute('data-tooltip', nextCollapsed?'Show chat list':'Hide chat list');
+    btn.setAttribute('aria-label', nextCollapsed?'Show chat list':'Hide chat list');
+    btn.setAttribute('aria-expanded', nextCollapsed?'false':'true');
+  }
+}
+/* Restore persisted collapse state on first paint — runs once at boot. */
+(function _restoreSidebarCollapse(){
+  try{
+    if(localStorage.getItem('hermes-sidebar-collapsed')==='1'){
+      // Defer one tick so .layout exists in the DOM.
+      const apply=()=>toggleSidebarCollapsed(true);
+      if(document.readyState==='loading'){
+        document.addEventListener('DOMContentLoaded',apply,{once:true});
+      } else { apply(); }
+    }
+  }catch(e){}
+})();
+/* When the user clicks a rail tab to bring the chat panel back, also
+   un-collapse the sidebar so they actually see what they switched to. */
+const _origSwitchPanel=typeof switchPanel==='function'?switchPanel:null;
+if(typeof window!=='undefined'){
+  const _wrappedSwitchPanel=function(name){
+    const layout=document.querySelector('.layout');
+    if(layout&&layout.classList.contains('sidebar-collapsed')) toggleSidebarCollapsed(false);
+    return _origSwitchPanel?_origSwitchPanel(name):undefined;
+  };
+  if(_origSwitchPanel) window.switchPanel=_wrappedSwitchPanel;
+}
+/* <<< hermes-fork */
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
   if(!panel)return;
