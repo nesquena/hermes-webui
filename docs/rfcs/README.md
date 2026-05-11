@@ -32,5 +32,8 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 
 ## Current RFCs
 
+- [`hermes-run-adapter-contract.md`](hermes-run-adapter-contract.md) — Event/control
+  compatibility contract and gap matrix for moving WebUI chat runs to Hermes-owned
+  runtime execution.
 - [`turn-journal.md`](turn-journal.md) — Crash-safe WebUI turn journal for
   recovering interrupted chat submissions.
