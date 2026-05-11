@@ -4023,7 +4023,7 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
-    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(_profileLabel) _profileLabel.textContent=(typeof _hermesDisplayProfileName==='function'?_hermesDisplayProfileName(S.activeProfile||'default'):(S.activeProfile||'default'));
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -4119,7 +4119,7 @@ function syncTopbar(){
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=(typeof _hermesDisplayProfileName==='function'?_hermesDisplayProfileName(S.activeProfile||'default'):(S.activeProfile||'default'));
 }
 
 function msgContent(m){
