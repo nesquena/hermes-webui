@@ -231,6 +231,48 @@ def validate_event_name(event_name: str) -> str:
     return name
 
 
+_RUNTIME_MESSAGE_TYPE_RE = re.compile(r"^capy:[a-z0-9:._-]+$", re.IGNORECASE)
+
+
+def _runtime_message_type_value(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()[:80]
+    return text if _RUNTIME_MESSAGE_TYPE_RE.fullmatch(text) else ""
+
+
+def _is_blocked_runtime_message_type(message_type: str) -> bool:
+    text = str(message_type or "").strip().lower()
+    return (
+        text == "capy:raw:eval"
+        or text == "capy:asset:url"
+        or bool(re.match(r"^capy:raw:", text))
+        or bool(re.match(r"^capy:eval(?::|$)", text))
+        or bool(re.match(r"^capy:data:(get|put|patch|post|set|delete|remove|merge|write|mutate)$", text))
+    )
+
+
+def _payload_runtime_message_type(payload: dict[str, Any]) -> str:
+    has_type = "type" in payload
+    has_message_type = "message_type" in payload
+    raw_type = re.sub(r"\s+", " ", str(payload.get("type") or "")).strip()
+    type_value = _runtime_message_type_value(raw_type)
+    message_type_value = _runtime_message_type_value(payload.get("message_type"))
+    if has_message_type and not message_type_value:
+        raise ValueError("Blocked by widget runtime contract")
+    if has_type and raw_type.lower().startswith("capy:") and not type_value:
+        raise ValueError("Blocked by widget runtime contract")
+    if type_value and message_type_value and type_value.lower() != message_type_value.lower():
+        raise ValueError("Blocked by widget runtime contract")
+    return type_value or message_type_value
+
+
+def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict[str, Any]) -> None:
+    event_type = _runtime_message_type_value(event_name)
+    payload_type = _payload_runtime_message_type(payload)
+    for message_type in (event_type, payload_type):
+        if _is_blocked_runtime_message_type(message_type):
+            raise ValueError("Blocked by widget runtime contract")
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -6308,10 +6350,12 @@ def queue_widget_event(
     name = validate_event_name(event_name)
     if payload is not None and not isinstance(payload, dict):
         raise ValueError("payload must be an object")
+    payload_data = payload or {}
+    _assert_widget_event_runtime_contract_allowed(name, payload_data)
     space = read_space(sid)
     _widget_index(space, wid)
     prompt_preview = _payload_text_summary(prompt, 1000)
-    payload_summary = _payload_summary(payload or {})
+    payload_summary = _payload_summary(payload_data)
     event_id = _record_event(
         sid,
         "widget.event.queued",

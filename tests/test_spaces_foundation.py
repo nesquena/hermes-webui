@@ -9758,6 +9758,60 @@ def test_widget_event_queues_agent_bridge_request_without_widget_bodies_or_secre
     assert "SECRET_VALUE_DO_NOT_LEAK" not in json.dumps(event)
 
 
+def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Runtime Event Gate"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    allowed = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "agent.prompt",
+        {"message_type": "capy:agent:prompt", "query": "safe prompt"},
+        prompt="safe sandbox prompt",
+    )
+    assert allowed["queued"] is True
+
+    for blocked_payload in (
+        {"event_name": "capy:data:get", "payload": {"query": "read shared data"}},
+        {"event_name": "agent.prompt", "payload": {"message_type": "capy:asset:url", "query": "fetch asset"}},
+        {"event_name": "agent.prompt", "payload": {"type": "capy:raw:SECRET_VALUE_DO_NOT_LEAK"}},
+        {"event_name": "capy:raw:eval", "payload": {"renderer": "<script>steal()</script>"}},
+    ):
+        with pytest.raises(ValueError, match="runtime contract"):
+            spaces.queue_widget_event(
+                created["space_id"],
+                "sandbox",
+                blocked_payload["event_name"],
+                blocked_payload["payload"],
+                prompt="Use bearer SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
+                session_id="SECRET_VALUE_DO_NOT_LEAK",
+            )
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "space_id": created["space_id"],
+            "widget_id": "sandbox",
+            "event_name": "agent.prompt",
+            "prompt": "Use bearer SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>",
+            "payload": {"message_type": "capy:data:put", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "runtime contract" in body["error"]
+    assert [event["event_id"] for event in events] == [allowed["event_id"]]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Route Events"})
