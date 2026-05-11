@@ -229,46 +229,61 @@ function toggleMobileFiles(){
 /* >>> hermes-fork: sidebar collapse toggle (HermesOS Cloud)
    Mirrors toggleWorkspacePanel — the chat list (left .sidebar element)
    collapses to zero width via the `.sidebar-collapsed` class on .layout.
-   Rail icons (.rail) stay visible always so the user has a re-open path
-   via switchPanel('chat'). State persists in localStorage so a reload
-   keeps the user's preference. */
+   Rail stays visible; re-open by clicking any rail tab (we hook
+   switchPanel below to auto-uncollapse) or the same chevron button.
+
+   Defensive: all of this MUST be wrapped so a thrown exception (e.g. a
+   browser shipping a buggy localStorage / matchMedia call) cannot
+   short-circuit the rest of boot.js — that would silently break later
+   bootstrap (incl. the session-list fetch). */
 function toggleSidebarCollapsed(force){
-  const layout=document.querySelector('.layout');
-  if(!layout) return;
-  const currentlyCollapsed=layout.classList.contains('sidebar-collapsed');
-  const nextCollapsed=typeof force==='boolean'?force:!currentlyCollapsed;
-  layout.classList.toggle('sidebar-collapsed',nextCollapsed);
-  try{ localStorage.setItem('hermes-sidebar-collapsed', nextCollapsed?'1':'0'); }catch(e){}
-  const btn=document.getElementById('btnCollapseSidebar');
-  if(btn){
-    btn.setAttribute('data-tooltip', nextCollapsed?'Show chat list':'Hide chat list');
-    btn.setAttribute('aria-label', nextCollapsed?'Show chat list':'Hide chat list');
-    btn.setAttribute('aria-expanded', nextCollapsed?'false':'true');
+  try{
+    const layout=document.querySelector('.layout');
+    if(!layout) return;
+    const currentlyCollapsed=layout.classList.contains('sidebar-collapsed');
+    const nextCollapsed=typeof force==='boolean'?force:!currentlyCollapsed;
+    layout.classList.toggle('sidebar-collapsed',nextCollapsed);
+    try{ localStorage.setItem('hermes-sidebar-collapsed', nextCollapsed?'1':'0'); }catch(e){}
+    const btn=document.getElementById('btnCollapseSidebar');
+    if(btn){
+      btn.setAttribute('data-tooltip', nextCollapsed?'Show chat list':'Hide chat list');
+      btn.setAttribute('aria-label', nextCollapsed?'Show chat list':'Hide chat list');
+      btn.setAttribute('aria-expanded', nextCollapsed?'false':'true');
+    }
+  }catch(e){
+    try{ console.warn('toggleSidebarCollapsed failed', e); }catch(_){}
   }
 }
-/* Restore persisted collapse state on first paint — runs once at boot. */
-(function _restoreSidebarCollapse(){
-  try{
-    if(localStorage.getItem('hermes-sidebar-collapsed')==='1'){
-      // Defer one tick so .layout exists in the DOM.
-      const apply=()=>toggleSidebarCollapsed(true);
-      if(document.readyState==='loading'){
-        document.addEventListener('DOMContentLoaded',apply,{once:true});
-      } else { apply(); }
-    }
-  }catch(e){}
-})();
+/* Restore persisted collapse state on first paint — runs once at boot.
+   Wrapped fully so an unexpected throw can't crash boot.js's top-level
+   execution and tank the rest of init. */
+try{
+  if(typeof localStorage!=='undefined' && localStorage.getItem('hermes-sidebar-collapsed')==='1'){
+    if(document.readyState==='loading'){
+      document.addEventListener('DOMContentLoaded',function(){toggleSidebarCollapsed(true);},{once:true});
+    } else { toggleSidebarCollapsed(true); }
+  }
+}catch(e){ try{ console.warn('sidebar-collapse restore failed', e); }catch(_){} }
 /* When the user clicks a rail tab to bring the chat panel back, also
-   un-collapse the sidebar so they actually see what they switched to. */
-const _origSwitchPanel=typeof switchPanel==='function'?switchPanel:null;
-if(typeof window!=='undefined'){
-  const _wrappedSwitchPanel=function(name){
-    const layout=document.querySelector('.layout');
-    if(layout&&layout.classList.contains('sidebar-collapsed')) toggleSidebarCollapsed(false);
-    return _origSwitchPanel?_origSwitchPanel(name):undefined;
-  };
-  if(_origSwitchPanel) window.switchPanel=_wrappedSwitchPanel;
-}
+   un-collapse the sidebar. Wrapped + late-bound — switchPanel is
+   defined in panels.js which loads AFTER boot.js (defer order), so we
+   patch on window-load when it definitely exists. */
+window.addEventListener('load', function(){
+  try{
+    if(typeof window.switchPanel === 'function' && !window.switchPanel.__hermesWrappedForSidebar){
+      var _orig = window.switchPanel;
+      var _wrapped = function(name){
+        try{
+          var layout = document.querySelector('.layout');
+          if(layout && layout.classList.contains('sidebar-collapsed')) toggleSidebarCollapsed(false);
+        }catch(e){}
+        return _orig.apply(this, arguments);
+      };
+      _wrapped.__hermesWrappedForSidebar = true;
+      window.switchPanel = _wrapped;
+    }
+  }catch(e){ try{ console.warn('switchPanel wrap failed', e); }catch(_){} }
+});
 /* <<< hermes-fork */
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
