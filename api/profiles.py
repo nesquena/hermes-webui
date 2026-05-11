@@ -619,6 +619,14 @@ def _set_hermes_home(home: Path):
     except (ImportError, AttributeError):
         logger.debug("Failed to patch skills_tool module")
 
+    # Patch skill_manager_tool module-level cache (same constants as skills_tool)
+    try:
+        import tools.skill_manager_tool as _sm
+        _sm.HERMES_HOME = home
+        _sm.SKILLS_DIR = home / 'skills'
+    except (ImportError, AttributeError):
+        logger.debug("Failed to patch skill_manager_tool module")
+
     # Patch cron/jobs module-level cache
     try:
         import cron.jobs as _cj
