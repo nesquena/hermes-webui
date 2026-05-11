@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **fix(sessions): preserve distinct retried messages when merging transcripts** ([#2027](https://github.com/nesquena/hermes-webui/issues/2027)). Messaging session transcript merges now use `id`/`message_id` when present before falling back to the legacy role/content/timestamp/tool metadata key, so repeated turns with identical visible text are not silently collapsed.
+
 ## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
 
 ### Fixed
