@@ -251,8 +251,41 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
                 files_changed.append({"file": rel_path, "status": "modified"})
                 diff_lines.extend(diff)
 
-    # Check for new files in workspace that aren't in checkpoint
-    # (skip for performance — diff is primarily for seeing what the checkpoint captures)
+    # Check for new files in workspace that aren't in checkpoint.  Use the
+    # checkpoint git index against the live workspace so standard git excludes
+    # are honored and repository internals such as .git are not surfaced as
+    # rollback-preview noise.
+    added_result = subprocess.run(
+        [
+            git,
+            f"--git-dir={ckpt_dir / '.git'}",
+            f"--work-tree={resolved}",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        capture_output=True,
+        timeout=10,
+    )
+    if added_result.returncode == 0 and added_result.stdout:
+        for raw_path in added_result.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            rel_path = raw_path.decode("utf-8", errors="replace")
+            ws_file = Path(resolved) / rel_path
+            if not ws_file.is_file():
+                continue
+            try:
+                ws_content = ws_file.read_text(errors="replace")
+            except OSError:
+                continue
+            files_changed.append({"file": rel_path, "status": "added"})
+            diff_lines.append("--- /dev/null")
+            diff_lines.append(f"+++ b/{rel_path}")
+            diff_lines.append("@@ -0,0 +1,{lines} @@".format(lines=len(ws_content.splitlines())))
+            for line in ws_content.splitlines():
+                diff_lines.append(f"+{line}")
 
     return {
         "checkpoint": checkpoint,
