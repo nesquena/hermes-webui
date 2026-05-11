@@ -5375,7 +5375,7 @@ function _clearCronUnreadForJob(jobId){
 }
 
 const _origSwitchPanel=switchPanel;
-switchPanel=async function(name){ return _origSwitchPanel(name); };
+switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
