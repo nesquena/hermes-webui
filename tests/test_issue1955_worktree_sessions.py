@@ -185,3 +185,57 @@ def test_session_new_route_creates_worktree_backed_session(tmp_path, monkeypatch
     assert session["workspace"] == str(worktree.resolve())
     assert session["worktree_path"] == str(worktree.resolve())
     assert session["worktree_branch"] == "hermes/hermes-route"
+
+
+def test_session_new_worktree_fallback_workspace_is_resolved(tmp_path, monkeypatch):
+    import api.routes as routes
+    import api.worktrees as worktrees
+
+    repo = tmp_path / "repo"
+    worktree = repo / ".worktrees" / "hermes-route"
+    repo.mkdir()
+    worktree.mkdir(parents=True)
+    seen = {"resolved": []}
+
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "read_body",
+        lambda handler: {
+            "worktree": True,
+            "profile": "default",
+        },
+    )
+    monkeypatch.setattr(routes, "get_last_workspace", lambda: str(repo))
+
+    def fake_resolve(raw):
+        seen["resolved"].append(raw)
+        return repo
+
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", fake_resolve)
+    monkeypatch.setattr(
+        worktrees,
+        "create_worktree_for_workspace",
+        lambda workspace: {
+            "path": str(worktree),
+            "branch": "hermes/hermes-route",
+            "repo_root": str(repo),
+            "created_at": 321.0,
+        },
+    )
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload,
+            status=status,
+        ) or True,
+    )
+
+    assert routes.handle_post(object(), SimpleNamespace(path="/api/session/new")) is True
+
+    assert seen["resolved"] == [str(repo)]
+    assert captured["status"] == 200
+    session = captured["payload"]["session"]
+    assert session["workspace"] == str(worktree.resolve())

@@ -3847,7 +3847,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/new":
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             return bad(handler, str(e))
         worktree_info = None
         worktree_requested = (
@@ -3857,10 +3857,12 @@ def handle_post(handler, parsed) -> bool:
         if worktree_requested:
             try:
                 from api.worktrees import create_worktree_for_workspace
-                base_workspace = workspace or str(resolve_trusted_workspace(get_last_workspace()))
+                base_workspace = workspace
+                if not base_workspace:
+                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
                 worktree_info = create_worktree_for_workspace(base_workspace)
                 workspace = worktree_info["path"]
-            except ValueError as e:
+            except (TypeError, ValueError) as e:
                 return bad(handler, str(e), status=400)
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
