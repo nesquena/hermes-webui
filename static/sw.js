@@ -8,6 +8,9 @@
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
 const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
+// Local build nonce: bumping this forces iOS/Safari to install a fresh SW even
+// when the repo is already --dirty and the git-derived asset version is unchanged.
+const SW_BUILD_NONCE = 'mobile-session-recovery-20260508-0055';
 
 // Static assets that form the app shell.
 //

@@ -1662,6 +1662,12 @@ def get_cli_sessions() -> list:
                 '_lineage_tip_id': row.get('_lineage_tip_id'),
                 '_compression_segment_count': row.get('_compression_segment_count'),
                 'is_cli_session': True,
+                # Imported CLI/state.db sessions are display-only in WebUI.
+                # They do not have a mutable WebUI JSON session backing them,
+                # so POST routes such as /api/chat/start and /api/session/draft
+                # cannot safely modify them.
+                'read_only': True,
+                'is_read_only': True,
             })
     except Exception as _cli_err:
         # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.

@@ -360,12 +360,21 @@ function _dashboardIsBrowserLoopback(){
 }
 function _dashboardBrowserUrl(status){
   if(!status||!status.running||!status.port) return '';
+  const browserHost=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+  // Casey's public WebUI is tunneled at webui.kmc-ai.com while the official
+  // Hermes dashboard is a separate tunneled hostname.  Do not send remote
+  // browsers to webui.kmc-ai.com:9119; Cloudflare only serves the normal HTTPS
+  // hostname, and the origin port is intentionally not public.
+  const publicDashboardUrls={
+    'webui.kmc-ai.com':'https://hermes.kmc-ai.com/',
+  };
+  if(publicDashboardUrls[browserHost]) return publicDashboardUrls[browserHost];
   let source;
   try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
   catch(_){source=new URL('http://127.0.0.1:'+status.port);}
-  const browserHost=window.location.hostname||source.hostname;
-  const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
-  return source.protocol+'//'+displayHost+':'+status.port;
+  const displayHost=browserHost||source.hostname;
+  const formattedHost=displayHost.includes(':')&&!displayHost.startsWith('[')?'['+displayHost+']':displayHost;
+  return source.protocol+'//'+formattedHost+':'+status.port;
 }
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);

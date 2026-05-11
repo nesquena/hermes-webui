@@ -930,7 +930,7 @@ $('msg').addEventListener('input',()=>{
   updateSendBtn();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
-  if (sid && typeof _saveComposerDraft === 'function') {
+  if (sid && typeof _saveComposerDraft === 'function' && !(typeof _isReadOnlyComposerSession === 'function' && _isReadOnlyComposerSession(sid))) {
     _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
   }
   const text=$('msg').value;
@@ -1484,6 +1484,19 @@ function applyBotName(){
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
+  // Emergency mobile recovery: /?fresh=1 or /?reset_session=1 clears the saved
+  // active-session pointer before boot restore. This gives users a URL-level escape
+  // hatch when Safari/PWA localStorage or a stale Cloudflare/SW shell keeps restoring
+  // a session that cannot be fetched.
+  try{
+    const _bootQs=new URLSearchParams(window.location.search||'');
+    if(_bootQs.has('fresh')||_bootQs.has('reset_session')){
+      localStorage.removeItem('hermes-webui-session');
+      _bootQs.delete('fresh');_bootQs.delete('reset_session');
+      const _clean=window.location.pathname+(_bootQs.toString()?('?'+_bootQs.toString()):'')+(window.location.hash||'');
+      if(window.history&&window.history.replaceState) window.history.replaceState(window.history.state||{},'',_clean);
+    }
+  }catch(_e){}
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
@@ -1535,6 +1548,7 @@ function applyBotName(){
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
+  try{const _msgInner=$('msgInner');if(_msgInner)_msgInner.innerHTML='';}catch(_e){}
   S._bootReady=true;
   syncTopbar();
   // Restore panel pref so the workspace panel stays visible on a fresh load if the

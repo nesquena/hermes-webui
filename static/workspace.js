@@ -60,6 +60,13 @@ function _restoreExpandedDirs(){
 
 async function loadDir(path){
   if(!S.session)return;
+  if(S.session.is_cli_session || S.session.read_only || S.session.is_read_only){
+    S.currentDir=path||'.';
+    S.entries=[];
+    if(typeof renderBreadcrumb==='function') renderBreadcrumb();
+    if(typeof renderFileTree==='function') renderFileTree();
+    return;
+  }
   try{
     if(!path||path==='.'){
       S._dirCache={};
@@ -98,6 +105,11 @@ async function loadDir(path){
 async function _refreshGitBadge(){
   const badge=$('gitBadge');
   if(!badge||!S.session)return;
+  if(S.session.is_cli_session || S.session.read_only || S.session.is_read_only){
+    badge.style.display='none';
+    badge.textContent='';
+    return;
+  }
   try{
     const data=await api(`/api/git-info?session_id=${encodeURIComponent(S.session.session_id)}`);
     if(data.git&&data.git.is_git){

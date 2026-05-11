@@ -23,10 +23,19 @@ let _loadingSessionId = null;
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 
+function _isReadOnlyComposerSession(sid) {
+  return !!(
+    sid && typeof S !== 'undefined' && S && S.session && S.session.session_id === sid &&
+    (S.session.read_only || S.session.is_read_only || S.session.is_cli_session)
+  );
+}
+
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  if (_isReadOnlyComposerSession(sid)) return;
   _draftSaveTimer = setTimeout(() => {
+    if (_isReadOnlyComposerSession(sid)) return;
     api('/api/session/draft', {
       method: 'POST',
       body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
@@ -38,6 +47,7 @@ function _saveComposerDraft(sid, text, files) {
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  if (_isReadOnlyComposerSession(sid)) return;
   api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
@@ -79,6 +89,7 @@ function _restoreComposerDraft(draft, targetSid) {
 function _clearComposerDraft(sid) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  if (_isReadOnlyComposerSession(sid)) return;
   api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: '' }),
@@ -372,7 +383,7 @@ async function newSession(flash, options={}){
   // blank-page display on all subsequent returns to the empty state (#823).
   const switchWs=S._profileSwitchWorkspace;
   S._profileSwitchWorkspace=null;
-  const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+  const inheritWs=(options.workspace||switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null));
   // Use the saved default model for new sessions (#872). The user's saved
   // default_model (from Settings) takes priority over the chat-header dropdown
   // value, which reflects the *previous* session's model. Fall back to the
@@ -467,22 +478,25 @@ async function loadSession(sid){
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
+    const isSavedBootRestore = !currentSid&&localStorage.getItem('hermes-webui-session')===sid;
     const _msgInner = $('msgInner');
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // If this 404 was for the saved active-session ID (not a click-into request),
-        // wipe the stale localStorage value and rethrow so boot can fall through to
-        // the empty-state instead of sticking to a broken "Session not available" view.
-        if(!currentSid&&localStorage.getItem('hermes-webui-session')===sid){
-          localStorage.removeItem('hermes-webui-session');
-          if (_loadingSessionId === sid) _loadingSessionId = null;
-          throw e;
-        }
       } else {
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
+    }
+    // If the failing request is the automatic restore of the saved active session,
+    // clear the stale pointer and rethrow. Boot will fall through to the empty-state
+    // with the sidebar/session picker still usable instead of leaving mobile users
+    // trapped behind the saved-session error view (common after iOS/Cloudflare/SW
+    // restores a cached shell but one session fetch fails).
+    if(isSavedBootRestore){
+      localStorage.removeItem('hermes-webui-session');
+      if (_loadingSessionId === sid) _loadingSessionId = null;
+      throw e;
     }
     if (_loadingSessionId === sid) _loadingSessionId = null;
     return;
@@ -1265,6 +1279,7 @@ let _allProjects = [];  // cached project list
 // double-underscore prefixes provide.
 const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
+let _activeWorkspaceFilter = null;
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _sessionActionMenu = null;
@@ -2275,6 +2290,18 @@ function _ensureSessionVirtualScrollHandler(list){
   list.addEventListener('scroll', _scheduleSessionVirtualizedRender, {passive:true});
 }
 
+function filterSessionsByWorkspace(path, name){
+  path=String(path||'').trim();
+  if(!path)return;
+  _activeWorkspaceFilter={path,name:name||path};
+  renderSessionListFromCache();
+}
+
+function clearWorkspaceSessionFilter(){
+  _activeWorkspaceFilter=null;
+  renderSessionListFromCache();
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -2316,11 +2343,12 @@ function renderSessionListFromCache(){
     _activeProject===NO_PROJECT_FILTER
       ?profileFiltered.filter(s=>!s.project_id)
       :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
+  const workspaceFiltered=_activeWorkspaceFilter?projectFiltered.filter(s=>s.workspace===_activeWorkspaceFilter.path):projectFiltered;
   // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const sessionsRaw=_showArchived?workspaceFiltered:workspaceFiltered.filter(s=>!s.archived);
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
+  const archivedCount=workspaceFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');
   const listScrollTopBeforeRender=list.scrollTop||0;
   list.innerHTML='';
@@ -2343,6 +2371,23 @@ function renderSessionListFromCache(){
   list.appendChild(batchBar);
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
+  // Workspace filter chip — set from workspace dropdown "Show chats" action.
+  if(_activeWorkspaceFilter){
+    const bar=document.createElement('div');
+    bar.className='workspace-filter';
+    const label=document.createElement('span');
+    label.className='workspace-filter-label';
+    label.textContent=(t('workspace_filter_label')||'Workspace')+': '+(_activeWorkspaceFilter.name||_activeWorkspaceFilter.path);
+    label.title=_activeWorkspaceFilter.path;
+    const clear=document.createElement('button');
+    clear.type='button';
+    clear.className='workspace-filter-clear';
+    clear.textContent=t('workspace_filter_clear')||'Clear';
+    clear.onclick=(e)=>{e.stopPropagation();clearWorkspaceSessionFilter();};
+    bar.appendChild(label);
+    bar.appendChild(clear);
+    list.appendChild(bar);
+  }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
   const hasUnprojected=profileFiltered.some(s=>!s.project_id);

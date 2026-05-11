@@ -2798,6 +2798,10 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
+    if parsed.path == "/reset":
+        reset_html = """<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Resetting Hermes WebUI</title><body style=\"font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0D0D1A;color:#F5E6C8;padding:32px;line-height:1.45\"><h1>Resetting Hermes WebUI…</h1><p>Clearing the saved session and browser shell cache. You will be redirected in a moment.</p><script>(async function(){try{localStorage.removeItem('hermes-webui-session');sessionStorage.clear();}catch(e){}try{if('caches' in window){var ks=await caches.keys();await Promise.all(ks.map(function(k){return caches.delete(k);}));}}catch(e){}try{if(navigator.serviceWorker){var rs=await navigator.serviceWorker.getRegistrations();await Promise.all(rs.map(function(r){return r.unregister();}));}}catch(e){}location.replace('/?fresh=1&nuclear=1&reset_at='+Date.now());})()</script><p>If it does not redirect, <a style=\"color:#F5C542\" href=\"/?fresh=1&nuclear=1\">tap here</a>.</p></body>"""
+        return t(handler, reset_html, content_type="text/html; charset=utf-8")
+
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
         # starts with "/static/" (its required prefix). _serve_static enforces
@@ -3247,7 +3251,12 @@ def handle_get(handler, parsed) -> bool:
                     "raw_source": (cli_meta or {}).get("raw_source"),
                     "session_source": (cli_meta or {}).get("session_source"),
                     "source_label": (cli_meta or {}).get("source_label"),
-                    "read_only": bool((cli_meta or {}).get("read_only")),
+                    # CLI/state.db sessions are imported for inspection. They
+                    # are not backed by mutable WebUI JSON session state, so
+                    # marking them read-only keeps the client from POSTing to
+                    # routes that would otherwise return "Session not found".
+                    "read_only": True,
+                    "is_read_only": True,
                     "messages": msgs,
                     "tool_calls": [],
                 }
@@ -4170,12 +4179,23 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
+        workspace_requested = "workspace" in body
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = str(resolve_trusted_workspace(body["workspace"] if workspace_requested else s.workspace))
         except ValueError as e:
             return bad(handler, str(e))
+        workspace_changing = workspace_requested and str(old_ws or "") != str(new_ws or "")
         with _get_session_agent_lock(body["session_id"]):
-            s.workspace = new_ws
+            if workspace_changing and (
+                getattr(s, "active_stream_id", None) or getattr(s, "pending_user_message", None)
+            ):
+                return bad(
+                    handler,
+                    "Session is still streaming; wait for the current turn to finish before moving workspace.",
+                    status=409,
+                )
+            if workspace_requested:
+                s.workspace = new_ws
             if "model" in body or "model_provider" in body:
                 model, provider = _session_model_state_from_request(
                     body.get("model", s.model),
@@ -4530,6 +4550,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)
+
+    if parsed.path == "/api/workspaces/set_last":
+        return _handle_workspace_set_last(handler, body)
 
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
@@ -7051,19 +7074,10 @@ def _handle_chat_sync(handler, body):
                 _sanitize_messages_for_api,
                 _session_context_messages,
                 _workspace_context_prefix,
+                _workspace_system_message,
             )
             workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            workspace_system_msg = _workspace_system_message(str(s.workspace))
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_session_context_messages(s))
@@ -7523,6 +7537,18 @@ def _handle_workspace_reorder(handler, body):
             reordered.append(w)
     save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
+
+
+def _handle_workspace_set_last(handler, body):
+    path_str = body.get("path", "").strip()
+    if not path_str:
+        return bad(handler, "path is required")
+    try:
+        p = resolve_trusted_workspace(path_str)
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
+    set_last_workspace(str(p))
+    return j(handler, {"ok": True, "workspace": str(p)})
 
 
 def _handle_approval_respond(handler, body):

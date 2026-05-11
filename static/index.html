@@ -16,6 +16,7 @@
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){try{var q=new URLSearchParams(location.search||'');if(q.has('fresh')||q.has('reset_session')||q.has('nuclear')){localStorage.removeItem('hermes-webui-session');sessionStorage.removeItem('hermes-webui-session');try{Object.keys(sessionStorage).forEach(function(k){if(k.indexOf('hermes-queue-')===0)sessionStorage.removeItem(k);});}catch(_e){}if(q.has('nuclear')){try{if(navigator.serviceWorker)navigator.serviceWorker.getRegistrations().then(function(rs){rs.forEach(function(r){r.unregister();});});}catch(_e){}try{if(window.caches)caches.keys().then(function(keys){keys.forEach(function(k){caches.delete(k);});});}catch(_e){}}if(location.pathname.indexOf('/session/')>=0){q.delete('fresh');q.delete('reset_session');q.delete('nuclear');var clean='/' +(q.toString()?('?'+q.toString()):'');location.replace(clean);return;}}}catch(e){}})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <!-- theme-color: surfaces the active theme's background to native chrome (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --bg-1 / :root.dark --bg-1. -->
 <meta name="theme-color" content="#FEFCF7" media="(prefers-color-scheme: light)">
@@ -24,7 +25,7 @@
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#0D0D1A':'#FEFCF7';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
-<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
@@ -53,7 +54,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });
@@ -1224,17 +1225,17 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/i18n.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/icons.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/ui.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/workspace.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/terminal.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/sessions.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/commands.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/messages.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/panels.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/onboarding.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
+<script src="static/boot.js?v=__WEBUI_VERSION__&h=cli-readonly-session-20260509" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->
 <div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">

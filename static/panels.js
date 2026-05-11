@@ -3713,8 +3713,35 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
       opt.className='ws-opt'+(w.path===currentWs?' active':'');
       opt.dataset.name=w.name||'';
       opt.dataset.path=w.path||'';
-      opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-      opt.onclick=()=>switchToWorkspace(w.path,w.name);
+      opt.innerHTML=`<div class="ws-opt-main"><span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span></div>`;
+      opt.onclick=(e)=>{e.stopPropagation();};
+      const actions=document.createElement('div');
+      actions.className='ws-opt-actions';
+      const newChatBtn=document.createElement('button');
+      newChatBtn.type='button';
+      newChatBtn.className='ws-opt-action-btn';
+      newChatBtn.textContent=t('workspace_action_new_chat');
+      newChatBtn.onclick=async(e)=>{e.stopPropagation();await newChatInWorkspace(w.path,w.name);};
+      const moveBtn=document.createElement('button');
+      moveBtn.type='button';
+      moveBtn.className='ws-opt-action-btn';
+      moveBtn.textContent=t('workspace_action_move_chat');
+      moveBtn.onclick=async(e)=>{e.stopPropagation();await moveCurrentChatToWorkspace(w.path,w.name);};
+      const defaultBtn=document.createElement('button');
+      defaultBtn.type='button';
+      defaultBtn.className='ws-opt-action-btn';
+      defaultBtn.textContent=t('workspace_action_set_default');
+      defaultBtn.onclick=async(e)=>{e.stopPropagation();await setDefaultWorkspaceForNewChats(w.path,w.name);};
+      const sessionsBtn=document.createElement('button');
+      sessionsBtn.type='button';
+      sessionsBtn.className='ws-opt-action-btn';
+      sessionsBtn.textContent=t('workspace_action_show_sessions');
+      sessionsBtn.onclick=(e)=>{e.stopPropagation();filterSessionsByWorkspace(w.path,w.name);closeWsDropdown();showToast(t('workspace_sessions_filtered',w.name||getWorkspaceFriendlyName(w.path)));};
+      actions.appendChild(newChatBtn);
+      actions.appendChild(moveBtn);
+      actions.appendChild(defaultBtn);
+      actions.appendChild(sessionsBtn);
+      opt.appendChild(actions);
       listContainer.appendChild(opt);
     }
     listContainer.appendChild(noResults);
@@ -3999,7 +4026,7 @@ function _clearWorkspaceDetail(){
 
 async function activateCurrentWorkspace(){
   if (!_currentWorkspaceDetail) return;
-  await switchToWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
+  await moveCurrentChatToWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
   // Re-render detail after activation so the active badge updates
   _renderWorkspaceDetail(_currentWorkspaceDetail);
 }
@@ -4208,7 +4235,7 @@ async function promptWorkspacePath(){
     _workspaceList=data.workspaces||[];
     const target=_workspaceList[_workspaceList.length-1];
     if(!target) throw new Error(t('workspace_not_added'));
-    await switchToWorkspace(target.path,target.name);
+    await moveCurrentChatToWorkspace(target.path,target.name);
   }catch(e){
     if(String(e.message||'').includes('Workspace already in list')){
       showToast(t('workspace_already_saved'));
@@ -4218,19 +4245,27 @@ async function promptWorkspacePath(){
   }
 }
 
-async function switchToWorkspace(path,name){
-  // Opus review Q6: if called from blank page, auto-create a session bound to
-  // the requested workspace so the switch doesn't silently no-op.
+async function newChatInWorkspace(path,name){
+  path=String(path||'').trim();
+  if(!path){showToast(t('no_workspace'));return;}
+  closeWsDropdown();
+  try{
+    await newSession(true,{workspace:path});
+    await renderSessionList();
+    const msg=$('msg');
+    if(msg)msg.focus();
+    showToast(t('workspace_new_chat_in',name||getWorkspaceFriendlyName(path)));
+  }catch(e){setStatus(t('switch_failed')+e.message);}
+}
+
+async function moveCurrentChatToWorkspace(path,name){
+  // Moving rewrites the active session's pinned workspace; other dropdown actions
+  // must not do that implicitly.
   if(!S.session){
-    const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
-    if(!ws){showToast(t('no_workspace'));return;}
-    try{
-      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
-      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
-    }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
-    if(!S.session)return;
+    await newChatInWorkspace(path,name);
+    return;
   }
-  if(S.busy){
+  if(_isCurrentSessionBusyForWorkspaceMove()){
     showToast(t('workspace_busy_switch'));
     return;
   }
@@ -4247,16 +4282,41 @@ async function switchToWorkspace(path,name){
   }
   try{
     closeWsDropdown();
-    await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
-    })});
-    S.session.workspace=path;
-    // Explicit workspace switch = user overriding any pending profile-switch default.
+    if(S.session.workspace!==path){
+      await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:path})});
+      S.session.workspace=path;
+    }
+    // Explicit workspace move = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
-    showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
+    showToast(t('workspace_moved_to',name||getWorkspaceFriendlyName(path)));
+  }catch(e){setStatus(t('switch_failed')+e.message);}
+}
+
+function _isCurrentSessionBusyForWorkspaceMove(){
+  return Boolean(S.session&&(S.busy||S.activeStreamId||S.session.active_stream_id||S.session.pending_user_message));
+}
+
+async function switchToWorkspace(path,name){
+  // Compatibility wrapper for older tests/callers. Blank-page moves create a
+  // session via newChatInWorkspace(), which calls /api/session/new; otherwise
+  // the explicit Move chat path owns active-session workspace mutation.
+  if(!S.session)return newChatInWorkspace(path,name);
+  S._profileSwitchWorkspace=null;
+  return moveCurrentChatToWorkspace(path,name);
+}
+
+async function setDefaultWorkspaceForNewChats(path,name){
+  path=String(path||'').trim();
+  if(!path){showToast(t('no_workspace'));return;}
+  try{
+    await api('/api/workspaces/set_last',{method:'POST',body:JSON.stringify({path})});
+    S._profileSwitchWorkspace=path;
+    S._profileDefaultWorkspace=path;
+    closeWsDropdown();
+    showToast(t('workspace_default_set',name||getWorkspaceFriendlyName(path)));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }
 
