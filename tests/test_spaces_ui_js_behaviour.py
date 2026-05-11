@@ -1302,6 +1302,23 @@ async function dispatchWindowMessage(data, opts) {
       code: 'alert(SECRET_VALUE_DO_NOT_LEAK)',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeUnknownCapyMessage') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:debug:SECRET_VALUE_DO_NOT_LEAK',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Do not queue this prompt',
+      renderer: '<script>bad()</script>',
+    });
   } else if (scenario === 'runtimeConflictingMessageType') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2642,6 +2659,20 @@ def test_spaces_ui_sandbox_postmessage_blocks_raw_eval_without_network_call(driv
     assert "Sandbox message blocked" in out["rootHtml"]
     assert "Sandbox message blocked: capy:raw:eval" not in out["rootHtml"]
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_blocks_unlisted_capy_messages_without_leaking_type(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeUnknownCapyMessage")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert "Sandbox message blocked" in out["rootHtml"]
+    assert "Sandbox message blocked: capy:debug" not in out["rootHtml"]
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Do not queue this prompt" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

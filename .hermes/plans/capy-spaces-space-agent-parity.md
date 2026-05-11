@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Backend sandbox/postMessage event queueing now enforces the published runtime contract allowlist and rejects unknown/unlisted `capy:*` message types such as `capy:debug:dump` before recording metadata-only widget events. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Static sandbox/postMessage handling now treats the published runtime message list as a front-end allowlist too: unlisted `capy:*` messages with a valid token and opaque sandbox origin render only a generic blocked status, open no approval dialog, queue no widget event, and omit hostile type/prompt/renderer markers plus secret-looking sentinels. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): block unlisted sandbox messages in UI`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving an unlisted runtime message (`capy:debug:SECRET_VALUE_DO_NOT_LEAK`) with a valid runtime token and `origin: "null"` opens no dialog, sends no `api/spaces/widget/event` request, renders only the generic `Sandbox message blocked` status, and omits hostile type/prompt/renderer/script markers plus secret-looking sentinels from DOM.
+  - Hardened the static sandbox bridge so `capy:ready`, `capy:resize`, and `capy:agent:prompt` are the only allowed runtime message types; every other `capy:*` discriminator fails closed before prompt approval or network queueing.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); targeted sandbox/postMessage suite passed (`15 passed, 125 deselected`); Spaces UI behavior + demo parity suites passed (`150 passed`); full Spaces foundation suite passed (`231 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static sandbox unknown-message harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_91d31a271e554707ae87615e08f43640.png`.
 
 - `fix(spaces): reject unknown sandbox messages`
   - Added RED/GREEN backend coverage proving an unlisted runtime message type (`capy:debug:dump`) is rejected through both direct `queue_widget_event(...)` and `/api/spaces/widget/event`, while the already-advertised `capy:agent:prompt` path remains queueable and rejected route responses/events omit renderer/source/API-auth markers plus secret-looking sentinels.
@@ -956,14 +961,13 @@ window.capySpaces = {
 }
 ```
 
-For sandboxed widgets, expose a postMessage bridge:
+For sandboxed widgets, the currently enabled postMessage bridge is a strict allowlist:
 
 - `capy:ready`
-- `capy:data:get`
-- `capy:data:put`
-- `capy:asset:url`
 - `capy:agent:prompt`
 - `capy:resize`
+
+Future read/write/data/asset bridge candidates such as `capy:data:get`, `capy:data:put`, and `capy:asset:url` remain not-yet-enabled and must stay fail-closed until a separate safe data/assets contract lands with tests.
 
 Bridge validates:
 
