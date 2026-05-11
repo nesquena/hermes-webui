@@ -49,6 +49,7 @@ document.addEventListener('DOMContentLoaded', function () {
       var data = {};
       try { data = await res.json(); } catch (_) {}
       if (res.ok && data.ok) {
+        try { if (data.csrf_token) sessionStorage.setItem('hermes-csrf-token', data.csrf_token); } catch (_) {}
         window.location.href = _safeNextPath();
       } else {
         showErr(data.error || invalidPw);

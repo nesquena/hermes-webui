@@ -17,16 +17,41 @@ from api.config import STATE_DIR, load_settings
 
 logger = logging.getLogger(__name__)
 
+
+# Default session TTL — 30 days. Kept as a module-level constant for backwards
+# compatibility with downstream code and regression tests that import it.
+# At runtime, prefer ``_resolve_session_ttl()`` which honours the env var and
+# settings.json overrides; this constant is the floor / fallback.
+SESSION_TTL = 86400 * 30  # 30 days
+
+
+def _resolve_session_ttl() -> int:
+    """Resolve session TTL from env > settings > default.
+
+    Priority mirrors get_password_hash(): HERMES_WEBUI_SESSION_TTL env var
+    first, then settings.json, falling back to ``SESSION_TTL`` (30 days).
+    Clamped to [60s, 1 year] to prevent runaway cookies or self-lockout.
+    """
+    env_v = os.getenv('HERMES_WEBUI_SESSION_TTL', '').strip()
+    if env_v.isdigit():
+        val = int(env_v)
+        if 60 <= val <= 86400 * 365:
+            return val
+    s = load_settings()
+    v = s.get('session_ttl_seconds')
+    if isinstance(v, int) and 60 <= v <= 86400 * 365:
+        return v
+    return SESSION_TTL
+
+
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
-    '/login', '/health', '/favicon.ico',
+    '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
     '/manifest.json', '/manifest.webmanifest',
-    '/sw.js',
 })
 
 COOKIE_NAME = 'hermes_session'
-SESSION_TTL = 86400 * 30  # 30 days
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -78,9 +103,58 @@ def _save_sessions(sessions: dict[str, float]) -> None:
 _sessions = _load_sessions()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
-_login_attempts = {}  # ip -> [timestamp, ...]
+_LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
 _LOGIN_MAX_ATTEMPTS = 5
 _LOGIN_WINDOW = 60  # seconds
+
+
+def _load_login_attempts() -> dict[str, list[float]]:
+    """Load persisted login attempts from STATE_DIR, pruning expired entries."""
+    try:
+        if _LOGIN_ATTEMPTS_FILE.exists():
+            data = json.loads(_LOGIN_ATTEMPTS_FILE.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('malformed login-attempts file — expected dict')
+            now = time.time()
+            attempts: dict[str, list[float]] = {}
+            for ip, raw_times in data.items():
+                if not isinstance(ip, str) or not isinstance(raw_times, list):
+                    continue
+                fresh = [
+                    float(t)
+                    for t in raw_times
+                    if isinstance(t, (int, float)) and now - float(t) < _LOGIN_WINDOW
+                ]
+                if fresh:
+                    attempts[ip] = fresh
+            return attempts
+    except Exception as e:
+        logger.debug("Failed to load login attempts file, starting fresh: %s", e)
+    return {}
+
+
+def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
+    """Atomically persist login attempts to STATE_DIR/.login_attempts.json (0600)."""
+    try:
+        _LOGIN_ATTEMPTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=_LOGIN_ATTEMPTS_FILE.parent, suffix='.login_attempts.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(attempts, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, _LOGIN_ATTEMPTS_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug("Failed to persist login attempts: %s", e)
+
+
+_login_attempts = _load_login_attempts()  # ip -> [timestamp, ...]
+
 
 def _check_login_rate(ip: str) -> bool:
     """Return True if the IP is allowed to attempt login."""
@@ -88,14 +162,20 @@ def _check_login_rate(ip: str) -> bool:
     attempts = _login_attempts.get(ip, [])
     # Prune old attempts
     attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
-    _login_attempts[ip] = attempts
+    if attempts:
+        _login_attempts[ip] = attempts
+    else:
+        _login_attempts.pop(ip, None)
+    _save_login_attempts(_login_attempts)
     return len(attempts) < _LOGIN_MAX_ATTEMPTS
+
 
 def _record_login_attempt(ip: str) -> None:
     now = time.time()
     attempts = _login_attempts.get(ip, [])
     attempts.append(now)
     _login_attempts[ip] = attempts
+    _save_login_attempts(_login_attempts)
 
 
 def _signing_key():
@@ -156,7 +236,7 @@ def verify_password(plain) -> bool:
 def create_session() -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
-    _sessions[token] = time.time() + SESSION_TTL
+    _sessions[token] = time.time() + _resolve_session_ttl()
     _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{token}.{sig}"
@@ -195,6 +275,31 @@ def invalidate_session(cookie_value) -> None:
         if token in _sessions:
             _sessions.pop(token, None)
             _save_sessions(_sessions)
+
+
+def csrf_token_for_session(cookie_value: str | None) -> str | None:
+    """Return the CSRF token bound to a valid auth session cookie.
+
+    The token is derived from the signed session cookie and the existing WebUI
+    signing key, so it survives process restarts without adding another
+    persistence surface. Invalid or expired cookies do not receive a token.
+    """
+    if not cookie_value or not verify_session(cookie_value):
+        return None
+    digest = hmac.new(
+        _signing_key(),
+        ("csrf:" + cookie_value).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest
+
+
+def verify_csrf_token(cookie_value: str | None, csrf_token: str | None) -> bool:
+    """Return True when csrf_token matches the valid session-bound token."""
+    expected = csrf_token_for_session(cookie_value)
+    if not expected or not csrf_token:
+        return False
+    return hmac.compare_digest(str(csrf_token), expected)
 
 
 def parse_cookie(handler) -> str | None:
@@ -257,7 +362,7 @@ def check_auth(handler, parsed) -> bool:
         # safe='/' keeps path separators readable; everything else (including
         # `?`, `&`, `=`) gets percent-encoded.
         _next = _urlparse.quote(_path_with_query, safe='/')
-        handler.send_header('Location', '/login?next=' + _next)
+        handler.send_header('Location', 'login?next=' + _next)
         handler.end_headers()
     return False
 
@@ -269,7 +374,7 @@ def set_auth_cookie(handler, cookie_value) -> None:
     cookie[COOKIE_NAME]['httponly'] = True
     cookie[COOKIE_NAME]['samesite'] = 'Lax'
     cookie[COOKIE_NAME]['path'] = '/'
-    cookie[COOKIE_NAME]['max-age'] = str(SESSION_TTL)
+    cookie[COOKIE_NAME]['max-age'] = str(_resolve_session_ttl())
     # Set Secure flag when connection is HTTPS
     if getattr(handler.request, 'getpeercert', None) is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
         cookie[COOKIE_NAME]['secure'] = True
