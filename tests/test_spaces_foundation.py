@@ -6421,6 +6421,45 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "<script" not in serialized
 
 
+def test_recovery_snapshot_redacts_camelcase_unsafe_module_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "tokenModule",
+            "name": "Metadata Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "sourceModule",
+            "name": "Metadata Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "global",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "html": "<script>bad()</script>",
+        }
+    )
+
+    snapshot = spaces.recovery_snapshot()
+    modules = {module["scope"]: module for module in snapshot["modules"]}
+    serialized = json.dumps(snapshot).lower()
+
+    assert modules["space"]["module_id"] == "[REDACTED]"
+    assert modules["global"]["module_id"] == "[REDACTED]"
+    assert "tokenmodule" not in serialized
+    assert "sourcemodule" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+
+
 def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(

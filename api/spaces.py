@@ -1082,7 +1082,28 @@ def _public_module_id_summary(value: Any) -> str:
         r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|authorization|bearer|cookie|credential|credentials|data|html|password|renderer|script|secret|source|token)([^a-z0-9]|$)",
         re.IGNORECASE,
     )
-    if unsafe_id_pattern.search(module_id) or _public_display_text_summary(module_id, 80) == "[REDACTED]":
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", module_id)
+    identifier_tokens = re.findall(r"[a-z0-9]+", camel_split.lower())
+    unsafe_tokens = {
+        "authorization",
+        "bearer",
+        "cookie",
+        "credential",
+        "credentials",
+        "data",
+        "html",
+        "password",
+        "renderer",
+        "script",
+        "secret",
+        "source",
+        "token",
+    }
+    if (
+        unsafe_id_pattern.search(module_id)
+        or _public_display_text_summary(module_id, 80) == "[REDACTED]"
+        or any(token in unsafe_tokens for token in identifier_tokens)
+    ):
         return "[REDACTED]"
     return module_id
 
