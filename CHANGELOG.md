@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Clarified worktree-backed session archive/delete semantics: WebUI archive/delete actions are session-only and now explicitly tell users when the git worktree directory is retained on disk (#2057).
+
 ## [v0.51.46] — 2026-05-11 — Release V (5-PR contributor batch — CSP report-only + logs panel polish + plugin slash commands + turn-journal crash-safe writer + lifecycle events)
 
 ### Added
@@ -61,7 +63,6 @@
 ### Stage-338 maintainer review (Opus advisor)
 
 - **`api/providers.py:1049`** — Custom provider entries that slugify to an empty string were silently dropped, which made misconfigurations hard to diagnose. `logger.warning()` now surfaces the bad config entry. ~4 LOC; pure observability change.
-
 
 ## [v0.51.44] — 2026-05-11 — Release T (5-PR contributor batch — security + worktree sessions + LM Studio + onboarding docs + transcript dedup, plus comprehensive test-suite network isolation)
 

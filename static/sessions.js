@@ -1279,6 +1279,27 @@ const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
 
+function _sessionSnapshotById(sid){
+  if(!sid)return null;
+  if(S.session&&S.session.session_id===sid) return S.session;
+  return (_allSessions||[]).find(s=>s&&s.session_id===sid)||null;
+}
+function _worktreeSessionCount(ids){
+  return (ids||[]).reduce((count,sid)=>{
+    const session=_sessionSnapshotById(sid);
+    return count+(session&&session.worktree_path?1:0);
+  },0);
+}
+function _sessionArchiveDescription(session){
+  return session&&session.worktree_path?t('session_archive_worktree_desc'):t('session_archive_desc');
+}
+function _sessionArchiveToast(session){
+  return session&&session.worktree_path?t('session_archived_worktree'):t('session_archived');
+}
+function _sessionDeleteDescription(session){
+  return session&&session.worktree_path?t('session_delete_worktree_desc'):t('session_delete_desc');
+}
+
 function _sessionIdFromLocation(){
   if(typeof window==='undefined'||!window.location) return null;
   const marker='/session/';
@@ -1376,10 +1397,15 @@ function _renderBatchActionBar(){
   archiveBtn.textContent=t('session_batch_archive');
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
-    const ok=await showConfirmDialog({message:t('session_batch_archive_confirm',ids.length),confirmLabel:t('session_batch_archive'),danger:true});
+    const wtCount=_worktreeSessionCount(ids);
+    const ok=await showConfirmDialog({
+      message:wtCount?t('session_batch_archive_worktree_confirm',ids.length,wtCount):t('session_batch_archive_confirm',ids.length),
+      confirmLabel:t('session_batch_archive'),
+      danger:true
+    });
     if(!ok)return;
     try{await Promise.all(ids.map(sid=>api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})})));
-      showToast(t('session_archived'));exitSessionSelectMode();await renderSessionList();
+      showToast(wtCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Archive failed: '+(e.message||e));}
   };bar.appendChild(archiveBtn);
   // Move
@@ -1391,7 +1417,12 @@ function _renderBatchActionBar(){
   deleteBtn.textContent=t('session_batch_delete');
   deleteBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
-    const ok=await showConfirmDialog({message:t('session_batch_delete_confirm',ids.length),confirmLabel:t('delete_title'),danger:true});
+    const wtCount=_worktreeSessionCount(ids);
+    const ok=await showConfirmDialog({
+      message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
+      confirmLabel:t('delete_title'),
+      danger:true
+    });
     if(!ok)return;
     try{
       await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
@@ -1402,7 +1433,7 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast(t('session_delete')+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      showToast((wtCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -1570,7 +1601,7 @@ function _openSessionActionMenu(session, anchorEl){
   ));
   menu.appendChild(_buildSessionAction(
     session.archived?t('session_restore'):t('session_archive'),
-    session.archived?t('session_restore_desc'):t('session_archive_desc'),
+    session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
@@ -1579,7 +1610,7 @@ function _openSessionActionMenu(session, anchorEl){
         session.archived=!session.archived;
         if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
         await renderSessionList();
-        showToast(session.archived?t('session_archived'):t('session_restored'));
+        showToast(session.archived?_sessionArchiveToast(session):t('session_restored'));
       }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
@@ -1601,7 +1632,7 @@ function _openSessionActionMenu(session, anchorEl){
   if(!isExternalSession){
     menu.appendChild(_buildSessionAction(
       t('session_delete'),
-      t('session_delete_desc'),
+      _sessionDeleteDescription(session),
       ICONS.trash,
       async()=>{
         closeSessionActionMenu();
@@ -3013,8 +3044,9 @@ if(typeof window!=='undefined'){
 }
 
 async function deleteSession(sid){
+  const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
-    message:'Delete this conversation?',
+    message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
     confirmLabel:t('delete_title'),
     danger:true
   });
@@ -3040,7 +3072,7 @@ async function deleteSession(sid){
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
-  showToast('Conversation deleted');
+  showToast(session&&session.worktree_path?t('session_deleted_worktree'):t('session_deleted'));
   await renderSessionList();
 }
 

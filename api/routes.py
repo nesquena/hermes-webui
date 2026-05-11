@@ -146,6 +146,34 @@ def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
     return [p for p in dirs if p.exists()]
 
 
+def _worktree_retained_payload(session) -> dict:
+    """Return explicit no-cleanup metadata for worktree-backed session actions."""
+    worktree_path = getattr(session, "worktree_path", None) if session else None
+    if not worktree_path:
+        return {}
+    payload = {
+        "worktree_retained": True,
+        "worktree_path": worktree_path,
+    }
+    worktree_branch = getattr(session, "worktree_branch", None)
+    worktree_repo_root = getattr(session, "worktree_repo_root", None)
+    if worktree_branch:
+        payload["worktree_branch"] = worktree_branch
+    if worktree_repo_root:
+        payload["worktree_repo_root"] = worktree_repo_root
+    return payload
+
+
+def _worktree_retained_payload_for_session_id(sid: str) -> dict:
+    try:
+        return _worktree_retained_payload(get_session(sid, metadata_only=True))
+    except KeyError:
+        return {}
+    except Exception:
+        logger.debug("Failed to read worktree metadata for deleted session %s", sid)
+        return {}
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -4205,6 +4233,7 @@ def handle_post(handler, parsed) -> bool:
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
+        worktree_retained = _worktree_retained_payload_for_session_id(sid)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
@@ -4243,7 +4272,7 @@ def handle_post(handler, parsed) -> bool:
                 delete_cli_session(sid)
             except Exception:
                 logger.debug("Failed to delete CLI session %s", sid)
-        return j(handler, {"ok": True})
+        return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
         try:
@@ -4880,7 +4909,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
     if parsed.path == "/api/session/move":
