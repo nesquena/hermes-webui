@@ -84,6 +84,8 @@ let _streamFadeLastArrivalMs=0;
 let _streamFadeArrivalWps=0;
 let _streamFadeLatestAnimationEndAt=0;
 let _streamFadeLastRevealCount=0;
+let _streamFadeWordCount=0;
+let _streamFadeWordBornAt=[];
 const _STREAM_FADE_MS=140;
 const _STREAM_FADE_WAVE_MS=320;
 const _STREAM_FADE_MAX_STAGGER_MS=520;
@@ -193,6 +195,7 @@ def test_fade_renderer_uses_playout_buffer_and_markdown_rerender():
         render_block,
         [
             "_streamFadeNextText(displayText)",
+            "if(!next.changed) return next.caughtUp",
             "renderMd ? renderMd(next.text||'')",
             "stream-fade-active",
             "_wrapStreamingFadeWords(assistantBody)",
@@ -210,6 +213,7 @@ def test_fade_animation_state_survives_markdown_rerenders():
             "ageMs",
             "animationDelay",
             "--stream-fade-ms",
+            "span.className='stream-fade-word is-new'",
             "_streamFadeLatestAnimationEndAt",
             "_streamFadeWordBornAt.length=wordIndex+1",
         ],
@@ -244,13 +248,15 @@ def test_fade_css_animates_words_and_hides_live_cursor():
         [
             "@keyframes stream-fade-word-in",
             ".stream-fade-word.is-new",
-            "var(--stream-fade-ms,140ms) ease-out",
+            "var(--stream-fade-ms,140ms) cubic-bezier(.2,.7,.2,1)",
+            "prefers-reduced-motion: reduce",
             ".msg-body.stream-fade-active > :last-child::after",
             "display:none",
             "content:none",
         ],
     )
-    assert "prefers-reduced-motion: reduce" not in fade_css
+    assert ".stream-fade-active .stream-fade-word{display:inline;}" in fade_css
+    assert ".stream-fade-active .stream-fade-word{display:inline;will-change:opacity;}" not in fade_css
 
 
 def test_stream_fade_next_text_executes_and_advances_playout():

@@ -3745,8 +3745,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
 
 /* OpenWebUI-style streaming word fade (opt-in via Settings → Preferences).
    Opacity-only fade; high-speed streams use a longer JS-driven wave duration. */
-.stream-fade-active .stream-fade-word{display:inline;will-change:opacity;}
-.stream-fade-word.is-new{animation:stream-fade-word-in var(--stream-fade-ms,140ms) ease-out both;}
+.stream-fade-active .stream-fade-word{display:inline;}
+.stream-fade-word.is-new{animation:stream-fade-word-in var(--stream-fade-ms,140ms) cubic-bezier(.2,.7,.2,1) both;will-change:opacity;}
 @keyframes stream-fade-word-in{from{opacity:0;}to{opacity:1;}}
+@media (prefers-reduced-motion: reduce){.stream-fade-word.is-new{animation:none;will-change:auto;}}
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active > :last-child::after,
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active:not(:has(> *))::after{display:none;content:none;}
