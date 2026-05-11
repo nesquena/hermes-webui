@@ -109,9 +109,7 @@ Loaded by `static/index.html` as the FIRST executable script (right after the `<
 
 ### `static/ui.js`
 
-| Line | Marker | Purpose |
-|---|---|---|
-| `~1148` | `provider chip — prefer the real provider name baked into the model display name` | When a model row's group label is "Custom" / "Custom (live)" but the model name carries a "Provider: …" prefix (e.g. "MoonshotAI: Kimi K2.5 (Lightning)"), extract the prefix and use it as the providerChip text instead of "Custom". Stops every model row in the dropdown from showing an identical "Custom" pill when the deploy is routed through an OpenAI-compat custom endpoint (CrofAI, CometAPI, Bankr, Venice, etc.). |
+(No remaining fork edits — the earlier "extract provider from model name" patch was reverted after user feedback: the chip should show the user's routing provider, not the upstream model owner. With the chip back to `m.group`, users on a plain `custom` endpoint see "Custom", users who configure `custom_providers: { crof: {…} }` in config.yaml see "Crof", etc.)
 
 ### `static/boot.js`
 
