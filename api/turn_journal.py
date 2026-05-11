@@ -117,6 +117,40 @@ def derive_turn_journal_states(events: Iterable[dict]) -> dict[str, dict]:
     return states
 
 
+def _latest_turn_id_for_stream(events: Iterable[dict], stream_id: str) -> str | None:
+    stream = str(stream_id or "").strip()
+    if not stream:
+        return None
+    latest: str | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("stream_id") or "") != stream:
+            continue
+        turn_id = str(event.get("turn_id") or "").strip()
+        if turn_id:
+            latest = turn_id
+    return latest
+
+
+def append_turn_journal_event_for_stream(
+    session_id: str,
+    stream_id: str,
+    event: dict,
+    *,
+    session_dir: Path | None = None,
+) -> dict:
+    """Append a lifecycle event for the turn associated with ``stream_id``."""
+    payload = dict(event)
+    payload["stream_id"] = str(stream_id)
+    if not payload.get("turn_id"):
+        journal = read_turn_journal(session_id, session_dir=session_dir)
+        turn_id = _latest_turn_id_for_stream(journal.get("events") or [], stream_id)
+        if turn_id:
+            payload["turn_id"] = turn_id
+    return append_turn_journal_event(session_id, payload, session_dir=session_dir)
+
+
 def iter_turn_journal_session_ids(session_dir: Path) -> list[str]:
     journal_dir = Path(session_dir) / TURN_JOURNAL_DIR_NAME
     if not journal_dir.exists():
