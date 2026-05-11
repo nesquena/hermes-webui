@@ -542,131 +542,173 @@ State lives outside the repo at `~/.hermes/webui/` by default
 
 ## Contributors
 
-Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly or incorporated via batch release — shapes the project, and we're grateful to everyone who has taken the time to contribute.
+Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, incorporated via batch release, or closed-but-shipped through a follow-up — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
-**66 contributors have shipped code that landed in a release tag** as of v0.50.245. The full credit roll lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). The highlights:
+**107 contributors have shipped code that landed in a release tag** as of v0.51.44. The full credit roll lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). The highlights:
 
-### Top contributors (by merged-PR count)
+### Top contributors (by merged-PR + batch-credit count)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 22 | `v0.50.49` → `v0.50.245` |
-| 2 | [@bergeouss](https://github.com/bergeouss) | 18 | `v0.50.49` → `v0.50.240` |
-| 3 | [@aronprins](https://github.com/aronprins) | 8 | `v0.47.0` → `v0.50.77` |
-| 4 | [@iRonin](https://github.com/iRonin) | 6 | `v0.41.0` |
-| 5 | [@24601](https://github.com/24601) | 6 | `v0.50.201` |
-| 6 | [@KingBoyAndGirl](https://github.com/KingBoyAndGirl) | 4 | `v0.50.232` → `v0.50.237` |
-| 7 | [@renheqiang](https://github.com/renheqiang) | 4 | `v0.50.93` |
-| 8 | [@ccqqlo](https://github.com/ccqqlo) | 3 | `v0.50.83` → `v0.50.207` |
-| 9 | [@deboste](https://github.com/deboste) | 3 | `v0.16.1` |
-| 10 | [@frap129](https://github.com/frap129) | 3 | `v0.50.157` → `v0.50.166` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 64 | `v0.50.57` → `v0.51.44` |
+| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 61 | `v0.50.240` → `v0.51.40` |
+| 3 | [@bergeouss](https://github.com/bergeouss) | 55 | `v0.50.49` → `v0.51.15` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 29 | `v0.51.4` → `v0.51.42` |
+| 5 | [@dso2ng](https://github.com/dso2ng) | 14 | `v0.50.238` → `v0.51.37` |
+| 6 | [@24601](https://github.com/24601) | 8 | `v0.50.233` → `v0.51.5` |
+| 7 | [@aronprins](https://github.com/aronprins) | 8 | `v0.47.0` → `v0.50.233` |
+| 8 | [@JKJameson](https://github.com/JKJameson) | 7 | `v0.50.233` → `v0.51.31` |
+| 9 | [@iRonin](https://github.com/iRonin) | 6 | `v0.41.0` |
+| 10 | [@NocGeek](https://github.com/NocGeek) | 6 | `v0.50.251` → `v0.50.252` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 66 contributors, including everyone with one or two merged PRs and the special-thanks roll for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 107 contributors, including everyone with one or two merged PRs and the special-thanks roll for design, security, and architectural contributions.
 
 ### Notable contributions
 
-**[@aronprins](https://github.com/aronprins)** — v0.50.0 UI overhaul (PR #242)
-The biggest single contribution to the project: a complete UI redesign that moved model/profile/workspace controls into the composer footer, replaced the gear-icon settings panel with the Hermes Control Center (tabbed modal), removed the activity bar in favor of inline composer status, redesigned the session list with a `⋯` action dropdown, and added the workspace panel state machine. 26 commits, thoroughly designed and iterated through multiple review rounds.
+**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (64 attributed PRs, `v0.50.57` → `v0.51.44`)  
+Mobile/responsive layout, the session sidebar polish that defines what users see day-to-day, breadcrumb workspace navigation, cron output preservation, the streaming-session sidebar exemption (#1327), worktree-backed session creation (#2053), the first-run `docs/onboarding.md` guide (#2052), composer footer container queries, session sidecar repair, profile default workspace persistence, and a long tail of polish across the session sidebar, mobile responsive layout, and workspace state machine.
 
-**[@iRonin](https://github.com/iRonin)** — Security hardening sprint (PRs #196–#204)
-Six consecutive security and reliability PRs: session memory leak fix (expired token pruning), Content-Security-Policy + Permissions-Policy headers, 30-second slow-client connection timeout, optional HTTPS/TLS support via environment variables, upstream branch tracking fix for self-update, and CLI session support in the file browser API. This is the kind of focused, high-quality security work that makes a self-hosted tool trustworthy.
+**[@Michaelyklam](https://github.com/Michaelyklam)** — Docker hardening + `/goal` command + Kanban polish (61 PRs, `v0.50.240` → `v0.51.40`)  
+Production Docker image hardening with passwordless-sudo removal (#1921), the WebUI `/goal` command with budget enforcement and continuation prompts (#1866), Kanban detail view scrollability (#1916), the auto-compression toast lifetime fix (#1988), env-lock prewarm (#2032), quota subprocess hardening (#2030), and a parade of i18n parity fixes — backfilled the empty zh-Hant kanban locale block (#1979) and translated `workspace_show_hidden_files` across seven non-English locales (#1960). Picked up the harder bug-class work — runtime-coexistence, alias-collapse, cross-PR data interactions — and stayed on it.
 
-**[@DavidSchuchert](https://github.com/DavidSchuchert)** — German translation (PR #190)
-Complete German locale (`de`) covering all UI strings, settings labels, commands, and system messages — and in doing so, stress-tested the i18n system and exposed several elements that weren't yet translatable, which got fixed as part of the same PR.
+**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + gateway sync + Docker hardening (55 PRs, `v0.50.49` → `v0.51.15`)  
+Real-time gateway session sync (Telegram/Discord/Slack into the WebUI sidebar via SSE), the provider management UI for adding/editing custom providers from Settings, the two-container Docker setup docs, OAuth provider status detection, profile isolation hardening (per-profile `.env` secrets), inline provider chip in the composer model picker (#1425), the Stop/Cancel data-loss fix (#1375) that recovers reasoning trace + tool calls + partial output on interrupt, and the bulk of what users see when they touch Settings → Providers.
 
-**[@Jordan-SkyLF](https://github.com/Jordan-SkyLF)** — Live streaming, session recovery, workspace fallback (PRs #366, #367)
-Three interlocking improvements: workspace fallback resolution so the server recovers gracefully when the configured workspace is deleted or unavailable; live reasoning cards that upgrade the generic thinking spinner to a real-time reasoning display as the model thinks; and durable session state recovery via `localStorage` so in-flight tool cards, partial assistant output, and the live SSE stream all survive a full page reload or session switch.
+**[@ai-ag2026](https://github.com/ai-ag2026)** — Session recovery + durability (29 PRs, `v0.51.4` → `v0.51.42`)  
+State.db × JSON sidecar reconciliation for WebUI-origin sessions whose sidecar was lost (#2041), `.bak` snapshot recovery on startup that extends the #1558 P0 fix (#2035), read-only `audit_session_recovery()` report (#2036), recovery audit + repair-safe HTTP endpoints (#2040), and the crash-safe turn-journal RFC (#2042). The work that keeps users' chat history from disappearing when something goes wrong on disk.
+
+**[@dso2ng](https://github.com/dso2ng)** — Session ownership + lineage (14 PRs, `v0.50.238` → `v0.51.37`)  
+Approval/clarify prompts scoped to their owning session (#1694), terminal stream cleanup scoped to owner session, lineage-report endpoint for compression/branching diagnostics, sidebar lineage collapse for WebUI JSON sessions plus the pre-release fix swapping a full-table scan for an indexed `WHERE id IN (...)` query (~50× faster at 1000 rows), and static-asset cache-busting on every release via the `WEBUI_VERSION` query string (#1337).
+
+**[@24601](https://github.com/24601)** — Performance + persistence fixes (8 PRs)  
+Auth session persistence across server restarts (#962), the Codex-style message queue flyout (#1040), the queue-drain race fix for cross-session stream completion (#964), localStorage throttle that stopped the GC-pressure renderer crash (#972), streaming-renderer 15fps cap that fixed Chrome `ERR_CONNECTION_RESET` reports (#966), session render cache (#963), and the `QuotaExceededError` guard on the model-selector `setItem` (#1712).
+
+**[@aronprins](https://github.com/aronprins)** — v0.50.0 UI overhaul (PR #242)  
+The biggest single contribution to the project: a complete UI redesign that moved model/profile/workspace controls into the composer footer, replaced the gear-icon settings panel with the Hermes Control Center (tabbed modal), removed the activity bar in favor of inline composer status, redesigned the session list with a `⋯` action dropdown, and added the workspace panel state machine. 26 commits, thoroughly designed and iterated through multiple review rounds. Also our standing UX reviewer.
+
+**[@iRonin](https://github.com/iRonin)** — Security hardening sprint (PRs #196–#204)  
+Six consecutive security and reliability PRs: session memory leak fix (expired token pruning), Content-Security-Policy + Permissions-Policy headers, 30-second slow-client connection timeout, optional HTTPS/TLS support via environment variables, upstream branch tracking fix for self-update, and CLI session support in the file browser API. The kind of focused, high-quality security work that makes a self-hosted tool trustworthy.
+
+**[@JKJameson](https://github.com/JKJameson)** — Workspace and navigation polish (7 PRs)  
+Workspace dropdown sort + search + chip sync on chat switch, `pushState` instead of `replaceState` for chat navigation (back-button actually works), persistent composer drafts across reloads, and the sidebar session-click handling that is instant on mouse and drag-aware on touch.
+
+**[@NocGeek](https://github.com/NocGeek)** — Streaming + status UX (6 PRs)  
+Streaming scroll viewport stability when tool/queue cards insert (#1377), `/status` slash command showing the resolved Hermes home directory (#1380), `/api/models/live` 60-second TTL cache (#1378), credential redaction layering for `ghp_*` / `sk-*` / `hf_*` / `AKIA*` tokens (#1379), CLI-only slash command explanations instead of model fall-through (#1382), and manual cron run output/metadata persistence (#1372).
+
+**[@starship-s](https://github.com/starship-s)** — Session and profile context (6 PRs)  
+Profile-context preservation when starting chats, mobile busy-input composer button, session sidecar repair hardening, and a small run of profile-isolation correctness fixes that shipped across the v0.50.233 → v0.51.8 window.
+
+**[@fxd-jason](https://github.com/fxd-jason)** — Real-time SSE notifications (5 PRs)  
+Replaced the 1.5s HTTP polling loop for approval and clarify prompts with SSE long-connection endpoints (`/api/approval/stream`, `/api/clarify/stream`), including the atomic subscribe+snapshot lock, head-of-queue payload fidelity, trailing-prompt re-emission, and the EventSource → HTTP fallback that preserves degraded-mode parity. Also the context-indicator percentage fix (#1349, #1341).
+
+**[@jasonjcwu](https://github.com/jasonjcwu)** — Kanban-bridge + model provider polish (5 PRs)  
+Two kanban-bridge fixes from an audit pass, scroll position preserved when loading older messages, model-tag work for DeepSeek V4 and the Z.AI/GLM provider, and a series of small navigation fixes across the v0.50.237 → v0.51.43 window.
+
+**[@Sanjays2402](https://github.com/Sanjays2402)** — Phantom provider groups + multi-fix work (5 PRs)  
+The phantom Custom-provider-group bug when active provider is ai-gateway with `custom_providers` declared in config (two cooperating bugs in `get_available_models()`), cross-container gateway liveness via state-file freshness fallback, custom-provider `:free`/`:beta`/`:thinking` suffix resolution, and the v0.51.30 endless-scroll × Start-jump race fix using a generation-token + mutex pair (#1949) — co-authored by @franksong2702 and @Michaelyklam.
 
 ### Feature contributions
 
-**[@gabogabucho](https://github.com/gabogabucho)** — Spanish locale + onboarding wizard (PRs #275, #285)
+**[@gabogabucho](https://github.com/gabogabucho)** — Spanish locale + onboarding wizard (PRs #275, #285)  
 Full Spanish (`es`) locale covering all 175 UI strings, plus the one-shot bootstrap onboarding wizard that guides new users through provider setup on first launch — the feature most responsible for new users actually getting started.
 
-**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + gateway sync + Docker hardening (18 PRs, `v0.50.49` → `v0.50.240`)
-Real-time gateway session sync (Telegram/Discord/Slack into the WebUI sidebar via SSE), the provider management UI for adding/editing custom providers from Settings, the two-container Docker setup docs, OAuth provider status detection, profile isolation hardening (per-profile `.env` secrets), and the bulk of what users see when they touch Settings → Providers.
+**[@ccqqlo](https://github.com/ccqqlo)** — Terminal approval UX + custom model discovery + mobile close button (3 PRs)  
+A run of focused quality-of-life improvements: terminal tool approval prompts that stay visible long enough to actually be read, bootstrap validation that the launcher Python can import the agent, provider models from `config.yaml` appearing in the model dropdown, and the `/root` workspace path allowlist.
 
-**[@ccqqlo](https://github.com/ccqqlo)** — Terminal approval UX + custom model discovery + mobile close button (PRs #224, #225, #238, #333)
-A run of focused quality-of-life improvements: terminal tool approval prompts that stay visible long enough to actually be read, restored custom model API key discovery, and the redundant mobile close button fix that had been confusing users on narrow screens.
+**[@KingBoyAndGirl](https://github.com/KingBoyAndGirl)** — Provider routing + SSRF trust (4 PRs)  
+`providers.only_configured` opt-in to restrict the model picker to configured providers, GET `/api/mcp/servers` 404 fix, live model fetch for custom providers reading `model.base_url`, and the SSRF whitelist for user-configured custom-provider base URLs.
 
-**[@kevin-ho](https://github.com/kevin-ho)** — OLED theme (PR #168)
+**[@renheqiang](https://github.com/renheqiang)** — Slash commands + MCP toolsets + locale (4 PRs)  
+Slash-command parity with hermes-agent, MCP server toolsets included in WebUI agent sessions, full Russian (`ru-RU`) localization, and office file attachment support.
+
+**[@frap129](https://github.com/frap129)** — Docker dependency completeness (3 PRs)  
+Open SSH client installation in the Docker image, agent dependencies installation in the production image, and a workspace path correctness fix — the kind of unglamorous Docker plumbing every self-hosted project needs.
+
+**[@kevin-ho](https://github.com/kevin-ho)** — OLED theme (PR #168)  
 Added the 7th built-in theme: pure black backgrounds with warm accents tuned to reduce burn-in risk. Small diff, big impact for anyone on an OLED display.
 
-**[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button + Android Chrome fixes (PRs #253, #263, #265)
-Added the Profiles entry to the mobile navigation flow, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
-
-**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (22 PRs, `v0.50.49` → `v0.50.245`)
-The session title guard, breadcrumb workspace navigation, mobile workspace panel sliver fix (#1300), composer footer container queries, streaming session sidebar exemption (#1327), session sidecar repair, cron output preservation (#1295), profile default workspace persistence, and a long tail of polish across the session sidebar, mobile responsive layout, and workspace state machine.
-
-**[@betamod](https://github.com/betamod)** — Security hardening (PR #171)
+**[@betamod](https://github.com/betamod)** — Security hardening (PR #171)  
 A comprehensive security audit PR covering CSRF protection, SSRF guards, XSS escaping improvements, and the env race condition between concurrent agent sessions — foundational security work that shipped in v0.39.0.
 
-**[@TaraTheStar](https://github.com/TaraTheStar)** — Bot name + thinking blocks + login refactor (PRs #132, #176, #181)
+**[@TaraTheStar](https://github.com/TaraTheStar)** — Bot name + thinking blocks + login refactor (PRs #132, #176, #181)  
 Made the assistant display name configurable throughout the UI, added thinking/reasoning block display in chat, and refactored the login page to use template variables instead of inline string replacement.
 
-**[@thadreber-web](https://github.com/thadreber-web)** — CLI session bridge (PR #56)
+**[@thadreber-web](https://github.com/thadreber-web)** — CLI session bridge (PR #56)  
 The original CLI session bridge: reads CLI sessions from the agent's SQLite state store and surfaces them in the WebUI sidebar. This was the first bridge between the CLI and WebUI session worlds.
 
-**[@deboste](https://github.com/deboste)** — Reverse proxy auth + mobile responsive layout + model routing (PRs #3, #4, #5)
+**[@deboste](https://github.com/deboste)** — Reverse proxy auth + mobile responsive layout + model routing (PRs #3, #4, #5)  
 Three of the very first community PRs: fixed EventSource/fetch to use the URL origin for reverse proxy setups, corrected model provider routing from config, and added mobile responsive layout with dvh viewport fix. Early foundation work.
+
+**[@qxxaa](https://github.com/qxxaa)** — Profile + skill correctness (4 PRs)  
+Stamp profile on continuation session after context compression, skill tools resolving from the wrong profile after per-request profile switch, and the auto-compressed banner that no longer repeats every turn after first compression (#1316).
+
+**[@Hinotoi-agent](https://github.com/Hinotoi-agent)** — Profile .env secret isolation + session import workspace validation (PRs #351, #2048)  
+Fixed API key leakage between profiles on switch — switching from a profile with `OPENAI_API_KEY` to one without it left the key in the process environment for the duration of the session. Later returned with the v0.51.44 `[security]` fix routing the imported `workspace` field through `resolve_trusted_workspace()` to prevent crafted JSON imports from serving host files.
 
 ### Bug fix and security contributions
 
-**[@Hinotoi-agent](https://github.com/Hinotoi-agent)** — Profile .env secret isolation (PR #351)
-Fixed API key leakage between profiles on switch — switching from a profile with `OPENAI_API_KEY` to one without it left the key in the process environment for the duration of the session, effectively leaking credentials. A subtle and important security fix.
-
-**[@lawrencel1ng](https://github.com/lawrencel1ng)** — Bandit security fixes B310/B324/B110 + QuietHTTPServer (PR #354)
+**[@lawrencel1ng](https://github.com/lawrencel1ng)** — Bandit security fixes B310/B324/B110 + QuietHTTPServer (PR #354)  
 Systematic bandit security scan fixes: URL scheme validation before `urlopen`, MD5 `usedforsecurity=False`, and 40+ bare `except: pass` blocks replaced with proper logging — plus `QuietHTTPServer` to stop client-disconnect log spam from SSE streams.
 
-**[@lx3133584](https://github.com/lx3133584)** — CSRF fix for reverse proxy on non-standard ports (PR #360)
+**[@lx3133584](https://github.com/lx3133584)** — CSRF fix for reverse proxy on non-standard ports (PR #360)  
 Fixed CSRF rejection for deployments behind Nginx Proxy Manager or similar on non-standard ports — a real-world blocker for anyone hosting on a port other than 80/443.
 
-**[@DelightRun](https://github.com/DelightRun)** — session_search fix for WebUI sessions (PR #356)
+**[@DelightRun](https://github.com/DelightRun)** — session_search fix for WebUI sessions (PR #356)  
 The `session_search` tool silently returned "Session database not available" in every WebUI session. Tracked down the missing `SessionDB` injection in the streaming path and fixed it.
 
-**[@shaoxianbilly](https://github.com/shaoxianbilly)** — Unicode filename downloads (PR #378)
+**[@shaoxianbilly](https://github.com/shaoxianbilly)** — Unicode filename downloads (PR #378)  
 Fixed `UnicodeEncodeError` crashes when downloading workspace files with Chinese, Japanese, or other non-ASCII names. Implemented proper `Content-Disposition` header with RFC 5987 `filename*=UTF-8''...` encoding.
 
-**[@huangzt](https://github.com/huangzt)** — Cancel interrupts agent (PR #244)
+**[@huangzt](https://github.com/huangzt)** — Cancel interrupts agent (PR #244)  
 Made the Cancel button actually interrupt the running agent and clean up UI state, rather than just hiding the button while the agent kept running.
 
-**[@tgaalman](https://github.com/tgaalman)** — Thinking card fix (PR #169)
-Fixed top-level reasoning fields being missed in the thinking card display — an edge case in how Claude's extended thinking blocks surface in the API response.
-
-**[@smurmann](https://github.com/smurmann)** — Custom provider routing fix (PR #189)
-Fixed model routing for slash-prefixed custom provider models, which were being misrouted in the model selector. A precise fix for a real edge case in multi-provider setups.
-
-**[@jeffscottward](https://github.com/jeffscottward)** — Claude Haiku model ID fix (PR #145)
-Caught and corrected the Claude Haiku model ID (`3-5` → `4-5`) immediately after the Anthropic release — the kind of quick community catch that keeps the model dropdown accurate.
-
-**[@kcclaw001](https://github.com/kcclaw001)** — Credential redaction in API responses (PR #243)
+**[@kcclaw001](https://github.com/kcclaw001)** — Credential redaction in API responses (PR #243)  
 Added credential redaction to all API response paths so API keys, tokens, and other secrets in session data or error messages are masked before reaching the browser.
 
-**[@mbac](https://github.com/mbac)** — Phantom "Custom" provider group fix (PR #191)
+**[@mbac](https://github.com/mbac)** — Phantom "Custom" provider group fix (PR #191)  
 Removed the phantom "Custom" optgroup that appeared in the model dropdown even when no custom provider was configured — a small but consistently confusing UI noise issue.
 
-**[@andrewy-wizard](https://github.com/andrewy-wizard)** — Chinese localization (PR #177)
+**[@andrewy-wizard](https://github.com/andrewy-wizard)** — Chinese localization (PR #177)  
 Added Simplified Chinese (`zh`) locale to the WebUI. One of the first non-English locales and the most-used non-English locale in the codebase.
 
-**[@mmartial](https://github.com/mmartial)** — Docker UID/GID matching (PR #237)
-Added Docker support for running as an arbitrary UID/GID matching the host user, eliminating permission issues with bind-mounted volumes — essential for Docker deployments where the host user isn't UID 1000.
+**[@DavidSchuchert](https://github.com/DavidSchuchert)** — German translation (PR #190)  
+Complete German locale (`de`) covering all UI strings, settings labels, commands, and system messages — and in doing so, stress-tested the i18n system and exposed several elements that weren't yet translatable, which got fixed as part of the same PR.
 
-**[@vCillusion](https://github.com/vCillusion)** — pip package resolution fix (PR #76)
-Fixed agent dependency resolution to prefer packages from the venv's site-packages over the agent directory itself, preventing shadowing bugs when developing locally.
-
-**[@carlytwozero](https://github.com/carlytwozero)** — API key pass-through for non-Anthropic providers (PR #78)
-Fixed `api_key` not being passed to `AIAgent` for non-Anthropic `/anthropic` providers — a quiet regression that silently broke any non-default provider.
-
-**[@mangodxd](https://github.com/mangodxd)** — Type hints cleanup (PR #115)
-Added missing type hints across 10 files and corrected 9 inaccurate existing ones — the kind of maintenance work that makes the codebase easier to reason about.
-
-**[@Argonaut790](https://github.com/Argonaut790)** — HTML entity decode + Traditional Chinese locale (PR #239)
+**[@Argonaut790](https://github.com/Argonaut790)** — HTML entity decode + Traditional Chinese locale (PR #239)  
 Fixed double-escaping of HTML entities in `renderMd()` — LLM output containing `&lt;code&gt;` was being escaped a second time, rendering as literal text instead of the intended markdown. The same PR also completed the Simplified Chinese translation (40+ missing keys) and added a full Traditional Chinese (`zh-Hant`) locale.
 
-**[@indigokarasu](https://github.com/indigokarasu)** — Visual redesign proposal: icon rail + design token system + 7 themes (PR #213)
+**[@Jordan-SkyLF](https://github.com/Jordan-SkyLF)** — Live streaming, session recovery, workspace fallback (PRs #366, #367)  
+Three interlocking improvements: workspace fallback resolution so the server recovers gracefully when the configured workspace is deleted or unavailable; live reasoning cards that upgrade the generic thinking spinner to a real-time reasoning display as the model thinks; and durable session state recovery via `localStorage` so in-flight tool cards, partial assistant output, and the live SSE stream all survive a full page reload or session switch.
+
+**[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button + Android Chrome fixes (PRs #253, #263, #265)  
+Added the Profiles entry to the mobile navigation flow, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
+
+**[@mmartial](https://github.com/mmartial)** — Docker UID/GID matching (PR #237)  
+Added Docker support for running as an arbitrary UID/GID matching the host user, eliminating permission issues with bind-mounted volumes — essential for Docker deployments where the host user isn't UID 1000.
+
+**[@vCillusion](https://github.com/vCillusion)** — pip package resolution fix (PR #76)  
+Fixed agent dependency resolution to prefer packages from the venv's site-packages over the agent directory itself, preventing shadowing bugs when developing locally.
+
+**[@carlytwozero](https://github.com/carlytwozero)** — API key pass-through for non-Anthropic providers (PR #78)  
+Fixed `api_key` not being passed to `AIAgent` for non-Anthropic `/anthropic` providers — a quiet regression that silently broke any non-default provider.
+
+**[@mangodxd](https://github.com/mangodxd)** — Type hints cleanup (PR #115)  
+Added missing type hints across 10 files and corrected 9 inaccurate existing ones — the kind of maintenance work that makes the codebase easier to reason about.
+
+**[@indigokarasu](https://github.com/indigokarasu)** — Visual redesign proposal: icon rail + design token system + 7 themes (PR #213)  
 A CSS-only redesign of the full UI — proper design tokens (`--bg-primary`, `--text-info`, spacing scale), an icon rail sidebar replacing the emoji tab strip, consistent form cards, breadcrumb nav, and 7 built-in themes as custom properties. The PR didn't merge as-is but directly shaped the design language and theme architecture that shipped in v0.50.0.
 
-**[@zenc-cp](https://github.com/zenc-cp)** — Anti-hallucination guard for ReAct loop (PR #133)
+**[@zenc-cp](https://github.com/zenc-cp)** — Anti-hallucination guard for ReAct loop (PR #133)  
 Added a streaming token buffer and post-run message scrub to `streaming.py` to detect and strip fake tool execution JSON that weaker models write inline instead of calling tools properly. A three-layer approach: ephemeral anti-hallucination prompt, live token filtering, and session history cleanup. The pattern influenced later streaming.py improvements.
+
+**[@smurmann](https://github.com/smurmann)** — Custom provider routing fix (PR #189)  
+Fixed model routing for slash-prefixed custom provider models, which were being misrouted in the model selector. A precise fix for a real edge case in multi-provider setups.
+
+**[@jeffscottward](https://github.com/jeffscottward)** — Claude Haiku model ID fix (PR #145)  
+Caught and corrected the Claude Haiku model ID (`3-5` → `4-5`) immediately after the Anthropic release — the kind of quick community catch that keeps the model dropdown accurate.
+
+**[@tgaalman](https://github.com/tgaalman)** — Thinking card fix (PR #169)  
+Fixed top-level reasoning fields being missed in the thinking card display — an edge case in how Claude's extended thinking blocks surface in the API response.
 
 ---
 
