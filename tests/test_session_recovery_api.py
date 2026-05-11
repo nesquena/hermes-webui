@@ -27,7 +27,7 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
 
     result = repair_safe_session_recovery(tmp_path)
 
-    assert result["ok"] is True
+    assert result["clean"] is True
     assert result["repaired"] == 1
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
@@ -50,7 +50,7 @@ def test_repair_safe_session_recovery_leaves_unsafe_orphan_for_manual_review(tmp
 
     result = repair_safe_session_recovery(tmp_path, state_db_path=db)
 
-    assert result["ok"] is False
+    assert result["clean"] is False
     assert result["repaired"] == 0
     assert not live.exists()
     assert result["after"]["status"] == "needs_manual_review"

@@ -5653,10 +5653,10 @@ def _handle_media(handler, parsed):
         pass
 
     # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
-    # (colon-separated list of absolute paths, e.g. /home/user/models:/home/user/Pictures)
+    # (pathsep-separated list of absolute paths, e.g. /home/user/models:/home/user/Pictures on Unix)
     extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
     if extra_roots:
-        for root in extra_roots.split(":"):
+        for root in extra_roots.split(_os.pathsep):
             root = root.strip()
             if root:
                 try:

@@ -230,6 +230,8 @@ def _read_state_db_missing_sidecar_rows(session_dir: Path, state_db_path: Path |
                             message['timestamp'] = msg['timestamp']
                         message_rows.append(message)
                 if not message_rows:
+                    row['messages'] = []
+                    rows.append(row)
                     continue
                 data['messages'] = message_rows
                 rows.append(data)
@@ -314,6 +316,10 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         sid = str(row.get('id') or '').strip()
         if not sid:
             continue
+        msg = row.get('messages')
+        if isinstance(msg, list) and not msg:
+            details.append({'session_id': sid, 'materialized': False, 'skipped': 'empty_messages'})
+            continue
         target = session_dir / f"{sid}.json"
         if target.exists():
             continue
@@ -353,7 +359,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         if materialized_now:
             materialized += 1
             details.append({'session_id': sid, 'materialized': True, 'messages': len(payload.get('messages') or [])})
-        elif not any(d.get('session_id') == sid for d in details[-1:]):
+        elif not (details and details[-1].get('session_id') == sid):
             details.append({'session_id': sid, 'materialized': False, 'skipped': 'sidecar_appeared_during_reconcile'})
     return {'scanned': len(rows), 'materialized': materialized, 'details': details}
 
@@ -460,14 +466,25 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
 
     for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path):
         sid = str(row.get('id') or '')
-        items.append(_new_audit_item(
-            sid,
-            "state_db_missing_sidecar",
-            "repairable",
-            "materialize_from_state_db",
-            -1,
-            -1,
-        ))
+        messages = row.get('messages')
+        if isinstance(messages, list) and not messages:
+            items.append(_new_audit_item(
+                sid,
+                "state_db_orphan_webui_row",
+                "unsafe_to_repair",
+                "manual_review",
+                -1,
+                -1,
+            ))
+        else:
+            items.append(_new_audit_item(
+                sid,
+                "state_db_missing_sidecar",
+                "repairable",
+                "materialize_from_state_db",
+                -1,
+                -1,
+            ))
 
     summary = {"ok": len(live_paths), "repairable": 0, "unsafe_to_repair": 0}
     for item in items:
@@ -507,7 +524,7 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
     repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
     return {
-        "ok": unsafe_remaining == 0 and repairable_remaining == 0,
+        "clean": unsafe_remaining == 0 and repairable_remaining == 0,
         "repaired": int(backup_repair.get("restored") or 0) + int(sidecar_repair.get("materialized") or 0),
         "before": before,
         "backup_repair": backup_repair,
