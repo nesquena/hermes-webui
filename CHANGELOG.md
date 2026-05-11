@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [v0.51.46] — 2026-05-11 — Release V (5-PR contributor batch — CSP report-only + logs panel polish + plugin slash commands + turn-journal crash-safe writer + lifecycle events)
+
+### Added
+
+- **PR #2059** by @ai-ag2026 — Append-only WebUI turn journal helper at `api/turn_journal.py` (new file, ~128 LOC). Writes one JSONL file per session under `_turn_journal/` and fsyncs `submitted`-turn events before the worker thread starts via `/api/chat/start` (after pending session state is saved and before `threading.Thread(...)` starts). `recovery_audit` extended to report non-terminal journal turns as `turn_journal_pending_turn` when the submitted user message is not present in the sidecar. Intentionally the minimal slice from `docs/rfcs/turn-journal.md` (RFC #2042): writer + reader + state derivation + audit-only reporting. No replay or repair yet.
+
+- **PR #2062** by @ai-ag2026 — Turn-journal lifecycle events on top of #2059's submitted-event writer. Records `worker_started` when the streaming worker begins, `assistant_started` before the final session save once an assistant message exists, `completed` after the final save, and `interrupted` on the provider-error path. `append_turn_journal_event_for_stream(...)` reuses the `turn_id` associated with the stream's submitted event. Still audit-only / journaling-only — does not replay turns or repair assistant output. The little WAL goblin remains on a leash.
+
+- **PR #2089** by @plerohellec — Plugin-defined slash commands now surface in the WebUI command picker and execute via a new `/api/commands/exec` route (closes #1935). `list_commands()` in `api/commands.py` merges `hermes_cli.plugins.get_plugin_commands()` into the `/api/commands` payload with `category: "Plugin"`; the frontend intercepts plugin commands in `static/messages.js` and `static/commands.js` to route through the plugin execution endpoint instead of falling through to the agent. Pre-fix the WebUI only learned slash commands from `hermes_cli.commands.COMMAND_REGISTRY` (commands.py:23), so plugin-registered commands were invisible to the picker, autocomplete, and routing — they fell through to the agent as raw text and the agent's response was about an unknown command. This is the WebUI half of the parity fix; the corresponding agent-side plumbing already existed in `hermes_cli/plugins.py:1424` (`get_plugin_commands()`).
+
+### Fixed
+
+- **PR #2085** by @bergeouss — Logs panel: clipboard `_copyText()` fallback + severity filter (closes #2081). Pre-fix `copyLogsAll()` called `navigator.clipboard.writeText()` directly with no fallback — failed silently on large payloads / non-secure contexts / unfocused pages, leaving users with a useless error toast. Now routes through `_copyText()` from `ui.js` which already has a `<textarea>` + `document.execCommand('copy')` fallback. Also adds a Severity dropdown (All / Errors / Warnings+) that filters the in-memory log cache without re-fetching — `errors.log` is ~90% WARNING tool noise so filtering down to ERROR/CRITICAL is a real triage time-saver. `copyLogsAll()` copies the FILTERED subset when a filter is active. 5 new i18n keys in all 9 locales.
+
+- **PR #2084** by @ai-ag2026 — `Content-Security-Policy-Report-Only` header (refs #1909). All WebUI responses now ship a CSP slice in report-only mode — non-enforcing, so the browser collects violations without blocking page behavior. Current UI allowances (`'unsafe-inline'` for scripts and styles, plus `https://cdn.jsdelivr.net` for the Prism/xterm/katex CDN assets that `static/index.html` loads with SRI hashes) are explicit so future tightening passes can replace them one constraint at a time. `object-src 'none'`, `base-uri 'self'`, and `frame-ancestors 'self'` are already enforced because they don't break the current UI. Server-side change only (`server.py` headers), zero client-side risk.
+
+### Stage-339 maintainer review (Opus advisor)
+
+- **`server.py:_CSP_REPORT_ONLY`** — Dropped `'unsafe-eval'` after Opus verified by grepping all production JS that nothing uses `eval()`, `new Function()`, or string-form `setTimeout`/`setInterval`. Keeping the allowance would have been a gratuitous privilege that defeats the purpose of the dry-run. ~1 LOC.
+
+- **`server.py:_CSP_REPORT_ONLY`** — Added `https://cdn.jsdelivr.net` to `script-src` and `style-src`. `static/index.html` loads Prism, xterm.js, and katex CSS from jsdelivr with SRI integrity hashes. Without the allowance, every page load would fire known-good CSP violations and drown out the real dry-run signal. ~2 LOC.
+
+- **`api/commands.py:execute_plugin_command`** — Sanitized the plugin error message. Previously returned `f"Plugin command error: {exc}"` which would leak paths / env / internal state from a `FileNotFoundError('/etc/something/secret.key')`-shape exception verbatim to the user-facing chat. Now returns only `type(exc).__name__`; the full traceback is logged at WARNING via `logger.warning(..., exc_info=exc)`. ~4 LOC.
+
 ## [v0.51.45] — 2026-05-11 — Release U (9-PR contributor batch — themes docs + gitignore policy + kanban parity + skill cache patching + fork lineage + sidebar spinner + custom provider slug + session recovery polish + compression anchor refactor)
 
 ### Added

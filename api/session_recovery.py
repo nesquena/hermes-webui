@@ -34,6 +34,13 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from api.turn_journal import (
+    derive_turn_journal_states,
+    is_terminal_turn_event,
+    iter_turn_journal_session_ids,
+    read_turn_journal,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -373,8 +380,9 @@ def _new_audit_item(
     recommendation: str,
     live_messages: int = -1,
     bak_messages: int = -1,
+    **extra,
 ) -> dict:
-    return {
+    item = {
         "session_id": session_id,
         "kind": kind,
         "category": category,
@@ -382,6 +390,8 @@ def _new_audit_item(
         "live_messages": live_messages,
         "bak_messages": bak_messages,
     }
+    item.update(extra)
+    return item
 
 
 def _read_index_session_ids(index_path: Path) -> set[str]:
@@ -486,6 +496,37 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
             -1,
             -1,
         ))
+
+    for session_id in iter_turn_journal_session_ids(session_dir):
+        journal = read_turn_journal(session_id, session_dir=session_dir)
+        states = derive_turn_journal_states(journal.get('events') or [])
+        live_path = session_dir / f"{session_id}.json"
+        live_messages = _msg_count(live_path)
+        existing_user_messages: set[str] = set()
+        try:
+            payload = json.loads(live_path.read_text(encoding='utf-8'))
+            if isinstance(payload, dict):
+                for message in payload.get('messages') or []:
+                    if isinstance(message, dict) and message.get('role') == 'user':
+                        existing_user_messages.add(str(message.get('content') or '').strip())
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+        for turn_id, event in sorted(states.items()):
+            if is_terminal_turn_event(event):
+                continue
+            content = str(event.get('content') or '').strip()
+            if not content or content in existing_user_messages:
+                continue
+            items.append(_new_audit_item(
+                session_id,
+                "turn_journal_pending_turn",
+                "repairable",
+                "audit_only_pending_turn_journal",
+                live_messages,
+                -1,
+                turn_id=turn_id,
+                event=str(event.get('event') or ''),
+            ))
 
     summary = {"ok": len(live_paths), "repairable": 0, "unsafe_to_repair": 0}
     for item in items:

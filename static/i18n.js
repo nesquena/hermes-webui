@@ -645,6 +645,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',
     logs_copied: 'Logs copied',
+    logs_severity: 'Severity',
+    logs_severity_all: 'All',
+    logs_severity_errors: 'Errors',
+    logs_severity_warnings: 'Warnings+',
+    logs_filter_active: 'shown (filter active)',
 
     // Insights
     insights_title: 'Usage Analytics',
@@ -1735,6 +1740,11 @@ const LOCALES = {
     logs_no_mtime: '未書き込み',
     logs_truncated_hint: '大きなログファイルの末尾を表示しています。メモリ使用量を抑えるため、古いデータは省略されました。',
     logs_copied: 'ログをコピーしました',
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
 
     // Insights
     insights_title: '使用状況分析',
@@ -2639,6 +2649,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: 'Новая беседа',
     filter_conversations: 'Фильтр бесед...',
     session_time_unknown: 'Неизвестно',
@@ -3663,6 +3678,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: 'Nueva conversación',
     filter_conversations: 'Filtrar conversaciones...',
     session_time_unknown: 'Desconocido',
@@ -4670,6 +4690,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: 'Neuer Chat',
     filter_conversations: 'Chats filtern...',
     scheduled_jobs: 'Geplante Aufgaben',
@@ -5710,6 +5735,11 @@ const LOCALES = {
     logs_no_mtime: '尚未写入',
     logs_truncated_hint: '此处显示的是日志文件的末尾内容。为节省内存，已省略较早的数据。',
     logs_copied: '日志已复制',
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: '新建对话',
     filter_conversations: '筛选对话…',
     session_time_unknown: '未知',
@@ -7902,6 +7932,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: 'Nova conversa',
     filter_conversations: 'Filtrar conversas...',
     session_time_unknown: 'Desconhecido',
@@ -8890,6 +8925,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
+    logs_severity: 'Severity',  // TODO: translate
+    logs_severity_all: 'All',  // TODO: translate
+    logs_severity_errors: 'Errors',  // TODO: translate
+    logs_severity_warnings: 'Warnings+',  // TODO: translate
+    logs_filter_active: 'shown (filter active)',  // TODO: translate
     new_conversation: '새 대화',
     filter_conversations: '대화 필터…',
     session_time_unknown: 'Unknown',

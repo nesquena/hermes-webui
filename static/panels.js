@@ -32,6 +32,7 @@ let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 let _logsAutoRefreshTimer = null;
 let _lastLogsLines = [];
+let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
@@ -2663,6 +2664,32 @@ function _selectedLogsTail() {
   return [100,200,500,1000].includes(value) ? value : 200;
 }
 
+function _severityForLine(line) {
+  const text = String(line || '').toUpperCase();
+  if (/\b(ERROR|CRITICAL|TRACEBACK)\b/.test(text)) return 'error';
+  if (/\b(WARNING|WARN)\b/.test(text)) return 'warning';
+  if (/\b(DEBUG)\b/.test(text)) return 'debug';
+  if (/\b(INFO)\b/.test(text)) return 'info';
+  return 'other';
+}
+
+function _filteredLogsLines() {
+  if (_logsSeverityFilter === 'all') return _lastLogsLines;
+  return _lastLogsLines.filter(line => {
+    const sev = _severityForLine(line);
+    if (_logsSeverityFilter === 'errors') return sev === 'error';
+    if (_logsSeverityFilter === 'warnings') return sev === 'warning' || sev === 'error';
+    return true;
+  });
+}
+
+function _applyLogsSeverityFilter() {
+  const el = $('logsSeverityFilter');
+  _logsSeverityFilter = (el && el.value) || 'all';
+  // Re-render from cached lines without re-fetching
+  _renderLogs({ lines: _lastLogsLines, hint: '', truncated: false, _fromFilter: true });
+}
+
 function _logLineSeverityClass(line) {
   const text = String(line || '').toUpperCase();
   if (/\b(WARNING|WARN)\b/.test(text)) return 'log-line-warning';
@@ -2710,14 +2737,19 @@ function _renderLogs(data) {
   const box = $('logsOutput');
   const status = $('logsStatus');
   if (!box) return;
-  const lines = Array.isArray(data && data.lines) ? data.lines : [];
-  _lastLogsLines = lines.slice();
+  const rawLines = Array.isArray(data && data.lines) ? data.lines : [];
+  // Only update cache when loading fresh data (not when re-rendering from filter)
+  if (data && !data._fromFilter) _lastLogsLines = rawLines.slice();
+  const displayLines = _filteredLogsLines();
   const hint = data && data.hint ? `<div class="logs-hint">${esc(data.hint)}</div>` : '';
   const truncated = data && data.truncated ? `<div class="logs-hint warn">${esc(t('logs_truncated_hint'))}</div>` : '';
-  if (!lines.length) {
-    box.innerHTML = `${hint}${truncated}<div class="logs-empty">${esc(t('logs_empty'))}</div>`;
+  const filterNote = _logsSeverityFilter !== 'all'
+    ? `<div class="logs-hint">${esc(displayLines.length + ' / ' + _lastLogsLines.length + ' ' + t('logs_filter_active'))}</div>`
+    : '';
+  if (!displayLines.length) {
+    box.innerHTML = `${hint}${truncated}${filterNote}<div class="logs-empty">${esc(t('logs_empty'))}</div>`;
   } else {
-    box.innerHTML = `${hint}${truncated}` + lines.map(line => {
+    box.innerHTML = `${hint}${truncated}${filterNote}` + displayLines.map(line => {
       const cls = _logLineSeverityClass(line);
       return `<div class="log-line ${cls}">${esc(line)}</div>`;
     }).join('');
@@ -2726,7 +2758,7 @@ function _renderLogs(data) {
   if (status) {
     const bytes = data && Number(data.total_bytes || 0);
     const when = data && data.mtime ? new Date(data.mtime * 1000).toLocaleString() : t('logs_no_mtime');
-    status.textContent = `${lines.length} / ${data.tail || _selectedLogsTail()} lines · ${bytes.toLocaleString()} bytes · ${when}`;
+    status.textContent = `${rawLines.length} / ${data.tail || _selectedLogsTail()} lines · ${bytes.toLocaleString()} bytes · ${when}`;
   }
 }
 
@@ -2754,9 +2786,10 @@ function _syncLogsAutoRefresh() {
 }
 
 async function copyLogsAll() {
-  const text = _lastLogsLines.join('\n');
+  const lines = _filteredLogsLines();
+  const text = lines.join('\n');
   try {
-    await navigator.clipboard.writeText(text);
+    await _copyText(text);
     showToast(t('logs_copied'));
   } catch(e) {
     showToast(t('copy_failed'), 'error');

@@ -257,6 +257,12 @@
           <option value="500">500</option>
           <option value="1000">1000</option>
         </select>
+        <label class="logs-control-label" for="logsSeverityFilter" data-i18n="logs_severity">Severity</label>
+        <select id="logsSeverityFilter" onchange="_applyLogsSeverityFilter()">
+          <option value="all" data-i18n="logs_severity_all">All</option>
+          <option value="errors" data-i18n="logs_severity_errors">Errors</option>
+          <option value="warnings" data-i18n="logs_severity_warnings">Warnings+</option>
+        </select>
         <label class="logs-check-row"><input id="logsAutoRefresh" type="checkbox" checked onchange="_syncLogsAutoRefresh()"><span data-i18n="logs_auto_refresh">Auto-refresh (5s)</span></label>
         <label class="logs-check-row"><input id="logsWrap" type="checkbox" onchange="_syncLogsWrap()"><span data-i18n="logs_wrap">Wrap lines</span></label>
         <button type="button" class="logs-copy" id="logsCopyAll" onclick="copyLogsAll()" data-i18n="logs_copy_all">Copy all</button>
