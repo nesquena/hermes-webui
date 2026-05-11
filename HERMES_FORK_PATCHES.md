@@ -119,6 +119,25 @@ Loaded by `static/index.html` as the FIRST executable script (right after the `<
 |---|---|---|
 | `~227` (`toggleSidebarCollapsed`) | `sidebar collapse toggle (HermesOS Cloud)` | New function that toggles `.sidebar-collapsed` on `.layout`. Persists in `localStorage[hermes-sidebar-collapsed]`. Also wraps `switchPanel()` so clicking any rail tab auto-uncollapses the sidebar. Mirrors the workspace-panel collapse pattern. Hooked from the chat panel head chevron button in index.html. |
 
+### `static/style.css` — context-window circle preservation
+
+| Line | Marker | Purpose |
+|---|---|---|
+| `~243` | (inside the preserve-circles allowlist) | Adds `.ctx-indicator`, `.ctx-indicator-wrap`, `.ctx-ring`, `.ctx-ring-center` so the composer's context-window progress badge stays circular under the HermesOS skin's universal `*{border-radius:0}` rule. The SVG donut itself uses shape-by-attributes and is unaffected; only the wrapper + the inner percent-bubble needed the carve-out. |
+
+### Default-profile nickname (3 files)
+
+The hermes-agent "default" profile name is hardcoded into the profile-resolution layer (session paths, active-profile API, gateway_state.json filename, etc.) — renaming the actual profile would break too much. Instead we render a UI-only nickname stored in `localStorage['hermes-default-profile-label']`.
+
+| File | What |
+|---|---|
+| `static/boot.js` (~`function _hermesDisplayProfileName`) | Helper that returns the nickname when `name === 'default'` and a localStorage override exists, else the name as-is. Plus `_hermesDefaultProfileLabelInput(value)` — the `oninput` handler for the Settings input. Live-updates the composer chip + the profile-dropdown render as the user types. |
+| `static/boot.js` (~`profileChipLabel.textContent =`) | Initial chip render at boot uses the helper. |
+| `static/ui.js` (~`profileChipLabel.textContent =` × 2) | Topbar + session-sync chip renders also go through the helper. Without this, those overwrite the boot-time value on every session activation and the nickname blinks back to "default". |
+| `static/panels.js` (~`profile-opt-name`) | The profile dropdown's per-row name uses `_hermesDisplayProfileName(p.name)`. Falls back to `p.name` if the helper isn't loaded yet (defensive). |
+| `static/index.html` (~`#settingsDefaultProfileLabel`) | The Settings → Preferences input that writes to localStorage on each keystroke. |
+| `static/i18n.js` | `settings_label_default_profile_label` + `settings_desc_default_profile_label`. |
+
 ### `static/panels.js`
 
 | Line | Marker | Purpose |
