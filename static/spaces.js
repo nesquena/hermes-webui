@@ -453,10 +453,15 @@
     if (gates.sandbox_preview_required) gateLabels.push('sandbox preview required');
     if (gates.visual_qa_required) gateLabels.push('visual QA required');
     if (gates.approve_commit_required) gateLabels.push('approval required');
+    const gateChecklist = previewId ? '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Creator commit gates</strong>' +
+      '<label class="capy-spaces-muted"><input type="checkbox" id="capyCreatorGateSandbox_'+escapeHtml(previewId)+'"> Sandbox preview inspected</label>' +
+      '<label class="capy-spaces-muted"><input type="checkbox" id="capyCreatorGateVisualQa_'+escapeHtml(previewId)+'"> Visual QA passed</label>' +
+      '<div class="capy-spaces-muted">Commit remains blocked until both checks are marked and the shared confirmation is accepted.</div>' +
+      '</div></div></div>' : '';
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + gateChecklist + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){
@@ -480,9 +485,10 @@
       '</div>'+actions+'</div></div></div>';
   }
 
-  function renderCreatorCommitBlockedResult(){
+  function renderCreatorCommitBlockedResult(message){
+    const safeMessage = safeCreatorSummaryText(message || 'Preview expired or target changed; refresh preview before committing.') || 'Preview expired or target changed; refresh preview before committing.';
     return '<div class="capy-spaces-card capy-spaces-danger-card" role="status"><h3>Creator commit blocked</h3>' +
-      '<div class="capy-spaces-muted">Preview expired or target changed; refresh preview before committing.</div>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(safeMessage)+'</div>' +
       '</div>';
   }
 
@@ -1674,8 +1680,15 @@
       return;
     }
     if (action === 'commitCreatorSpec') {
-      const previewId = button.dataset.previewId || '';
+      const previewId = safeCreatorIdText(button.dataset.previewId || '');
       if (!previewId) return;
+      const sandboxGate = document.getElementById('capyCreatorGateSandbox_'+previewId);
+      const visualGate = document.getElementById('capyCreatorGateVisualQa_'+previewId);
+      if (!sandboxGate || !sandboxGate.checked || !visualGate || !visualGate.checked) {
+        const refreshedRoot = document.getElementById('capySpacesRoot');
+        if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitBlockedResult('Complete sandbox preview and visual QA checks before committing.') + refreshedRoot.innerHTML;
+        return;
+      }
       if (typeof showConfirmDialog !== 'function') return;
       const confirmed = await showConfirmDialog({
         title: 'Commit creator preview?',

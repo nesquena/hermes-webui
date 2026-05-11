@@ -59,6 +59,7 @@ function makeElement(id) {
     dataset: {},
     innerHTML: '',
     textContent: '',
+    checked: false,
     listeners: {},
     addEventListener(type, fn) { this.listeners[type] = fn; },
     querySelector(selector) {
@@ -80,7 +81,14 @@ global.S = { session: { session_id: 'session-123', active_space_id: null } };
 global.switchPanel = async function(panel) { switchedPanels.push(panel); return true; };
 global.syncCapyActiveSpaceContext = function() { capySpaceSyncs.push(global.S && global.S.session ? global.S.session.active_space_id : null); };
 global.document = {
-  getElementById: makeElement,
+  getElementById(id) {
+    if (String(id || '').startsWith('capyCreatorGate')) {
+      const root = elements.capySpacesRoot;
+      const html = root && root.innerHTML ? root.innerHTML : '';
+      if (!html.includes('id="' + id + '"')) return null;
+    }
+    return makeElement(id);
+  },
 };
 global.fetch = async function(path, opts = {}) {
   calls.push({ path, method: opts.method || 'GET', body: opts.body || '' });
@@ -2155,13 +2163,30 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
+    makeElement('capyCreatorGateSandbox_preview-existing-safe-1').checked = true;
+    makeElement('capyCreatorGateVisualQa_preview-existing-safe-1').checked = true;
     beforeHtml = root.innerHTML;
     await click('commitCreatorSpec', { previewId: 'preview-existing-safe-1' });
   } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId' || scenario === 'creatorCommitStaleFailure') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
+    makeElement('capyCreatorGateSandbox_preview-safe-1').checked = true;
+    makeElement('capyCreatorGateVisualQa_preview-safe-1').checked = true;
     beforeHtml = root.innerHTML;
+    await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
+  } else if (scenario === 'creatorCommitGateUnchecked') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
+    beforeHtml = root.innerHTML;
+    await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
+  } else if (scenario === 'creatorCommitGateMissing') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
+    beforeHtml = root.innerHTML;
+    root.innerHTML = '';
     await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
   } else if (scenario === 'creatorCommitNoDialog') {
     await window.loadCapySpaces();
@@ -4652,6 +4677,10 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "executed: false" in out["rootHtml"]
     assert "sandbox preview required" in out["rootHtml"]
     assert "visual QA required" in out["rootHtml"]
+    assert "Creator commit gates" in out["rootHtml"]
+    assert "Sandbox preview inspected" in out["rootHtml"]
+    assert "Visual QA passed" in out["rootHtml"]
+    assert "Commit remains blocked until both checks are marked" in out["rootHtml"]
     assert "Approve revisioned commit" in out["rootHtml"]
     assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
     assert "Summary &lt;Widget&gt;" in out["rootHtml"]
@@ -4714,6 +4743,31 @@ def test_creator_preview_can_target_existing_space_and_render_revision_diff_safe
     assert "renderer" not in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
     assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_commit_blocks_until_sandbox_and_visual_qa_are_checked(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitGateUnchecked")
+
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Creator commit blocked" in out["rootHtml"]
+    assert "Complete sandbox preview and visual QA checks before committing." in out["rootHtml"]
+    assert "Creator commit saved" not in out["rootHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_blocks_when_gate_controls_are_missing(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitGateMissing")
+
+    assert "capyCreatorGateSandbox_preview-safe-1" in out["beforeHtml"]
+    assert "capyCreatorGateVisualQa_preview-safe-1" in out["beforeHtml"]
+    assert "Creator commit blocked" in out["rootHtml"]
+    assert "Complete sandbox preview and visual QA checks before committing." in out["rootHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
 
 
 def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
