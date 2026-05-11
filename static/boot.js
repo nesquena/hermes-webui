@@ -42,6 +42,17 @@ async function cancelSessionStream(session){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
+async function _savedSessionShouldStaySidebarOnly(sid){
+  if(!sid) return false;
+  try{
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const session = data&&data.session;
+    return !!(session&&(session.active_stream_id||session.pending_user_message));
+  }catch(e){
+    return false;
+  }
+}
+
 // ── Mobile navigation ──────────────────────────────────────────────────────
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
@@ -144,6 +155,26 @@ function handleWorkspaceClose(){
   closeWorkspacePanel();
 }
 
+/**
+ * Set a tooltip on a button, preferring the custom CSS tooltip (`data-tooltip`)
+ * when the element opts in via the `has-tooltip` class. Falls back to the
+ * native `title` attribute for elements that haven't opted in.
+ *
+ * Critical: when the element DOES have data-tooltip, this MUST also clear any
+ * existing native `title` attribute, otherwise the slow ~1.5s native browser
+ * tooltip co-fires alongside the fast custom CSS tooltip — exactly the bug
+ * #1775 reports. Always pair `data-tooltip` with `removeAttribute('title')`.
+ */
+function _setButtonTooltip(btn, text){
+  if(!btn) return;
+  if(btn.hasAttribute('data-tooltip')){
+    btn.setAttribute('data-tooltip', text);
+    if(btn.hasAttribute('title')) btn.removeAttribute('title');
+  } else {
+    btn.title = text;
+  }
+}
+
 function syncWorkspacePanelUI(){
   const {layout,panel,toggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -156,11 +187,11 @@ function syncWorkspacePanelUI(){
   if(toggleBtn){
     toggleBtn.classList.toggle('active',isOpen);
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
-    toggleBtn.title=isOpen?'Hide workspace panel':'Show workspace panel';
+    _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
     toggleBtn.disabled=!canBrowse;
   }
   if(collapseBtn){
-    collapseBtn.title=isCompact?'Close workspace panel':'Hide workspace panel';
+    _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
   }
   const hasSession=!!S.session;
   ['btnUpDir','btnNewFile','btnNewFolder','btnRefreshPanel'].forEach(id=>{
@@ -170,7 +201,7 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    clearBtn.title=hasPreview?'Close preview':'Hide workspace panel';
+    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Hide workspace panel');
     // On desktop, only show the X button when a file preview is open.
     // In browse mode the chevron (btnCollapseWorkspacePanel) already serves
     // as the close control, so showing both produces a duplicate X.
@@ -192,6 +223,62 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+
+// ── Desktop sidebar collapse toggle ────────────────────────────────────────
+// Two discoverability paths into the same state:
+//   (1) Click the already-active rail icon → collapse / expand the sidebar.
+//   (2) Cmd/Ctrl+B keyboard shortcut (VS Code convention).
+// Mobile is unaffected: the sidebar is an overlay there, and every collapse
+// code path is gated on `_isDesktopWidth()` (min-width:641px).
+// State is persisted via localStorage and survives reloads + bfcache.
+const _SIDEBAR_COLLAPSED_KEY='hermes-webui-sidebar-collapsed';
+
+function _isDesktopWidth(){
+  try{return window.matchMedia('(min-width:641px)').matches;}catch(_){return true;}
+}
+
+function _isSidebarCollapsed(){
+  return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
+}
+
+function _syncSidebarAria(){
+  // Mirror the open/collapsed state on the active rail button via aria-expanded
+  // so screen readers announce the toggle. Open=true, collapsed=false.
+  const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
+  if(active)active.setAttribute('aria-expanded',!_isSidebarCollapsed());
+}
+
+function toggleSidebar(forceState){
+  if(!_isDesktopWidth())return; // mobile uses an overlay; never collapse there
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const next=typeof forceState==='boolean'?forceState:!_isSidebarCollapsed();
+  layout.classList.toggle('sidebar-collapsed',next);
+  // Clear the flash-prevention root-level marker once JS owns the state.
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  try{localStorage.setItem(_SIDEBAR_COLLAPSED_KEY,next?'1':'0');}catch(_){}
+  _syncSidebarAria();
+}
+
+function expandSidebar(){
+  if(_isSidebarCollapsed())toggleSidebar(false);
+}
+
+// Boot-time restore. The inline flash-prevention script in index.html already
+// set data-sidebar-collapsed='1' on <html> before the stylesheet so the page
+// renders collapsed without paint flash. This IIFE promotes that pre-paint
+// state into the .layout class system where both JS and CSS can read it.
+(function _restoreSidebarState(){
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  if(!_isDesktopWidth())return;
+  try{
+    if(localStorage.getItem(_SIDEBAR_COLLAPSED_KEY)==='1'){
+      const layout=document.querySelector('.layout');
+      if(layout)layout.classList.add('sidebar-collapsed');
+    }
+  }catch(_){}
+  _syncSidebarAria();
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
@@ -236,7 +323,7 @@ $('btnSend').onclick=()=>{
   }
   send();
 };
-$('btnAttach').onclick=()=>$('fileInput').click();
+$('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 (function(){
@@ -267,7 +354,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
     // pressing the button will do (#1488).
-    btn.title = on ? t('voice_dictate_active') : t('voice_dictate');
+    _setButtonTooltip(btn, on ? t('voice_dictate_active') : t('voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
@@ -470,14 +557,17 @@ window._micPendingSend=window._micPendingSend||false;
     try{ return localStorage.getItem('hermes-voice-mode-button')==='true'; }
     catch(_){ return false; }
   }
+  let _voiceModeActive=false;
+
   function _applyVoiceModePref(){
-    modeBtn.style.display = _voiceModePrefEnabled() ? '' : 'none';
+    const enabled = _voiceModePrefEnabled();
+    modeBtn.style.display = enabled ? '' : 'none';
+    if(!enabled && _voiceModeActive) _deactivate();
   }
   _applyVoiceModePref();
   // Expose so the settings pane can re-apply immediately on toggle.
   window._applyVoiceModePref = _applyVoiceModePref;
 
-  let _voiceModeActive=false;
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
@@ -688,7 +778,7 @@ window._micPendingSend=window._micPendingSend||false;
   function _activate(){
     _voiceModeActive=true;
     modeBtn.classList.add('active');
-    modeBtn.title=t('voice_mode_toggle_active');
+    _setButtonTooltip(modeBtn, t('voice_mode_toggle_active'));
     showToast(t('voice_mode_active'),1500);
     // If the agent is busy, wait — state will be 'thinking' and we'll detect completion
     if(typeof S!=='undefined'&&S.busy){
@@ -705,7 +795,7 @@ window._micPendingSend=window._micPendingSend||false;
     _voiceModeState='idle';
     _voiceModeThinkingSid=null;
     modeBtn.classList.remove('active');
-    modeBtn.title=t('voice_mode_toggle');
+    _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     try{ if(_recognition) _recognition.abort(); }catch(_){}
@@ -786,10 +876,11 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
-function clearPreview(){
+function clearPreview(opts={}){
+  const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
-  const closePanelAfter=_workspacePanelMode==='preview';
+  const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
   const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
@@ -800,6 +891,7 @@ function clearPreview(){
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
   if(closePanelAfter)closeWorkspacePanel();
+  else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
 }
 $('btnClearPreview').onclick=handleWorkspaceClose;
@@ -812,7 +904,7 @@ $('modelSelect').onchange=async()=>{
     : {model:selectedModel,model_provider:null};
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
-  else localStorage.setItem('hermes-webui-model', modelState.model);
+  else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   await api('/api/session/update',{method:'POST',body:JSON.stringify({
     session_id:S.session.session_id,
     workspace:S.session.workspace,
@@ -836,6 +928,11 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   autoResize();
   updateSendBtn();
+  // Persist composer draft to server (debounced in _saveComposerDraft).
+  const sid = S && S.session && S.session.session_id;
+  if (sid && typeof _saveComposerDraft === 'function') {
+    _saveComposerDraft(sid, $('msg').value, S.pendingFiles ? [...S.pendingFiles] : []);
+  }
   const text=$('msg').value;
   if(text.startsWith('/')&&text.indexOf('\n')===-1){
     if(typeof getSlashAutocompleteMatches==='function'){
@@ -907,6 +1004,18 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
+  // Skip when typing in an input/textarea/contenteditable so text-edit
+  // shortcuts (e.g. bold in some embedded editors) are never stolen.
+  if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
+      e.preventDefault();
+      toggleSidebar();
+      return;
+    }
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
@@ -962,13 +1071,22 @@ document.addEventListener('keydown',async e=>{
 });
 $('msg').addEventListener('paste',e=>{
   const items=Array.from(e.clipboardData?.items||[]);
-  const imageItems=items.filter(i=>i.type.startsWith('image/'));
-  if(!imageItems.length)return;
+  // When the clipboard carries BOTH text and an image (common from Notes,
+  // Word, browsers, Slack — the OS attaches a rendered preview alongside
+  // the plain text), prefer the text and let the browser paste normally.
+  // Only intercept when the clipboard is image-only (true screenshot paste).
+  // Tighten the image filter to kind==='file' so string items advertising an
+  // image MIME (e.g. text/html with an embedded data URI) are not misclassified.
+  const hasText=items.some(i=>i.kind==='string'&&(i.type==='text/plain'||i.type==='text/html'));
+  const imageItems=items.filter(i=>i.kind==='file'&&i.type.startsWith('image/'));
+  if(!imageItems.length||hasText)return;
   e.preventDefault();
-  const files=imageItems.map(i=>{
+  const pasteTs=Date.now();
+  const files=imageItems.map((i,idx)=>{
     const blob=i.getAsFile();
     const ext=i.type.split('/')[1]||'png';
-    return new File([blob],`screenshot-${Date.now()}.${ext}`,{type:i.type});
+    const suffix=imageItems.length>1?`-${idx+1}`:'';
+    return new File([blob],`screenshot-${pasteTs}${suffix}.${ext}`,{type:i.type});
   });
   addFiles(files);
   setStatus(t('image_pasted')+files.map(f=>f.name).join(', '));
@@ -1072,16 +1190,44 @@ function _normalizeAppearance(theme,skin){
   return {theme:nextTheme,skin:nextSkin};
 }
 
+// Sync <meta name="theme-color"> with the active theme's computed --bg.
+// This surfaces the WebUI's exact theme background to:
+//   1. Mobile Safari status bar (the prefers-color-scheme media variants in index.html
+//      cover the pre-load case; this updater handles user-toggled changes mid-session).
+//   2. iOS PWA / Add to Home Screen status bar.
+//   3. Native WKWebView wrappers (e.g. hermes-swift-mac) that read this attribute as
+//      the source of truth for AppKit chrome (tab bar, title bar, traffic-light area)
+//      instead of pixel-sampling — overlay-resistant and IPC-free.
+// Reading getComputedStyle(html).getPropertyValue('--bg') picks up the active skin
+// (Default, Sienna, Sisyphus, Charizard, etc.) so each skin's distinct paint reaches
+// the meta tag.
+function _syncThemeColorMeta(){
+  try{
+    const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    if(!bg) return;
+    const known=document.getElementById('hermes-theme-color');
+    if(known){
+      known.setAttribute('content',bg);
+      known.removeAttribute('media');
+    }
+    document.querySelectorAll('meta[name="theme-color"]').forEach(meta=>{
+      meta.setAttribute('content',bg);
+      meta.removeAttribute('media');
+    });
+  }catch(e){}
+}
+
 function _setResolvedTheme(isDark){
   document.documentElement.classList.toggle('dark',!!isDark);
   const link=document.getElementById('prism-theme');
-  if(!link) return;
+  if(!link){ _syncThemeColorMeta(); return; }
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
   // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
   // digests for the same pinned version, causing intermittent blocking (#1100).
   if(link.href!==want){ link.integrity=''; link.href=want; }
+  _syncThemeColorMeta();
 }
 
 function _applyTheme(name){
@@ -1106,6 +1252,7 @@ function _applySkin(name){
   const key=(name||'default').toLowerCase();
   if(key==='default') delete document.documentElement.dataset.skin;
   else document.documentElement.dataset.skin=key;
+  _syncThemeColorMeta();
 }
 
 function _pickTheme(name){
@@ -1228,6 +1375,7 @@ function applyBotName(){
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
+    window._showTps=!!s.show_tps;
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
@@ -1235,11 +1383,13 @@ function applyBotName(){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
+    window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
@@ -1261,13 +1411,16 @@ function applyBotName(){
   }catch(e){
     window._sendKey='enter';
     window._showTokenUsage=false;
+    window._showTps=false;
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
+    window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
@@ -1284,7 +1437,7 @@ function applyBotName(){
   // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
-    const _checkUrl='/api/updates/check'+(_testUpdates?'?simulate=1':'');
+    const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
@@ -1331,10 +1484,20 @@ function applyBotName(){
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
+  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-  const saved=urlSession||localStorage.getItem('hermes-webui-session');
+  const savedLocal=localStorage.getItem('hermes-webui-session');
+  const saved=urlSession||savedLocal;
   if(saved){
     try{
+      if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        return;
+      }
       await loadSession(saved);
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
@@ -1432,4 +1595,14 @@ window.addEventListener('pageshow', async (event) => {
   }
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
+  // Re-sync sidebar collapse state from localStorage. bfcache restored the
+  // frozen DOM but another tab may have toggled the sidebar in the meantime.
+  if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {
+    try {
+      const _want = localStorage.getItem('hermes-webui-sidebar-collapsed') === '1';
+      const _have = _isSidebarCollapsed();
+      if (_want !== _have) toggleSidebar(_want);
+      if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
+    } catch (_) {}
+  }
 });
