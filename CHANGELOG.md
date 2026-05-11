@@ -2,7 +2,36 @@
 
 ## [Unreleased]
 
-- Harmonized profile HERMES_HOME switching so process-wide switches and per-request streaming switches patch both `tools.skills_tool` and `tools.skill_manager_tool` module-level skill paths consistently (#2023).
+### Added
+
+- **PR #2074** by @franksong2702 — `_patch_skill_home_modules(home)` centralizes patching of both `tools.skills_tool` and `tools.skill_manager_tool` module-level skill paths so process-wide HERMES_HOME switches and per-request streaming switches stay aligned. Closes #2023. Closes the cleanup gap from the original #2023 fix where the streaming per-request path patched both modules but the process-wide switch path only patched `tools.skills_tool`. Preserves the no-import-under-`_ENV_LOCK` invariant from #2024.
+
+- **PR #2077** by @franksong2702 — Compression anchor visibility helpers collapsed into a single shared module `api/compression_anchor.py` (new file, 77 lines) so the manual `/api/session/compress` path in `api/routes.py` and the streaming auto-compression path in `api/streaming.py` share one canonical implementation. Net effect: 48 lines removed from `routes.py`, 41 from `streaming.py`, plus 59-line regression suite. Closes #2028.
+
+### Fixed
+
+- **PR #2068** by @franksong2702 — Stuck sidebar spinners on completed sessions (closes #2066). `_isSessionLocallyStreaming()` no longer consults `INFLIGHT` for non-active sessions — INFLIGHT entries for non-active sessions are always artifacts and never affect spinner state. Added `_purgeStaleInflightEntries()` cleanup pass and 71-line regression file `tests/test_issue2066_stale_sidebar_spinner.py` covering the abnormal-termination cases (page refresh / network drop / gateway restart) that the symptomatic 5-minute-staleness alternative would have left broken.
+
+- **PR #2056** by @franksong2702 — Custom provider name slugs no longer preserve slug-hostile punctuation (closes #2047). Friendly setup names like `Local (127.0.0.1:15721)` now become `custom:local-127.0.0.1-15721` instead of `custom:local-(127.0.0.1:15721)`. The latter shape collided with the `@provider:model` grammar and could corrupt the model into `15721):deepseek-v4-flash`. Endpoint-derived `custom:<host>:<port>` slugs continue to flow through the host-port parser unchanged. `_custom_provider_slug_from_name()` is now reused by both model resolution and available-model lookup instead of duplicating `lower().replace(" ", "-")`.
+
+- **PR #2065** by @franksong2702 — Four low-severity polish items from the v0.51.42 Opus pre-release review (closes #2050). (1) `state.db` rows with `source='webui'` but zero readable messages now emit `state_db_orphan_webui_row` / `unsafe_to_repair` / `manual_review` instead of being silently dropped. (2) `repair_safe_session_recovery()` returns an explicit `clean` flag preserving `ok` for compatibility; `/api/session/recovery/repair-safe` 200/409 dispatch keys off `clean`, so a 409 now means "audit still has findings" rather than "repair code failed." (3) `MEDIA_ALLOWED_ROOTS` splits on `os.pathsep` (POSIX `:` / Windows `;`) instead of a hard-coded colon. (4) Replaced the confusing `details[-1:]` one-element slice with an explicit local detail-recorded flag.
+
+- **PR #2063** by @dso2ng — Explicit `session_source="fork"` sessions are kept out of `read_session_lineage_report()` continuation chains. The query now fetches optional `session_source` so the existing continuation helper can see fork metadata; pre-fix the backend read-only lineage report bridge added in #2012 contradicted the sidebar collapse logic taught in #2014 (where forks are explicit branches, not compression continuations). Regression covers a fork child whose parent ended via compression.
+
+### Refactored
+
+- **PR #2077** (cross-listed) — see Added.
+
+### Documentation
+
+- **PR #2088** by @michael-dg — `THEMES.md` re-aligned with the post-#627 `Theme × Skin` architecture. The old monolithic palette names (`Dark`, `Light`, `Slate`, `Solarized Dark`, `Monokai`, `Nord`, `OLED`) no longer match the actual two-picker model (Theme `System` / `Dark` / `Light` applied as `.dark` class on `<html>`, plus Skin — 8 named accent palettes — applied as `data-skin="<name>"`). The Settings → Appearance panel exposes both pickers plus Font Size, and `/theme <name>` accepts theme + skin tokens.
+
+- **PR #2073** by @ai-ag2026 — Top-level Markdown docs (`docs/*.md`) are now tracked instead of silently ignored by the broad `docs/*` rule. Arbitrary scratch/reference files under `docs/` (non-`.md`) remain ignored by default. Regression tests cover the intended `git check-ignore` behavior on both paths.
+
+### Tests
+
+- **PR #2076** by @franksong2702 — `test_kanban_locale_parity` (added to `tests/test_kanban_ui_static.py`) catches missing-key regressions across ~86 `kanban_*` i18n keys × 9 locales (en, ja, ru, es, de, zh, zh-Hant, pt, ko). Follows the existing `test_lineage_segment_locale_keys_are_defined_for_sidebar_locales` pattern. Issue #1973 flagged that this regression class was previously caught only by manual review during the Opus pre-ship audit.
+
 
 ## [v0.51.44] — 2026-05-11 — Release T (5-PR contributor batch — security + worktree sessions + LM Studio + onboarding docs + transcript dedup, plus comprehensive test-suite network isolation)
 
