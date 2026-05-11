@@ -1376,6 +1376,7 @@ function applyBotName(){
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showTps=!!s.show_tps;
+    window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
@@ -1412,6 +1413,7 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showTps=false;
+    window._fadeTextEffect=false;
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;

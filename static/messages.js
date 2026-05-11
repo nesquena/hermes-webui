@@ -510,6 +510,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // the final answer or the response to render twice.
   let _streamFinalized=false;
   let _pendingRafHandle=null;
+  let _streamFadeWordCount=0;
+  let _streamFadeVisibleText='';
+  let _streamFadeLastTickMs=0;
+  let _streamFadeWordCarry=0;
+  let _streamFadeWordBornAt=[];
+  let _streamFadeStartedAt=0;
+  let _streamFadeLastTargetWords=0;
+  let _streamFadeLastArrivalMs=0;
+  let _streamFadeArrivalWps=0;
+  let _streamFadeLatestAnimationEndAt=0;
+  let _streamFadeLastRevealCount=0;
+  const _STREAM_FADE_MS=140;
+  const _STREAM_FADE_WAVE_MS=320;
+  const _STREAM_FADE_MAX_STAGGER_MS=520;
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
@@ -667,12 +681,221 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
+
+  function _resetStreamFadeState(){
+    _streamFadeWordCount=0;
+    _streamFadeVisibleText='';
+    _streamFadeLastTickMs=0;
+    _streamFadeWordCarry=0;
+    _streamFadeWordBornAt=[];
+    _streamFadeStartedAt=0;
+    _streamFadeLastTargetWords=0;
+    _streamFadeLastArrivalMs=0;
+    _streamFadeArrivalWps=0;
+    _streamFadeLatestAnimationEndAt=0;
+    _streamFadeLastRevealCount=0;
+  }
+  function _cancelPendingStreamRender(){
+    if(_pendingRafHandle===null) return;
+    cancelAnimationFrame(_pendingRafHandle);
+    clearTimeout(_pendingRafHandle);
+    _pendingRafHandle=null;
+    _renderPending=false;
+  }
+  function _shouldUseStreamFade(){
+    return window._fadeTextEffect===true;
+  }
+  function _streamFadeSkipNode(node){
+    if(!node||node.nodeType!==1) return false;
+    const tag=(node.tagName||'').toLowerCase();
+    return tag==='pre'||tag==='code'||tag==='script'||tag==='style'||tag==='textarea'||tag==='svg'||tag==='math';
+  }
+  function _streamFadeWordCountOf(text){
+    const m=String(text||'').match(/\S+/g);
+    return m?m.length:0;
+  }
+  function _streamFadeNextText(targetText){
+    targetText=String(targetText||'');
+    const now=performance.now();
+    if(!targetText){
+      _resetStreamFadeState();
+      return {text:'', caughtUp:true};
+    }
+    if(!_streamFadeVisibleText||!targetText.startsWith(_streamFadeVisibleText)){
+      // Markdown/tool stripping can rewrite the visible prefix. Reset safely rather than
+      // trying to animate across incompatible strings or stale word birth timestamps.
+      _resetStreamFadeState();
+    }
+    if(!_streamFadeLastTickMs){
+      _streamFadeLastTickMs=now;
+      _streamFadeStartedAt=now;
+    }
+    if(_streamFadeVisibleText===targetText) return {text:_streamFadeVisibleText,caughtUp:true};
+
+    const remaining=targetText.slice(_streamFadeVisibleText.length);
+    const backlogWords=_streamFadeWordCountOf(remaining);
+    const targetWords=_streamFadeWordCountOf(targetText);
+    const elapsedMs=Math.max(16,Math.min(120,now-_streamFadeLastTickMs));
+    _streamFadeLastTickMs=now;
+
+    // OpenWebUI fades the actual arriving tokens, so long/fast responses naturally
+    // appear to accelerate. Hermes has a playout buffer, so track incoming word
+    // velocity and play out faster than it instead of using a metronomic cadence.
+    // LLM telemetry is usually tokens/sec, but the UI reveals words. A fixed word
+    // cadence can look stuck even when token throughput is high, so combine:
+    //   1) live target-word arrival velocity, 2) backlog pressure, 3) time ramp.
+    if(!_streamFadeLastArrivalMs){
+      _streamFadeLastArrivalMs=now;
+      _streamFadeLastTargetWords=targetWords;
+    } else if(targetWords>_streamFadeLastTargetWords){
+      const arrivalElapsedMs=Math.max(16, now-_streamFadeLastArrivalMs);
+      const instantArrivalWps=(targetWords-_streamFadeLastTargetWords)*1000/arrivalElapsedMs;
+      // EWMA smooths bursty token chunks without hiding sustained fast output.
+      _streamFadeArrivalWps=_streamFadeArrivalWps
+        ? (_streamFadeArrivalWps*0.65 + instantArrivalWps*0.35)
+        : instantArrivalWps;
+      _streamFadeLastArrivalMs=now;
+      _streamFadeLastTargetWords=targetWords;
+    } else if(targetWords<_streamFadeLastTargetWords){
+      _streamFadeLastTargetWords=targetWords;
+      _streamFadeLastArrivalMs=now;
+      _streamFadeArrivalWps=0;
+    }
+
+    const streamAgeSeconds=Math.max(0, (now-(_streamFadeStartedAt||now))/1000);
+    const baseWps=30 + Math.min(streamAgeSeconds*4, 35); // 30 → 65 wps over long answers
+    const arrivalWps=_streamFadeArrivalWps ? Math.min(_streamFadeArrivalWps*2.4 + 20, 320) : 0;
+    const backlogWps=backlogWords>0 ? Math.min(30 + backlogWords*8, 420) : 0;
+    const wordsPerSecond=Math.min(420, Math.max(baseWps, arrivalWps, backlogWps));
+
+    // High cap allows line/sentence-sized catch-up, while the rolling wave below
+    // keeps the visual effect animated instead of collapsing into block pops.
+    _streamFadeWordCarry+=elapsedMs*wordsPerSecond/1000;
+    if(!_streamFadeVisibleText) _streamFadeWordCarry=Math.max(_streamFadeWordCarry,1);
+    let wordsToReveal=Math.floor(_streamFadeWordCarry);
+    // At very high throughput, reveal in rolling phrase-sized waves instead of
+    // dumping whole paragraphs in one frame. The wrapper lengthens/staggers the
+    // fade for these waves so fast output stays visibly animated.
+    const burstFloor=backlogWords>=120?24:backlogWords>=60?18:backlogWords>=30?12:wordsPerSecond>=300?8:wordsPerSecond>=220?6:0;
+    if(burstFloor>0) wordsToReveal=Math.max(wordsToReveal, Math.min(burstFloor, backlogWords));
+    if(wordsToReveal<1){_streamFadeLastRevealCount=0;return {text:_streamFadeVisibleText,caughtUp:false};}
+    _streamFadeLastRevealCount=Math.min(wordsToReveal, backlogWords);
+    _streamFadeWordCarry=Math.max(0,_streamFadeWordCarry-wordsToReveal);
+
+    let cut=0;
+    const wordRe=/(\s*\S+\s*)/g;
+    let match;
+    while(wordsToReveal>0&&(match=wordRe.exec(remaining))){
+      cut=wordRe.lastIndex;
+      wordsToReveal-=1;
+    }
+    if(cut<=0) cut=Math.min(remaining.length,4);
+    _streamFadeVisibleText+=remaining.slice(0,cut);
+    if(_streamFadeVisibleText.length>targetText.length) _streamFadeVisibleText=targetText;
+    return {text:_streamFadeVisibleText,caughtUp:_streamFadeVisibleText===targetText};
+  }
+  function _renderStreamingFadeMarkdown(displayText){
+    if(!assistantBody) return true;
+    const next=_streamFadeNextText(displayText);
+    const html=renderMd ? renderMd(next.text||'') : esc(next.text||'');
+    assistantBody.innerHTML=html;
+    assistantBody.classList.add('stream-fade-active');
+    _wrapStreamingFadeWords(assistantBody);
+    _sanitizeSmdLinks(assistantBody);
+    return next.caughtUp;
+  }
+  function _wrapStreamingFadeWords(root){
+    if(!root||!document.createTreeWalker) return;
+    const textNodes=[];
+    const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
+      acceptNode(node){
+        if(!node||!node.nodeValue||!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        let parent=node.parentElement;
+        while(parent&&parent!==root){
+          if(parent.classList&&parent.classList.contains('stream-fade-word')) return NodeFilter.FILTER_REJECT;
+          if(_streamFadeSkipNode(parent)) return NodeFilter.FILTER_REJECT;
+          parent=parent.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let node;
+    while((node=walker.nextNode())) textNodes.push(node);
+    let wordIndex=0;
+    const now=performance.now();
+    const wordRe=/(\S+)(\s*)/g;
+    const revealedThisFrame=Math.max(1,_streamFadeLastRevealCount||1);
+    const fadeMs=revealedThisFrame>=8?_STREAM_FADE_WAVE_MS:revealedThisFrame>=4?240:_STREAM_FADE_MS;
+    const waveStepMs=revealedThisFrame>=18?18:revealedThisFrame>=8?22:revealedThisFrame>=4?16:10;
+    for(const textNode of textNodes){
+      const value=textNode.nodeValue||'';
+      wordRe.lastIndex=0;
+      const frag=document.createDocumentFragment();
+      let last=0, match, changed=false;
+      while((match=wordRe.exec(value))){
+        if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
+        wordIndex+=1;
+        const span=document.createElement('span');
+        if(!_streamFadeWordBornAt[wordIndex]){
+          const newWordOffset=Math.max(wordIndex-_streamFadeWordCount-1,0);
+          // High-speed output should feel like a continuous animated sweep, not
+          // a block pop. Keep bursts smaller, but stretch/stagger each wave so
+          // multiple sentences can fade across several hundred milliseconds.
+          const staggerMs=Math.min(newWordOffset*waveStepMs,_STREAM_FADE_MAX_STAGGER_MS);
+          _streamFadeWordBornAt[wordIndex]=now+staggerMs;
+        }
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,_streamFadeWordBornAt[wordIndex]+fadeMs);
+        const ageMs=now-_streamFadeWordBornAt[wordIndex];
+        const isAnimating=ageMs<fadeMs;
+        span.className=isAnimating?'stream-fade-word is-new':'stream-fade-word';
+        if(isAnimating){
+          const delayMs=Math.max(-fadeMs, -ageMs);
+          span.style.animationDelay=delayMs+'ms';
+          span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
+        }
+        span.textContent=match[1];
+        frag.appendChild(span);
+        if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+        last=match.index+match[0].length;
+        changed=true;
+      }
+      if(!changed) continue;
+      if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+      textNode.replaceWith(frag);
+    }
+    _streamFadeWordBornAt.length=wordIndex+1;
+    _streamFadeWordCount=wordIndex;
+  }
+  function _streamFadeCurrentDisplayText(){
+    const parsed=_parseStreamState();
+    return segmentStart===0
+      ? parsed.displayText
+      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+  }
+  function _drainStreamFadeBeforeDone(onDone){
+    const step=()=>{
+      if(!assistantBody){onDone();return;}
+      const target=_streamFadeCurrentDisplayText();
+      const caughtUp=_renderStreamingFadeMarkdown(target);
+      scrollIfPinned();
+      if(caughtUp){
+        // Let the last released words visibly finish their stagger + fade before
+        // the final renderMessages() DOM replacement removes the live spans.
+        const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
+        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_WAVE_MS+_STREAM_FADE_MAX_STAGGER_MS));
+        return;
+      }
+      setTimeout(()=>requestAnimationFrame(step), 16);
+    };
+    step();
+  }
   function _resetAssistantSegment(){
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
     _freshSegment=true;
     _smdEndParser();
+    _resetStreamFadeState();
   }
 
   let _lastRenderMs=0;
@@ -701,30 +924,41 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const displayText = segmentStart===0
           ? parsed.displayText                          // first segment: uses think-tag stripping
           : _stripXmlToolCalls(assistantText.slice(segmentStart));
-        if(!_smdParser&&window.smd){
-          // On reconnect: prior content in assistantBody came from a different smd parser run.
-          // Clear it and start fresh — renderMessages() on done will restore the full content.
-          if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
-          _smdNewParser(assistantBody);
-        }
-        if(_smdParser){
-          _smdWrite(displayText);
+        if(_shouldUseStreamFade()){
+          _smdEndParser();
+          const caughtUp=_renderStreamingFadeMarkdown(displayText);
+          if(!caughtUp&&!_streamFinalized){
+            setTimeout(()=>_scheduleRender(), 24);
+          }
         } else {
-          // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
-          // for every live segment. Without this, the first segment inserts raw
-          // parsed.displayText and users see unformatted markdown until done.
-          const fallbackText = segmentStart===0
-            ? parsed.displayText
-            : _stripXmlToolCalls(assistantText.slice(segmentStart));
-          assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
+          assistantBody.classList.remove('stream-fade-active');
+          _resetStreamFadeState();
+          if(!_smdParser&&window.smd){
+            // On reconnect: prior content in assistantBody came from a different smd parser run.
+            // Clear it and start fresh — renderMessages() on done will restore the full content.
+            if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+            _smdNewParser(assistantBody);
+          }
+          if(_smdParser){
+            _smdWrite(displayText);
+          } else {
+            // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
+            // for every live segment. Without this, the first segment inserts raw
+            // parsed.displayText and users see unformatted markdown until done.
+            const fallbackText = segmentStart===0
+              ? parsed.displayText
+              : _stripXmlToolCalls(assistantText.slice(segmentStart));
+            assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
+          }
         }
       }
       scrollIfPinned();
     };
-    if(sinceLastMs>=66){
+    const frameIntervalMs=_shouldUseStreamFade()?16:66;
+    if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
-      _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), 66-sinceLastMs);
+      _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), frameIntervalMs-sinceLastMs);
     }
   }
 
@@ -745,6 +979,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
@@ -756,6 +991,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('interim_assistant',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
@@ -776,6 +1012,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('reasoning',e=>{
+      if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
       liveReasoningText += d.text || '';
@@ -954,153 +1191,162 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
-      // Bug A fix: cancel any pending rAF and mark stream finalized before
-      // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
-      // can reintroduce a stale thinking card or duplicate content.
-      _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
-      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      // Finalize smd parser — flushes any remaining buffered markdown state
-      // and runs Prism + copy buttons on the live segment before the DOM is replaced
-      if(assistantBody){
-        const _finBody=assistantBody;
-        _smdEndParser();
-        requestAnimationFrame(()=>{
-          if(typeof highlightCode==='function') highlightCode(_finBody);
-          if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
-          if(typeof renderKatexBlocks==='function') renderKatexBlocks();
-        });
-      } else {
-        _smdEndParser();
-      }
-      const d=JSON.parse(e.data);
-      const isActiveSession=_isSessionCurrentPane(activeSid);
-      const isSessionViewed=_isSessionActivelyViewed(activeSid);
-      const completedSession=d.session||{session_id:activeSid};
-      const completedSid=completedSession.session_id||activeSid;
-      if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-        _markSessionCompletionUnread(completedSid, completedSession.message_count);
-      }
-      _clearOwnerInflightState();
-      if(typeof _markSessionCompletedInList==='function'){
-        _markSessionCompletedInList(completedSession, activeSid);
-      }
-      _clearApprovalForOwner();
-      _clearClarifyForOwner('terminal');
-      const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
-        ? _shouldFollowMessagesOnDomReplace()
-        : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
-      if(isActiveSession){
-        S.activeStreamId=null;
-      }
-      if(isActiveSession){
-        // Capture previous session totals BEFORE overwriting S.session with the new
-        // cumulative values from the done event. prevIn/prevOut are the totals as of
-        // the start of this turn; curIn/curOut are the full post-turn totals — the
-        // delta is the per-turn usage for #1159.
-        const _prevIn=(S.session&&S.session.input_tokens)||0;
-        const _prevOut=(S.session&&S.session.output_tokens)||0;
-        const _prevCost=(S.session&&S.session.estimated_cost)||0;
-        S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
-        if(S.session&&S.session.session_id){
-          localStorage.setItem('hermes-webui-session',S.session.session_id);
-          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+      const _doneData=JSON.parse(e.data);
+      const _finishDone=()=>{
+        // Bug A fix: cancel any pending rAF and mark stream finalized before
+        // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
+        // can reintroduce a stale thinking card or duplicate content.
+        _streamFinalized=true;
+        _cancelPendingStreamRender();
+        if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+        // Finalize smd parser — flushes any remaining buffered markdown state
+        // and runs Prism + copy buttons on the live segment before the DOM is replaced
+        if(assistantBody){
+          const _finBody=assistantBody;
+          _smdEndParser();
+          requestAnimationFrame(()=>{
+            if(typeof highlightCode==='function') highlightCode(_finBody);
+            if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
+            if(typeof renderKatexBlocks==='function') renderKatexBlocks();
+          });
+        } else {
+          _smdEndParser();
         }
-        if(
-          window._compressionUi&&window._compressionUi.automatic&&
-          window._compressionUi.sessionId===activeSid&&
-          d.session&&d.session.session_id
-        ){
-          window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+        const d=_doneData;
+        const isActiveSession=_isSessionCurrentPane(activeSid);
+        const isSessionViewed=_isSessionActivelyViewed(activeSid);
+        const completedSession=d.session||{session_id:activeSid};
+        const completedSid=completedSession.session_id||activeSid;
+        if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
+          _markSessionCompletionUnread(completedSid, completedSession.message_count);
         }
-        // Find the last assistant message once for both reasoning persistence and timestamp
-        const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
-        // Persist reasoning trace so thinking card survives page reload
-        if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
-        // Stamp _ts on the last assistant message if it has no timestamp
-        if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
-        if(d.usage){
-          S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
-          // #503 — compute per-turn cost delta and attach to last assistant message
-          if(lastAsst){
-            const prevIn=_prevIn;
-            const prevOut=_prevOut;
-            const prevCost=_prevCost;
-            const curIn=d.usage.input_tokens||0;
-            const curOut=d.usage.output_tokens||0;
-            const curCost=d.usage.estimated_cost||0;
-            // Only set delta if values actually increased (skip no-op turns)
-            if(curIn>prevIn||curOut>prevOut){
-              lastAsst._turnUsage={
-                input_tokens:Math.max(0,curIn-prevIn),
-                output_tokens:Math.max(0,curOut-prevOut),
-                estimated_cost:Math.max(0,curCost-prevCost),
-              };
-            }
-            if(typeof d.usage.duration_seconds==='number'){
-              lastAsst._turnDuration=d.usage.duration_seconds;
-            }
-            if(typeof d.usage.tps==='number'&&d.usage.tps>0){
-              lastAsst._turnTps=d.usage.tps;
-            }
-            if(d.usage.gateway_routing){
-              lastAsst._gatewayRouting=d.usage.gateway_routing;
-              if(S.session)S.session.gateway_routing=d.usage.gateway_routing;
-              if(S.session&&Array.isArray(S.session.gateway_routing_history))S.session.gateway_routing_history.push(d.usage.gateway_routing);
-              else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
+        _clearOwnerInflightState();
+        if(typeof _markSessionCompletedInList==='function'){
+          _markSessionCompletedInList(completedSession, activeSid);
+        }
+        _clearApprovalForOwner();
+        _clearClarifyForOwner('terminal');
+        const shouldFollowOnDone=isActiveSession&&((typeof _shouldFollowMessagesOnDomReplace==='function')
+          ? _shouldFollowMessagesOnDomReplace()
+          : (typeof _isMessagePaneNearBottom==='function'&&_isMessagePaneNearBottom(1200)));
+        if(isActiveSession){
+          S.activeStreamId=null;
+        }
+        if(isActiveSession){
+          // Capture previous session totals BEFORE overwriting S.session with the new
+          // cumulative values from the done event. prevIn/prevOut are the totals as of
+          // the start of this turn; curIn/curOut are the full post-turn totals — the
+          // delta is the per-turn usage for #1159.
+          const _prevIn=(S.session&&S.session.input_tokens)||0;
+          const _prevOut=(S.session&&S.session.output_tokens)||0;
+          const _prevCost=(S.session&&S.session.estimated_cost)||0;
+          S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(S.session&&S.session.session_id){
+            localStorage.setItem('hermes-webui-session',S.session.session_id);
+            if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+          }
+          if(
+            window._compressionUi&&window._compressionUi.automatic&&
+            window._compressionUi.sessionId===activeSid&&
+            d.session&&d.session.session_id
+          ){
+            window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+          }
+          // Find the last assistant message once for both reasoning persistence and timestamp
+          const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          // Persist reasoning trace so thinking card survives page reload
+          if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
+          // Stamp _ts on the last assistant message if it has no timestamp
+          if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
+          if(d.usage){
+            S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
+            // #503 — compute per-turn cost delta and attach to last assistant message
+            if(lastAsst){
+              const prevIn=_prevIn;
+              const prevOut=_prevOut;
+              const prevCost=_prevCost;
+              const curIn=d.usage.input_tokens||0;
+              const curOut=d.usage.output_tokens||0;
+              const curCost=d.usage.estimated_cost||0;
+              // Only set delta if values actually increased (skip no-op turns)
+              if(curIn>prevIn||curOut>prevOut){
+                lastAsst._turnUsage={
+                  input_tokens:Math.max(0,curIn-prevIn),
+                  output_tokens:Math.max(0,curOut-prevOut),
+                  estimated_cost:Math.max(0,curCost-prevCost),
+                };
+              }
+              if(typeof d.usage.duration_seconds==='number'){
+                lastAsst._turnDuration=d.usage.duration_seconds;
+              }
+              if(typeof d.usage.tps==='number'&&d.usage.tps>0){
+                lastAsst._turnTps=d.usage.tps;
+              }
+              if(d.usage.gateway_routing){
+                lastAsst._gatewayRouting=d.usage.gateway_routing;
+                if(S.session)S.session.gateway_routing=d.usage.gateway_routing;
+                if(S.session&&Array.isArray(S.session.gateway_routing_history))S.session.gateway_routing_history.push(d.usage.gateway_routing);
+                else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
+              }
             }
           }
+          if(d.session.tool_calls&&d.session.tool_calls.length){
+            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+          } else {
+            S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+          }
+          if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
+            const assistantIdx=S.messages.indexOf(lastAsst);
+            if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);
+          }
+          if(uploaded.length){
+            const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
+            if(lastUser)lastUser.attachments=uploaded;
+          }
+          if(_latestGoalStatus&&_latestGoalStatus.message){
+            S.messages.push({
+              role:'assistant',
+              content:String(_latestGoalStatus.message),
+              _ts:Date.now()/1000,
+              _goalStatus:true,
+              _transient:true,
+            });
+          }
+          clearLiveToolCards();
+          S.busy=false;
+          // No-reply guard (#373): if agent returned nothing, show inline error
+          if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
+          syncTopbar();renderMessages({preserveScroll:true});
+          if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
+          loadDir('.');
+          // TTS auto-read: speak the last assistant response if enabled (#499)
+          if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
         }
-        if(d.session.tool_calls&&d.session.tool_calls.length){
-          S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
-        } else {
-          S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
-        }
-        if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
-          const assistantIdx=S.messages.indexOf(lastAsst);
-          if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);
-        }
-        if(uploaded.length){
-          const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
-          if(lastUser)lastUser.attachments=uploaded;
-        }
-        if(_latestGoalStatus&&_latestGoalStatus.message){
-          S.messages.push({
-            role:'assistant',
-            content:String(_latestGoalStatus.message),
-            _ts:Date.now()/1000,
-            _goalStatus:true,
-            _transient:true,
+        if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
+          const _goalNext=_pendingGoalContinuation;
+          _pendingGoalContinuation=null;
+          queueSessionMessage(_goalNext.sid,{
+            text:_goalNext.text,
+            files:[],
+            model:_goalNext.model,
+            model_provider:_goalNext.model_provider,
+            profile:_goalNext.profile,
           });
+          if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }
-        clearLiveToolCards();
-        S.busy=false;
-        // No-reply guard (#373): if agent returned nothing, show inline error
-        if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
-        if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
-        syncTopbar();renderMessages({preserveScroll:true});
-        if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
-        loadDir('.');
-        // TTS auto-read: speak the last assistant response if enabled (#499)
-        if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
+        if(isActiveSession) _queueDrainSid=activeSid;
+        renderSessionList();
+        _setActivePaneIdleIfOwner();
+        playNotificationSound();
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+      };
+      if(_shouldUseStreamFade()&&assistantBody){
+        _cancelPendingStreamRender();
+        _drainStreamFadeBeforeDone(_finishDone);
+        return;
       }
-      if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
-        const _goalNext=_pendingGoalContinuation;
-        _pendingGoalContinuation=null;
-        queueSessionMessage(_goalNext.sid,{
-          text:_goalNext.text,
-          files:[],
-          model:_goalNext.model,
-          model_provider:_goalNext.model_provider,
-          profile:_goalNext.profile,
-        });
-        if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
-      }
-      if(isActiveSession) _queueDrainSid=activeSid;
-      renderSessionList();
-      _setActivePaneIdleIfOwner();
-      playNotificationSound();
-      sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+      _finishDone();
     });
 
     source.addEventListener('stream_end',e=>{
@@ -1195,7 +1441,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _cancelPendingStreamRender();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
@@ -1281,7 +1527,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
-      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _cancelPendingStreamRender();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
@@ -1375,7 +1621,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _streamFinalized=true;
-    if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);clearTimeout(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+    _cancelPendingStreamRender();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
     _closeSource();

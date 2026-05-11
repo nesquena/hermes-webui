@@ -3742,3 +3742,11 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .log-line-debug{color:var(--muted);opacity:.75;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
+
+/* OpenWebUI-style streaming word fade (opt-in via Settings → Preferences).
+   Opacity-only fade; high-speed streams use a longer JS-driven wave duration. */
+.stream-fade-active .stream-fade-word{display:inline;will-change:opacity;}
+.stream-fade-word.is-new{animation:stream-fade-word-in var(--stream-fade-ms,140ms) ease-out both;}
+@keyframes stream-fade-word-in{from{opacity:0;}to{opacity:1;}}
+[data-live-assistant="1"]:last-child .msg-body.stream-fade-active > :last-child::after,
+[data-live-assistant="1"]:last-child .msg-body.stream-fade-active:not(:has(> *))::after{display:none;content:none;}
