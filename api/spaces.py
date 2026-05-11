@@ -3796,6 +3796,40 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
         result = enable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         return {"ok": True, "action": name, **result}
+    if name in {
+        "space.recovery.repair_module",
+        "space.recovery.repairmodule",
+        "space.module.recovery.repair",
+        "module.recovery.repair",
+        "space.admin.repair_module",
+        "space.admin.repairmodule",
+        "space.admin.module.repair",
+        "space.admin.recovery.repair_module",
+        "space.admin.recovery.repairmodule",
+    }:
+        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        result = queue_recovery_module_repair_event(
+            module_id,
+            data.get("payload") if "payload" in data else {},
+            prompt=data.get("prompt") or "",
+            session_id=data.get("session_id") or "",
+        )
+        return {"ok": True, "action": name, **result}
+    if name in {
+        "space.recovery.module_repair_events",
+        "space.recovery.modulerepairevents",
+        "space.recovery.repair_module_events",
+        "space.admin.module_repair_events",
+        "space.admin.recovery.module_repair_events",
+        "space.admin.recovery.repair_module_events",
+    }:
+        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        return {
+            "ok": True,
+            "action": name,
+            "module_id": module_id,
+            "events": list_recovery_module_repair_events(module_id, data.get("limit", 20)),
+        }
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "widgets": list_widgets(space_id)}
@@ -6029,6 +6063,96 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     return _module_summary(module)
 
 
+def _module_repair_event_summary(event: dict[str, Any], module_id: str | None = None) -> dict[str, Any] | None:
+    event_id = str(event.get("event_id") or "")
+    if not _event_id_is_safe(event_id) or event.get("space_id") != _RECOVERY_MODULE_EVENT_SPACE_ID:
+        return None
+    if _context_value(event.get("event_type"), 120) != "module.repair.queued":
+        return None
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    mid = _public_module_id_summary(details.get("module_id"))
+    if not mid or mid == "[REDACTED]" or (module_id and mid != module_id):
+        return None
+    payload_summary = _space_repair_payload_summary(details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}, max_depth=0)
+    return {
+        "schema_version": event.get("schema_version", SCHEMA_VERSION),
+        "event_id": event_id,
+        "module_id": mid,
+        "event_name": _space_repair_text_summary(details.get("event_name") or "agent.repair", 120),
+        "status": _space_repair_text_summary(details.get("status") or "queued", 80),
+        "prompt_preview": _space_repair_text_summary(details.get("prompt_preview"), 1000),
+        "payload_summary": payload_summary,
+        "created_at": _space_repair_created_at(event.get("created_at")),
+    }
+
+
+def list_recovery_module_repair_events(module_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    """Return newest-first metadata-only repair events for quarantined modules."""
+    if not spaces_enabled():
+        return []
+    mid = validate_module_id(module_id) if module_id else None
+    if mid:
+        read_recovery_module(mid)
+    max_events = _clamped_int(limit, 20, 1, 100)
+    summaries: list[dict[str, Any]] = []
+    _ensure_dirs()
+    for event_path in sorted(events_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(summaries) >= max_events:
+            break
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        summary = _module_repair_event_summary(event, mid)
+        if summary is not None:
+            summaries.append(summary)
+    summaries.sort(key=lambda event: _space_repair_created_at(event.get("created_at")), reverse=True)
+    return summaries[:max_events]
+
+
+def queue_recovery_module_repair_event(
+    module_id: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    prompt: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Queue a metadata-only repair request for a quarantined generated module."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    mid = validate_module_id(module_id)
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    module = read_recovery_module(mid)
+    name = "agent.repair"
+    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    event_id = _record_event(
+        _RECOVERY_MODULE_EVENT_SPACE_ID,
+        "module.repair.queued",
+        {
+            "module_id": _public_module_id_summary(mid),
+            "event_name": name,
+            "prompt_preview": prompt_preview,
+            "payload_summary": payload_summary,
+            "session_id": _space_repair_text_summary(session_id, 120),
+            "status": "queued",
+        },
+        snapshot=_module_summary(module),
+    )
+    return {
+        "queued": True,
+        "status": "queued",
+        "module_id": _public_module_id_summary(mid),
+        "event_name": name,
+        "event_id": event_id,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+    }
+
+
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
@@ -6264,6 +6388,21 @@ def recovery_snapshot() -> dict[str, Any]:
     modules, module_count, disabled_module_count = _collect_recovery_module_summaries(_RECOVERY_MODULE_SUMMARY_LIMIT)
     counts["module_count"] = module_count
     counts["disabled_module_count"] = disabled_module_count
+    for module_summary in modules:
+        module_id = module_summary.get("module_id")
+        if not module_id or module_id == "[REDACTED]":
+            continue
+        module_events = list_recovery_module_repair_events(module_id, limit=20)
+        if not module_events:
+            continue
+        latest_module_repair = module_events[0]
+        counts["queued_event_count"] += len(module_events)
+        module_summary["queued_repair_count"] = len(module_events)
+        module_summary["latest_repair_event"] = {
+            "event_id": _context_value(latest_module_repair.get("event_id"), 120),
+            "event_name": _context_value(latest_module_repair.get("event_name"), 120),
+            "status": _context_value(latest_module_repair.get("status") or "queued", 80),
+        }
     for manifest in manifests_dir().glob("*/space.json"):
         try:
             space = json.loads(manifest.read_text(encoding="utf-8"))

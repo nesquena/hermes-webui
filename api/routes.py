@@ -5026,6 +5026,29 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Module not found", 404)
 
+    if parsed.path == "/api/spaces/recovery/repair-module":
+        from api import spaces as capy_spaces
+        module_id = body.get("module_id") or body.get("id")
+        if not module_id:
+            return bad(handler, "Missing module_id")
+        payload = body["payload"] if "payload" in body else {}
+        try:
+            return j(
+                handler,
+                capy_spaces.queue_recovery_module_repair_event(
+                    module_id,
+                    payload,
+                    prompt=body.get("prompt") or "",
+                    session_id=body.get("session_id") or "",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Module not found", 404)
+
     if parsed.path == "/api/spaces/activate":
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():

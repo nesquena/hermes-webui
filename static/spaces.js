@@ -2442,6 +2442,19 @@
     return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
   }
 
+  function renderRecoveryModuleEventStatus(module){
+    const count = Number(module && module.queued_repair_count || 0);
+    if (!count) return '';
+    const latest = module && module.latest_repair_event && typeof module.latest_repair_event === 'object' ? module.latest_repair_event : {};
+    const parts = [];
+    const eventName = latest.event_name ? String(latest.event_name) : '';
+    const status = latest.status ? String(latest.status) : '';
+    const state = [eventName, status].filter(Boolean).join(' · ');
+    parts.push('Module repair queued:'+(state ? ' '+state : ' '+count));
+    if (latest.event_id) parts.push('Event: '+String(latest.event_id).slice(0, 12));
+    return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
+  }
+
   function recoveryCountLabel(count, singular){
     return Number(count || 0)+' '+singular+(Number(count || 0) === 1 ? '' : 's');
   }
@@ -2486,12 +2499,14 @@
       const moduleAction = actionModuleId ? (disabled
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'">Enable module</button>'
         : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'">Disable module</button>') : '';
+      const repairAction = actionModuleId ? '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'" data-module-name="'+escapeHtml(name || moduleId || 'module')+'">Ask Capy to repair module</button>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(name || moduleId || 'Untitled module')+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml([scope, moduleId].filter(Boolean).join(' · '))+'</div>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         (disabled ? '<div class="capy-spaces-muted">Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '')+'</div>' : '') +
+        renderRecoveryModuleEventStatus(module || {}) +
         (revision ? '<div class="capy-spaces-muted">Revision: '+escapeHtml(revision.slice(0, 12))+'</div>' : '') +
-        '</div><div class="capy-spaces-actions"><span class="capy-spaces-muted">metadata-only</span>'+moduleAction+'</div></div>';
+        '</div><div class="capy-spaces-actions"><span class="capy-spaces-muted">metadata-only</span>'+repairAction+moduleAction+'</div></div>';
     }).join('');
     return '<div class="capy-spaces-card"><h4>Quarantined modules</h4>' +
       '<div class="capy-spaces-muted">Generated module bodies stay quarantined for repair/rollback; this panel shows safe metadata only.</div>' +
@@ -2554,7 +2569,26 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'exportRecoverySpaceYaml' && action !== 'exportRecoverySpaceZip' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'exportRecoverySpaceYaml' && action !== 'exportRecoverySpaceZip' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
+    if (action === 'repairRecoveryModule') {
+      if (typeof showPromptDialog !== 'function') return;
+      const moduleId = button.dataset.moduleId || '';
+      const moduleName = button.dataset.moduleName || moduleId;
+      if (!moduleId) return;
+      const promptText = await showPromptDialog({
+        title: 'Ask Capy to repair module',
+        placeholder: 'Describe what is broken in '+moduleName,
+        confirmLabel: 'Queue repair',
+      });
+      if (!promptText) return;
+      await postSpacesJson('api/spaces/recovery/repair-module', {
+        module_id: moduleId,
+        prompt: promptText,
+        payload: {source: 'recovery-panel', action: 'repair-module'},
+      });
+      await loadCapySpacesRecovery();
+      return;
+    }
     if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
       if (typeof showConfirmDialog !== 'function') return;
       const moduleId = button.dataset.moduleId || '';

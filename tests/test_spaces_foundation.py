@@ -6421,6 +6421,95 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "<script" not in serialized
 
 
+def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-repair",
+            "name": "Module Repair Target",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    queued = spaces.queue_recovery_module_repair_event(
+        "module-repair",
+        {"source": "recovery-panel", "action": "repair-module", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="Repair module renderer without leaking SECRET_VALUE_DO_NOT_LEAK or api_key fields",
+        session_id="session token SECRET_VALUE_DO_NOT_LEAK",
+    )
+    snapshot = spaces.recovery_snapshot()
+    event = json.loads((spaces.events_dir() / f"{queued['event_id']}.json").read_text(encoding="utf-8"))
+    serialized = json.dumps({"queued": queued, "snapshot": snapshot, "event": event}).lower()
+
+    assert queued["queued"] is True
+    assert queued["status"] == "queued"
+    assert queued["module_id"] == "module-repair"
+    assert queued["event_name"] == "agent.repair"
+    assert queued["prompt_preview"] == "[REDACTED]"
+    assert queued["payload_summary"] == {"action": "repair-module"}
+    assert event["space_id"] == spaces._RECOVERY_MODULE_EVENT_SPACE_ID
+    assert event["event_type"] == "module.repair.queued"
+    assert event["details"]["module_id"] == "module-repair"
+    assert event["details"]["status"] == "queued"
+    assert snapshot["summary"]["queued_event_count"] == 1
+    assert snapshot["modules"][0]["queued_repair_count"] == 1
+    assert snapshot["modules"][0]["latest_repair_event"] == {
+        "event_id": queued["event_id"],
+        "event_name": "agent.repair",
+        "status": "queued",
+    }
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-repair-tool",
+            "name": "Module Repair Tool",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+        }
+    )
+
+    queued = spaces.run_space_tool(
+        "space.admin.recovery.repair_module",
+        {
+            "moduleId": "module-repair-tool",
+            "payload": {"action": "repair-module", "renderer": "<script>bad()</script>"},
+            "prompt": "Patch generated source without exposing bearer placeholder",
+        },
+    )
+    listed = spaces.run_space_tool("space.recovery.module_repair_events", {"module_id": "module-repair-tool"})
+    serialized = json.dumps({"queued": queued, "listed": listed}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.admin.recovery.repair_module"
+    assert queued["queued"] is True
+    assert queued["module_id"] == "module-repair-tool"
+    assert queued["payload_summary"] == {"action": "repair-module"}
+    assert listed["ok"] is True
+    assert listed["action"] == "space.recovery.module_repair_events"
+    assert listed["module_id"] == "module-repair-tool"
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert listed["events"][0]["prompt_preview"] == "[REDACTED]"
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_admin_recovery_module_aliases_accept_camelcase_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
