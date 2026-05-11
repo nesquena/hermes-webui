@@ -395,6 +395,12 @@
     return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) ? text : '';
   }
 
+  function safePathIdText(value){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    const unsafeActionIdPattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw[_-]?prompt|generated[_-]?code|^html$|^script$)/i;
+    return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) && !unsafeActionIdPattern.test(text) ? text : '';
+  }
+
   function safeDisplayMetadataText(value, fallback){
     const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
     if (!text) return fallback || '';
@@ -543,7 +549,7 @@
   }
 
   function renderSpaceAgentCanvasShell(space, widgets){
-    const spaceId = safeCreatorIdText(space && space.space_id ? space.space_id : '') || '';
+    const spaceId = safePathIdText(space && space.space_id ? space.space_id : '') || '';
     const rawName = space && space.name ? space.name : spaceId || 'Untitled Space';
     const name = safeDisplayMetadataText(rawName, spaceId || 'Untitled Space') || spaceId || 'Untitled Space';
     const revision = safeDisplayMetadataText(space && space.revision_event_id ? space.revision_event_id : '', 'none') || 'none';
@@ -564,7 +570,10 @@
       renderSpaceAgentExamplePrompts() +
       '<div class="capy-spaces-canvas-grid">'+widgetCards+'</div>' +
       '</div>' +
-      '<div class="capy-spaces-canvas-dock" aria-label="Docked Capy input"><span>Docked Capy input</span><div>Ask Capy to build, edit, or repair this Space</div></div>' +
+      '<div class="capy-spaces-canvas-dock" aria-label="Docked Capy input">' +
+      '<label><span>Docked Capy input</span><textarea id="capyCanvasCreatorPrompt" rows="2" autocomplete="off" placeholder="Ask Capy to build, edit, or repair this Space"></textarea></label>' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt">Preview safely</button>' +
+      '<div>Metadata-only creator preview · sandbox and visual QA required before commit</div></div>' +
       '</section>';
   }
 
@@ -1647,10 +1656,11 @@
     }
     if (action === 'previewCreatorSpec') {
       const root = document.getElementById('capySpacesRoot');
-      const promptInput = getRootInput(root, '#capyCreatorPrompt');
+      const promptSelector = button.dataset.creatorPromptSelector === '#capyCanvasCreatorPrompt' ? '#capyCanvasCreatorPrompt' : '#capyCreatorPrompt';
+      const promptInput = getRootInput(root, promptSelector);
       const targetInput = getRootInput(root, '#capyCreatorTargetSpaceId');
       const prompt = promptInput && promptInput.value ? String(promptInput.value) : '';
-      const targetSpaceId = safeCreatorIdText(targetInput && targetInput.value ? String(targetInput.value) : '');
+      const targetSpaceId = safePathIdText(button.dataset.spaceId || (targetInput && targetInput.value ? String(targetInput.value) : ''));
       const payload = {action: 'space.creator.preview', prompt: prompt};
       if (targetSpaceId) payload.space_id = targetSpaceId;
       const data = await postSpacesJson('api/spaces/tool', payload);

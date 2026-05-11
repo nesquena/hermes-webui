@@ -41,6 +41,7 @@ const values = {
   '#capySpaceAgentImportZipB64': 'UEsDBBQAAAAIAAxTSFsAAAAAAAAAAAAAAAALAAAAc3BhY2UueWFtbA==',
   '#capyWidgetNotesBody': 'Initial notes body',
   '#capyCreatorPrompt': 'Create an ops dashboard without leaking SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
+  '#capyCanvasCreatorPrompt': 'Add a safe timeline widget without renderer source data api_key SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
   '#capyCreatorTargetSpaceId': '',
 };
 const inputs = {};
@@ -86,6 +87,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces') {
     if (String(scenario || '').startsWith('resetBigBang')) {
       return response({ enabled: true, spaces: [{ space_id: 'big-bang-onboarding', name: 'Big Bang Onboarding', widget_count: 4, revision_event_id: 'rev-reset-bigbang' }] });
+    }
+    if (scenario === 'canvasCreatorPreviewDataSpace') {
+      return response({ enabled: true, spaces: [{ space_id: 'data-lab', name: 'Daily Data Dashboard', widget_count: 1, revision_event_id: 'rev-data-lab' }] });
     }
     return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
   }
@@ -855,6 +859,22 @@ global.fetch = async function(path, opts = {}) {
         { key: 'api_key', value_summary: { note: 'SECRET_VALUE_DO_NOT_LEAK' }, metadata_summary: { renderer: '<script>bad()</script>' } },
       ],
     } });
+  }
+  if (path === 'api/spaces/get?space_id=data-lab') {
+    return response({ space: {
+      space_id: 'data-lab',
+      name: 'Daily Data Dashboard',
+      description: 'Safe dashboard metadata',
+      revision_event_id: 'rev-data-lab',
+      widgets: [
+        { id: 'timeline', kind: 'status', title: 'Timeline', layout: { x: 1, y: 2, w: 4, h: 3, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      ],
+    } });
+  }
+  if (path === 'api/spaces/revisions?space_id=data-lab') {
+    return response({ revisions: [
+      { event_id: 'rev-data-lab', event_type: 'space.created', space_id: 'data-lab', created_at: 1709999900, details: { name: 'Daily Data Dashboard' }, restore_preview: { name: 'Daily Data Dashboard', widget_count: 1, widgets: [{ id: 'timeline', title: 'Timeline', kind: 'status' }] }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [] } },
+    ] });
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
@@ -1684,6 +1704,16 @@ async function dispatchWindowMessage(data, opts) {
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
+  } else if (scenario === 'canvasCreatorPreview') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('previewCreatorSpec', { spaceId: 'lab', creatorPromptSelector: '#capyCanvasCreatorPrompt' });
+  } else if (scenario === 'canvasCreatorPreviewDataSpace') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'data-lab' });
+    beforeHtml = root.innerHTML;
+    await click('previewCreatorSpec', { spaceId: 'data-lab', creatorPromptSelector: '#capyCanvasCreatorPrompt' });
   } else if (scenario === 'deleteSharedDataNoDialog') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -2202,6 +2232,49 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_canvas_docked_input_previews_existing_space_creator_spec(driver_path):
+    out = _run_spaces_scenario(driver_path, "canvasCreatorPreview")
+    post = next(
+        call
+        for call in out["calls"]
+        if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.creator.preview"
+    )
+
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Summary &lt;Widget&gt;" in out["rootHtml"]
+    assert "sandbox preview required" in out["rootHtml"]
+    assert json.loads(post["body"]) == {
+        "action": "space.creator.preview",
+        "prompt": "Add a safe timeline widget without renderer source data api_key SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>",
+        "space_id": "lab",
+    }
+    assert "data-capy-action=\"previewCreatorSpec\"" in out["beforeHtml"]
+    assert "data-creator-prompt-selector=\"#capyCanvasCreatorPrompt\"" in out["beforeHtml"]
+    assert "Add a safe timeline widget" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
+def test_spaces_ui_canvas_docked_input_preserves_path_safe_data_space_target(driver_path):
+    out = _run_spaces_scenario(driver_path, "canvasCreatorPreviewDataSpace")
+    post = next(
+        call
+        for call in out["calls"]
+        if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.creator.preview"
+    )
+
+    assert "Daily Data Dashboard" in out["beforeHtml"]
+    assert "data-space-id=\"data-lab\"" in out["beforeHtml"]
+    assert json.loads(post["body"])["space_id"] == "data-lab"
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
 
 
 def test_spaces_ui_widget_manager_shows_weather_prompt_hint(driver_path):
