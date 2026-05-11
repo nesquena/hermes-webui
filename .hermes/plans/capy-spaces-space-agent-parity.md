@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-10 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Root Space `layout` and `capabilities` metadata now use the same metadata-only safety boundary on create/update/read as widget/event summaries, preserving safe grid/capability labels while dropping generated renderer/html/script/source/data/API-auth, credential-like, and secret-looking sentinel fields before public responses, manifests, or revision snapshots can expose them. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Widget-level rollback now preserves explicit recovery/admin quarantine state when restoring an older revision snapshot, so time-travel cannot silently re-enable a disabled generated widget; explicit recovery enable controls remain the only way to clear quarantine. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): preserve widget quarantine on rollback`
+  - Added RED/GREEN backend coverage proving `restore_widget_revision(...)` restores a widget's safe title/layout from a revision snapshot while preserving the trusted current `recovery.disabled` / `disabled_reason` envelope until the explicit enable recovery control runs.
+  - Hardened widget-level rollback to reuse the existing recovery-state preservation helper already used by upsert/update/patch paths, keeping recovery snapshots metadata-only and omitting generated renderer/script/API-auth markers plus secret-looking sentinel values.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related rollback/quarantine regressions passed (`5 passed, 223 deselected`); full validation, screenshot artifact, commit hash, and live health are recorded in the scheduled sprint report for this run.
 
 - `fix(spaces): sanitize root space metadata`
   - Added RED/GREEN backend coverage proving root Space `layout` and `capabilities` metadata are sanitized at create/update time, reflected safely through `space.get`, and persisted into manifests/revision snapshots without generated renderer/html/script/source/data/API-auth, credential-like, or secret-looking sentinel fields.

@@ -4048,7 +4048,7 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
     replaced = False
     for widget in widgets:
         if isinstance(widget, dict) and widget.get("id") == wid:
-            restored_widgets.append(target_widget)
+            restored_widgets.append(_preserve_admin_disabled_widget_recovery(widget, target_widget))
             replaced = True
         elif isinstance(widget, dict):
             restored_widgets.append(_normalize_widget(widget))
