@@ -299,6 +299,27 @@ try{
     } else { toggleSidebarCollapsed(true); }
   }
 }catch(e){ try{ console.warn('sidebar-collapse restore failed', e); }catch(_){} }
+/* Sidebar-level click delegate so the ENTIRE 24px strip is a re-open
+   target — clicking anywhere on the collapsed sidebar expands it. The
+   chevron icon inside is just a visual cue (its own pointer-events are
+   suppressed via CSS so the click bubbles to the sidebar). */
+(function _wireSidebarClickToExpand(){
+  function bind(){
+    var sb = document.querySelector('.sidebar');
+    if(!sb || sb.__hermesClickWired) return;
+    sb.__hermesClickWired = true;
+    sb.addEventListener('click', function(ev){
+      var layout = document.querySelector('.layout');
+      if(!layout || !layout.classList.contains('sidebar-collapsed')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleSidebarCollapsed(false);
+    });
+  }
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded', bind, {once:true});
+  } else { bind(); }
+})();
 /* When the user clicks a rail tab to bring the chat panel back, also
    un-collapse the sidebar. Wrapped + late-bound — switchPanel is
    defined in panels.js which loads AFTER boot.js (defer order), so we

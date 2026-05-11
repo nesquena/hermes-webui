@@ -454,57 +454,68 @@
   .app-titlebar-hamburger:hover{background:var(--hover-bg);color:var(--text);}
   .sidebar{width:300px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:visible;flex-shrink:0;transition:width .18s ease, min-width .18s ease;}
   /* >>> hermes-fork: collapsed-sidebar state (HermesOS Cloud).
-     Triggered by the chevron in the chat panel head. The sidebar shrinks
-     to a thin strip (28px) showing ONLY the chevron-right re-open button —
-     NOT fully hidden, otherwise the user has no obvious affordance to
-     re-open. Title text + + button + filter + session list all hidden via
-     :not(...) below; the chevron stays anchored at the top. */
+     The sidebar shrinks to a thin 24px strip. The ENTIRE strip is the
+     click target (cursor: pointer everywhere, click anywhere expands).
+     A tiny static chevron sits at the top as a visual cue; it's NOT a
+     standalone button anymore — no bg, no tooltip, no hover rectangle.
+     This avoids the "button-in-a-strip" inset-rectangle weirdness. */
   .layout.sidebar-collapsed .sidebar{
-    width:28px;
-    min-width:28px;
+    width:24px;
+    min-width:24px;
     overflow:hidden;
-    /* Soft hairline between the rail and the strip so the strip doesn't
-       read as a floating orphan. */
     border-right:1px solid var(--border);
+    cursor:pointer;
+    transition:width .18s ease,min-width .18s ease,background .15s ease;
   }
-  /* Hide everything in the active panel-view except the chevron button. */
+  /* Make the strip subtly highlight on hover so the user reads "clickable". */
+  .layout.sidebar-collapsed .sidebar:hover{
+    background:var(--hover-bg);
+  }
+  /* Hide everything inside the active panel except the chevron button. */
   .layout.sidebar-collapsed .sidebar .panel-view.active > :not(.panel-head),
   .layout.sidebar-collapsed .sidebar .panel-view.active > .panel-head > :not(.panel-head-actions),
   .layout.sidebar-collapsed .sidebar .panel-view.active > .panel-head > .panel-head-actions > :not(#btnCollapseSidebar){
     display:none !important;
   }
-  /* Panel-head becomes a compact, centered tab-tab-tab strip. No border-bottom
-     (would look like a horizontal rule cutting the thin strip). */
+  /* Panel-head spans the full strip; no padding (button positions itself). */
   .layout.sidebar-collapsed .sidebar .panel-view.active > .panel-head{
-    padding:8px 0;
+    padding:10px 0 0;
     justify-content:center;
+    align-items:flex-start;
     border-bottom:none;
     background:transparent;
+    pointer-events:none;  /* let clicks fall through to .sidebar's handler */
   }
   .layout.sidebar-collapsed .sidebar .panel-view.active > .panel-head .panel-head-actions{
-    margin:0;
-    padding:0;
-    gap:0;
+    margin:0;padding:0;gap:0;pointer-events:none;
   }
-  /* Override the loud accent-bg hover of .panel-head-btn for this single
-     button — in the thin strip a chunky gold rectangle screams. Subtle
-     muted bg + slightly smaller chevron read as "pull-tab to expand". */
+  /* The chevron is now a non-interactive icon, not a button. The whole
+     strip handles the click via a delegated JS listener on .sidebar. */
   .layout.sidebar-collapsed .sidebar #btnCollapseSidebar{
-    width:22px;
-    height:22px;
+    width:16px;
+    height:16px;
     color:var(--muted);
     background:transparent;
-    opacity:.55;
-    transition:opacity .15s,background .15s,color .15s;
+    opacity:.45;
+    pointer-events:none;  /* sidebar-level handler captures the click */
+    border:none;
+    padding:0;
   }
-  .layout.sidebar-collapsed .sidebar #btnCollapseSidebar:hover{
-    background:var(--hover-bg);
+  .layout.sidebar-collapsed .sidebar:hover #btnCollapseSidebar{
+    opacity:.9;
     color:var(--text);
-    opacity:1;
+    background:transparent;
   }
   .layout.sidebar-collapsed .sidebar #btnCollapseSidebar svg{
-    width:11px;
-    height:11px;
+    width:9px;
+    height:9px;
+  }
+  /* Suppress the has-tooltip popup when collapsed — the strip's affordance
+     IS the visual cue; a floating gold popup near a 24px strip looks
+     disproportionate. */
+  .layout.sidebar-collapsed .sidebar #btnCollapseSidebar::after,
+  .layout.sidebar-collapsed .sidebar #btnCollapseSidebar::before{
+    display:none !important;
   }
   .layout.sidebar-collapsed #sidebarResize{display:none;}
   /* Chevron flips to chevron-right (→) when collapsed so the SAME button
