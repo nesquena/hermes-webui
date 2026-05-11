@@ -1069,6 +1069,14 @@
     return String(event && event.origin || '') === 'null';
   }
 
+  function runtimeMessageSelectorMatches(data, snakeKey, camelKey, expected){
+    if (!data || typeof data !== 'object') return true;
+    const values = [];
+    if (Object.prototype.hasOwnProperty.call(data, snakeKey)) values.push(runtimeTokenPart(data[snakeKey], ''));
+    if (Object.prototype.hasOwnProperty.call(data, camelKey)) values.push(runtimeTokenPart(data[camelKey], ''));
+    return values.every(function(value){ return value && value === expected; });
+  }
+
   function prependRuntimeStatus(html){
     const root = document.getElementById('capySpacesRoot');
     if (root) root.innerHTML = html + root.innerHTML;
@@ -1082,8 +1090,8 @@
     const session = token ? widgetRuntimeSessions[token] : null;
     if (!session) return;
     if (!runtimeSessionStillVisible(token)) return;
-    if (data.space_id && runtimeTokenPart(data.space_id, '') !== session.spaceId) return;
-    if (data.widget_id && runtimeTokenPart(data.widget_id, '') !== session.widgetId) return;
+    if (!runtimeMessageSelectorMatches(data, 'space_id', 'spaceId', session.spaceId)) return;
+    if (!runtimeMessageSelectorMatches(data, 'widget_id', 'widgetId', session.widgetId)) return;
     if (typeInfo.blocked) {
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked', 'Blocked by Capy runtime contract; no widget event was queued.'));
       return;

@@ -1338,6 +1338,23 @@ async function dispatchWindowMessage(data, opts) {
       source: 'eval(SECRET_VALUE_DO_NOT_LEAK)',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeMismatchedCamelCaseSelectors') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      spaceId: 'other-lab',
+      widgetId: 'other-widget',
+      prompt: 'Queue this prompt with mismatched selectors and SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+    });
   } else if (scenario === 'runtimePromptCancelled') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2688,6 +2705,21 @@ def test_spaces_ui_sandbox_postmessage_rejects_conflicting_message_type_aliases(
     assert "Sandbox prompt queued" not in out["rootHtml"]
     assert "Sandbox message blocked: capy:raw:eval" not in out["rootHtml"]
     assert "eval(" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_mismatched_camelcase_selectors(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeMismatchedCamelCaseSelectors")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this prompt" not in out["rootHtml"]
+    assert "other-lab" not in out["rootHtml"]
+    assert "other-widget" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
