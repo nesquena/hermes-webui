@@ -22,6 +22,10 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 // Navigations populate './' only after a successful non-redirect network load.
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
+  // >>> hermes-fork: iframe shim must be pre-cached so iframe loads warm
+  // (the shim is the FIRST script in index.html — every other request
+  // depends on it being installed before any fetch goes out). <<<
+  './static/iframe-shim.js' + VQ,
   './static/style.css' + VQ,
   './static/boot.js' + VQ,
   './static/ui.js' + VQ,

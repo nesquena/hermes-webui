@@ -76,6 +76,26 @@ When upstream rebases, conflicts only ever land inside these blocks. Resolve
 | `2660` | `first-run identity-discovery bootstrap (HermesOS Cloud)` | Resolve `api.bootstrap.build_first_run_system_prompt(_profile_home_path)` and combine with personality prompt into `agent.ephemeral_system_prompt` for the turn |
 | `~3390` | `mark first-run sentinel only after a clean done` | Sentinel write is deferred until **after** `put('done', ...)` so a buggy first message (bad API key, rate limit, provider 5xx, SSE drop) never burns the bootstrap. Subsequent retries re-fire until the agent produces a real reply. |
 
+### `static/iframe-shim.js` (whole file is a fork addition)
+
+| Symbol / behaviour | Purpose |
+|---|---|
+| `__hermesIframeShimInstalled` guard | Idempotent re-install — re-reads `#iframe_token` if the dashboard re-mints a URL, keeps the patched transports in place. |
+| Hash → sessionStorage handoff | Reads `iframe_token=` from `location.hash` on first paint, sessions-stores the bearer, wipes the hash so the URL bar doesn't expose it. |
+| `fetch()` wrapper | Adds `Authorization: Bearer <token>` to every same-origin request that doesn't already have one. |
+| `XMLHttpRequest.open` wrapper | Same — sets the header right before `.send()`. |
+| `EventSource` wrapper | SSE has no header API; instead appends `?token=<bearer>` to same-origin URLs. **Requires** the dashboard Caddyfile to add an `@authQueryToken query token=<bearer>` matcher so SSE auth lands. |
+| `WebSocket` wrapper | Same `?token=` URL approach as EventSource. |
+| Same-origin guard | Cross-origin requests (CDN fonts, analytics) are passed through unmodified — the bearer never leaks off-host. |
+
+Loaded by `static/index.html` as the FIRST executable script (right after the `<base>`-href bootstrap). Synchronous on purpose — every later script issues fetch/XHR/SSE/WS that needs the patches in place.
+
+**Direct-URL users** (typing the gateway URL into a tab with no parent iframe / no `#iframe_token=` hash) are unaffected — the shim no-ops and falls back to whatever auth path the Caddyfile is configured for (cookie / forward_auth / bearer header).
+
+**Companion in dashboard repo (still required):** `dashboard/src/lib/services/webui-instance-builder.ts` Caddyfile template needs two updates that don't live in this repo:
+1. Add `/` to the `@public path …` list so the SPA shell loads unauthenticated (the shim then installs the bearer for everything else).
+2. Add `@authQueryToken query token=<bearer>` matcher routing to webui so the shim's `?token=` URLs on EventSource/WebSocket actually authenticate.
+
 ### `api/bootstrap.py` (whole file is a fork addition)
 
 | Symbol | Purpose |

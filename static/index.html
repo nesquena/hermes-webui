@@ -20,6 +20,14 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
+<!-- >>> hermes-fork: iframe bearer-from-hash shim (HermesOS Cloud)
+     Must run BEFORE any other script that issues fetch/XHR/SSE/WS. Reads
+     #iframe_token=<bearer> from location.hash, sessions-stores it, wipes the
+     hash, and patches the four request transports to inject the bearer.
+     Synchronous (non-defer) on purpose — every later script depends on the
+     patched transports being in place. -->
+<script src="static/iframe-shim.js?v=__WEBUI_VERSION__"></script>
+<!-- <<< hermes-fork -->
 <script>/* >>> hermes-fork: HermesOS skin whitelist + default + migration (HermesOS Cloud)
    - 'hermesos' added to the allowed skin set
    - Default for fresh installs (no localStorage)
