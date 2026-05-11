@@ -563,6 +563,7 @@
       '<div class="capy-spaces-canvas-actions">' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Menu</button>' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Share</button>' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="openSafeRecovery" data-space-id="'+escapeHtml(spaceId)+'">Recovery</button>' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Rearrange</button>' +
       '</div></div>' +
       '<div class="capy-spaces-canvas-stage">' +
@@ -1571,6 +1572,10 @@
       const panel = button.dataset.systemPanel || '';
       if (['chat', 'workspaces', 'tasks', 'memory', 'settings'].indexOf(panel) === -1) return;
       if (typeof switchPanel === 'function') await switchPanel(panel);
+      return;
+    }
+    if (action === 'openSafeRecovery') {
+      await loadCapySpacesRecovery();
       return;
     }
     if (action === 'loadWidgets') {

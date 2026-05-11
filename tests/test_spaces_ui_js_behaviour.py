@@ -1704,6 +1704,11 @@ async function dispatchWindowMessage(data, opts) {
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
+  } else if (scenario === 'openSpaceCanvasRecovery') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('openSafeRecovery', { spaceId: 'lab' });
   } else if (scenario === 'canvasCreatorPreview') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -2232,6 +2237,32 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceCanvasRecovery")
+
+    assert "Recovery" in out["beforeHtml"]
+    assert "data-capy-action=\"openSafeRecovery\"" in out["beforeHtml"]
+    assert "data-space-id=\"lab\"" in out["beforeHtml"]
+    assert {"path": "api/spaces/recovery", "method": "GET", "body": ""} in out["calls"]
+
+    recovery_html = out["recoveryHtml"]
+    assert "Safe recovery" in recovery_html
+    assert "Recovery hard gate" in recovery_html
+    assert "Generated widgets rendered: false" in recovery_html
+    assert "Restore revision" in recovery_html
+    assert "Disable widget" in recovery_html
+    assert "Ask Capy to repair" in recovery_html
+    assert "metadata-only recovery" in recovery_html
+
+    combined = out["rootHtml"] + recovery_html
+    assert "<script>" not in combined
+    assert "renderer" not in combined.lower()
+    assert "api_key" not in combined.lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in combined
+    assert "raw prompt" not in recovery_html.lower()
+    assert "generated code" not in recovery_html.lower()
 
 
 def test_spaces_ui_canvas_docked_input_previews_existing_space_creator_spec(driver_path):
