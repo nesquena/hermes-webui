@@ -107,6 +107,18 @@ Loaded by `static/index.html` as the FIRST executable script (right after the `<
 
 **Companion in dashboard repo (kept, scoped):** `dashboard/src/components/chat/hooks/chat-bootstrap.ts` continues to serve the legacy gateway-backend chat surface (when `instance.backend !== "webui"`). WebUI-backed deploys are handled by this module instead. Either path delivers the same prompt text.
 
+### `static/ui.js`
+
+| Line | Marker | Purpose |
+|---|---|---|
+| `~1148` | `provider chip — prefer the real provider name baked into the model display name` | When a model row's group label is "Custom" / "Custom (live)" but the model name carries a "Provider: …" prefix (e.g. "MoonshotAI: Kimi K2.5 (Lightning)"), extract the prefix and use it as the providerChip text instead of "Custom". Stops every model row in the dropdown from showing an identical "Custom" pill when the deploy is routed through an OpenAI-compat custom endpoint (CrofAI, CometAPI, Bankr, Venice, etc.). |
+
+### `static/boot.js`
+
+| Line | Marker | Purpose |
+|---|---|---|
+| `~227` (`toggleSidebarCollapsed`) | `sidebar collapse toggle (HermesOS Cloud)` | New function that toggles `.sidebar-collapsed` on `.layout`. Persists in `localStorage[hermes-sidebar-collapsed]`. Also wraps `switchPanel()` so clicking any rail tab auto-uncollapses the sidebar. Mirrors the workspace-panel collapse pattern. Hooked from the chat panel head chevron button in index.html. |
+
 ### `static/panels.js`
 
 | Line | Marker | Purpose |
