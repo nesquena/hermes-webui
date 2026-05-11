@@ -9897,6 +9897,188 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
     assert "capy:debug:dump" not in serialized
 
 
+def test_widget_event_route_accepts_camelcase_runtime_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "camel-route-runtime", "name": "Camel Route Runtime"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "messageType": "capy:agent:prompt",
+            "prompt": "safe sandbox prompt",
+            "payload": {
+                "query": "safe camel route prompt",
+                "renderer": "<script>bad()</script>",
+                "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["space_id"] == created["space_id"]
+    assert body["widget_id"] == "sandbox"
+    assert body["event_name"] == "agent.prompt"
+    assert body["payload_summary"]["query"] == "safe camel route prompt"
+    assert len(events) == 1
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_widget_event_route_rejects_conflicting_selector_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "selector-conflict-route", "name": "Selector Conflict Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "space_id": created["space_id"],
+            "spaceId": "other-space",
+            "widget_id": "sandbox",
+            "widgetId": "other-widget",
+            "event_name": "agent.prompt",
+            "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {"query": "safe", "renderer": "<script>bad()</script>"},
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert not events
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_widget_event_route_rejects_conflicting_runtime_message_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "message-conflict-route", "name": "Message Conflict Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "messageType": "capy:ready",
+            "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "message_type": "capy:agent:prompt",
+                "source": "eval(SECRET_VALUE_DO_NOT_LEAK)",
+                "renderer": "<script>bad()</script>",
+            },
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "runtime contract" in body["error"]
+    assert not events
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "capy:raw" not in serialized
+
+
+def test_widget_event_route_rejects_conflicting_event_name_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "event-conflict-route", "name": "Event Conflict Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "event_name": "agent.prompt",
+            "eventName": "widget.refresh",
+            "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {"query": "safe", "renderer": "<script>bad()</script>"},
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert not events
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_widget_event_route_rejects_shadowed_top_level_runtime_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shadowed-runtime-route", "name": "Shadowed Runtime Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "messageType": "capy:raw:eval",
+            "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "messageType": "capy:agent:prompt",
+                "query": "safe",
+                "source": "eval(SECRET_VALUE_DO_NOT_LEAK)",
+            },
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "runtime contract" in body["error"]
+    assert not events
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "capy:raw" not in serialized
+
+
+def test_widget_event_route_preserves_benign_payload_type_with_runtime_message_alias(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "benign-type-route", "name": "Benign Type Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "messageType": "capy:agent:prompt",
+            "prompt": "safe sandbox prompt",
+            "payload": {"type": "form.submit", "query": "safe benign type"},
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["payload_summary"]["type"] == "form.submit"
+    assert body["payload_summary"]["query"] == "safe benign type"
+    assert len(events) == 1
+
+
 def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Route Events"})
