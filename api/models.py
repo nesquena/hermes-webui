@@ -335,6 +335,10 @@ class Session:
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                 parent_session_id: str=None,
+                worktree_path=None,
+                worktree_branch=None,
+                worktree_repo_root=None,
+                worktree_created_at=None,
                 enabled_toolsets=None,
                 composer_draft=None,
                 **kwargs):
@@ -370,6 +374,10 @@ class Session:
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
         self.parent_session_id = parent_session_id
+        self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
+        self.worktree_branch = str(worktree_branch) if worktree_branch else None
+        self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
+        self.worktree_created_at = worktree_created_at
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.raw_source = kwargs.get('raw_source')
@@ -417,6 +425,7 @@ class Session:
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
+            'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
             'enabled_toolsets', 'composer_draft',
         ]
@@ -584,6 +593,12 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            **({
+                'worktree_path': self.worktree_path,
+                'worktree_branch': self.worktree_branch,
+                'worktree_repo_root': self.worktree_repo_root,
+                'worktree_created_at': self.worktree_created_at,
+            } if self.worktree_path else {}),
             'user_message_count': sum(
                 1 for message in self.messages if _message_role(message) == 'user'
             ) if isinstance(self.messages, list) else 0,
@@ -896,7 +911,7 @@ def get_session(sid, metadata_only=False):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -911,7 +926,9 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
 
     Crash-safety: if the process exits between session creation and first
     message, the session is lost.  Since it had no messages, there is
-    nothing to lose.
+    nothing to lose.  Worktree-backed sessions are the exception: they are
+    saved immediately because creating the session also creates real
+    filesystem state that must remain discoverable after restart.
 
     *profile* — when supplied by the caller (e.g. from the request body sent
     by the active browser tab), it is used directly so that concurrent clients
@@ -927,18 +944,26 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         except ImportError:
             profile = None
     effective_model = model or get_effective_default_model()
+    wt = worktree_info if isinstance(worktree_info, dict) else None
+    workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
-        workspace=workspace or get_last_workspace(),
+        workspace=workspace_path or get_last_workspace(),
         model=effective_model,
         model_provider=model_provider,
         profile=profile,
         project_id=project_id,
+        worktree_path=wt.get('path') if wt else None,
+        worktree_branch=wt.get('branch') if wt else None,
+        worktree_repo_root=wt.get('repo_root') if wt else None,
+        worktree_created_at=wt.get('created_at') if wt else None,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
+    if wt:
+        s.save()
     return s
 
 def _hide_from_default_sidebar(session: dict) -> bool:
@@ -1042,6 +1067,7 @@ def all_sessions(diag=None):
                 and s.get('message_count', 0) == 0
                 and not s.get('active_stream_id')
                 and not s.get('has_pending_user_message')
+                and not s.get('worktree_path')
             )]
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
@@ -1077,6 +1103,7 @@ def all_sessions(diag=None):
         and len(s.messages) == 0
         and not s.active_stream_id
         and not s.pending_user_message
+        and not getattr(s, 'worktree_path', None)
     )]
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:

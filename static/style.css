@@ -2657,7 +2657,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .session-pin-indicator svg{width:10px;height:10px;}
 
 /* ── Fork lineage indicator (inline, subtle until row focus/hover) ── */
-.session-branch-indicator{
+.session-branch-indicator,
+.session-worktree-indicator{
   flex-shrink:0;
   width:12px;
   height:12px;
@@ -2670,14 +2671,22 @@ main.main.showing-logs > #mainLogs{display:flex;}
   pointer-events:none;
   transition:opacity .15s ease,color .15s ease;
 }
-.session-branch-indicator svg{width:12px;height:12px;}
+.session-branch-indicator svg,
+.session-worktree-indicator svg{width:12px;height:12px;}
 .session-item:hover .session-branch-indicator,
+.session-item:hover .session-worktree-indicator,
 .session-item:focus-within .session-branch-indicator,
+.session-item:focus-within .session-worktree-indicator,
 .session-item.menu-open .session-branch-indicator{
   opacity:.85;
   color:var(--text);
 }
-.session-item.active .session-branch-indicator{color:var(--accent-text);}
+.session-item.menu-open .session-worktree-indicator{
+  opacity:.85;
+  color:var(--text);
+}
+.session-item.active .session-branch-indicator,
+.session-item.active .session-worktree-indicator{color:var(--accent-text);}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}

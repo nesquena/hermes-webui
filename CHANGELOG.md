@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added worktree-backed conversation creation for development sessions: the workspace menu can now create a new conversation in a Hermes Agent git worktree, persist the worktree path/branch/repo metadata on the session, and show a sidebar worktree indicator without adding automatic cleanup yet (#1955).
+
 ## [v0.51.43] — 2026-05-11 — Release S (fused community PR — desktop sidebar collapse)
 
 ### Added

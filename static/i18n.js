@@ -151,6 +151,11 @@ const LOCALES = {
     model_group_configured: 'Configured',
     ws_search_placeholder: 'Search workspaces…',
     ws_no_results: 'No workspaces found',
+    workspace_new_worktree_conversation: 'New conversation in worktree',
+    workspace_new_worktree_conversation_meta: 'Create an isolated git worktree for this workspace.',
+    workspace_worktree_created: 'Worktree conversation created',
+    workspace_worktree_failed: 'Worktree creation failed: ',
+    session_worktree_badge: 'Worktree',
     model_scope_advisory: 'Applies to this conversation from your next message.',
     model_scope_toast: 'Applies to this conversation from your next message.',
     // commands.js
@@ -1236,6 +1241,11 @@ const LOCALES = {
     model_group_configured: '設定済み',
     ws_search_placeholder: 'ワークスペースを検索…',
     ws_no_results: 'ワークスペースが見つかりません',
+    workspace_new_worktree_conversation: 'worktree で新しい会話',
+    workspace_new_worktree_conversation_meta: 'このワークスペース用に隔離された git worktree を作成します。',
+    workspace_worktree_created: 'worktree 会話を作成しました',
+    workspace_worktree_failed: 'worktree の作成に失敗しました: ',
+    session_worktree_badge: 'Worktree',
     model_scope_advisory: '次回のメッセージからこの会話に適用されます。',
     model_scope_toast: '次回のメッセージからこの会話に適用されます。',
     // commands.js
@@ -2383,6 +2393,11 @@ const LOCALES = {
     model_group_configured: 'Настроенные',
     ws_search_placeholder: 'Поиск рабочих пространств…',
     ws_no_results: 'Рабочие пространства не найдены',
+    workspace_new_worktree_conversation: 'Новый разговор в worktree',
+    workspace_new_worktree_conversation_meta: 'Создать изолированный git worktree для этого рабочего пространства.',
+    workspace_worktree_created: 'Разговор в worktree создан',
+    workspace_worktree_failed: 'Не удалось создать worktree: ',
+    session_worktree_badge: 'Worktree',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
     session_toolsets: 'Session Toolsets', // TODO: translate
@@ -3320,6 +3335,11 @@ const LOCALES = {
     model_group_configured: 'Configurados',
     ws_search_placeholder: 'Buscar espacios de trabajo…',
     ws_no_results: 'No se encontraron espacios de trabajo',
+    workspace_new_worktree_conversation: 'Nueva conversación en worktree',
+    workspace_new_worktree_conversation_meta: 'Crear un git worktree aislado para este espacio de trabajo.',
+    workspace_worktree_created: 'Conversación en worktree creada',
+    workspace_worktree_failed: 'Error al crear worktree: ',
+    session_worktree_badge: 'Worktree',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
     session_toolsets_global: 'Global (default)', // TODO: translate
@@ -4882,6 +4902,11 @@ const LOCALES = {
     model_group_configured: 'Konfiguriert',
     ws_search_placeholder: 'Arbeitsbereiche suchen…',
     ws_no_results: 'Keine Arbeitsbereiche gefunden',
+    workspace_new_worktree_conversation: 'Neue Unterhaltung in Worktree',
+    workspace_new_worktree_conversation_meta: 'Erstellt einen isolierten git worktree für diesen Arbeitsbereich.',
+    workspace_worktree_created: 'Worktree-Unterhaltung erstellt',
+    workspace_worktree_failed: 'Worktree-Erstellung fehlgeschlagen: ',
+    session_worktree_badge: 'Worktree',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
     session_toolsets_global: 'Global (default)', // TODO: translate
@@ -5358,6 +5383,11 @@ const LOCALES = {
     model_group_configured: '已配置',
     ws_search_placeholder: '搜索工作区…',
     ws_no_results: '未找到工作区',
+    workspace_new_worktree_conversation: '在 worktree 中新建对话',
+    workspace_new_worktree_conversation_meta: '为此工作区创建隔离的 git worktree。',
+    workspace_worktree_created: '已创建 worktree 对话',
+    workspace_worktree_failed: 'Worktree 创建失败：',
+    session_worktree_badge: 'Worktree',
     session_toolsets: 'Session 工具集',
     session_toolsets_desc: '限制此会话可用工具（留空 = 使用全局配置）',
     session_toolsets_global: '全局（默认）',
@@ -7451,6 +7481,11 @@ const LOCALES = {
     model_group_configured: 'Configurados',
     ws_search_placeholder: 'Buscar espaços de trabalho…',
     ws_no_results: 'Nenhum espaço de trabalho encontrado',
+    workspace_new_worktree_conversation: 'Nova conversa em worktree',
+    workspace_new_worktree_conversation_meta: 'Cria um git worktree isolado para este espaço de trabalho.',
+    workspace_worktree_created: 'Conversa em worktree criada',
+    workspace_worktree_failed: 'Falha ao criar worktree: ',
+    session_worktree_badge: 'Worktree',
     // commands.js
     cmd_clear: 'Limpar mensagens da conversa',
     cmd_compress: 'Comprimir manualmente o contexto (uso: /compress [tópico])',
@@ -8407,6 +8442,11 @@ const LOCALES = {
     model_group_configured: '구성됨',
     ws_search_placeholder: '워크스페이스 검색…',
     ws_no_results: '워크스페이스를 찾을 수 없습니다',
+    workspace_new_worktree_conversation: 'worktree에서 새 대화',
+    workspace_new_worktree_conversation_meta: '이 워크스페이스용 격리된 git worktree를 만듭니다.',
+    workspace_worktree_created: 'worktree 대화가 생성되었습니다',
+    workspace_worktree_failed: 'worktree 생성 실패: ',
+    session_worktree_badge: 'Worktree',
     model_scope_advisory: '다음 메시지부터 이 대화에 적용됩니다.',
     model_scope_toast: '다음 메시지부터 이 대화에 적용됩니다.',
     // commands.js

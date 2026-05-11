@@ -340,7 +340,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   }
 }
 
-async function newSession(flash){
+async function newSession(flash, options={}){
   updateQueueBadge();
   S.toolCalls=[];
   clearLiveToolCards();
@@ -371,6 +371,7 @@ async function newSession(flash){
     workspace:inheritWs,
     profile:S.activeProfile||'default',
   };
+  if(options&&options.worktree) reqBody.worktree=true;
   if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
   S.session=data.session;S.messages=data.session.messages||[];
@@ -2580,6 +2581,14 @@ function renderSessionListFromCache(){
       pinInd.className='session-pin-indicator';
       pinInd.innerHTML=ICONS.pin;
       titleRow.appendChild(pinInd);
+    }
+    if(s.worktree_path){
+      const wtInd=document.createElement('span');
+      wtInd.className='session-worktree-indicator';
+      wtInd.innerHTML=li('git-branch',12);
+      const wtLabel=(typeof t==='function'?t('session_worktree_badge'):'Worktree');
+      wtInd.title=`${wtLabel}: ${s.worktree_branch||s.worktree_path}`;
+      titleRow.appendChild(wtInd);
     }
     // Parent session indicator for forked/branched sessions (#465)
     if(s.parent_session_id){
