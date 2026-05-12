@@ -58,3 +58,9 @@ docs/*
 graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
+# CocoIndex caches
+/.cocoindex_code/
+/.cocoindex-secondbrain/
+
+# Local memory capture/quarantine artifacts
+/.memory-quarantine/

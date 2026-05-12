@@ -37,7 +37,7 @@ def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0)
     upstream_advanced>0 to make the remote ahead.
     """
     upstream = tmp_path / 'upstream.git'
-    subprocess.run(['git', 'init', '--quiet', '--bare', str(upstream)], check=True)
+    subprocess.run(['git', 'init', '--quiet', '--bare', '--initial-branch=master', str(upstream)], check=True)
 
     seed = tmp_path / 'seed'
     subprocess.run(['git', 'init', '--quiet', '--initial-branch=master', str(seed)], check=True)

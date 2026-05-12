@@ -392,10 +392,15 @@ def test_message_footer_timestamp_uses_server_tz():
     )
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     data = json.loads(proc.stdout)
-    # Should display in UTC+8, not America/New_York.
-    # 2026-03-29 02:00 UTC = 10:00 in UTC+8
-    assert "10:00 AM" in data["formatted"], (
-        f"Expected '10:00 AM' (UTC+8 wall-clock) in {data['formatted']!r}"
+    # Should display in UTC+8, not America/New_York.  Keep this assertion
+    # locale-independent: Node may render the same wall-clock as "10:00 AM"
+    # in en-US or "3月29日 10:00" in Japanese locales.
+    # 2026-03-29 02:00 UTC = 10:00 in UTC+8; America/New_York would be 22:00.
+    assert "10:00" in data["formatted"], (
+        f"Expected a UTC+8 10:00 wall-clock in {data['formatted']!r}"
+    )
+    assert "22:00" not in data["formatted"] and "10:00 PM" not in data["formatted"], (
+        f"Formatted timestamp appears to use local/New_York time: {data['formatted']!r}"
     )
 
 
