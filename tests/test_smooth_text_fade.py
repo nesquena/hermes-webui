@@ -84,8 +84,7 @@ let _streamFadeLastArrivalMs=0;
 let _streamFadeArrivalWps=0;
 let _streamFadeLatestAnimationEndAt=0;
 let _streamFadeLastRevealCount=0;
-let _streamFadeWordCount=0;
-let _streamFadeWordBornAt=[];
+let _streamFadeAppendOffset=0;
 const _STREAM_FADE_MS=140;
 const _STREAM_FADE_WAVE_MS=320;
 const _STREAM_FADE_MAX_STAGGER_MS=520;
@@ -148,7 +147,7 @@ def test_fade_helpers_and_constants_exist():
         "_streamFadeNextText",
         "_streamFadeWordCountOf",
         "_renderStreamingFadeMarkdown",
-        "_wrapStreamingFadeWords",
+        "_streamFadeRenderer",
         "_streamFadeSkipNode",
         "_drainStreamFadeBeforeDone",
     ]:
@@ -161,7 +160,7 @@ def test_fade_helpers_and_constants_exist():
             "const _STREAM_FADE_WAVE_MS=320",
             "const _STREAM_FADE_MAX_STAGGER_MS=520",
             "_streamFadeVisibleText",
-            "_streamFadeWordBornAt",
+            "_streamFadeAppendOffset",
             "_streamFadeArrivalWps",
         ],
     )
@@ -176,7 +175,7 @@ def test_schedule_render_keeps_default_smd_path_when_fade_is_off():
     assert "?16:66" in compact(block)
 
 
-def test_fade_renderer_uses_playout_buffer_and_markdown_rerender():
+def test_fade_renderer_uses_playout_buffer_and_incremental_markdown():
     next_block = function_block(MESSAGES_JS, "_streamFadeNextText")
     render_block = function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
 
@@ -196,26 +195,31 @@ def test_fade_renderer_uses_playout_buffer_and_markdown_rerender():
         [
             "_streamFadeNextText(displayText)",
             "if(!next.changed) return next.caughtUp",
-            "renderMd ? renderMd(next.text||'')",
+            "_smdNewParser(assistantBody,true)",
+            "_smdWrite(next.text,true)",
             "stream-fade-active",
-            "_wrapStreamingFadeWords(assistantBody)",
-            "_sanitizeSmdLinks(assistantBody)",
         ],
     )
+    assert "renderMd ? renderMd(next.text||'')" in render_block
+    assert "_wrapStreamingFadeWords" not in MESSAGES_JS
 
 
-def test_fade_animation_state_survives_markdown_rerenders():
-    block = function_block(MESSAGES_JS, "_wrapStreamingFadeWords")
+def test_fade_renderer_animates_new_text_and_cleans_up_spans():
+    block = function_block(MESSAGES_JS, "_streamFadeRenderer")
     assert_contains_all(
         block,
         [
-            "_streamFadeWordBornAt[wordIndex]",
-            "ageMs",
+            "renderer.add_text",
+            "waveStepMs",
             "animationDelay",
             "--stream-fade-ms",
             "span.className='stream-fade-word is-new'",
+            "animationend",
+            "span.replaceWith(document.createTextNode",
+            "prefers-reduced-motion: reduce",
+            "renderer.set_attr",
+            "data-blocked-scheme",
             "_streamFadeLatestAnimationEndAt",
-            "_streamFadeWordBornAt.length=wordIndex+1",
         ],
     )
     assert "filter:" not in STYLE_CSS[STYLE_CSS.index("OpenWebUI-style streaming word fade") :].split(
@@ -289,8 +293,43 @@ for(let frame=0;frame<240;frame++){
   shown=(out.text.match(/\S+/g)||[]).length;
 }
 const backlog=targetCount-shown;
-if(shown < 150) throw new Error(`too slow: shown=${shown} target=${targetCount} backlog=${backlog} arrivalWps=${_streamFadeArrivalWps}`);
-if(backlog > 10) throw new Error(`did not catch up: shown=${shown} target=${targetCount} backlog=${backlog} arrivalWps=${_streamFadeArrivalWps}`);
+if(shown < 145) throw new Error(`too slow: shown=${shown} target=${targetCount} backlog=${backlog} arrivalWps=${_streamFadeArrivalWps}`);
+if(backlog > 15) throw new Error(`did not catch up: shown=${shown} target=${targetCount} backlog=${backlog} arrivalWps=${_streamFadeArrivalWps}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_caps_large_backlog_to_readable_waves():
+    script = (
+        fade_helper_script()
+        + r"""
+const words=Array.from({length:500},(_,i)=>'w'+i);
+const target=words.join(' ');
+let previous=0;
+for(let frame=0;frame<40;frame++){
+  performance._t += 16;
+  const out=_streamFadeNextText(target);
+  const shown=(out.text.match(/\S+/g)||[]).length;
+  const revealed=shown-previous;
+  previous=shown;
+  if(revealed>3) throw new Error(`revealed too much in one frame: ${revealed}`);
+}
+if(previous<50) throw new Error(`too slow under large backlog: ${previous}`);
+"""
+    )
+    run_node(script)
+
+
+def test_stream_fade_does_not_reveal_across_multiple_paragraphs_in_one_frame():
+    script = (
+        fade_helper_script()
+        + r"""
+const target='alpha beta gamma\n\nsecond paragraph starts here\n\nthird paragraph starts here';
+performance._t += 200;
+const out=_streamFadeNextText(target);
+const breaks=(out.text.match(/\n\s*\n/g)||[]).length;
+if(breaks>1) throw new Error(`revealed multiple paragraph breaks: ${JSON.stringify(out.text)}`);
 """
     )
     run_node(script)

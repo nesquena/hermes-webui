@@ -510,17 +510,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // the final answer or the response to render twice.
   let _streamFinalized=false;
   let _pendingRafHandle=null;
-  let _streamFadeWordCount=0;
   let _streamFadeVisibleText='';
   let _streamFadeLastTickMs=0;
   let _streamFadeWordCarry=0;
-  let _streamFadeWordBornAt=[];
   let _streamFadeStartedAt=0;
   let _streamFadeLastTargetWords=0;
   let _streamFadeLastArrivalMs=0;
   let _streamFadeArrivalWps=0;
   let _streamFadeLatestAnimationEndAt=0;
   let _streamFadeLastRevealCount=0;
+  let _streamFadeAppendOffset=0;
   const _STREAM_FADE_MS=140;
   const _STREAM_FADE_WAVE_MS=320;
   const _STREAM_FADE_MAX_STAGGER_MS=520;
@@ -616,11 +615,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Helper: create (or recreate) the smd parser bound to a given DOM element.
   // Called when assistantBody is first created and after each tool-call segment reset.
-  function _smdNewParser(el){
+  function _smdNewParser(el, fade=false){
     _smdWrittenLen=0;
     _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
-    const renderer=window.smd.default_renderer(el);
+    const renderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
     _smdParser=window.smd.parser(renderer);
   }
   // Helper: end the current smd parser (flushes remaining state) and null it out.
@@ -637,7 +636,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
-  function _smdWrite(displayText){
+  function _smdWrite(displayText, fade=false){
     if(!_smdParser||!window.smd) return;
     displayText=String(displayText||'');
     // Self-heal desyncs: if displayText no longer starts with what we've already
@@ -648,7 +647,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdWrittenLen=0;
       _smdWrittenText='';
       if(assistantBody) assistantBody.innerHTML='';
-      _smdNewParser(assistantBody);
+      _smdNewParser(assistantBody,fade);
       if(!_smdParser) return;
     }
     const delta=displayText.slice(_smdWrittenText.length);
@@ -656,15 +655,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
     _smdWrittenText=displayText;
-    // streaming-markdown does NOT sanitize URL schemes — `[click](javascript:...)`
-    // and `![alt](javascript:...)` survive as href/src.  Strip any unsafe schemes
-    // from anchors/images that were just added to the live DOM.  The existing
-    // renderMd() path filters these via its http(s)-only regex; we need a matching
-    // guard here so the live-stream path isn't an XSS vector for agent-echoed
-    // prompt-injection content.  The final renderMessages() call at `done` uses
-    // renderMd which is already safe, but during streaming the user could click
-    // a malicious link before that replacement happens.
-    if(assistantBody){_sanitizeSmdLinks(assistantBody);}
+    // streaming-markdown does NOT sanitize URL schemes. The default live path
+    // scans after writes; fade mode blocks unsafe href/src in its renderer.set_attr.
+    if(assistantBody&&!fade){_sanitizeSmdLinks(assistantBody);}
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Matches the effective allowlist of renderMd() (http/https via regex + relative).
@@ -684,17 +677,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _resetStreamFadeState(){
-    _streamFadeWordCount=0;
     _streamFadeVisibleText='';
     _streamFadeLastTickMs=0;
     _streamFadeWordCarry=0;
-    _streamFadeWordBornAt=[];
     _streamFadeStartedAt=0;
     _streamFadeLastTargetWords=0;
     _streamFadeLastArrivalMs=0;
     _streamFadeArrivalWps=0;
     _streamFadeLatestAnimationEndAt=0;
     _streamFadeLastRevealCount=0;
+    _streamFadeAppendOffset=0;
   }
   function _cancelAnimationFramePendingStreamRender(){
     if(_pendingRafHandle===null) return;
@@ -710,6 +702,60 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!node||node.nodeType!==1) return false;
     const tag=(node.tagName||'').toLowerCase();
     return tag==='pre'||tag==='code'||tag==='script'||tag==='style'||tag==='textarea'||tag==='svg'||tag==='math';
+  }
+  function _streamFadeRenderer(el){
+    const renderer=window.smd.default_renderer(el);
+    const baseAddText=renderer.add_text;
+    const baseSetAttr=renderer.set_attr;
+    renderer.add_text=(data,text)=>{
+      const parent=data&&data.nodes&&data.nodes[data.index];
+      if(!parent||_streamFadeSkipNode(parent)){baseAddText(data,text);return;}
+      const frag=document.createDocumentFragment();
+      const wordRe=/(\S+)(\s*)/g;
+      const value=String(text||'');
+      const revealedThisFrame=Math.max(1,_streamFadeLastRevealCount||1);
+      const fadeMs=revealedThisFrame>=8?_STREAM_FADE_WAVE_MS:revealedThisFrame>=4?240:_STREAM_FADE_MS;
+      const waveStepMs=revealedThisFrame>=18?18:revealedThisFrame>=8?22:revealedThisFrame>=4?16:12;
+      const reduceMotion=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      let last=0, match, changed=false;
+      while((match=wordRe.exec(value))){
+        if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
+        if(reduceMotion){
+          frag.appendChild(document.createTextNode(match[1]));
+          if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+          last=match.index+match[0].length;
+          changed=true;
+          continue;
+        }
+        const span=document.createElement('span');
+        span.className='stream-fade-word is-new';
+        const delayMs=Math.min(_streamFadeAppendOffset*waveStepMs,_STREAM_FADE_MAX_STAGGER_MS);
+        span.style.animationDelay=delayMs+'ms';
+        span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
+        span.textContent=match[1];
+        span.addEventListener('animationend',()=>span.replaceWith(document.createTextNode(span.textContent||'')),{once:true});
+        frag.appendChild(span);
+        _streamFadeAppendOffset+=1;
+        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,performance.now()+delayMs+fadeMs);
+        if(match[2]) frag.appendChild(document.createTextNode(match[2]));
+        last=match.index+match[0].length;
+        changed=true;
+      }
+      if(!changed){baseAddText(data,text);return;}
+      if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+      parent.appendChild(frag);
+    };
+    renderer.set_attr=(data,attr,value)=>{
+      const isHref=window.smd&&attr===window.smd.HREF;
+      const isSrc=window.smd&&attr===window.smd.SRC;
+      if((isHref||isSrc)&&!_SMD_SAFE_URL_RE.test(String(value||''))){
+        const node=data&&data.nodes&&data.nodes[data.index];
+        if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
+        return;
+      }
+      baseSetAttr(data,attr,value);
+    };
+    return renderer;
   }
   function _streamFadeWordCountOf(text){
     const m=String(text||'').match(/\S+/g);
@@ -765,21 +811,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
 
     const streamAgeSeconds=Math.max(0, (now-(_streamFadeStartedAt||now))/1000);
-    const baseWps=30 + Math.min(streamAgeSeconds*4, 35); // 30 → 65 wps over long answers
-    const arrivalWps=_streamFadeArrivalWps ? Math.min(_streamFadeArrivalWps*2.4 + 20, 320) : 0;
-    const backlogWps=backlogWords>0 ? Math.min(30 + backlogWords*8, 420) : 0;
-    const wordsPerSecond=Math.min(420, Math.max(baseWps, arrivalWps, backlogWps));
+    const baseWps=22 + Math.min(streamAgeSeconds*2.5, 28); // 22 → 50 wps over long answers
+    const arrivalWps=_streamFadeArrivalWps ? Math.min(_streamFadeArrivalWps*1.05 + 8, 90) : 0;
+    const backlogWps=backlogWords>0 ? Math.min(22 + backlogWords*1.1, 100) : 0;
+    const wordsPerSecond=Math.min(100, Math.max(baseWps, arrivalWps, backlogWps));
 
-    // High cap allows line/sentence-sized catch-up, while the rolling wave below
-    // keeps the visual effect animated instead of collapsing into block pops.
     _streamFadeWordCarry+=elapsedMs*wordsPerSecond/1000;
     if(!_streamFadeVisibleText) _streamFadeWordCarry=Math.max(_streamFadeWordCarry,1);
     let wordsToReveal=Math.floor(_streamFadeWordCarry);
-    // At very high throughput, reveal in rolling phrase-sized waves instead of
-    // dumping whole paragraphs in one frame. The wrapper lengthens/staggers the
-    // fade for these waves so fast output stays visibly animated.
-    const burstFloor=backlogWords>=120?24:backlogWords>=60?18:backlogWords>=30?12:wordsPerSecond>=300?8:wordsPerSecond>=220?6:0;
-    if(burstFloor>0) wordsToReveal=Math.max(wordsToReveal, Math.min(burstFloor, backlogWords));
+    // At very high throughput, cap each frame to a small readable wave. Sustained
+    // playback still catches up, but whole paragraphs no longer pop in at once.
+    const waveCap=backlogWords>=160?3:2;
+    wordsToReveal=Math.min(wordsToReveal,waveCap,backlogWords);
     if(wordsToReveal<1){_streamFadeLastRevealCount=0;return {text:_streamFadeVisibleText,caughtUp:false,changed:false};}
     _streamFadeLastRevealCount=Math.min(wordsToReveal, backlogWords);
     _streamFadeWordCarry=Math.max(0,_streamFadeWordCarry-wordsToReveal);
@@ -792,6 +835,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       wordsToReveal-=1;
     }
     if(cut<=0) cut=Math.min(remaining.length,4);
+    const paragraphBreak=remaining.slice(0,cut).search(/\n\s*\n/);
+    if(paragraphBreak>0) cut=paragraphBreak+2;
     _streamFadeVisibleText+=remaining.slice(0,cut);
     if(_streamFadeVisibleText.length>targetText.length) _streamFadeVisibleText=targetText;
     return {text:_streamFadeVisibleText,caughtUp:_streamFadeVisibleText===targetText,changed:true};
@@ -800,76 +845,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!assistantBody) return true;
     const next=_streamFadeNextText(displayText);
     if(!next.changed) return next.caughtUp;
-    const html=renderMd ? renderMd(next.text||'') : esc(next.text||'');
-    assistantBody.innerHTML=html;
     assistantBody.classList.add('stream-fade-active');
-    _wrapStreamingFadeWords(assistantBody);
-    _sanitizeSmdLinks(assistantBody);
-    return next.caughtUp;
-  }
-  function _wrapStreamingFadeWords(root){
-    if(!root||!document.createTreeWalker) return;
-    const textNodes=[];
-    const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
-      acceptNode(node){
-        if(!node||!node.nodeValue||!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-        let parent=node.parentElement;
-        while(parent&&parent!==root){
-          if(parent.classList&&parent.classList.contains('stream-fade-word')) return NodeFilter.FILTER_REJECT;
-          if(_streamFadeSkipNode(parent)) return NodeFilter.FILTER_REJECT;
-          parent=parent.parentElement;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
-    let node;
-    while((node=walker.nextNode())) textNodes.push(node);
-    let wordIndex=0;
-    const now=performance.now();
-    const wordRe=/(\S+)(\s*)/g;
-    const revealedThisFrame=Math.max(1,_streamFadeLastRevealCount||1);
-    const fadeMs=revealedThisFrame>=8?_STREAM_FADE_WAVE_MS:revealedThisFrame>=4?240:_STREAM_FADE_MS;
-    const waveStepMs=revealedThisFrame>=18?18:revealedThisFrame>=8?22:revealedThisFrame>=4?16:10;
-    for(const textNode of textNodes){
-      const value=textNode.nodeValue||'';
-      wordRe.lastIndex=0;
-      const frag=document.createDocumentFragment();
-      let last=0, match, changed=false;
-      while((match=wordRe.exec(value))){
-        if(match.index>last) frag.appendChild(document.createTextNode(value.slice(last,match.index)));
-        wordIndex+=1;
-        if(!_streamFadeWordBornAt[wordIndex]){
-          const newWordOffset=Math.max(wordIndex-_streamFadeWordCount-1,0);
-          // High-speed output should feel like a continuous animated sweep, not
-          // a block pop. Keep bursts smaller, but stretch/stagger each wave so
-          // multiple sentences can fade across several hundred milliseconds.
-          const staggerMs=Math.min(newWordOffset*waveStepMs,_STREAM_FADE_MAX_STAGGER_MS);
-          _streamFadeWordBornAt[wordIndex]=now+staggerMs;
-        }
-        _streamFadeLatestAnimationEndAt=Math.max(_streamFadeLatestAnimationEndAt,_streamFadeWordBornAt[wordIndex]+fadeMs);
-        const ageMs=now-_streamFadeWordBornAt[wordIndex];
-        const isAnimating=ageMs<fadeMs;
-        if(isAnimating){
-          const span=document.createElement('span');
-          span.className='stream-fade-word is-new';
-          const delayMs=Math.max(-fadeMs, -ageMs);
-          span.style.animationDelay=delayMs+'ms';
-          span.style.setProperty('--stream-fade-ms',fadeMs+'ms');
-          span.textContent=match[1];
-          frag.appendChild(span);
-        }else{
-          frag.appendChild(document.createTextNode(match[1]));
-        }
-        if(match[2]) frag.appendChild(document.createTextNode(match[2]));
-        last=match.index+match[0].length;
-        changed=true;
-      }
-      if(!changed) continue;
-      if(last<value.length) frag.appendChild(document.createTextNode(value.slice(last)));
-      textNode.replaceWith(frag);
+    if(!_smdParser&&window.smd){
+      if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+      _smdNewParser(assistantBody,true);
     }
-    _streamFadeWordBornAt.length=wordIndex+1;
-    _streamFadeWordCount=wordIndex;
+    if(_smdParser){
+      _streamFadeAppendOffset=0;
+      _smdWrite(next.text,true);
+    }else{
+      assistantBody.innerHTML=renderMd ? renderMd(next.text||'') : esc(next.text||'');
+      _sanitizeSmdLinks(assistantBody);
+    }
+    return next.caughtUp;
   }
   function _streamFadeCurrentDisplayText(){
     const parsed=_parseStreamState();
@@ -884,6 +872,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const caughtUp=_renderStreamingFadeMarkdown(target);
       scrollIfPinned();
       if(caughtUp){
+        // parser_end can flush pending markdown text; include that final text in
+        // the fade wait instead of replacing it immediately in renderMessages().
+        if(_smdParser) _smdEndParser();
         // Let the last released words visibly finish their stagger + fade before
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
@@ -930,7 +921,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? parsed.displayText                          // first segment: uses think-tag stripping
           : _stripXmlToolCalls(assistantText.slice(segmentStart));
         if(_shouldUseStreamFade()){
-          _smdEndParser();
           const caughtUp=_renderStreamingFadeMarkdown(displayText);
           if(!caughtUp&&!_streamFinalized){
             setTimeout(()=>_scheduleRender(), 24);
