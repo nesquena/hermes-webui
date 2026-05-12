@@ -1218,6 +1218,13 @@ const _THEMES=[
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
   {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
 ];
+// >>> hermes-fork: HermesOS Light appearance preset (HermesOS Cloud)
+// A visible one-click preset for the dashboard-matched light HermesOS look.
+// It persists through the existing settings schema: theme=light + skin=hermesos.
+const _APPEARANCE_PRESETS={
+  'hermesos-light':{theme:'light',skin:'hermesos'},
+};
+// <<< hermes-fork
 const _SKINS=[
   // >>> hermes-fork: HermesOS skin tile (HermesOS Cloud)
   // First in the list so it's the visual default in the Appearance picker.
@@ -1250,6 +1257,8 @@ let _onSystemThemeChange=null;
 function _normalizeAppearance(theme,skin){
   const rawTheme=typeof theme==='string'?theme.trim().toLowerCase():'';
   const rawSkin=typeof skin==='string'?skin.trim().toLowerCase():'';
+  const preset=_APPEARANCE_PRESETS[rawTheme];
+  if(preset) return {theme:preset.theme,skin:preset.skin};
   const legacy=_LEGACY_THEME_MAP[rawTheme];
   const nextTheme=legacy?legacy.theme:(_VALID_THEMES.has(rawTheme)?rawTheme:'dark');
   const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'hermesos');
@@ -1352,9 +1361,19 @@ function _pickSkin(name){
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
+// >>> hermes-fork: HermesOS Light active-state routing (HermesOS Cloud)
+// The shortcut is stored as light+hermesos, so picker highlighting needs to
+// treat that pair as its own card instead of activating both "Light" cards.
+function _isThemePickerActive(val,active){
+  const skin=(($('settingsSkin')||{}).value||localStorage.getItem('hermes-skin')||'hermesos').toLowerCase();
+  const isHermesosLight=active==='light'&&skin==='hermesos';
+  return val==='hermesos-light'?isHermesosLight:(val==='light'?active==='light'&&!isHermesosLight:val===active);
+}
+// <<< hermes-fork
+
 function _syncThemePicker(active){
   document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.themeVal===active);
+    btn.classList.toggle('active',_isThemePickerActive(btn.dataset.themeVal,active));
     btn.style.borderColor='';
     btn.style.boxShadow='';
   });

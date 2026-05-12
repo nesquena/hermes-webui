@@ -15,6 +15,7 @@ bottom.
 
 | SHA | Subject | Files |
 |---|---|---|
+| _staged_ | feat(skin): expose one-click HermesOS Light appearance preset | `static/index.html`, `static/boot.js`, `static/commands.js`, `static/i18n.js`, `tests/test_hermesos_light_skin.py` |
 | _staged_ | fix(providers): runtime auth must not see UI-only auto-detected slug (+ Layer A regression tests) | `api/config.py`, `tests/test_hermes_fork_provider_resolution.py` |
 | _staged_ | fix(ui): chat-list streaming spinner stays circular under HermesOS skin | `static/style.css` |
 | _staged_ | fix(sidebar): widen collapsed strip to 32px + border-left for browser-sidebar-visible users | `static/style.css` |
@@ -150,8 +151,16 @@ Loaded by `static/index.html` as the FIRST executable script (right after the `<
 |---|---|---|
 | `229` | `default-profile display nickname (HermesOS Cloud)` | `_hermesDisplayProfileName(name)` helper + `_hermesDefaultProfileLabelInput(value)` oninput handler. See "Default-profile nickname" section below for the full surface. |
 | `264` | `sidebar collapse toggle (HermesOS Cloud)` | `toggleSidebarCollapsed()` toggles `.sidebar-collapsed` on `.layout`. Persists in `localStorage[hermes-sidebar-collapsed]`. Wraps `switchPanel()` so clicking any rail tab auto-uncollapses. **`_wireSidebarClickToExpand` IIFE** registers a CAPTURE-PHASE click delegate on `.sidebar`: when collapsed, any click on the strip expands the sidebar AND stops propagation BEFORE the inline `onclick="toggleSidebarCollapsed()"` on the chevron button fires (which would otherwise immediately re-collapse). The `true` third arg to `addEventListener` is load-bearing — bubble phase double-toggles. |
+| `~1220` | `HermesOS Light appearance preset (HermesOS Cloud)` | Adds `_APPEARANCE_PRESETS['hermesos-light']` as a visible shortcut that persists via existing settings fields: `theme='light'` + `skin='hermesos'`. No new server schema values. |
 | `1222` | `HermesOS skin tile (HermesOS Cloud)` | Adds `{name:'HermesOS', colors:['#d4af37','#c5a059','#8a6e26']}` as the FIRST entry in `_SKINS` so it shows up as the leftmost tile in the Appearance picker. Gold swatches match dashboard `--gold-leaf`. |
+| `~1360` | `HermesOS Light active-state routing (HermesOS Cloud)` | `_isThemePickerActive()` makes the HermesOS Light card active for the `light + hermesos` pair and keeps the generic Light card inactive, so the picker shows one selected theme card instead of two. |
 | `1514` | `hydrate the Settings nickname input from localStorage` | When the Preferences panel mounts, reads `localStorage[hermes-default-profile-label]` into the `#settingsDefaultProfileLabel` input value so the user sees their saved nickname instead of an empty field. |
+
+### `static/commands.js`
+
+| Line | Marker | Purpose |
+|---|---|---|
+| `~503` | `include appearance presets in /theme (HermesOS Cloud)` | Extends `/theme` to accept `_APPEARANCE_PRESETS` values such as `hermesos-light`, keeping command usage aligned with the visible Appearance picker. |
 
 ### `static/style.css`
 
@@ -171,6 +180,7 @@ Loaded by `static/index.html` as the FIRST executable script (right after the `<
 | `23` | `iframe bearer-from-hash shim (HermesOS Cloud)` | `<script src="static/iframe-shim.js?v=__WEBUI_VERSION__"></script>` — runs synchronously BEFORE any other script. See the `static/iframe-shim.js` section for what it does. |
 | `31` | `HermesOS skin whitelist + default + migration (HermesOS Cloud)` | Inline `<script>` runs before the rest of boot: (1) adds `hermesos` to the boot-time `skins` allowlist, (2) sets `hermesos` as the default for fresh installs (`localStorage.getItem('hermes-skin') \|\| 'hermesos'`), (3) **forced rebrand migration v3** — if `hermes-skin-rebrand-v3` flag is unset (everyone right now), force `s = 'hermesos'` and write the flag. Old `v1` + `v2` flags get cleared. Users who pick another skin AFTER the migration fires keep their choice. Bumping to v4/v5/etc. is a one-line change. |
 | `149` | `collapse-sidebar button (HermesOS Cloud)` | The `#btnCollapseSidebar` chevron button in the chat panel head. Inline `onclick="toggleSidebarCollapsed()"` calls the boot.js helper. The SVG icon flips to chevron-right via CSS when `.sidebar-collapsed` is on `.layout`. |
+| `~858` | `HermesOS Light appearance preset (HermesOS Cloud)` | Adds the "HermesOS Light" theme card to Settings → Appearance. It calls `_pickTheme('hermesos-light')`, which resolves to the existing `light + hermesos` pair. |
 | `1081` | `default-profile nickname (HermesOS Cloud)` | The `#settingsDefaultProfileLabel` input in Preferences. `oninput="_hermesDefaultProfileLabelInput(value)"` writes to localStorage on each keystroke and re-renders the composer chip + the Profiles panel if it's open. |
 
 ### `static/sw.js`

@@ -500,7 +500,9 @@ async function cmdUsage(){
 }
 
 async function cmdTheme(args){
-  const themes=['system','dark','light'];
+  // >>> hermes-fork: include appearance presets in /theme (HermesOS Cloud)
+  const themes=['system','dark','light',...Object.keys(_APPEARANCE_PRESETS||{})];
+  // <<< hermes-fork
   const skins=(_SKINS||[]).map(s=>s.name.toLowerCase());
   const legacyThemes=Object.keys(_LEGACY_THEME_MAP||{});
   const val=(args||'').toLowerCase().trim();
