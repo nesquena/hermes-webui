@@ -293,8 +293,10 @@ def test_login_locale_resolver_handles_new_locales():
     assert _resolve_login_locale_key("pt-PT") == "pt"
     assert _resolve_login_locale_key("ko") == "ko"
     assert _resolve_login_locale_key("ko-KR") == "ko"
+    assert _resolve_login_locale_key("fr") == "fr"
+    assert _resolve_login_locale_key("fr-FR") == "fr"
+    assert _resolve_login_locale_key("fr-CA") == "fr"
     # Unknown locale still falls back to en.
-    assert _resolve_login_locale_key("fr") == "en"
     assert _resolve_login_locale_key("xx-YY") == "en"
 
 

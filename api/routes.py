@@ -1928,6 +1928,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Invalid password",
         "conn_failed": "Connection failed",
     },
+    "fr": {
+        "lang": "fr-FR",
+        "title": "Se connecter",
+        "subtitle": "Entrez votre mot de passe pour continuer",
+        "placeholder": "Mot de passe",
+        "btn": "Se connecter",
+        "invalid_pw": "Mot de passe invalide",
+        "conn_failed": "\u00c9chec de la connexion",
+    },
     "es": {
         "lang": "es-ES",
         "title": "Iniciar sesi\u00f3n",

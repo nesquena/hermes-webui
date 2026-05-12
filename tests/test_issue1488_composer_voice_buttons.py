@@ -123,7 +123,7 @@ class TestComposerVoiceButtonI18n:
         "voice_mode_toggle_active",
     )
 
-    LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
 
     def test_legacy_voice_toggle_key_removed(self):
         """The old key whose string was 'Voice input' caused the duplicate-
@@ -171,7 +171,7 @@ class TestComposerVoiceButtonI18n:
 class TestVoiceModePreferenceGate:
     """boot.js must hide btnVoiceMode by default, surface it via Preferences."""
 
-    LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
+    LOCALES = ("en", "fr", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
 
     def test_voice_mode_pref_is_localstorage_backed(self):
         """The pref reads from localStorage key 'hermes-voice-mode-button'."""
