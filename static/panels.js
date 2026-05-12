@@ -5056,6 +5056,10 @@ function _preferencesPayloadFromUi(){
   if(sendKeySel) payload.send_key=sendKeySel.value;
   const langSel=$('settingsLanguage');
   if(langSel) payload.language=langSel.value;
+  const rtlCb=$('settingsRtl');
+  if(rtlCb) payload.rtl=rtlCb.checked;
+  const rtlVal = rtlCb?.checked;
+  if(rtlVal !== undefined) localStorage.setItem('hermes-rtl', rtlVal ? 'true' : 'false');
   const showUsageCb=$('settingsShowTokenUsage');
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
   const showTpsCb=$('settingsShowTps');
@@ -5288,6 +5292,21 @@ async function loadSettingsPanel(){
       }
       langSel.value=resolvedLanguage;
       langSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const rtlCb=$('settingsRtl');
+    if(rtlCb){
+      rtlCb.checked=!!settings.rtl || localStorage.getItem('hermes-rtl')==='true';
+      isChatRtl=rtlCb.checked;
+      document.documentElement.classList.toggle('chat-content-rtl',isChatRtl);
+      // Sync the quick toggle button
+      _syncRtlToggle();
+      rtlCb.addEventListener('change',()=>{
+        isChatRtl=rtlCb.checked;
+        localStorage.setItem('hermes-rtl',isChatRtl?'true':'false');
+        document.documentElement.classList.toggle('chat-content-rtl',isChatRtl);
+        _syncRtlToggle();
+        _schedulePreferencesAutosave();
+      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -6422,3 +6441,33 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
 }
+
+// ── Quick RTL toggle button (chat content only, not full page) ──────────────
+let isChatRtl=localStorage.getItem('hermes-rtl')==='true';
+function _syncRtlToggle(){
+  // Show/hide the button based on Settings, then set active state
+  const btn=document.getElementById('btnRtlToggle');
+  if(!btn) return;
+  // Read from Settings checkbox (the master switch)
+  const rtlCb=$('settingsRtl');
+  const showBtn=rtlCb ? rtlCb.checked : false;
+  btn.style.display=showBtn?'flex':'none';
+  btn.classList.toggle('active',isChatRtl);
+}
+function toggleRtlLayout(){
+  isChatRtl=!isChatRtl;
+  localStorage.setItem('hermes-rtl',isChatRtl?'true':'false');
+  document.documentElement.classList.toggle('chat-content-rtl',isChatRtl);
+  _syncRtlToggle();
+}
+(function(){
+  const btn=document.getElementById('btnRtlToggle');
+  if(btn){
+    btn.addEventListener('click',toggleRtlLayout);
+    // Initially hidden — _syncRtlToggle will show it if Settings enables it
+    btn.style.display='none';
+  }
+})();
+// Apply saved state on boot
+if(isChatRtl) document.documentElement.classList.add('chat-content-rtl');
+document.addEventListener('DOMContentLoaded',_syncRtlToggle);

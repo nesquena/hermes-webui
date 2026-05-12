@@ -59,6 +59,13 @@
       });
     }
   </script>
+  <script>
+    (function(){
+      if(localStorage.getItem('hermes-rtl')==='true'){
+        document.documentElement.classList.add('chat-content-rtl');
+      }
+    })();
+  </script>
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -576,6 +583,13 @@
                 <span class="composer-toolsets-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
               </button>
             </div>
+            <button class="rtl-toggle-btn" id="btnRtlToggle" type="button" title="Toggle RTL layout (Right-to-Left)" aria-label="Toggle Right-to-Left layout">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M5 4h14"/><path d="M5 12h9"/><path d="M5 20h14"/>
+                <path d="M20 4v16" stroke-dasharray="2 2"/>
+              </svg>
+              <span class="rtl-toggle-label" id="rtlToggleLabel">RTL</span>
+            </button>
           </div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
@@ -918,6 +932,13 @@
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label for="settingsRtl" data-i18n="settings_label_rtl">Enable Right-to-Left option in chat</label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsRtl" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_desc_rtl">Shows an RTL toggle button in the chat composer footer</span>
+              </label>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

@@ -3760,3 +3760,50 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .log-line-debug{color:var(--muted);opacity:.75;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
+
+/* ── RTL (Right-to-Left): chat content alignment only ────────────────────────
+ * Triggered by .chat-content-rtl on <html> — affects ONLY the chat messages
+ * area, not the sidebar, workspace panel, or any other UI element.
+ * Use the RTL toggle button in the composer footer to switch on/off.
+ */
+
+.chat-content-rtl .msg-row{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+.chat-content-rtl .msg-body{
+  text-align:start;
+}
+.chat-content-rtl .msg-body th,
+.chat-content-rtl .csv-table th{
+  text-align:right;
+}
+.chat-content-rtl .csv-table td{
+  text-align:right;
+}
+.chat-content-rtl .tool-call-group-summary{
+  text-align:right;
+}
+.chat-content-rtl textarea#msg{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+.chat-content-rtl #msg{
+  direction:rtl;
+  text-align:right;
+}
+
+/* Quick RTL toggle button in composer footer */
+.rtl-toggle-btn{
+  display:flex;align-items:center;gap:4px;padding:4px 8px;
+  background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--muted);font-size:11px;cursor:pointer;transition:all .15s;
+  white-space:nowrap;height:28px;
+}
+.rtl-toggle-btn:hover{background:var(--hover-bg);color:var(--text);}
+.rtl-toggle-btn.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+.rtl-toggle-btn svg{width:13px;height:13px;flex-shrink:0;}
+.rtl-toggle-label{font-weight:600;letter-spacing:.02em;}
+
