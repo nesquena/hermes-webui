@@ -98,8 +98,8 @@ def test_mic_button_inside_composer_left():
     """btnMic must be inside .composer-left, next to the attach button."""
     html, _ = get_text("/")
     composer_left_start = html.find('class="composer-left"')
-    composer_left_end = html.find('</div>', composer_left_start)
-    section = html[composer_left_start:composer_left_end]
+    composer_right_start = html.find('class="composer-right"', composer_left_start)
+    section = html[composer_left_start:composer_right_start]
     assert 'btnAttach' in section
     assert 'btnMic' in section
 
