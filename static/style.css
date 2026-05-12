@@ -3742,3 +3742,502 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .log-line-debug{color:var(--muted);opacity:.75;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
+
+
+/* ── CLAW3D DASHBOARD STYLES ── */
+/* Dark techy aesthetic with electric blue accents */
+:root.dark {
+  /* Override dashboard-specific colors for Claw3D theme */
+  --dashboard-bg: #0a0a0f;
+  --dashboard-card-bg: #141419;
+  --dashboard-accent: #00CFFF;
+  --dashboard-accent-hover: #0099CC;
+  --dashboard-border: rgba(0, 207, 255, 0.2);
+  --dashboard-text: #e0e0e0;
+  --dashboard-text-muted: #888888;
+  --dashboard-scanline: rgba(0, 207, 255, 0.05);
+  
+  /* Agent role colors */
+  --role-nexus: #00CFFF;
+  --role-forge: #FF6B35;
+  --role-pixel: #C77DFF;
+  --role-scout: #2ECC71;
+  --role-sage: #F4A261;
+}
+
+/* Dashboard panels */
+#panelDashboard, #panelAgents, #panelOffice, #panelDashboardLogs {
+  background: var(--dashboard-bg);
+  position: relative;
+}
+
+/* Scanline effect for dashboard panels */
+#panelDashboard::before, #panelAgents::before, #panelOffice::before, #panelDashboardLogs::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: 
+    linear-gradient(0deg, transparent 24%, var(--dashboard-scanline) 25%, var(--dashboard-scanline) 26%, transparent 27%, transparent 74%, var(--dashboard-scanline) 75%, var(--dashboard-scanline) 76%, transparent 77%, transparent);
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Dashboard header styling */
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--dashboard-border);
+  background: rgba(10, 10, 15, 0.95);
+  backdrop-filter: blur(8px);
+  position: relative;
+  z-index: 2;
+}
+
+.dashboard-title {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--dashboard-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.dashboard-subtitle {
+  font-size: 12px;
+  color: var(--dashboard-text-muted);
+  margin-top: 4px;
+  font-family: 'SF Mono', ui-monospace, monospace;
+}
+
+/* System health indicator */
+.dashboard-health {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.dashboard-health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dashboard-accent);
+  box-shadow: 0 0 8px var(--dashboard-accent);
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.1); }
+}
+
+/* Dashboard content area */
+.dashboard-content {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  position: relative;
+  z-index: 2;
+}
+
+/* Agent status grid */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+/* Agent card component */
+.agent-card {
+  background: var(--dashboard-card-bg);
+  border: 1px solid var(--dashboard-border);
+  border-radius: 8px;
+  padding: 16px;
+  position: relative;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.agent-card:hover {
+  border-color: var(--dashboard-accent);
+  box-shadow: 0 4px 16px rgba(0, 207, 255, 0.1);
+}
+
+.agent-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 8px 8px 0 0;
+  background: var(--role-nexus); /* Default, overridden by role classes */
+}
+
+.agent-card.role-nexus::before { background: var(--role-nexus); }
+.agent-card.role-forge::before { background: var(--role-forge); }
+.agent-card.role-pixel::before { background: var(--role-pixel); }
+.agent-card.role-scout::before { background: var(--role-scout); }
+.agent-card.role-sage::before { background: var(--role-sage); }
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.agent-name {
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--dashboard-text);
+}
+
+.agent-role {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 4px 8px;
+  border-radius: 12px;
+  border: 1px solid;
+}
+
+.agent-role.nexus { color: var(--role-nexus); border-color: var(--role-nexus); background: rgba(0, 207, 255, 0.1); }
+.agent-role.forge { color: var(--role-forge); border-color: var(--role-forge); background: rgba(255, 107, 53, 0.1); }
+.agent-role.pixel { color: var(--role-pixel); border-color: var(--role-pixel); background: rgba(199, 125, 255, 0.1); }
+.agent-role.scout { color: var(--role-scout); border-color: var(--role-scout); background: rgba(46, 204, 113, 0.1); }
+.agent-role.sage { color: var(--role-sage); border-color: var(--role-sage); background: rgba(244, 162, 97, 0.1); }
+
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.active { background: var(--role-scout); box-shadow: 0 0 6px var(--role-scout); }
+.status-dot.idle { background: var(--dashboard-text-muted); }
+.status-dot.error { background: var(--error); box-shadow: 0 0 6px var(--error); }
+
+.status-text {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--dashboard-text-muted);
+  text-transform: uppercase;
+}
+
+.agent-message {
+  font-size: 13px;
+  color: var(--dashboard-text);
+  line-height: 1.4;
+  opacity: 0.8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Activity feed */
+.activity-feed {
+  background: var(--dashboard-card-bg);
+  border: 1px solid var(--dashboard-border);
+  border-radius: 8px;
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.activity-header {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dashboard-accent);
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--dashboard-border);
+  padding-bottom: 8px;
+}
+
+.activity-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.activity-item:last-child {
+  border-bottom: none;
+}
+
+.activity-time {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--dashboard-text-muted);
+  min-width: 50px;
+}
+
+.activity-text {
+  font-size: 12px;
+  color: var(--dashboard-text);
+  line-height: 1.3;
+}
+
+/* Agents list view */
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-list-item {
+  background: var(--dashboard-card-bg);
+  border: 1px solid var(--dashboard-border);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  border-left: 4px solid var(--role-nexus);
+}
+
+.agent-list-item.role-nexus { border-left-color: var(--role-nexus); }
+.agent-list-item.role-forge { border-left-color: var(--role-forge); }
+.agent-list-item.role-pixel { border-left-color: var(--role-pixel); }
+.agent-list-item.role-scout { border-left-color: var(--role-scout); }
+.agent-list-item.role-sage { border-left-color: var(--role-sage); }
+
+.agent-list-item:hover {
+  border-color: var(--dashboard-accent);
+  box-shadow: 0 2px 8px rgba(0, 207, 255, 0.1);
+}
+
+.agent-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--dashboard-text-muted);
+}
+
+.agent-task {
+  font-size: 12px;
+  color: var(--dashboard-text);
+  opacity: 0.7;
+}
+
+/* Office placeholder */
+.office-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  text-align: center;
+  color: var(--dashboard-text-muted);
+}
+
+.office-icon {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 24px;
+  opacity: 0.3;
+}
+
+.office-title {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--dashboard-text);
+}
+
+.office-description {
+  font-size: 14px;
+  line-height: 1.5;
+  max-width: 400px;
+}
+
+/* Terminal logs viewer */
+.logs-container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  font-family: 'SF Mono', ui-monospace, monospace;
+}
+
+.logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(20, 20, 20, 0.95);
+  border-bottom: 1px solid var(--dashboard-border);
+}
+
+.logs-title {
+  font-size: 12px;
+  color: var(--dashboard-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.logs-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.logs-btn {
+  background: none;
+  border: 1px solid var(--dashboard-border);
+  color: var(--dashboard-text-muted);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.logs-btn:hover {
+  border-color: var(--dashboard-accent);
+  color: var(--dashboard-accent);
+}
+
+.logs-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  line-height: 1.4;
+  font-size: 12px;
+}
+
+.log-line {
+  margin-bottom: 2px;
+  white-space: pre-wrap;
+}
+
+.log-line.error { color: var(--error); }
+.log-line.warning { color: var(--warning); }
+.log-line.info { color: var(--dashboard-accent); }
+.log-line.debug { color: var(--dashboard-text-muted); }
+.log-line.default { color: var(--dashboard-text); }
+
+/* Sidebar navigation updates */
+.sidebar.dashboard-mode {
+  background: var(--dashboard-bg);
+  border-right-color: var(--dashboard-border);
+}
+
+.sidebar.dashboard-mode .panel-head {
+  background: rgba(10, 10, 15, 0.95);
+  border-bottom-color: var(--dashboard-border);
+  color: var(--dashboard-accent);
+}
+
+.sidebar.dashboard-mode .nav-tab {
+  color: var(--dashboard-text-muted);
+}
+
+.sidebar.dashboard-mode .nav-tab.active {
+  color: var(--dashboard-accent);
+  border-left: 2px solid var(--dashboard-accent);
+  background: rgba(0, 207, 255, 0.05);
+}
+
+.sidebar.dashboard-mode .nav-tab:hover {
+  color: var(--dashboard-text);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* HERMES HQ branding */
+.dashboard-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--dashboard-border);
+  background: rgba(10, 10, 15, 0.95);
+}
+
+.dashboard-logo {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--dashboard-accent), var(--dashboard-accent-hover));
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #000;
+  font-weight: 800;
+  font-size: 16px;
+  box-shadow: 0 4px 12px rgba(0, 207, 255, 0.2);
+}
+
+.dashboard-brand-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-brand-title {
+  font-family: 'SF Mono', ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--dashboard-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  line-height: 1;
+}
+
+.dashboard-brand-sub {
+  font-size: 10px;
+  color: var(--dashboard-text-muted);
+  margin-top: 2px;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .agent-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .dashboard-content {
+    padding: 16px;
+  }
+  
+  .agent-list-item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  
+  .dashboard-header {
+    padding: 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+}

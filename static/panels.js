@@ -238,6 +238,19 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
+  // Dashboard panels
+  if (nextPanel === 'dashboard') await loadDashboard();
+  if (nextPanel === 'agents') await loadAgents();
+  if (nextPanel === 'dashboardLogs') await loadDashboardLogs();
+  
+  // Apply dashboard theme for dashboard panels
+  if (typeof isDashboardPanel === 'function') {
+    if (isDashboardPanel(nextPanel)) {
+      applyDashboardTheme();
+    } else if (isDashboardPanel(prevPanel)) {
+      removeDashboardTheme();
+    }
+  }
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
