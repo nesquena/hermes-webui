@@ -167,6 +167,57 @@ function handleNewChat(){
   if(typeof newChat==='function')newChat();
   else if(typeof switchPanel==='function')switchPanel('chat');
 }
+function toggleComposerPlusMenu(force){
+  const menu=$('composerPlusMenu');
+  if(!menu)return;
+  const open=typeof force==='boolean'?force:!menu.classList.contains('open');
+  menu.classList.toggle('open',open);
+  if(open){
+    const close=e=>{if(!menu.contains(e.target)&&e.target.id!=='btnComposerPlus'){menu.classList.remove('open');document.removeEventListener('pointerdown',close);}};
+    document.addEventListener('pointerdown',close);
+  }
+}
+function toggleComposerBottomSheet(force){
+  const sheet=$('composerBottomSheet');
+  const overlay=$('composerBottomSheetOverlay');
+  if(!sheet)return;
+  const open=typeof force==='boolean'?force:!sheet.classList.contains('open');
+  sheet.classList.toggle('open',open);
+  if(overlay)overlay.classList.toggle('visible',open);
+  if(open)syncBottomSheetContent();
+}
+function syncBottomSheetContent(){
+  const modelLabel=$('composerModelLabel');
+  const ctxLabel=$('composerContextLabel');
+  if(modelLabel&&ctxLabel)ctxLabel.textContent=modelLabel.textContent||'Modelo';
+  const modelWrap=$('bottomSheetModelWrap');
+  if(modelWrap){
+    const sel=$('modelSelect');
+    if(sel)modelWrap.textContent=sel.options[sel.selectedIndex]?.text||'';
+  }
+  const profileWrap=$('bottomSheetProfileWrap');
+  if(profileWrap){
+    const lbl=$('profileChipLabel');
+    profileWrap.textContent=lbl?lbl.textContent:'default';
+  }
+  const wsWrap=$('bottomSheetWorkspaceWrap');
+  if(wsWrap){
+    const lbl=$('composerWorkspaceLabel');
+    wsWrap.textContent=lbl?lbl.textContent:'—';
+  }
+  const reasonSec=$('bottomSheetReasoningSection');
+  const reasonWrap=$('composerReasoningWrap');
+  if(reasonSec)reasonSec.style.display=(reasonWrap&&reasonWrap.style.display!=='none')?'':'none';
+}
+document.addEventListener('click',function(e){
+  const seg=e.target.closest('.reasoning-seg');
+  if(!seg)return;
+  const container=seg.parentElement;
+  container.querySelectorAll('.reasoning-seg').forEach(s=>s.classList.remove('active'));
+  seg.classList.add('active');
+  const effort=seg.dataset.effort;
+  if(typeof setReasoningEffort==='function')setReasoningEffort(effort);
+});
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
