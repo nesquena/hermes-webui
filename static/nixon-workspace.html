@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIXON Workspace</title>
+    <link rel="stylesheet" href="nixon-workspace.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Main Application Container -->
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <span class="logo-text">NIXON Workspace</span>
+                </div>
+                <div class="workspace-selector">
+                    <i class="fas fa-building"></i>
+                    <span>AI Operations Center</span>
+                    <i class="fas fa-chevron-down"></i>
+                </div>
+            </div>
+            <div class="header-center">
+                <div class="search-bar">
+                    <i class="fas fa-search"></i>
+                    <input type="text" placeholder="Search agents, tasks, or rooms...">
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="header-actions">
+                    <button class="header-btn">
+                        <i class="fas fa-bell"></i>
+                        <span class="notification-badge">3</span>
+                    </button>
+                    <button class="header-btn">
+                        <i class="fas fa-cog"></i>
+                    </button>
+                    <div class="user-profile">
+                        <div class="user-avatar">N</div>
+                        <span>Nixon</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Left Sidebar -->
+            <aside class="left-sidebar">
+                <nav class="sidebar-nav">
+                    <div class="nav-section">
+                        <div class="nav-item active">
+                            <i class="fas fa-home"></i>
+                            <span>Overview</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-building"></i>
+                            <span>Office</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-users"></i>
+                            <span>Agents</span>
+                            <span class="nav-badge">7</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-tasks"></i>
+                            <span>Tasks</span>
+                            <span class="nav-badge">24</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-server"></i>
+                            <span>Servers</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-chart-bar"></i>
+                            <span>Analytics</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-file-alt"></i>
+                            <span>Logs</span>
+                        </div>
+                        <div class="nav-item">
+                            <i class="fas fa-cog"></i>
+                            <span>Settings</span>
+                        </div>
+                    </div>
+                </nav>
+            </aside>
+
+            <!-- Office Workspace -->
+            <main class="office-workspace">
+                <div class="workspace-header">
+                    <h1>AI Operations Center</h1>
+                    <div class="workspace-controls">
+                        <button class="control-btn">
+                            <i class="fas fa-expand-arrows-alt"></i>
+                            Full View
+                        </button>
+                        <button class="control-btn">
+                            <i class="fas fa-pause"></i>
+                            Pause
+                        </button>
+                        <button class="control-btn primary">
+                            <i class="fas fa-play"></i>
+                            Run All
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Office Layout -->
+                <div class="office-container">
+                    <div class="office-floor">
+                        <!-- Command Center -->
+                        <div class="office-room command-center" id="command-center">
+                            <div class="room-header">
+                                <h3>Command Center</h3>
+                                <div class="room-status active"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="desk main-desk">
+                                    <div class="monitor large"></div>
+                                    <div class="monitor medium"></div>
+                                </div>
+                                <div class="agent-avatar coordinator" data-role="Coordinator">
+                                    <div class="avatar-icon">C</div>
+                                    <div class="status-indicator online"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-chart-line"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Developer Zone -->
+                        <div class="office-room developer-zone" id="developer-zone">
+                            <div class="room-header">
+                                <h3>Developer Zone</h3>
+                                <div class="room-status active"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="desk-cluster">
+                                    <div class="desk">
+                                        <div class="monitor small"></div>
+                                        <div class="keyboard"></div>
+                                    </div>
+                                    <div class="desk">
+                                        <div class="monitor small"></div>
+                                        <div class="keyboard"></div>
+                                    </div>
+                                </div>
+                                <div class="agent-avatar developer" data-role="Developer">
+                                    <div class="avatar-icon">D</div>
+                                    <div class="status-indicator busy"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-code"></i>
+                                    </div>
+                                </div>
+                                <div class="agent-avatar developer-2" data-role="Developer">
+                                    <div class="avatar-icon">D2</div>
+                                    <div class="status-indicator online"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-bug"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Server Room -->
+                        <div class="office-room server-room" id="server-room">
+                            <div class="room-header">
+                                <h3>Server Room</h3>
+                                <div class="room-status active"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="server-rack">
+                                    <div class="server-unit active"></div>
+                                    <div class="server-unit active"></div>
+                                    <div class="server-unit warning"></div>
+                                </div>
+                                <div class="cooling-unit"></div>
+                                <div class="agent-avatar devops" data-role="DevOps">
+                                    <div class="avatar-icon">O</div>
+                                    <div class="status-indicator online"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-tools"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Research Lab -->
+                        <div class="office-room research-lab" id="research-lab">
+                            <div class="room-header">
+                                <h3>Research Lab</h3>
+                                <div class="room-status active"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="whiteboard"></div>
+                                <div class="analysis-desk">
+                                    <div class="monitor wide"></div>
+                                </div>
+                                <div class="agent-avatar researcher" data-role="Researcher">
+                                    <div class="avatar-icon">R</div>
+                                    <div class="status-indicator online"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-flask"></i>
+                                    </div>
+                                </div>
+                                <div class="agent-avatar analyst" data-role="Analyst">
+                                    <div class="avatar-icon">A</div>
+                                    <div class="status-indicator busy"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-chart-pie"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Deployment Hub -->
+                        <div class="office-room deployment-hub" id="deployment-hub">
+                            <div class="room-header">
+                                <h3>Deployment Hub</h3>
+                                <div class="room-status active"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="deployment-station">
+                                    <div class="pipeline-monitor"></div>
+                                </div>
+                                <div class="agent-avatar security" data-role="Security">
+                                    <div class="avatar-icon">S</div>
+                                    <div class="status-indicator online"></div>
+                                    <div class="task-icon">
+                                        <i class="fas fa-shield-alt"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Meeting Room -->
+                        <div class="office-room meeting-room" id="meeting-room">
+                            <div class="room-header">
+                                <h3>Meeting Room</h3>
+                                <div class="room-status idle"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="conference-table"></div>
+                                <div class="presentation-screen"></div>
+                            </div>
+                        </div>
+
+                        <!-- Break Area -->
+                        <div class="office-room break-area" id="break-area">
+                            <div class="room-header">
+                                <h3>Break Area</h3>
+                                <div class="room-status idle"></div>
+                            </div>
+                            <div class="room-content">
+                                <div class="lounge-area">
+                                    <div class="couch"></div>
+                                    <div class="coffee-table"></div>
+                                </div>
+                                <div class="plants">
+                                    <div class="plant"></div>
+                                    <div class="plant"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Right Sidebar -->
+            <aside class="right-sidebar">
+                <div class="sidebar-section">
+                    <h3>Active Agents</h3>
+                    <div class="agent-list">
+                        <div class="agent-item">
+                            <div class="agent-avatar-small coordinator">C</div>
+                            <div class="agent-info">
+                                <span class="agent-name">Coordinator</span>
+                                <span class="agent-task">Managing workflows</span>
+                            </div>
+                            <div class="status-dot online"></div>
+                        </div>
+                        <div class="agent-item">
+                            <div class="agent-avatar-small developer">D</div>
+                            <div class="agent-info">
+                                <span class="agent-name">Developer</span>
+                                <span class="agent-task">Building features</span>
+                            </div>
+                            <div class="status-dot busy"></div>
+                        </div>
+                        <div class="agent-item">
+                            <div class="agent-avatar-small devops">O</div>
+                            <div class="agent-info">
+                                <span class="agent-name">DevOps</span>
+                                <span class="agent-task">Server maintenance</span>
+                            </div>
+                            <div class="status-dot online"></div>
+                        </div>
+                        <div class="agent-item">
+                            <div class="agent-avatar-small researcher">R</div>
+                            <div class="agent-info">
+                                <span class="agent-name">Researcher</span>
+                                <span class="agent-task">Data analysis</span>
+                            </div>
+                            <div class="status-dot online"></div>
+                        </div>
+                        <div class="agent-item">
+                            <div class="agent-avatar-small analyst">A</div>
+                            <div class="agent-info">
+                                <span class="agent-name">Analyst</span>
+                                <span class="agent-task">Performance review</span>
+                            </div>
+                            <div class="status-dot busy"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3>Current Tasks</h3>
+                    <div class="task-list">
+                        <div class="task-item high">
+                            <div class="task-priority"></div>
+                            <div class="task-info">
+                                <span class="task-title">API Optimization</span>
+                                <span class="task-progress">75% complete</span>
+                            </div>
+                        </div>
+                        <div class="task-item medium">
+                            <div class="task-priority"></div>
+                            <div class="task-info">
+                                <span class="task-title">Security Audit</span>
+                                <span class="task-progress">45% complete</span>
+                            </div>
+                        </div>
+                        <div class="task-item low">
+                            <div class="task-priority"></div>
+                            <div class="task-info">
+                                <span class="task-title">Documentation Update</span>
+                                <span class="task-progress">20% complete</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="sidebar-section">
+                    <h3>System Status</h3>
+                    <div class="status-grid">
+                        <div class="status-card">
+                            <div class="status-icon">
+                                <i class="fas fa-server"></i>
+                            </div>
+                            <div class="status-info">
+                                <span class="status-value">98.5%</span>
+                                <span class="status-label">Uptime</span>
+                            </div>
+                        </div>
+                        <div class="status-card">
+                            <div class="status-icon">
+                                <i class="fas fa-tachometer-alt"></i>
+                            </div>
+                            <div class="status-info">
+                                <span class="status-value">42ms</span>
+                                <span class="status-label">Response</span>
+                            </div>
+                        </div>
+                        <div class="status-card">
+                            <div class="status-icon">
+                                <i class="fas fa-memory"></i>
+                            </div>
+                            <div class="status-info">
+                                <span class="status-value">64%</span>
+                                <span class="status-label">Memory</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Bottom Panels -->
+        <div class="bottom-panels">
+            <div class="panel-tabs">
+                <div class="panel-tab active">Task Pipeline</div>
+                <div class="panel-tab">Live Activity</div>
+                <div class="panel-tab">Server Health</div>
+                <div class="panel-tab">AI Workflow</div>
+            </div>
+            <div class="panel-content">
+                <div class="pipeline-view">
+                    <div class="pipeline-stage">
+                        <div class="stage-header">Development</div>
+                        <div class="stage-tasks">
+                            <div class="pipeline-task">Feature Implementation</div>
+                            <div class="pipeline-task">Code Review</div>
+                        </div>
+                    </div>
+                    <div class="pipeline-arrow">→</div>
+                    <div class="pipeline-stage">
+                        <div class="stage-header">Testing</div>
+                        <div class="stage-tasks">
+                            <div class="pipeline-task active">Unit Tests</div>
+                            <div class="pipeline-task">Integration Tests</div>
+                        </div>
+                    </div>
+                    <div class="pipeline-arrow">→</div>
+                    <div class="pipeline-stage">
+                        <div class="stage-header">Deployment</div>
+                        <div class="stage-tasks">
+                            <div class="pipeline-task">Staging</div>
+                            <div class="pipeline-task">Production</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="nixon-workspace.js"></script>
+</body>
+</html>

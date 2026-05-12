@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIXON Workspace - Test Page</title>
+    <style>
+        body { font-family: Inter, sans-serif; padding: 20px; background: #f9fafb; }
+        .test-container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .test-item { padding: 15px; margin: 10px 0; border-left: 4px solid #2563eb; background: #f8fafc; border-radius: 6px; }
+        .test-passed { border-left-color: #10b981; }
+        .test-failed { border-left-color: #ef4444; }
+        .test-button { padding: 10px 20px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; margin: 5px; }
+        .test-button:hover { background: #1d4ed8; }
+        #workspace-preview { width: 100%; height: 600px; border: 2px solid #e5e7eb; border-radius: 8px; margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <h1>🧪 NIXON Workspace - Testing Dashboard</h1>
+        <p>This page tests the functionality of the NIXON Workspace dashboard components.</p>
+        
+        <div class="test-section">
+            <h2>📁 File Structure Tests</h2>
+            <div id="file-tests"></div>
+        </div>
+        
+        <div class="test-section">
+            <h2>🎨 Visual Tests</h2>
+            <button class="test-button" onclick="openWorkspace()">Open NIXON Workspace</button>
+            <button class="test-button" onclick="testResponsive()">Test Responsive Design</button>
+            <button class="test-button" onclick="testInteractions()">Test Interactions</button>
+        </div>
+        
+        <div class="test-section">
+            <h2>🔧 Component Tests</h2>
+            <div id="component-tests"></div>
+        </div>
+        
+        <div class="test-section">
+            <h2>📱 Preview</h2>
+            <iframe id="workspace-preview" src="nixon-workspace.html" title="NIXON Workspace Preview"></iframe>
+        </div>
+    </div>
+
+    <script>
+        // Test results storage
+        const testResults = {
+            files: [],
+            components: [],
+            interactions: []
+        };
+
+        // File structure tests
+        function testFileStructure() {
+            const requiredFiles = [
+                'nixon-workspace.html',
+                'nixon-workspace.css',
+                'nixon-workspace.js'
+            ];
+            
+            const fileTestsContainer = document.getElementById('file-tests');
+            
+            requiredFiles.forEach(file => {
+                const testItem = document.createElement('div');
+                testItem.className = 'test-item';
+                
+                // Test if file exists by trying to fetch it
+                fetch(file)
+                    .then(response => {
+                        if (response.ok) {
+                            testItem.className += ' test-passed';
+                            testItem.innerHTML = `✅ ${file} - File exists and accessible`;
+                            testResults.files.push({ file, status: 'passed' });
+                        } else {
+                            throw new Error('File not found');
+                        }
+                    })
+                    .catch(() => {
+                        testItem.className += ' test-failed';
+                        testItem.innerHTML = `❌ ${file} - File not found or inaccessible`;
+                        testResults.files.push({ file, status: 'failed' });
+                    });
+                
+                fileTestsContainer.appendChild(testItem);
+            });
+        }
+
+        // Component tests
+        function testComponents() {
+            const iframe = document.getElementById('workspace-preview');
+            
+            iframe.onload = function() {
+                try {
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    const componentsToTest = [
+                        { selector: '.app-container', name: 'Main App Container' },
+                        { selector: '.app-header', name: 'Header' },
+                        { selector: '.left-sidebar', name: 'Left Sidebar' },
+                        { selector: '.office-workspace', name: 'Office Workspace' },
+                        { selector: '.right-sidebar', name: 'Right Sidebar' },
+                        { selector: '.bottom-panels', name: 'Bottom Panels' },
+                        { selector: '.office-room', name: 'Office Rooms' },
+                        { selector: '.agent-avatar', name: 'Agent Avatars' },
+                        { selector: '.nav-item', name: 'Navigation Items' },
+                        { selector: '.status-card', name: 'Status Cards' }
+                    ];
+
+                    const componentTestsContainer = document.getElementById('component-tests');
+                    
+                    componentsToTest.forEach(component => {
+                        const testItem = document.createElement('div');
+                        testItem.className = 'test-item';
+                        
+                        const elements = iframeDoc.querySelectorAll(component.selector);
+                        
+                        if (elements.length > 0) {
+                            testItem.className += ' test-passed';
+                            testItem.innerHTML = `✅ ${component.name} - Found ${elements.length} element(s)`;
+                            testResults.components.push({ component: component.name, status: 'passed', count: elements.length });
+                        } else {
+                            testItem.className += ' test-failed';
+                            testItem.innerHTML = `❌ ${component.name} - No elements found`;
+                            testResults.components.push({ component: component.name, status: 'failed', count: 0 });
+                        }
+                        
+                        componentTestsContainer.appendChild(testItem);
+                    });
+
+                    // Test JavaScript functionality
+                    testJavaScriptFunctionality(iframeDoc);
+                    
+                } catch (error) {
+                    const errorItem = document.createElement('div');
+                    errorItem.className = 'test-item test-failed';
+                    errorItem.innerHTML = `❌ Cannot access iframe content - ${error.message}`;
+                    document.getElementById('component-tests').appendChild(errorItem);
+                }
+            };
+        }
+
+        function testJavaScriptFunctionality(iframeDoc) {
+            const testItem = document.createElement('div');
+            testItem.className = 'test-item';
+            
+            const iframe = document.getElementById('workspace-preview');
+            const iframeWindow = iframe.contentWindow;
+            
+            // Check if NixonWorkspace class is available
+            setTimeout(() => {
+                if (iframeWindow.nixonWorkspace && typeof iframeWindow.nixonWorkspace === 'object') {
+                    testItem.className += ' test-passed';
+                    testItem.innerHTML = `✅ JavaScript - NixonWorkspace initialized successfully`;
+                    
+                    // Test some methods
+                    if (typeof iframeWindow.nixonWorkspace.showNotification === 'function') {
+                        testItem.innerHTML += '<br>  - showNotification method available';
+                    }
+                    if (typeof iframeWindow.nixonWorkspace.updateDashboard === 'function') {
+                        testItem.innerHTML += '<br>  - updateDashboard method available';
+                    }
+                } else {
+                    testItem.className += ' test-failed';
+                    testItem.innerHTML = `❌ JavaScript - NixonWorkspace not initialized`;
+                }
+                
+                document.getElementById('component-tests').appendChild(testItem);
+            }, 1000);
+        }
+
+        // Interactive tests
+        function openWorkspace() {
+            window.open('nixon-workspace.html', '_blank', 'width=1400,height=900');
+        }
+
+        function testResponsive() {
+            const testWindow = window.open('nixon-workspace.html', '_blank', 'width=400,height=800');
+            
+            if (testWindow) {
+                setTimeout(() => {
+                    alert('Check if the workspace adapts to mobile screen size. Sidebars should be hidden and layout should stack vertically.');
+                }, 1000);
+            }
+        }
+
+        function testInteractions() {
+            const testWindow = window.open('nixon-workspace.html', '_blank', 'width=1400,height=900');
+            
+            if (testWindow) {
+                setTimeout(() => {
+                    alert('Test these interactions:\n\n1. Click on navigation items in left sidebar\n2. Click on office rooms to highlight them\n3. Click on agent avatars to see details\n4. Try the search bar\n5. Switch between bottom panel tabs\n6. Click control buttons in workspace header');
+                }, 1000);
+            }
+        }
+
+        // Generate test report
+        function generateTestReport() {
+            const report = {
+                timestamp: new Date().toISOString(),
+                files: testResults.files,
+                components: testResults.components,
+                summary: {
+                    totalTests: testResults.files.length + testResults.components.length,
+                    passed: testResults.files.filter(t => t.status === 'passed').length + 
+                           testResults.components.filter(t => t.status === 'passed').length,
+                    failed: testResults.files.filter(t => t.status === 'failed').length + 
+                           testResults.components.filter(t => t.status === 'failed').length
+                }
+            };
+            
+            console.log('Test Report:', report);
+            return report;
+        }
+
+        // Initialize tests when page loads
+        window.addEventListener('load', () => {
+            console.log('🧪 Starting NIXON Workspace tests...');
+            testFileStructure();
+            setTimeout(testComponents, 500);
+            
+            // Generate report after all tests
+            setTimeout(() => {
+                const report = generateTestReport();
+                console.log(`📊 Test Summary: ${report.summary.passed}/${report.summary.totalTests} tests passed`);
+            }, 3000);
+        });
+    </script>
+</body>
+</html>
