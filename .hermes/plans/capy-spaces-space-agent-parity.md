@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Revision history UI now treats the current revision as informational only: current rows keep the fixed `Current revision · timeline: current` label while omitting full-Space and widget restore actions; return-to-present candidates still render exactly one `Return to present` action and future non-candidates keep ordinary `Restore`, with hostile renderer/API-auth/secret-looking fixture values omitted from DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Sandbox runtime `postMessage` handling now accepts the Space-Agent-style camelCase `runtimeToken` alias only when it matches the visible sandbox session, rejects conflicting `runtime_token`/`runtimeToken` aliases fail-closed before approval or event queueing, and continues to omit hostile renderer/API-auth/secret-looking fixture values from DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): accept runtimeToken sandbox alias`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `messageType` + `runtimeToken` + `spaceId`/`widgetId` sandbox prompts queue the same metadata-only `agent.prompt` event through the existing approval gate.
+  - Added conflicting-alias coverage proving mismatched `runtime_token` / `runtimeToken` values fail closed before shared-dialog approval or `api/spaces/widget/event`, without reflecting hostile token/prompt/renderer/script markers or secret-looking sentinels into the DOM.
+  - Hardened the static sandbox bridge with a shared runtime-token alias resolver, preserving opaque-origin, exact-iframe-source, visible-shell, selector, and metadata-only queueing checks.
 
 - `fix(spaces): hide current revision restore actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving current revision rows expose no `data-event-id` restore actions, while the return-to-present candidate keeps `Return to present` and a future non-candidate keeps `Restore`.

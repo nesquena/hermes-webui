@@ -1273,6 +1273,22 @@
     return values.length > 0 && values.every(function(value){ return value && value === expected; });
   }
 
+  function runtimeMessageTokenValue(value){
+    const token = String(value || '').trim().slice(0, 120);
+    return /^[a-z0-9._-]+$/i.test(token) ? token : '';
+  }
+
+  function runtimeMessageTokenInfo(data){
+    const hasSnakeToken = Object.prototype.hasOwnProperty.call(data || {}, 'runtime_token');
+    const hasCamelToken = Object.prototype.hasOwnProperty.call(data || {}, 'runtimeToken');
+    const snakeToken = runtimeMessageTokenValue(data && data.runtime_token);
+    const camelToken = runtimeMessageTokenValue(data && data.runtimeToken);
+    if ((hasSnakeToken && !snakeToken) || (hasCamelToken && !camelToken)) return { token: '', blocked: true };
+    const aliases = [snakeToken, camelToken].filter(Boolean);
+    if (aliases.some(function(value){ return value !== aliases[0]; })) return { token: '', blocked: true };
+    return { token: aliases[0] || '', blocked: false };
+  }
+
   function prependRuntimeStatus(html){
     const root = document.getElementById('capySpacesRoot');
     if (root) root.innerHTML = html + root.innerHTML;
@@ -1282,7 +1298,9 @@
     const data = event && event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data : {};
     const typeInfo = runtimeMessageTypeInfo(data);
     if ((!typeInfo.type && !typeInfo.blocked) || !runtimeMessageOriginAllowed(event)) return;
-    const token = String(data.runtime_token || '').trim();
+    const tokenInfo = runtimeMessageTokenInfo(data);
+    if (tokenInfo.blocked) return;
+    const token = tokenInfo.token;
     const session = token ? widgetRuntimeSessions[token] : null;
     if (!session) return;
     if (!runtimeSessionStillVisible(token)) return;

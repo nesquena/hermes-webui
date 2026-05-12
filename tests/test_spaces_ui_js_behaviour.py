@@ -1244,7 +1244,8 @@ async function dispatchWindowMessage(data, opts) {
   const listener = windowListeners.message;
   if (!listener) return;
   opts = opts || {};
-  const frame = data && data.runtime_token ? document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="' + data.runtime_token + '"]') : null;
+  const token = data && (data.runtime_token || data.runtimeToken);
+  const frame = token ? document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="' + token + '"]') : null;
   await listener({ data, origin: opts.origin || 'null', source: Object.prototype.hasOwnProperty.call(opts, 'source') ? opts.source : (frame ? frame.contentWindow : { mockFrame: true }) });
 }
 
@@ -1318,6 +1319,43 @@ async function dispatchWindowMessage(data, opts) {
       source: 'SECRET_SOURCE',
       apiAuth: 'Bearer SECRET_VALUE_DO_NOT_LEAK',
     });
+  } else if (scenario === 'runtimeCamelCaseRuntimeTokenPrompt') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      messageType: 'capy:agent:prompt',
+      runtimeToken: match[1],
+      spaceId: 'lab',
+      widgetId: 'weather',
+      prompt: 'Refresh safely without SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
+      renderer: '<script>bad()</script>',
+      source: 'SECRET_SOURCE',
+      apiAuth: 'Bearer SECRET_VALUE_DO_NOT_LEAK',
+    });
+  } else if (scenario === 'runtimeConflictingRuntimeToken') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      runtimeToken: 'other-token-SECRET_VALUE_DO_NOT_LEAK',
+      spaceId: 'lab',
+      widgetId: 'weather',
+      prompt: 'Queue this prompt despite conflicting token and SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+    }, { source: document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="' + match[1] + '"]').contentWindow });
   } else if (scenario === 'runtimeBlockedMessage') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -2834,6 +2872,47 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_accepts_camelcase_message_ty
     assert "apiAuth" not in combined
     assert "apiauth" not in combined.lower()
     assert "SECRET" not in combined
+
+
+def test_spaces_ui_sandbox_postmessage_agent_prompt_accepts_camelcase_runtime_token_alias(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeCamelCaseRuntimeTokenPrompt")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = out["rootHtml"] + " " + dialog_blob + " " + json.dumps(body)
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert body == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "agent.prompt",
+        "prompt": "Refresh safely without [REDACTED] or bad()",
+        "payload": {"source": "sandbox-postmessage", "message_type": "capy:agent:prompt"},
+    }
+    assert "Widget event queued" in out["rootHtml"]
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "runtimeToken" not in out["rootHtml"]
+    assert "<script" not in combined.lower()
+    assert "renderer" not in combined.lower()
+    assert "apiAuth" not in combined
+    assert "apiauth" not in combined.lower()
+    assert "SECRET" not in combined
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_conflicting_runtime_token_aliases(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeConflictingRuntimeToken")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this prompt" not in out["rootHtml"]
+    assert "other-token" not in out["rootHtml"]
+    assert "runtimeToken" not in out["rootHtml"]
+    assert "<script" not in out["rootHtml"].lower()
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_sandbox_postmessage_blocks_raw_eval_without_network_call(driver_path):
