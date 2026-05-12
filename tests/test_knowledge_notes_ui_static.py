@@ -86,6 +86,12 @@ def test_knowledge_panel_fetches_local_api_and_renders_safe_obsidian_links():
     assert "api('/api/knowledge/status" in load_fn or 'api("/api/knowledge/status' in load_fn
     assert "/api/knowledge/search" in search_fn
     assert "/api/knowledge/read" in read_fn
+    assert "/api/knowledge/ask" in PANELS
+    assert "askKnowledge" in PANELS
+    assert "saveKnowledgeAnswer" in PANELS
+    assert "id=\"knowledgeAsk\"" in INDEX
+    assert "id=\"knowledgeAskResult\"" in INDEX
+    assert "id=\"knowledgeSaveAnswerBtn\"" in INDEX
     assert "/api/notes/capture" in note_fn
     assert "esc(" in render_fn, "knowledge results must escape dynamic snippets/titles"
     assert "innerHTML" in render_fn and "snippet" in render_fn

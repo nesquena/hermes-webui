@@ -86,6 +86,26 @@ def read_source(path, cfg=None, config_path=None, offset=1, limit=80):
         'total_lines': 2,
         'content': '1|# Safe Note\\n2|SECRET_VALUE_DO_NOT_LEAK should be redacted',
     }
+
+def context_pack(query, cfg=None, config_path=None, limit=8, max_sources=4, chars_per_source=1200, source_types=None):
+    return {
+        'query': query,
+        'local_only': True,
+        'generated': False,
+        'source_count': 1,
+        'context_markdown': '# Local Knowledge Context Pack\\n\\n## [1] Unsafe <script>Title</script>\\nSECRET_VALUE_DO_NOT_LEAK cited body',
+        'citations': [{
+            'citation_id': 1,
+            'path': str(Path.cwd() / 'Vault' / 'Note.md'),
+            'source_type': 'obsidian',
+            'title': 'Unsafe <script>Title</script>',
+            'heading_path': 'Heading',
+            'start_line': 1,
+            'end_line': 4,
+            'excerpt': '1|Capy local knowledge answer with SECRET_VALUE_DO_NOT_LEAK and <script>bad()</script>',
+            'content_sha256': 'abc123',
+        }],
+    }
 """.lstrip(),
         encoding="utf-8",
     )
@@ -161,6 +181,44 @@ def test_knowledge_read_route_redacts_content_and_maps_permission_errors_to_403(
     assert handled is True
     assert denied.status == 403
     assert "/private/secret" not in denied.json_body().get("error", "")
+
+
+def test_knowledge_ask_route_returns_extract_context_with_safe_citations(monkeypatch, tmp_path):
+    knowledge_root = tmp_path / "local-knowledge"
+    _install_fake_knowledge_index(knowledge_root)
+    vault = tmp_path / "Vault"
+    vault.mkdir()
+    monkeypatch.setenv("HERMES_LOCAL_KNOWLEDGE_DIR", str(knowledge_root))
+    monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(vault))
+
+    handled, handler = _post(
+        "/api/knowledge/ask",
+        {"query": "what should Capy cite?", "max_sources": 2, "chars_per_source": 600},
+    )
+
+    assert handled is True
+    assert handler.status == 200
+    payload = handler.json_body()
+    assert payload["local_only"] is True
+    assert payload["generated"] is False
+    assert payload["query"] == "what should Capy cite?"
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in json.dumps(payload)
+    assert "<script>" not in json.dumps(payload)
+    assert "[1]" in payload["answer_markdown"]
+    assert payload["citations"][0]["citation_id"] == 1
+    assert payload["citations"][0]["obsidian_url"].startswith("obsidian://open?")
+
+
+def test_knowledge_ask_rejects_empty_query(monkeypatch, tmp_path):
+    knowledge_root = tmp_path / "local-knowledge"
+    _install_fake_knowledge_index(knowledge_root)
+    monkeypatch.setenv("HERMES_LOCAL_KNOWLEDGE_DIR", str(knowledge_root))
+
+    handled, handler = _post("/api/knowledge/ask", {"query": "  "})
+
+    assert handled is True
+    assert handler.status == 400
+    assert "query" in handler.json_body().get("error", "")
 
 
 def test_note_capture_writes_markdown_inside_obsidian_vault_and_returns_metadata_only(monkeypatch, tmp_path):

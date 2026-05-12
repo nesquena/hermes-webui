@@ -728,6 +728,14 @@
       </div>
       <div class="main-view-body knowledge-main-body">
         <div class="main-view-content knowledge-content">
+          <form class="knowledge-ask-form" onsubmit="askKnowledge();return false;">
+            <textarea id="knowledgeAsk" rows="3" placeholder="Ask local knowledge..." data-i18n-placeholder="knowledge_ask_placeholder"></textarea>
+            <div class="knowledge-ask-actions">
+              <button class="btn primary" type="submit" data-i18n="knowledge_ask">Ask knowledge</button>
+              <button class="btn secondary" type="button" id="knowledgeSaveAnswerBtn" onclick="saveKnowledgeAnswer()" style="display:none" data-i18n="knowledge_save_answer">Save answer</button>
+            </div>
+            <div class="knowledge-ask-result" id="knowledgeAskResult"></div>
+          </form>
           <div class="knowledge-results" id="knowledgeResults"><div class="main-view-empty-title" data-i18n="knowledge_empty_title">Search local knowledge</div><div class="main-view-empty-sub" data-i18n="knowledge_empty_sub">Results and source previews stay local and redact sensitive snippets.</div></div>
           <div class="knowledge-source" id="knowledgeSource"></div>
         </div>

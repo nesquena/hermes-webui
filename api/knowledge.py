@@ -182,6 +182,73 @@ def read_payload(path: str, *, offset: int = 1, limit: int = 120) -> dict[str, A
     }
 
 
+def ask_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """Return an extractive, local-only answer context with sanitized citations.
+
+    This endpoint deliberately does not call a model. The browser/agent can use
+    the returned answer_markdown/context_markdown as a cited context pack or save
+    it to Obsidian through the existing notes endpoint.
+    """
+    query = str(body.get("query") or body.get("q") or "").strip()
+    if not query:
+        raise ValueError("query is required")
+    max_sources = max(1, min(int(body.get("max_sources") or 4), 8))
+    limit = max(max_sources, min(int(body.get("limit") or 8), 25))
+    chars_per_source = max(200, min(int(body.get("chars_per_source") or 1200), 3000))
+    raw_source_types = body.get("source_types") or body.get("source_type") or []
+    if isinstance(raw_source_types, str):
+        raw_source_types = [raw_source_types]
+    source_types = [str(s).strip() for s in raw_source_types if str(s).strip()] if isinstance(raw_source_types, list) else []
+    module = _load_knowledge_index()
+    result = module.context_pack(
+        query,
+        cfg=_cfg(module),
+        limit=limit,
+        max_sources=max_sources,
+        chars_per_source=chars_per_source,
+        source_types=source_types or None,
+    )
+    citations = []
+    answer_lines = [
+        f"### Local knowledge answer context for: {_safe_text(query, max_len=300)}",
+        "",
+        "This is local-only extracted context. Use the citations below before making durable claims.",
+    ]
+    for item in result.get("citations", []):
+        source_type = _safe_text(item.get("source_type"), max_len=80)
+        path = str(item.get("path") or "")
+        title = _safe_text(item.get("title"), max_len=200)
+        excerpt = _safe_text(item.get("excerpt"), max_len=4000)
+        citation_id = int(item.get("citation_id") or (len(citations) + 1))
+        citations.append(
+            {
+                "citation_id": citation_id,
+                "path": path,
+                "source_type": source_type,
+                "title": title,
+                "heading_path": _safe_text(item.get("heading_path"), max_len=300),
+                "start_line": item.get("start_line"),
+                "end_line": item.get("end_line"),
+                "excerpt": excerpt,
+                "content_sha256": _safe_text(item.get("content_sha256"), max_len=80),
+                "obsidian_url": obsidian_url_for_path(path, source_type=source_type),
+            }
+        )
+        answer_lines.extend(["", f"[{citation_id}] {title}", excerpt])
+    if not citations:
+        answer_lines.append("\nNo local sources matched this query.")
+    context_markdown = _safe_text(result.get("context_markdown"), max_len=30_000)
+    return {
+        "query": _safe_text(query, max_len=300),
+        "local_only": True,
+        "generated": False,
+        "source_count": len(citations),
+        "citations": citations,
+        "answer_markdown": "\n".join(answer_lines).strip() + "\n",
+        "context_markdown": context_markdown,
+    }
+
+
 def _safe_note_folder(folder: Any) -> str:
     raw = str(folder or "00_Inbox").strip().replace("\\", "/")
     parts = [p for p in raw.split("/") if p and p not in (".", "..")]

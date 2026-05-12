@@ -4494,6 +4494,7 @@ async function deleteProfile(name) {
 // ── Knowledge & Notes panel ──
 let _knowledgeLoaded = false;
 let _knowledgeLastResults = [];
+let _knowledgeLastAnswer = null;
 
 async function loadKnowledge(force) {
   const statusEl = $('knowledgeStatus');
@@ -4557,6 +4558,52 @@ async function readKnowledgeSource(index) {
     if (sourceEl) sourceEl.innerHTML = `<div class="knowledge-source-head"><strong>${esc(data.path || item.path)}</strong>${obsidian}</div><pre class="knowledge-source-pre"><code>${esc(data.content || '')}</code></pre>`;
   } catch (e) {
     if (sourceEl) sourceEl.innerHTML = `<div class="logs-empty">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+function _renderKnowledgeAnswer(data) {
+  const resultEl = $('knowledgeAskResult');
+  const saveBtn = $('knowledgeSaveAnswerBtn');
+  _knowledgeLastAnswer = data || null;
+  if (saveBtn) saveBtn.style.display = data && data.answer_markdown ? '' : 'none';
+  if (!resultEl) return;
+  if (!data) { resultEl.innerHTML = ''; return; }
+  const citations = (data.citations || []).map(c => {
+    const link = c.obsidian_url ? `<a href="${esc(c.obsidian_url)}" target="_blank" rel="noopener noreferrer">Obsidian</a>` : '';
+    const label = `[${esc(c.citation_id)}] ${esc(c.title || c.path || '')}`;
+    const meta = [c.source_type, c.heading_path, c.start_line ? `L${c.start_line}` : ''].filter(Boolean).map(esc).join(' · ');
+    return `<li><strong>${label}</strong><span>${meta}</span>${link}</li>`;
+  }).join('');
+  resultEl.innerHTML = `<div class="knowledge-answer-note">${esc(t('knowledge_extract_note'))}</div><pre class="knowledge-answer-pre"><code>${esc(data.answer_markdown || '')}</code></pre><ul class="knowledge-citations">${citations}</ul>`;
+}
+
+async function askKnowledge() {
+  const input = $('knowledgeAsk');
+  const resultEl = $('knowledgeAskResult');
+  const query = (input && input.value || '').trim();
+  if (!query) { if (input) input.focus(); return; }
+  if (resultEl) resultEl.innerHTML = `<div class="logs-empty">${esc(t('loading'))}</div>`;
+  try {
+    const data = await api('/api/knowledge/ask', {method:'POST', body: JSON.stringify({query, max_sources:4, chars_per_source:1200})});
+    _renderKnowledgeAnswer(data);
+  } catch (e) {
+    if (resultEl) resultEl.innerHTML = `<div class="logs-empty">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+async function saveKnowledgeAnswer() {
+  if (!_knowledgeLastAnswer || !_knowledgeLastAnswer.answer_markdown) return;
+  const statusEl = $('knowledgeNoteStatus');
+  if (statusEl) statusEl.textContent = t('loading');
+  try {
+    const title = 'Knowledge answer - ' + (_knowledgeLastAnswer.query || '').slice(0, 80);
+    const content = `${_knowledgeLastAnswer.answer_markdown}\n\n## Context pack\n\n${_knowledgeLastAnswer.context_markdown || ''}`;
+    const data = await api('/api/notes/capture', {method:'POST', body: JSON.stringify({title, content, folder:'00_Inbox', tags:['capy','knowledge','answer']})});
+    const link = data.obsidian_url ? ` <a href="${esc(data.obsidian_url)}" target="_blank" rel="noopener noreferrer">Obsidian</a>` : '';
+    if (statusEl) statusEl.innerHTML = `${esc(t('knowledge_note_saved'))}${link}`;
+    if (typeof showToast === 'function') showToast(t('knowledge_note_saved'));
+  } catch (e) {
+    if (statusEl) statusEl.textContent = t('error_prefix') + e.message;
   }
 }
 

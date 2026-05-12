@@ -3723,6 +3723,18 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .knowledge-main-body{display:flex;gap:0;min-height:0;overflow:hidden;}
 .knowledge-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,42%);gap:12px;padding:16px;overflow:auto;}
 .knowledge-results,.knowledge-source{min-height:0;}
+.knowledge-ask-form{grid-column:1 / -1;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);padding:12px;display:flex;flex-direction:column;gap:10px;}
+.knowledge-ask-form textarea{width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px;font:inherit;font-size:13px;resize:vertical;}
+.knowledge-ask-actions{display:flex;gap:8px;align-items:center;}
+.knowledge-sidebar .btn,.knowledge-ask-form .btn,.knowledge-note-form .btn{border:1px solid var(--border);border-radius:8px;background:var(--input-bg);color:var(--text);padding:8px 12px;font:inherit;font-size:12px;cursor:pointer;transition:background .15s,border-color .15s,transform .12s;}
+.knowledge-sidebar .btn:hover,.knowledge-ask-form .btn:hover,.knowledge-note-form .btn:hover{background:rgba(255,255,255,.08);border-color:var(--accent);}
+.knowledge-sidebar .btn.primary,.knowledge-ask-form .btn.primary,.knowledge-note-form .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-contrast,#fff);}
+.knowledge-sidebar .btn.secondary,.knowledge-ask-form .btn.secondary,.knowledge-note-form .btn.secondary{background:transparent;}
+.knowledge-ask-result{color:var(--text);font-size:12px;line-height:1.45;}
+.knowledge-answer-note{color:var(--muted);margin-bottom:8px;}
+.knowledge-answer-pre{border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.18);padding:10px;white-space:pre-wrap;overflow:auto;max-height:32vh;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;}
+.knowledge-citations{display:flex;flex-direction:column;gap:6px;margin:8px 0 0;padding-left:18px;color:var(--muted);}
+.knowledge-citations li span{display:block;font-size:11px;}
 .knowledge-result{border:1px solid var(--border);border-radius:12px;background:var(--sidebar);padding:12px;margin-bottom:10px;}
 .knowledge-result-head{display:flex;flex-direction:column;gap:3px;margin-bottom:8px;}
 .knowledge-result-head strong{color:var(--text);font-size:13px;}

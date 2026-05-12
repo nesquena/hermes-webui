@@ -4487,6 +4487,18 @@ def handle_post(handler, parsed) -> bool:
             bad(handler, _sanitize_error(exc), status=500)
         return True
 
+    if parsed.path == "/api/knowledge/ask":
+        try:
+            from api.knowledge import ask_payload
+
+            j(handler, ask_payload(body))
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("knowledge ask failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
+
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
 
