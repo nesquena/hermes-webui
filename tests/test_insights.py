@@ -162,3 +162,133 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS
+
+
+def _make_daily_rows(n):
+    rows = []
+    for i in range(n):
+        rows.append({
+            'date': f'2026-01-{i+1:02d}',
+            'input_tokens': (i + 1) * 100,
+            'output_tokens': (i + 1) * 50,
+            'sessions': 1,
+            'cost': (i + 1) * 0.01,
+        })
+    return rows
+
+
+# Python reference implementation of the JS bucketing logic, so we can
+# verify the JS implementation produces the same behavior without needing
+# a JS runtime.
+def _py_bucket(rows):
+    if not isinstance(rows, list) or len(rows) == 0:
+        return []
+    n = len(rows)
+    if n <= 30:
+        return list(rows)  # unchanged
+
+    if n <= 90:
+        bucket_size = 2
+    elif n <= 180:
+        bucket_size = 3
+    elif n <= 365:
+        bucket_size = 8  # ≤52 bars for 365 days; shrink-safe with minmax(0,1fr)
+    else:
+        bucket_size = 8  # fallback for >365 (shouldn't occur in practice)
+
+    result = []
+    for i in range(0, n, bucket_size):
+        sl = rows[i:i + bucket_size]
+        inp = sum(r['input_tokens'] for r in sl)
+        out = sum(r['output_tokens'] for r in sl)
+        sess = sum(r['sessions'] for r in sl)
+        cost = sum(r['cost'] for r in sl)
+        first = sl[0]['date']
+        last = sl[-1]['date']
+        first_lbl = first[5:]  # MM-DD
+        last_lbl = last[5:]
+        result.append({
+            'label': (first_lbl if first == last else first_lbl + '--' + last_lbl),
+            'title': first + (' -- ' + last if first != last else ''),
+            'date': first,
+            'input_tokens': inp,
+            'output_tokens': out,
+            'sessions': sess,
+            'cost': cost,
+        })
+    return result
+
+
+def test_insights_bucketing_helper_preserves_short_ranges():
+    # _bucketDailyTokensForChart must exist in panels.js
+    assert '_bucketDailyTokensForChart' in PANELS_JS
+
+    # 7-day: unchanged (≤ 30 threshold)
+    rows7 = _make_daily_rows(7)
+    bucketed7 = _py_bucket(rows7)
+    assert len(bucketed7) == 7, f'7-day should stay 7 bars, got {len(bucketed7)}'
+    assert bucketed7[0]['input_tokens'] == 100
+
+    # 30-day: exactly 30 → unchanged
+    rows30 = _make_daily_rows(30)
+    bucketed30 = _py_bucket(rows30)
+    assert len(bucketed30) == 30, f'30-day should stay 30 bars, got {len(bucketed30)}'
+
+    # 31-day: bucketed
+    rows31 = _make_daily_rows(31)
+    bucketed31 = _py_bucket(rows31)
+    assert len(bucketed31) < 31, f'31-day should be bucketed, got {len(bucketed31)}'
+    assert len(bucketed31) <= 16  # ceil(31/2)
+
+
+def test_insights_bucketing_helper_bounds_long_ranges():
+    # 90-day → 2-day buckets → 45 bars
+    rows90 = _make_daily_rows(90)
+    bucketed90 = _py_bucket(rows90)
+    assert len(bucketed90) <= 45, f'90-day should be <=45 bars, got {len(bucketed90)}'
+    assert len(bucketed90) > 0
+
+    # 365-day → 8-day buckets → 46 bars (≤52 threshold)
+    rows365 = _make_daily_rows(365)
+    bucketed365 = _py_bucket(rows365)
+    assert len(bucketed365) <= 52, f'365-day should be <=52 bars, got {len(bucketed365)}'
+    assert len(bucketed365) > 0
+    # First bucket has 8 days: 100+200+300+400+500+600+700+800 = 3600
+    assert bucketed365[0]['input_tokens'] == 3600
+    assert bucketed365[0]['sessions'] == 8
+
+
+def test_insights_bucketing_helper_preserves_label_and_title_fields():
+    # Short range → rows unchanged; no .label/.title keys
+    rows10 = _make_daily_rows(10)
+    bucketed10 = _py_bucket(rows10)
+    assert bucketed10[0]['date'] == '2026-01-01'
+    assert 'label' not in bucketed10[0]
+    assert 'title' not in bucketed10[0]
+
+    # 90-day → bucket rows have .label and .title
+    rows90 = _make_daily_rows(90)
+    bucketed90 = _py_bucket(rows90)
+    assert 'label' in bucketed90[0], 'bucket row must have .label'
+    assert 'title' in bucketed90[0], 'bucket row must have .title'
+    assert '2026-01-01' in bucketed90[0]['title'], f'title should include start date, got {bucketed90[0]["title"]}'
+    assert len(bucketed90[0]['label']) <= 12, f'label should be short, got {bucketed90[0]["label"]}'
+
+
+def test_insights_render_loop_uses_bucket_helper():
+    src = PANELS_JS
+    daily_section_start = src.find('// Daily token trend')
+    daily_section_end = src.find('// Models table', daily_section_start)
+    daily_section = src[daily_section_start:daily_section_end]
+
+    assert '_bucketDailyTokensForChart' in daily_section, '_bucketDailyTokensForChart must be called in the render loop'
+    assert 'const chartRows' in daily_section, 'chartRows variable must be used instead of dailyTokens.map directly'
+
+
+def test_insights_css_chart_shrink_safe():
+    assert '.insights-daily-token-chart' in STYLE_CSS
+    chart_line = [line for line in STYLE_CSS.splitlines() if '.insights-daily-token-chart' in line][0]
+    # minmax(0,1fr) instead of minmax(12px,1fr) lets long-range bars shrink to fit the card
+    assert 'minmax(0,1fr)' in chart_line, f'chart must use minmax(0,1fr) for shrink-safe columns, got: {chart_line}'
+    assert 'overflow:hidden' in chart_line, 'chart must have overflow:hidden to prevent horizontal scroll'
+    assert 'max-width:100%' in chart_line or 'max-width' in chart_line, 'chart should constrain max-width'

@@ -2918,6 +2918,66 @@ function _renderLlmWikiStatus(d) {
     </div>`;
 }
 
+/**
+ * Bucket daily token rows for chart display.
+ * Returns rows unchanged when length <= 30 (per-day resolution).
+ * For longer ranges, groups consecutive days into buckets:
+ *   31–90 days → 2-day buckets
+ *   91–180 days → 3-day buckets
+ *   181–365 days → 8-day buckets
+ * Result is always <= ~52 bars.
+ * Each bucket row has:
+ *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
+ *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
+ *   - date: first date in bucket (used for date label slicing)
+ *   - input_tokens, output_tokens, sessions, cost: summed across bucket
+ */
+function _bucketDailyTokensForChart(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const len = rows.length;
+  if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
+
+  // Target <= 75 bars; derive bucket size
+  let bucketSize;
+  if (len <= 90) {
+    bucketSize = 2;
+  } else if (len <= 180) {
+    bucketSize = 3;
+  } else if (len <= 365) {
+    bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
+  } else {
+    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+  }
+
+  const result = [];
+  for (let i = 0; i < len; i += bucketSize) {
+    const slice = rows.slice(i, i + bucketSize);
+    const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
+    const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
+    const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
+
+    const firstDate = slice[0].date;
+    const lastDate = slice[slice.length - 1].date;
+
+    // Label: short form for axis
+    const firstLabel = String(firstDate).slice(5);  // MM-DD
+    const lastLabel = String(lastDate).slice(5);
+    const label = (firstDate === lastDate) ? firstLabel : (firstLabel + '–' + lastLabel);
+
+    result.push({
+      label,
+      title: firstDate + (firstDate !== lastDate ? ' – ' + lastDate : ''),
+      date: firstDate,
+      input_tokens,
+      output_tokens,
+      sessions,
+      cost,
+    });
+  }
+  return result;
+}
+
 function _renderInsights(d, box, wikiStatus) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
@@ -2937,21 +2997,24 @@ function _renderInsights(d, box, wikiStatus) {
     { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
   ];
 
-  // Daily token trend
+  // Daily token trend — bucket long ranges to avoid horizontal overflow
   const dailyTokens = Array.isArray(d.daily_tokens) ? d.daily_tokens : [];
+  const chartRows = _bucketDailyTokensForChart(dailyTokens);
   let dailyHtml = '';
-  if (dailyTokens.length) {
-    const maxDailyTokens = Math.max(...dailyTokens.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
-    const labelEvery = Math.max(Math.ceil(dailyTokens.length / 7), 1);
+  if (chartRows.length) {
+    const maxDailyTokens = Math.max(...chartRows.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
+    const labelEvery = Math.max(Math.ceil(chartRows.length / 7), 1);
     dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-daily-token-chart">` +
-      dailyTokens.map((r, idx) => {
+      chartRows.map((r, idx) => {
         const input = Number(r.input_tokens || 0);
         const output = Number(r.output_tokens || 0);
         const inputPct = Math.max((input / maxDailyTokens) * 100, input ? 2 : 0).toFixed(1);
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
-        const showLabel = idx === 0 || idx === dailyTokens.length - 1 || idx % labelEvery === 0;
-        const title = `${r.date} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
-        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(String(r.date).slice(5)) : ''}</span></div>`;
+        const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
+        const titleDate = r.title || r.date;
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
+        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
       `</div><div class="insights-daily-legend"><span><i class="insights-daily-legend-input"></i>${esc(t('insights_input_tokens'))}</span><span><i class="insights-daily-legend-output"></i>${esc(t('insights_output_tokens'))}</span></div></div>`;
   } else {

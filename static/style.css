@@ -3370,7 +3370,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-model-cost,.insights-model-tokens{font-variant-numeric:tabular-nums;}
 .insights-model-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .insights-empty{font-size:12px;color:var(--muted);padding:12px 0;}
-.insights-daily-token-chart{height:180px;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(10px,1fr);gap:4px;align-items:end;padding:6px 0 2px;border-bottom:1px solid var(--border);}
+.insights-daily-token-chart{height:180px;display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:4px;align-items:end;padding:6px 0 2px;border-bottom:1px solid var(--border);overflow:hidden;max-width:100%;}
 .insights-daily-bar{min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;gap:4px;}
 .insights-daily-stack{height:150px;display:flex;flex-direction:column;justify-content:flex-end;background:var(--border,.15);border-radius:4px;overflow:hidden;}
 .insights-daily-bar-input{background:var(--accent);min-height:0;}
