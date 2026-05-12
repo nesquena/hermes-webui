@@ -51,9 +51,11 @@ _load_repo_dotenv_preserving_env() {
   set +a
 
   local assignment
-  for assignment in "${preserved[@]}"; do
-    export "${assignment}"
-  done
+  if [[ ${#preserved[@]} -gt 0 ]]; then
+    for assignment in "${preserved[@]}"; do
+      export "${assignment}"
+    done
+  fi
 }
 
 _find_python() {
