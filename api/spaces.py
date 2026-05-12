@@ -2260,6 +2260,30 @@ def space_demo_run(name: str) -> dict[str, Any]:
         if widgets:
             disable_widget_for_recovery(space_id, widgets[0]["id"], reason="demo smoke recovery")
             action = "recovery-disabled"
+        recovery = recovery_snapshot()
+        safe_admin = recovery.get("safe_admin") if isinstance(recovery.get("safe_admin"), dict) else {}
+        recovery_summary = recovery.get("summary") if isinstance(recovery.get("summary"), dict) else {}
+        gate_labels = safe_admin.get("gate_labels") if isinstance(safe_admin.get("gate_labels"), list) else []
+        restore_routes = safe_admin.get("restore_routes") if isinstance(safe_admin.get("restore_routes"), list) else []
+        extra = {
+            "safe_admin_recovery_check": {
+                "verified": bool(
+                    widgets
+                    and recovery_summary.get("disabled_widget_count", 0) >= 1
+                    and safe_admin.get("metadata_only") is True
+                    and safe_admin.get("generated_widgets_rendered") is False
+                    and "/api/spaces/revision/restore" in restore_routes
+                    and "disable and repair controls available" in gate_labels
+                    and "module quarantine available" in gate_labels
+                ),
+                "metadata_only": safe_admin.get("metadata_only") is True,
+                "generated_widgets_rendered": safe_admin.get("generated_widgets_rendered") is True,
+                "disabled_widget_count": int(recovery_summary.get("disabled_widget_count") or 0),
+                "rollback_controls_available": "/api/spaces/revision/restore" in restore_routes,
+                "repair_controls_available": "disable and repair controls available" in gate_labels,
+                "module_quarantine_available": "module quarantine available" in gate_labels,
+            }
+        }
     elif demo == "demo_research_harness_pdf_export":
         progress = set_research_progress(
             space_id,

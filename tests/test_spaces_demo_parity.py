@@ -285,6 +285,34 @@ def test_time_travel_demo_smoke_records_restore_check_metadata_only(monkeypatch,
     _assert_safe_payload(detail)
 
 
+def test_safe_admin_recovery_demo_smoke_records_recovery_check_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_safe_admin_recovery")
+    detail = spaces.read_widget_detail(result["space"]["space_id"], "weather-current")
+    snapshot = spaces.recovery_snapshot()
+
+    assert result["action"] == "recovery-disabled"
+    assert result["safe_admin_recovery_check"] == {
+        "verified": True,
+        "metadata_only": True,
+        "generated_widgets_rendered": False,
+        "disabled_widget_count": 1,
+        "rollback_controls_available": True,
+        "repair_controls_available": True,
+        "module_quarantine_available": True,
+    }
+    assert str(detail["recovery"]["disabled"]).lower() == "true"
+    assert snapshot["summary"]["disabled_widget_count"] == 1
+    assert snapshot["safe_admin"]["metadata_only"] is True
+    assert snapshot["safe_admin"]["generated_widgets_rendered"] is False
+    assert "/api/spaces/revision/restore" in snapshot["safe_admin"]["restore_routes"]
+    assert "disable and repair controls available" in snapshot["safe_admin"]["gate_labels"]
+    assert "module quarantine available" in snapshot["safe_admin"]["gate_labels"]
+    _assert_safe_payload(result)
+    _assert_safe_payload({"detail": detail, "snapshot": snapshot})
+
+
 def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

@@ -273,8 +273,8 @@ global.fetch = async function(path, opts = {}) {
     return response({
       ok: true,
       action: 'space.demo.run_all',
-      total: 5,
-      passed: 5,
+      total: 6,
+      passed: 6,
       failed: 0,
       mode: 'metadata-only-smoke',
       results: [
@@ -287,6 +287,7 @@ global.fetch = async function(path, opts = {}) {
         ], renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_research_harness_pdf_export', template: 'research', mode: 'metadata-only-smoke', space: { space_id: 'demo-research-harness-pdf-export', name: 'Research Harness', source: 'UNTRUSTED_SOURCE' }, widget_count: 5, persisted_widget_count: 5, rollback_point: true, persistence_checked: true, queued_event_count: 1, research_rollback_check: { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_time_travel_restore', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true, time_travel_restore_check: { patch_applied: true, restored: true, patch_cleared: true, history_preserved: true, return_to_present_preserved: true, restored_widget_count: 1, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE', raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' } },
+        { ok: true, demo: 'demo_safe_admin_recovery', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-safe-admin-recovery', name: 'Admin Recovery Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true, safe_admin_recovery_check: { verified: true, metadata_only: true, generated_widgets_rendered: false, disabled_widget_count: 1, rollback_controls_available: true, repair_controls_available: true, module_quarantine_available: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE', raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', disabled_reason: 'bearer SECRET_VALUE_DO_NOT_LEAK' } },
       ],
       renderer: '<script>bad()</script>',
       api_key: 'UNTRUSTED_VALUE',
@@ -4016,12 +4017,13 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
         for call in out["calls"]
     )
     assert "Demo parity smoke suite passed" in out["rootHtml"]
-    assert "5 / 5 metadata-only smokes passed" in out["rootHtml"]
+    assert "6 / 6 metadata-only smokes passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]
     assert "demo_notes_app" in out["rootHtml"]
     assert "demo_kanban_board" in out["rootHtml"]
     assert "demo_research_harness_pdf_export" in out["rootHtml"]
     assert "demo_time_travel_restore" in out["rootHtml"]
+    assert "demo_safe_admin_recovery" in out["rootHtml"]
     assert "persistence: checked" in out["rootHtml"]
     assert "Weather demo checklist" in out["rootHtml"]
     assert "Weather flow: chat answer recorded · widget created · reload verified" in out["rootHtml"]
@@ -4034,6 +4036,8 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Research flow: PDF export queued · rollback verified · replayed after restore · restored widgets 5" in out["rootHtml"]
     assert "Time travel restore checklist" in out["rootHtml"]
     assert "Time travel flow: patch applied · restored · return-to-present preserved · history preserved · restored widgets 1" in out["rootHtml"]
+    assert "Safe admin recovery checklist" in out["rootHtml"]
+    assert "Admin recovery flow: metadata-only · generated widgets not rendered · disabled widgets 1 · rollback controls available · repair controls available · module quarantine available" in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
     assert "smoke patch" not in out["rootHtml"].lower()
     assert "Observation summary" not in out["rootHtml"]
