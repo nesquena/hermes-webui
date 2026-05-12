@@ -354,7 +354,22 @@ else
     fi
   done
   if [ -n "$_agent_src" ]; then
-    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    # >>> hermes-fork: resilient agent[all] install (HermesOS Cloud)
+    # The [all] extra includes [mistral] which pulls mistralai from PyPI. If
+    # PyPI quarantines mistralai (happened May 12 2026), the resolver fails
+    # with "no versions of mistralai" and init crashes the container. Fall
+    # back to a curated extras list that excludes mistral so a single
+    # ecosystem incident doesn't take down every fresh VM provision and
+    # every container that gets force-recreated.
+    if ! uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org; then
+      echo ""
+      echo "!! WARNING: full [all] install failed (likely a PyPI quarantine on one"
+      echo "!! optional extra). Falling back to curated extras minus [mistral]."
+      uv pip install "$_agent_src[modal,daytona,vercel,messaging,matrix,cron,cli,dev,tts-premium,slack,pty,honcho,mcp,homeassistant,sms,acp,voice,dingtalk,feishu,google,bedrock,web]" \
+        --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+        || error_exit "Failed to install hermes-agent's curated extras"
+    fi
+    # <<< hermes-fork
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."
