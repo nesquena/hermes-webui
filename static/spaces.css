@@ -338,3 +338,599 @@
 .capy-spaces-canvas-dock div {
   color: #fff;
 }
+
+
+/* Space Agent-like product home shell. */
+.capy-spaces-product-home {
+  background:
+    radial-gradient(circle at 12% 15%, rgba(80, 155, 255, 0.20), transparent 26%),
+    radial-gradient(circle at 78% 22%, rgba(217, 119, 6, 0.14), transparent 22%),
+    radial-gradient(circle at 50% 82%, rgba(14, 165, 233, 0.12), transparent 30%),
+    linear-gradient(180deg, #050711 0%, #08111f 48%, #03050b 100%);
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 30px;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255,255,255,0.05);
+  color: #eef6ff;
+  isolation: isolate;
+  margin: -4px;
+  min-height: 860px;
+  overflow: hidden;
+  padding: 18px 22px 72px;
+  position: relative;
+}
+
+.capy-spaces-product-starfield {
+  background-image:
+    radial-gradient(circle, rgba(255,255,255,.85) 1px, transparent 1.4px),
+    radial-gradient(circle, rgba(147,197,253,.55) 1px, transparent 1.2px),
+    radial-gradient(circle, rgba(251,146,60,.45) 1px, transparent 1.2px);
+  background-position: 0 0, 31px 41px, 83px 17px;
+  background-size: 84px 84px, 132px 132px, 190px 190px;
+  inset: 0;
+  opacity: 0.68;
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+}
+
+.capy-spaces-product-topbar {
+  align-items: center;
+  background: rgba(6, 12, 25, 0.72);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 0 0 22px 22px;
+  box-shadow: 0 12px 35px rgba(0,0,0,0.24);
+  display: flex;
+  gap: 10px;
+  margin: -18px auto 26px;
+  max-width: 760px;
+  padding: 9px 12px;
+}
+
+.capy-spaces-product-top-spacer { flex: 1; }
+
+.capy-spaces-orb-button,
+.capy-spaces-product-icon,
+.capy-spaces-product-top-action,
+.capy-spaces-agent-key,
+.capy-spaces-demo-pill,
+.capy-spaces-panel-pill,
+.capy-spaces-product-space-card button,
+.capy-spaces-product-close {
+  font: inherit;
+}
+
+.capy-spaces-orb-button,
+.capy-spaces-product-icon {
+  align-items: center;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 999px;
+  color: #eaf6ff;
+  cursor: pointer;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  min-width: 34px;
+}
+
+.capy-spaces-product-top-action,
+.capy-spaces-agent-key {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(147, 197, 253, 0.28);
+  border-radius: 999px;
+  color: #f8fbff;
+  cursor: pointer;
+  padding: 8px 13px;
+}
+
+.capy-spaces-product-welcome {
+  background: rgba(8, 18, 35, 0.78);
+  border: 1px solid rgba(147, 197, 253, 0.28);
+  border-radius: 24px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.04);
+  margin: 0 auto 26px;
+  max-width: 720px;
+  padding: 22px;
+  position: relative;
+}
+
+.capy-spaces-product-close {
+  background: transparent;
+  border: 0;
+  color: rgba(226,232,240,0.72);
+  cursor: pointer;
+  font-size: 20px;
+  position: absolute;
+  right: 18px;
+  top: 14px;
+}
+
+.capy-spaces-product-eyebrow,
+.capy-spaces-product-group-label,
+.capy-spaces-section-heading strong {
+  color: rgba(191, 219, 254, 0.78);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+
+.capy-spaces-product-welcome h2 {
+  color: #fff;
+  font-size: clamp(28px, 4vw, 48px);
+  margin: 6px 0 8px;
+}
+
+.capy-spaces-product-welcome p {
+  color: rgba(226, 232, 240, 0.78);
+  margin: 0 0 18px;
+}
+
+.capy-spaces-resource-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin: 9px 0 18px;
+}
+
+.capy-spaces-resource-pill,
+.capy-spaces-demo-pill,
+.capy-spaces-panel-pill {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.74);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+  color: #eef6ff;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 11px 14px;
+  text-decoration: none;
+}
+
+.capy-spaces-demo-strip,
+.capy-spaces-product-panels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.capy-spaces-demo-pill,
+.capy-spaces-panel-pill {
+  cursor: pointer;
+}
+
+.capy-spaces-demo-pill .material-icons,
+.capy-spaces-panel-pill .material-icons {
+  color: #93c5fd;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.capy-spaces-agent-float {
+  align-items: center;
+  background: rgba(4, 9, 20, 0.82);
+  border: 1px solid rgba(251, 146, 60, 0.36);
+  border-radius: 999px;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.34);
+  display: flex;
+  gap: 9px;
+  margin: -8px auto 28px;
+  max-width: 760px;
+  padding: 8px 10px;
+}
+
+.capy-spaces-agent-mascot {
+  align-items: center;
+  background: radial-gradient(circle at 35% 35%, #fff7ed, #fb923c 55%, #7c2d12);
+  border-radius: 999px;
+  color: #111827;
+  display: flex;
+  font-size: 20px;
+  height: 42px;
+  justify-content: center;
+  min-width: 42px;
+}
+
+.capy-spaces-agent-float label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.capy-spaces-agent-float label span {
+  color: rgba(226,232,240,0.72);
+  font-size: 12px;
+}
+
+.capy-spaces-agent-float textarea {
+  background: transparent;
+  border: 0;
+  color: #fff;
+  min-height: 22px;
+  outline: none;
+  resize: none;
+}
+
+.capy-spaces-agent-key {
+  background: linear-gradient(135deg, #f97316, #f59e0b);
+  border-color: rgba(253, 186, 116, 0.6);
+  color: #111827;
+  font-weight: 700;
+}
+
+.capy-spaces-section-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin: 28px auto 16px;
+  max-width: 780px;
+}
+
+.capy-spaces-section-heading span {
+  background: linear-gradient(90deg, transparent, rgba(147,197,253,.45), transparent);
+  flex: 1;
+  height: 1px;
+}
+
+.capy-spaces-product-card-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  margin: 0 auto;
+  max-width: 900px;
+}
+
+.capy-spaces-product-space-card {
+  background: rgba(11, 22, 42, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 22px;
+  box-shadow: 0 20px 52px rgba(0,0,0,0.26);
+  color: #f8fbff;
+  min-height: 170px;
+  overflow: hidden;
+  padding: 18px;
+  position: relative;
+  text-align: left;
+}
+
+button.capy-spaces-product-space-card { cursor: pointer; }
+
+.capy-spaces-create-card {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+
+.capy-spaces-create-card span {
+  align-items: center;
+  background: rgba(96, 165, 250, 0.18);
+  border-radius: 18px;
+  color: #bfdbfe;
+  display: flex;
+  font-size: 34px;
+  height: 72px;
+  justify-content: center;
+  margin-bottom: 12px;
+  width: 72px;
+}
+
+.capy-spaces-product-card-open {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  inset: 0;
+  padding: 0;
+  position: absolute;
+}
+
+.capy-spaces-product-space-title,
+.capy-spaces-product-tags,
+.capy-spaces-product-space-actions {
+  display: flex;
+  gap: 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.capy-spaces-product-space-title {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.capy-spaces-product-space-card p,
+.capy-spaces-product-space-meta {
+  color: rgba(226, 232, 240, 0.72);
+  position: relative;
+  z-index: 1;
+}
+
+.capy-spaces-product-tags {
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.capy-spaces-product-tags span {
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(147, 197, 253, 0.20);
+  border-radius: 999px;
+  color: #bfdbfe;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.capy-spaces-product-space-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.capy-spaces-product-space-actions button {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 999px;
+  color: rgba(226,232,240,0.92);
+  cursor: pointer;
+  padding: 6px 9px;
+}
+
+.capy-spaces-product-empty {
+  background: rgba(15, 23, 42, 0.66);
+  border: 1px dashed rgba(147, 197, 253, 0.32);
+  border-radius: 22px;
+  color: rgba(226,232,240,0.80);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 170px;
+  padding: 18px;
+}
+
+.capy-spaces-product-panels {
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.capy-spaces-control-plane {
+  background: color-mix(in srgb, var(--panel, #111827) 80%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.capy-spaces-control-plane > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .capy-spaces-product-home { border-radius: 22px; min-height: 980px; padding-inline: 14px; }
+  .capy-spaces-agent-float { align-items: stretch; border-radius: 24px; flex-wrap: wrap; }
+  .capy-spaces-product-topbar { border-radius: 0 0 18px 18px; }
+}
+
+
+/* Stronger Space Agent-like open Space canvas. */
+.capy-spaces-canvas-shell {
+  background:
+    radial-gradient(circle at 20% 16%, rgba(96,165,250,.22), transparent 26%),
+    radial-gradient(circle at 82% 26%, rgba(251,146,60,.14), transparent 24%),
+    radial-gradient(circle at 50% 90%, rgba(14,165,233,.14), transparent 34%),
+    linear-gradient(180deg, #050711 0%, #071225 50%, #03050b 100%);
+  border-color: rgba(125, 211, 252, 0.25);
+  border-radius: 30px;
+  box-shadow: 0 28px 90px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.05);
+  min-height: 760px;
+}
+
+.capy-spaces-canvas-shell .capy-spaces-starfield {
+  background-image:
+    radial-gradient(circle, rgba(255,255,255,.86) 1px, transparent 1.4px),
+    radial-gradient(circle, rgba(147,197,253,.58) 1px, transparent 1.2px),
+    radial-gradient(circle, rgba(251,146,60,.42) 1px, transparent 1.2px);
+  background-position: 0 0, 31px 41px, 83px 17px;
+  background-size: 84px 84px, 132px 132px, 190px 190px;
+  opacity: .68;
+}
+
+.capy-spaces-canvas-orbit {
+  border: 1px solid rgba(147,197,253,.12);
+  border-radius: 999px;
+  filter: blur(.2px);
+  pointer-events: none;
+  position: absolute;
+  transform: rotate(-18deg);
+  z-index: 0;
+}
+
+.capy-spaces-canvas-orbit-one {
+  height: 340px;
+  right: -120px;
+  top: 86px;
+  width: 520px;
+}
+
+.capy-spaces-canvas-orbit-two {
+  bottom: -110px;
+  height: 260px;
+  left: -90px;
+  transform: rotate(22deg);
+  width: 420px;
+}
+
+.capy-spaces-canvas-topbar {
+  background: rgba(6, 12, 25, .76);
+  border-color: rgba(125, 211, 252, .28);
+  box-shadow: 0 16px 44px rgba(0,0,0,.30);
+  left: 28px;
+  right: 28px;
+  top: 18px;
+}
+
+.capy-spaces-canvas-space-switcher {
+  background: rgba(15, 23, 42, .72);
+  border: 1px solid rgba(147,197,253,.20);
+  border-radius: 999px;
+  min-width: min(320px, 36vw);
+  padding: 8px 16px;
+}
+
+.capy-spaces-canvas-stage {
+  inset: 96px 28px 104px;
+}
+
+.capy-spaces-canvas-prompt-card {
+  background: rgba(8, 18, 35, .80);
+  border-color: rgba(147,197,253,.26);
+  border-radius: 24px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.04);
+  display: flex;
+  left: 0;
+  max-width: 330px;
+  padding: 18px;
+  position: absolute;
+  top: 0;
+  z-index: 2;
+}
+
+.capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples {
+  align-items: stretch;
+  flex-direction: column;
+  margin-top: 14px;
+}
+
+.capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples > span {
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.capy-spaces-canvas-grid {
+  left: 352px;
+  top: 0;
+}
+
+.capy-spaces-canvas-widget {
+  background: rgba(10, 22, 42, .82);
+  border-color: rgba(148,163,184,.28);
+  border-radius: 22px;
+  box-shadow: 0 22px 58px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.04);
+  gap: 10px;
+  padding: 14px;
+}
+
+.capy-spaces-canvas-widget-bar {
+  border-bottom: 1px solid rgba(148,163,184,.14);
+  padding-bottom: 9px;
+}
+
+.capy-spaces-window-dots {
+  display: inline-flex;
+  gap: 4px;
+  min-width: 42px;
+}
+
+.capy-spaces-window-dots i {
+  background: #64748b;
+  border-radius: 999px;
+  display: block;
+  height: 8px;
+  width: 8px;
+}
+
+.capy-spaces-window-dots i:nth-child(1) { background: #fb7185; }
+.capy-spaces-window-dots i:nth-child(2) { background: #fbbf24; }
+.capy-spaces-window-dots i:nth-child(3) { background: #34d399; }
+
+.capy-spaces-canvas-kind {
+  background: rgba(96,165,250,.12);
+  border: 1px solid rgba(147,197,253,.22);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.capy-spaces-canvas-widget-preview {
+  background:
+    linear-gradient(135deg, rgba(96,165,250,.13), rgba(15,23,42,.64)),
+    repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px 16px);
+  border: 1px solid rgba(147,197,253,.16);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 64px;
+  justify-content: center;
+  padding: 12px;
+}
+
+.capy-spaces-canvas-widget-preview span {
+  color: rgba(226,232,240,.70);
+  font-size: 12px;
+}
+
+.capy-spaces-canvas-widget-controls span {
+  background: rgba(255,255,255,.075);
+  border-color: rgba(255,255,255,.12);
+}
+
+.capy-spaces-canvas-widget-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.capy-spaces-canvas-resize-handle {
+  color: rgba(226,232,240,.48);
+  font-size: 11px;
+}
+
+.capy-spaces-canvas-agent-dock {
+  align-items: center;
+  background: rgba(4, 9, 20, .84);
+  border-color: rgba(251,146,60,.36);
+  border-radius: 999px;
+  bottom: 20px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.34);
+  flex-direction: row;
+  gap: 9px;
+  left: 50%;
+  max-width: min(760px, calc(100% - 56px));
+  padding: 8px 10px;
+  right: auto;
+  text-align: left;
+  transform: translateX(-50%);
+  width: 760px;
+}
+
+.capy-spaces-canvas-agent-dock label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.capy-spaces-canvas-agent-dock textarea {
+  background: transparent;
+  border: 0;
+  color: #fff;
+  min-height: 22px;
+  outline: none;
+  resize: none;
+}
+
+.capy-spaces-canvas-dock-note {
+  color: rgba(226,232,240,.58) !important;
+  flex-basis: 100%;
+  font-size: 11px;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .capy-spaces-canvas-shell { min-height: 900px; }
+  .capy-spaces-canvas-stage { inset: 92px 18px 136px; }
+  .capy-spaces-canvas-prompt-card { left: 0; max-width: none; right: 0; }
+  .capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples { flex-direction: row; }
+  .capy-spaces-canvas-grid { left: 0; top: 220px; }
+  .capy-spaces-canvas-agent-dock { align-items: stretch; border-radius: 24px; flex-wrap: wrap; }
+}

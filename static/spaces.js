@@ -110,6 +110,112 @@
 
   function renderSpacesList(spaces, demos){
     const activeSpaceId = currentActiveSpaceId();
+    const safeSpaces = Array.isArray(spaces) ? spaces : [];
+    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId) +
+      renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
+  }
+
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId){
+    return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
+      '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
+      '<div class="capy-spaces-product-topbar">' +
+      '<button type="button" class="capy-spaces-orb-button" data-capy-action="newSpace" aria-label="New Space">＋</button>' +
+      '<button type="button" class="capy-spaces-product-top-action" data-capy-action="newSpace">New Space</button>' +
+      '<div class="capy-spaces-product-top-spacer"></div>' +
+      '<button type="button" class="capy-spaces-product-icon" data-capy-action="reloadSpaces" aria-label="Home">⌂</button>' +
+      '<button type="button" class="capy-spaces-product-icon" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(activeSpaceId || '')+'" aria-label="Menu">☰</button>' +
+      '</div>' +
+      '<div class="capy-spaces-product-welcome">' +
+      '<button type="button" class="capy-spaces-product-close" aria-label="Close welcome">×</button>' +
+      '<div class="capy-spaces-product-eyebrow">WELCOME</div>' +
+      '<h2>Start fast</h2>' +
+      '<p>Open a saved Space, launch a bundled demo, or ask Capy to build the next widget.</p>' +
+      '<div class="capy-spaces-product-group-label">RESOURCES</div>' +
+      '<div class="capy-spaces-resource-grid">' +
+      renderSpaceAgentResourceLink('GitHub Repo', 'https://github.com/bschmidy10/capy') +
+      renderSpaceAgentResourceLink('DeepWiki Docs', 'https://deepwiki.com/agent0ai/space-agent') +
+      renderSpaceAgentResourceLink('Agent Zero', 'https://github.com/frdel/agent-zero') +
+      renderSpaceAgentResourceLink('Discord', 'https://discord.com') +
+      renderSpaceAgentResourceLink('YouTube', 'https://youtube.com') +
+      renderSpaceAgentResourceLink('X', 'https://x.com') +
+      '</div>' +
+      '<div class="capy-spaces-product-group-label">DEMO SPACES</div>' +
+      '<div class="capy-spaces-demo-strip">' + renderSpaceAgentDemoCards() + '</div>' +
+      '</div>' +
+      '<div class="capy-spaces-agent-float" aria-label="Onscreen Capy agent dock">' +
+      '<div class="capy-spaces-agent-mascot" aria-hidden="true">☄</div>' +
+      '<label><span>Ready…</span><textarea id="capyCanvasCreatorPrompt" rows="1" autocomplete="off" placeholder="Ask Capy to make a widget"></textarea></label>' +
+      '<button type="button" class="capy-spaces-agent-key" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(activeSpaceId || '')+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt">Preview safely</button>' +
+      '<button type="button" class="capy-spaces-product-icon" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(activeSpaceId || '')+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt" aria-label="Send">↑</button>' +
+      '<button type="button" class="capy-spaces-product-icon" data-capy-action="openSafeRecovery" data-space-id="'+escapeHtml(activeSpaceId || '')+'" aria-label="More">⋯</button>' +
+      '</div>' +
+      '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
+      '<div class="capy-spaces-product-card-grid">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
+      '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
+      '<div class="capy-spaces-product-panels">' + renderSpaceAgentPanelPills(activeSpaceId) + '</div>' +
+      '</section>';
+  }
+
+  function renderSpaceAgentResourceLink(label, href){
+    return '<a class="capy-spaces-resource-pill" href="'+escapeHtml(href)+'" target="_blank" rel="noopener noreferrer"><span>'+escapeHtml(label)+'</span><span aria-hidden="true">open_in_new</span></a>';
+  }
+
+  function renderSpaceAgentDemoCards(){
+    const demos = [
+      ['newspaper', 'Daily News', 'runDashboardWalkthrough'],
+      ['currency_bitcoin', 'Crypto Dashboard', 'runStockWalkthrough'],
+      ['gamepad', 'Retro Arcade', 'runSnakeWalkthrough'],
+      ['smart_display', 'Agent Zero Videos', 'runBrowserWalkthrough']
+    ];
+    return demos.map(function(demo){
+      return '<button type="button" class="capy-spaces-demo-pill" data-capy-action="'+escapeHtml(demo[2])+'"><span class="material-icons">'+escapeHtml(demo[0])+'</span><strong>'+escapeHtml(demo[1])+'</strong><span aria-hidden="true">arrow_forward</span></button>';
+    }).join('');
+  }
+
+  function renderSpaceAgentProductSpaceCards(spaces, activeSpaceId){
+    const createCard = '<button type="button" class="capy-spaces-product-space-card capy-spaces-create-card" data-capy-action="newSpace"><span>＋</span><strong>Create New Space</strong></button>';
+    const cards = spaces.length ? spaces.slice(0, 8).map(function(s){
+      const spaceId = s && s.space_id ? String(s.space_id) : '';
+      const name = safeDisplayMetadataText(s && s.name ? s.name : spaceId || 'Untitled Space', 'Untitled Space') || 'Untitled Space';
+      const description = safeDisplayMetadataText(s && s.description ? s.description : '', '') || '';
+      const widgetCount = Number(s && s.widget_count || 0);
+      const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
+      const active = activeSpaceId && activeSpaceId === spaceId;
+      return '<article class="capy-spaces-product-space-card" data-space-id="'+escapeHtml(spaceId)+'">' +
+        '<button type="button" class="capy-spaces-product-card-open" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open '+escapeHtml(name)+'"></button>' +
+        '<div class="capy-spaces-product-space-title"><strong>'+escapeHtml(name)+'</strong><span aria-hidden="true">flare</span></div>' +
+        (description ? '<p>'+escapeHtml(description)+'</p>' : '<p>Space Agent-style product canvas · safe metadata shell</p>') +
+        '<div class="capy-spaces-product-tags"><span>'+escapeHtml(widgetLabel)+'</span><span>'+escapeHtml(active ? 'Active' : 'Ready')+'</span><span>metadata</span></div>' +
+        '<div class="capy-spaces-product-space-meta">'+escapeHtml(formatProductRevisionDate(s && s.revision_event_id || 'none'))+'</div>' +
+        '<div class="capy-spaces-product-space-actions">' +
+        '<button type="button" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open">arrow_forward</button>' +
+        '<button type="button" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'" aria-label="Edit">edit</button>' +
+        '<button type="button" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Delete">delete</button>' +
+        '</div>' +
+        '</article>';
+    }).join('') : '<div class="capy-spaces-product-empty"><strong>No spaces yet</strong><span>Create a space to start the Space Agent-style canvas.</span></div>';
+    return createCard + cards;
+  }
+
+  function formatProductRevisionDate(value){
+    const safe = safeDisplayMetadataText(value, 'none') || 'none';
+    return safe === 'none' ? 'No revision yet' : 'Revision '+safe;
+  }
+
+  function renderSpaceAgentPanelPills(activeSpaceId){
+    const panels = [
+      ['smart_toy', 'Agent', 'chat'],
+      ['folder', 'Files', 'workspaces'],
+      ['memory', 'Local LLM', 'settings'],
+      ['history', 'Time Travel', 'tasks'],
+      ['person', 'User', 'memory']
+    ];
+    return panels.map(function(panel){
+      return '<button type="button" class="capy-spaces-panel-pill" data-capy-action="openSystemPanel" data-system-panel="'+escapeHtml(panel[2])+'"><span class="material-icons">'+escapeHtml(panel[0])+'</span>'+escapeHtml(panel[1])+'</button>';
+    }).join('') + (activeSpaceId ? '<button type="button" class="capy-spaces-panel-pill" data-capy-action="clearActiveSpace"><span class="material-icons">close</span>Clear active Space</button>' : '');
+  }
+
+  function renderCapySpacesControlPlane(spaces, demos, activeSpaceId){
     const cards = spaces.length ? spaces.map(function(s){
       const spaceId = s.space_id || '';
       const name = s.name || spaceId || 'Untitled';
@@ -137,9 +243,42 @@
         '</div></div>' +
         '</div>';
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
-    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runSnakeWalkthrough">Run snake repair walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runMusicWalkthrough">Run music walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runProviderSetupWalkthrough">Run provider setup walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBigBangWalkthrough">Run Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="runLocalServiceWalkthrough">Run local service walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runTimeTravelWalkthrough">Run time travel walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runAdminRecoveryWalkthrough">Run admin recovery walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
-      renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderCreatorLoopForm() + renderSpaceAgentImportForm() + renderSpaceForm();
+    return '<details class="capy-spaces-control-plane"><summary>Control plane / debug tools</summary>' +
+      '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
+      '<div class="capy-spaces-actions">' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runWeatherWalkthrough">Run weather walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runNotesWalkthrough">Run notes walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runSnakeWalkthrough">Run snake repair walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runDashboardWalkthrough">Run dashboard walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runCameraWalkthrough">Run camera walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runStockWalkthrough">Run stock walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runMusicWalkthrough">Run music walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runProviderSetupWalkthrough">Run provider setup walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runBigBangWalkthrough">Run Big Bang onboarding</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runLocalServiceWalkthrough">Run local service walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runTimeTravelWalkthrough">Run time travel walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runAdminRecoveryWalkthrough">Run admin recovery walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runBrowserWalkthrough">Run browser walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runResearchWalkthrough">Run research walkthrough</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="runAllDemoSmokes">Run all demo smokes</button>' +
+      '</div></div>' +
+      renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderCreatorLoopForm() + renderSpaceAgentImportForm() + renderSpaceForm() +
+      '</details>';
   }
 
   function renderDemoSmokeRunner(demos){
@@ -567,9 +706,11 @@
     const widgetCards = renderSpaceAgentCanvasWidgets(spaceId, widgets || []);
     return '<section class="capy-spaces-canvas-shell" aria-label="Current Space canvas">' +
       '<div class="capy-spaces-starfield" aria-hidden="true"></div>' +
+      '<div class="capy-spaces-canvas-orbit capy-spaces-canvas-orbit-one" aria-hidden="true"></div>' +
+      '<div class="capy-spaces-canvas-orbit capy-spaces-canvas-orbit-two" aria-hidden="true"></div>' +
       '<div class="capy-spaces-canvas-topbar">' +
-      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="reloadSpaces">Home</button>' +
-      '<div class="capy-spaces-canvas-title"><span>Current Space</span><strong>'+escapeHtml(name)+'</strong></div>' +
+      '<button type="button" class="capy-spaces-canvas-pill capy-spaces-canvas-home" data-capy-action="reloadSpaces"><span aria-hidden="true">⌂</span> Home</button>' +
+      '<div class="capy-spaces-canvas-title capy-spaces-canvas-space-switcher"><span>Current Space</span><strong>'+escapeHtml(name)+' <span aria-hidden="true">⌄</span></strong></div>' +
       '<div class="capy-spaces-canvas-actions">' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Menu</button>' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Share</button>' +
@@ -577,14 +718,16 @@
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Rearrange</button>' +
       '</div></div>' +
       '<div class="capy-spaces-canvas-stage">' +
-      '<div class="capy-spaces-canvas-prompt-card"><strong>Ask Capy to build, edit, or repair this Space</strong><span>Metadata-only shell · '+escapeHtml(String(widgetCount))+' widgets · revision '+escapeHtml(revision)+'</span></div>' +
-      renderSpaceAgentExamplePrompts() +
+      '<aside class="capy-spaces-canvas-prompt-card"><div class="capy-spaces-product-eyebrow">BUILD WITH CAPY</div><strong>Ask Capy to build, edit, or repair this Space</strong><span>Metadata-only shell · '+escapeHtml(String(widgetCount))+' widgets · revision '+escapeHtml(revision)+'</span>' +
+      renderSpaceAgentExamplePrompts() + '</aside>' +
       '<div class="capy-spaces-canvas-grid">'+widgetCards+'</div>' +
       '</div>' +
-      '<div class="capy-spaces-canvas-dock" aria-label="Docked Capy input">' +
-      '<label><span>Docked Capy input</span><textarea id="capyCanvasCreatorPrompt" rows="2" autocomplete="off" placeholder="Ask Capy to build, edit, or repair this Space"></textarea></label>' +
-      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt">Preview safely</button>' +
-      '<div>Metadata-only creator preview · sandbox and visual QA required before commit</div></div>' +
+      '<div class="capy-spaces-canvas-dock capy-spaces-canvas-agent-dock" aria-label="Docked Capy input">' +
+      '<div class="capy-spaces-agent-mascot" aria-hidden="true">☄</div>' +
+      '<label><span>Ready… · Docked Capy input</span><textarea id="capyCanvasCreatorPrompt" rows="1" autocomplete="off" placeholder="Ask Capy to build, edit, or repair this Space"></textarea></label>' +
+      '<button type="button" class="capy-spaces-agent-key" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt">Preview safely</button>' +
+      '<button type="button" class="capy-spaces-product-icon" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt" aria-label="Send">↑</button>' +
+      '<div class="capy-spaces-canvas-dock-note">Metadata-only creator preview · sandbox and visual QA required before commit</div></div>' +
       '</section>';
   }
 
@@ -612,11 +755,12 @@
       const width = Math.min(48, Math.max(20, layout.w * 5));
       const height = Math.min(44, Math.max(16, layout.h * 6));
       return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'" style="left:'+x+'%;top:'+y+'%;width:'+width+'%;min-height:'+height+'px">' +
-        '<div class="capy-spaces-canvas-widget-bar"><span class="capy-spaces-canvas-drag-handle">Drag</span><strong>'+escapeHtml(title)+'</strong><span>'+escapeHtml(kind)+'</span></div>' +
-        '<div class="capy-spaces-canvas-widget-controls" aria-label="Widget controls"><span>Resize</span><span>Minimize</span></div>' +
+        '<div class="capy-spaces-canvas-widget-bar"><span class="capy-spaces-window-dots" aria-hidden="true"><i></i><i></i><i></i></span><strong>'+escapeHtml(title)+'</strong><span class="capy-spaces-canvas-kind">'+escapeHtml(kind)+'</span></div>' +
+        '<div class="capy-spaces-canvas-widget-preview"><strong>Widget shell</strong><span>'+escapeHtml(kind)+' · safe metadata window</span></div>' +
+        '<div class="capy-spaces-canvas-widget-controls" aria-label="Widget controls"><span>Drag</span><span>Resize</span><span>Minimize</span></div>' +
         '<div class="capy-spaces-canvas-widget-meta">'+escapeHtml(formatWidgetLayout(layout))+'</div>' +
         '<div class="capy-spaces-canvas-widget-safe">generated code disabled · metadata-only-shell</div>' +
-        '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Inspect</button></div>' +
+        '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Inspect</button><span class="capy-spaces-canvas-resize-handle">Resize handle</span></div>' +
         '</article>';
     }).join('');
   }
