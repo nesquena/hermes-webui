@@ -157,6 +157,19 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
             "LC_CTYPE", "LC_MESSAGES", "LANGUAGE", "TZ", "TMPDIR", "TEMP",
             "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+            # >>> hermes-fork: pass through toolchain path config (HermesOS Cloud)
+            # The Hermes runtime container installs Python/Node/Go/Cargo tooling
+            # under /home/hermeswebui/.hermes/ via PYTHONUSERBASE etc., and the
+            # `hermes` CLI imports yaml/click/requests from that user-site dir.
+            # Without these vars in the allowlist the embedded terminal cannot
+            # find ANY agent dependency and every `hermes` invocation fails
+            # with `ModuleNotFoundError`. None of these are credentials —
+            # they're path config the parent process has already resolved.
+            "XDG_CACHE_HOME", "PYTHONUSERBASE", "PIP_CONFIG_FILE", "PIP_CACHE_DIR",
+            "PIPX_HOME", "PIPX_BIN_DIR", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR",
+            "PYTHONDONTWRITEBYTECODE", "NPM_CONFIG_PREFIX", "GOBIN", "CARGO_HOME",
+            "GH_CONFIG_DIR",
+            # <<< hermes-fork
         }
         env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
         env.update(
