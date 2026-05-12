@@ -657,64 +657,7 @@ _PROVIDER_DISPLAY = {
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
-    # >>> hermes-fork: first-class providers (HermesOS Cloud)
-    "venice": "Venice",
-    "crof": "CrofAI",
-    "bankr": "Bankr",
-    "xiaomi": "Xiaomi MiMo",
-    "cometapi": "CometAPI",
-    # <<< hermes-fork
 }
-
-# >>> hermes-fork: built-in base-URL → canonical-slug map (HermesOS Cloud)
-#
-# Without this table, any user pointing OPENAI_BASE_URL at a known
-# OpenAI-compatible aggregator (CrofAI, CometAPI, Venice, etc.) sees their
-# entire model list labelled "Custom" in the picker AND every model row
-# tagged with the generic "Custom" chip — because the upstream slug-resolver
-# only looks at config.yaml's `custom_providers:` entries. Users would have
-# to hand-write a custom_providers block in YAML to get a friendly name.
-#
-# This table is the auto-detect fallback consulted AFTER the config.yaml
-# lookup misses. Hostnames are normalised to lowercase and matched against
-# the substring of the request URL's netloc (so "api.crof.ai" and "crof.ai"
-# both hit the "crof" entry, no per-subdomain enumeration needed).
-#
-# Keys are substrings; values must be a canonical id present in
-# _PROVIDER_DISPLAY above so the group inherits a friendly display name.
-_BUILTIN_BASE_URL_PROVIDERS = (
-    ("crof.ai",              "crof"),
-    ("venice.ai",            "venice"),
-    ("bankr.com",            "bankr"),
-    ("cometapi.com",         "cometapi"),
-    ("openrouter.ai",        "openrouter"),
-    ("api.anthropic.com",    "anthropic"),
-    ("api.openai.com",       "openai"),
-    ("api.groq.com",         "groq"),
-    ("api.deepseek.com",     "deepseek"),
-    ("api.minimaxi.com",     "minimax"),
-    ("api.moonshot.cn",      "kimi-coding"),
-    ("api.together.xyz",     "together"),
-    ("api.fireworks.ai",     "fireworks"),
-)
-
-
-def _builtin_provider_slug_for_base_url(base_url: object) -> str:
-    """Resolve a base_url to a canonical provider slug using the built-in
-    aggregator dictionary. Returns "" if no entry matches.
-
-    Substring match against the URL's host so "https://api.crof.ai/v1" and
-    "https://crof.ai/v1" both resolve to "crof".
-    """
-    target = _normalize_base_url_for_match(base_url)
-    if not target:
-        return ""
-    target_lower = target.lower()
-    for hostname_fragment, slug in _BUILTIN_BASE_URL_PROVIDERS:
-        if hostname_fragment in target_lower:
-            return slug
-    return ""
-# <<< hermes-fork
 
 # Provider alias → canonical slug.  Users configure providers using the
 # dotted/hyphenated form they see on the provider website (``z.ai``,
@@ -953,8 +896,6 @@ def _normalize_base_url_for_match(value: object) -> str:
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
-    *,
-    include_builtin_fallback: bool = True,
 ) -> str:
     target = _normalize_base_url_for_match(base_url)
     if not target:
@@ -964,25 +905,6 @@ def _named_custom_provider_slug_for_base_url(
         if entry_base_url != target:
             continue
         return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    # >>> hermes-fork: built-in base-URL fallback (HermesOS Cloud)
-    #     Auto-rename "Custom" to a known aggregator slug (crof, venice,
-    #     bankr, cometapi, …) when the user hasn't bothered to write a
-    #     custom_providers: block in config.yaml. See
-    #     _BUILTIN_BASE_URL_PROVIDERS above for the full table.
-    #
-    #     **UI-only by default**: callers in the runtime auth path
-    #     (resolve_model_provider via _resolve_configured_provider_id
-    #     resolve_alias=False) pass include_builtin_fallback=False so the
-    #     fallback doesn't change which API-key env var the agent reads.
-    #     A user with `provider: custom` + `base_url: https://crof.ai/v1`
-    #     + only OPENAI_API_KEY in .env (no CROF_API_KEY) still has their
-    #     request authenticated against OPENAI_API_KEY — the chip just
-    #     shows "CrofAI" instead of "Custom" in the dropdown.
-    if include_builtin_fallback:
-        builtin = _builtin_provider_slug_for_base_url(base_url)
-        if builtin:
-            return builtin
-    # <<< hermes-fork
     return ""
 
 
@@ -1157,17 +1079,6 @@ _PROVIDER_MODELS = {
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
-    # >>> hermes-fork: first-class providers (HermesOS Cloud)
-    # Intentionally empty lists. Each provider's real lineup is fetched live
-    # from their /v1/models endpoint after the user adds an API key and clicks
-    # the "Refresh models" button. Hardcoding lists here only invites drift —
-    # providers add/retire models constantly. Live fetch via
-    # /api/models/refresh is the source of truth.
-    "venice": [],
-    "crof": [],
-    "bankr": [],
-    "xiaomi": [],
-    # <<< hermes-fork
 }
 
 
@@ -1670,28 +1581,6 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
-        # >>> hermes-fork: protect runtime from @<built-in-slug>: leak (HermesOS Cloud)
-        #     When the model dropdown labels a group "CrofAI" / "Venice" / etc.
-        #     because the user's `model.base_url` matches the built-in aggregator
-        #     table, every model inside that group gets an `@<slug>:` prefix in
-        #     JS (see _addLiveModelsToSelect in static/ui.js). That prefix would
-        #     otherwise be treated here as an EXPLICIT runtime provider override
-        #     — which leaks the UI-only slug into the agent's auth path and
-        #     fails with "Provider 'crof' is set in config.yaml but no API key
-        #     was found" because hermes-agent doesn't have `crof` in its
-        #     PROVIDER_REGISTRY. Translate it back to `provider: custom` + the
-        #     configured `base_url` so the request authenticates against
-        #     `OPENAI_API_KEY` (the agent's `custom` provider env var).
-        #     Only fires when the user's actual config is `provider: custom`
-        #     — an explicit `provider: openrouter` user routing via
-        #     `@crof:some-model` still gets respected.
-        if (
-            config_provider == "custom"
-            and config_base_url
-            and provider_hint == _builtin_provider_slug_for_base_url(config_base_url)
-        ):
-            return bare_model, "custom", config_base_url
-        # <<< hermes-fork
         return bare_model, provider_hint, None
 
     if "/" in model_id:
@@ -3874,16 +3763,6 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
-    # >>> hermes-fork: HermesOS Cloud skins server-side allowlist
-    #     Without these, `/api/claude-config` autosave normalises any unknown
-    #     skin back to "default" — meaning a user who picks HermesOS in the
-    #     Appearance picker watches localStorage flip back to "default" on
-    #     the next page load (server-state-wins race against the boot-time
-    #     skin migration). "sienna" is upstream-recognised in static/boot.js
-    #     `_VALID_SKINS` but was missing from this set too — adding both.
-    "hermesos",
-    "sienna",
-    # <<< hermes-fork
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.

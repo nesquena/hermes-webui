@@ -95,7 +95,7 @@ jobs:
           gh workflow run hermesdeploy-image.yml --ref master
           echo "✓ Triggered hermesdeploy-image build for new master."
 
-      - name: Open PR (conflicted rebase)
+      - name: Push conflict-resolution branch (conflicted rebase)
         if: steps.rebase.outputs.status == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -103,8 +103,8 @@ jobs:
           BRANCH="upstream-sync-$(date +%Y%m%d-%H%M%S)"
           git checkout -B "$BRANCH" upstream/master
 
-          # Cherry-pick our custom commits one at a time so the PR diff cleanly
-          # shows where conflicts landed; record any failures into the PR body.
+          # Cherry-pick our custom commits one at a time so the resulting branch
+          # cleanly shows where conflicts landed; record any failures.
           CUSTOM_COMMITS=$(git log --reverse --format=%H "$BRANCH"..origin/master 2>/dev/null || true)
           FAILED=""
           for sha in $CUSTOM_COMMITS; do
@@ -119,7 +119,13 @@ jobs:
           git push origin "$BRANCH"
 
           CONFLICTED=$(cat /tmp/conflicted_files.txt 2>/dev/null | tr '\n' ' ')
-          BODY=$(cat <<EOF
+
+          # Try to open a PR. If the default GITHUB_TOKEN lacks PR-create perms
+          # (Settings → Actions → General → "Allow GHA to create and approve PRs"
+          # is the toggle), don't fail the workflow — leave a clear summary in
+          # the run log + a Job Summary tile so the human just clicks Compare.
+          PR_TITLE="Sync upstream — manual conflict resolution required"
+          PR_BODY=$(cat <<EOF
           Auto-track-upstream detected new commits on \`nesquena/hermes-webui:master\`
           but the rebase of ash's custom commits hit conflicts.
 
@@ -134,7 +140,41 @@ jobs:
           The hermesdeploy-image build will fire automatically on merge.
           EOF
           )
-          gh pr create \
-            --title "Sync upstream — manual conflict resolution required" \
-            --body "$BODY" \
-            --base master --head "$BRANCH"
+
+          if gh pr create --title "$PR_TITLE" --body "$PR_BODY" --base master --head "$BRANCH" 2>/tmp/pr_err; then
+            echo "✓ Opened PR for conflict resolution."
+          else
+            COMPARE_URL="https://github.com/${{ github.repository }}/compare/master...$BRANCH"
+            cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+          ## ⚠ Upstream sync needs manual conflict resolution
+
+          The daily \`track-upstream\` rebase found $BEHIND new upstream commits
+          but \`git rebase upstream/master\` hit conflicts. Branch
+          \`$BRANCH\` was pushed with our custom commits cherry-picked where
+          possible; conflicts are still in tree.
+
+          **Open PR manually:** [Compare → master ← $BRANCH]($COMPARE_URL)
+
+          **Conflicted files:** \`${CONFLICTED:-(none from the rebase itself; cherry-pick details below)}\`
+
+          **Cherry-pick failures:**
+          ${FAILED:-(none)}
+
+          ---
+          *Auto-PR creation failed* — \`GITHUB_TOKEN\` lacks PR-create permission
+          in this fork. Fix once: Settings → Actions → General → "Allow GitHub
+          Actions to create and approve pull requests" → enable. Then this
+          message will be replaced with a real PR link on the next conflict.
+
+          Error from \`gh pr create\`:
+          \`\`\`
+          $(cat /tmp/pr_err 2>/dev/null || echo '(none)')
+          \`\`\`
+          SUMMARY
+            echo "::warning::PR creation failed (token lacks permission). Branch $BRANCH was pushed; open the PR manually at $COMPARE_URL."
+            # Don't fail the workflow — the branch IS there, just needs a human click.
+            exit 0
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEHIND: ${{ steps.state.outputs.behind }}
