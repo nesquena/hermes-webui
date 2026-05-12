@@ -10202,6 +10202,110 @@ def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_onl
     assert "capy:debug:dump" not in serialized
 
 
+def test_widget_event_ready_resize_runtime_messages_are_local_noops_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "local-runtime-gate", "name": "Local Runtime Gate"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    ready = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "capy:ready",
+        {
+            "message_type": "capy:ready",
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        prompt="Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        session_id="SECRET_VALUE_DO_NOT_LEAK",
+    )
+    resize = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "capy:resize",
+        {
+            "messageType": "capy:resize",
+            "height": 99999,
+            "source": "SECRET_SOURCE",
+            "renderer": "<script>bad()</script>",
+        },
+        prompt="SECRET_VALUE_DO_NOT_LEAK",
+    )
+    mixed_ready_prompt = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "capy:ready",
+        {"message_type": "capy:agent:prompt", "renderer": "<script>bad()</script>"},
+        prompt="SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"ready": ready, "resize": resize, "mixed": mixed_ready_prompt, "events": events}).lower()
+
+    assert ready["queued"] is False
+    assert ready["status"] == "local-noop"
+    assert ready["event_name"] == "capy:ready"
+    assert ready["local"] is True
+    assert "event_id" not in ready
+    assert resize["queued"] is False
+    assert resize["status"] == "local-noop"
+    assert resize["event_name"] == "capy:resize"
+    assert resize["local"] is True
+    assert "event_id" not in resize
+    assert mixed_ready_prompt["queued"] is False
+    assert mixed_ready_prompt["status"] == "local-noop"
+    assert mixed_ready_prompt["event_name"] == "capy:ready"
+    assert mixed_ready_prompt["local"] is True
+    assert "event_id" not in mixed_ready_prompt
+    assert events == []
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_widget_event_route_treats_ready_resize_message_type_as_local_noop(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-local-runtime", "name": "Route Local Runtime"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    for message_type in ("capy:ready", "capy:resize"):
+        handled, status, body = _route_post(
+            "/api/spaces/widget/event",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "sandbox",
+                "messageType": message_type,
+                "prompt": "SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {
+                    "height": 99999,
+                    "renderer": "<script>bad()</script>",
+                    "apiAuth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+                },
+            },
+        )
+        serialized = json.dumps(body).lower()
+
+        assert handled is None
+        assert status == 200
+        assert body["queued"] is False
+        assert body["status"] == "local-noop"
+        assert body["event_name"] == message_type
+        assert body["event_name"] != "agent.prompt"
+        assert body["local"] is True
+        assert "event_id" not in body
+        assert "secret_value_do_not_leak" not in serialized
+        assert "bearer" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert "apiauth" not in serialized
+        assert "api_auth" not in serialized
+
+    assert spaces.list_widget_events(created["space_id"], "sandbox") == []
+
+
 def test_widget_event_rejects_nested_blocked_runtime_message_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "nested-runtime-gate", "name": "Nested Runtime Gate"})

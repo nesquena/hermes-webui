@@ -329,6 +329,16 @@ def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict
             raise ValueError("Blocked by widget runtime contract")
 
 
+def _local_runtime_message_type(event_name: str, payload: dict[str, Any]) -> str:
+    event_type = _runtime_message_type_value(event_name)
+    payload_type = _payload_runtime_message_type(payload)
+    runtime_types = [value.lower() for value in (event_type, payload_type) if value]
+    for value in runtime_types:
+        if value in {"capy:ready", "capy:resize"}:
+            return value
+    return ""
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -6550,6 +6560,16 @@ def queue_widget_event(
     _assert_widget_event_runtime_contract_allowed(name, payload_data)
     space = read_space(sid)
     _widget_index(space, wid)
+    local_message_type = _local_runtime_message_type(name, payload_data)
+    if local_message_type:
+        return {
+            "queued": False,
+            "status": "local-noop",
+            "local": True,
+            "space_id": sid,
+            "widget_id": wid,
+            "event_name": local_message_type,
+        }
     prompt_preview = _payload_text_summary(prompt, 1000)
     payload_summary = _payload_summary(payload_data)
     event_id = _record_event(
