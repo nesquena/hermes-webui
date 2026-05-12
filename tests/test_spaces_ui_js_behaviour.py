@@ -887,8 +887,9 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
-      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widget_count_delta: -1, widgets_to_add: [], widgets_to_remove: ['notes'], widgets_to_update: ['weather'], space_fields_to_update: ['description'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev3', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000060, timeline_state: 'future', is_return_to_present_candidate: false, details: { widget_id: 'weather', fields: ['layout'], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab intermediate', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather intermediate', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, timeline_state: 'future', is_return_to_present_candidate: true, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, timeline_state: 'current', is_current_revision: true, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widget_count_delta: -1, widgets_to_add: [], widgets_to_remove: ['notes'], widgets_to_update: ['weather'], space_fields_to_update: ['description'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
     ] });
   }
   if (path === 'api/spaces/widget/upsert') {
@@ -2371,6 +2372,21 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_revision_history_labels_current_and_return_to_present_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+
+    assert "Current revision" in out["rootHtml"]
+    assert "Return to present" in out["rootHtml"]
+    assert out["rootHtml"].count(">Return to present</button>") == 1
+    assert "timeline: current" in out["rootHtml"]
+    assert "timeline: future" in out["rootHtml"]
+    assert "Restore" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
 
 
 def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driver_path):

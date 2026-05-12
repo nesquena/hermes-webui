@@ -884,10 +884,13 @@
       const previewText = formatRestorePreview(rev && rev.restore_preview);
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const widgetRestoreButtons = renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff);
-      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button>' : '';
+      const timelineLabel = formatRevisionTimelineLabel(rev);
+      const restoreLabel = isReturnToPresentRevision(rev) ? 'Return to present' : 'Restore';
+      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        (timelineLabel ? '<div class="capy-spaces-muted">'+escapeHtml(timelineLabel)+'</div>' : '') +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
@@ -938,6 +941,19 @@
       }
     });
     return rows.filter(Boolean).slice(0, 18).join(' · ');
+  }
+
+  function isReturnToPresentRevision(rev){
+    if (!rev || typeof rev !== 'object' || Array.isArray(rev)) return false;
+    return rev.is_return_to_present_candidate === true;
+  }
+
+  function formatRevisionTimelineLabel(rev){
+    if (!rev || typeof rev !== 'object' || Array.isArray(rev)) return '';
+    if (rev.is_current_revision === true || rev.timeline_state === 'current') return 'Current revision · timeline: current';
+    if (isReturnToPresentRevision(rev)) return 'Return-to-present candidate · timeline: future';
+    if (rev.timeline_state === 'past') return 'timeline: past';
+    return '';
   }
 
   function formatRestorePreview(preview){

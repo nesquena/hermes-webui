@@ -4008,6 +4008,19 @@ def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]
     space = read_space(sid)
     max_events = _clamped_int(limit, 20, 1, 100)
     revision_ids = [str(event_id) for event_id in (space.get("revision_events") or []) if _event_id_is_safe(event_id)]
+    revision_index = {event_id: index for index, event_id in enumerate(revision_ids)}
+    current_event_id = str(space.get("revision_event_id") or "")
+    current_index = revision_index.get(current_event_id) if _event_id_is_safe(current_event_id) else None
+    restored_target_index: int | None = None
+    if current_index is not None:
+        try:
+            current_event = json.loads((events_dir() / f"{current_event_id}.json").read_text(encoding="utf-8"))
+        except Exception:
+            current_event = None
+        current_details = current_event.get("details") if isinstance(current_event, dict) else None
+        restored_target_id = str(current_details.get("restored_event_id") or "") if isinstance(current_details, dict) else ""
+        if _event_id_is_safe(restored_target_id):
+            restored_target_index = revision_index.get(restored_target_id)
     summaries: list[dict[str, Any]] = []
     for event_id in reversed(revision_ids):
         if len(summaries) >= max_events:
@@ -4021,6 +4034,22 @@ def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]
             continue
         summary = _event_summary(event, sid, space)
         if summary is not None:
+            event_index = revision_index.get(event_id)
+            event_type = str(summary.get("event_type") or "")
+            is_current = bool(current_event_id and event_id == current_event_id)
+            is_restore_event = event_type.endswith(".restored")
+            is_future = bool(
+                restored_target_index is not None
+                and current_index is not None
+                and event_index is not None
+                and not is_restore_event
+                and restored_target_index < event_index < current_index
+            )
+            summary["is_current_revision"] = is_current
+            summary["timeline_state"] = "current" if is_current else ("future" if is_future else "past")
+            summary["is_return_to_present_candidate"] = bool(
+                is_future and current_index is not None and event_index == current_index - 1
+            )
             summaries.append(summary)
     return summaries
 

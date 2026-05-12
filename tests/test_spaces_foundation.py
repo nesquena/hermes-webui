@@ -5008,6 +5008,11 @@ def test_restore_revision_preserves_future_history_for_return_to_present_metadat
     after_rollback_ids = [event["event_id"] for event in after_rollback]
     assert patched["revision_event_id"] in after_rollback_ids
     assert after_rollback[0]["event_type"] == "space.restored"
+    assert after_rollback[0]["is_current_revision"] is True
+    assert after_rollback[0]["timeline_state"] == "current"
+    patched_row = next(event for event in after_rollback if event["event_id"] == patched["revision_event_id"])
+    assert patched_row["timeline_state"] == "future"
+    assert patched_row["is_return_to_present_candidate"] is True
 
     restored_present = spaces.restore_revision(created["space_id"], patched["revision_event_id"])
 
@@ -5018,6 +5023,10 @@ def test_restore_revision_preserves_future_history_for_return_to_present_metadat
     after_return_ids = [event["event_id"] for event in after_return]
     assert original["revision_event_id"] in after_return_ids
     assert patched["revision_event_id"] in after_return_ids
+    assert after_return[0]["event_type"] == "space.restored"
+    assert after_return[0]["is_current_revision"] is True
+    assert not any(event.get("is_return_to_present_candidate") for event in after_return)
+    assert all(event.get("timeline_state") != "future" for event in after_return if event["event_type"].endswith(".restored"))
     serialized = json.dumps({"rollback": after_rollback, "return": after_return, "present": restored_present}).lower()
     assert "keptbutneverreturned" not in serialized
     assert "secret_source_do_not_leak" not in serialized
