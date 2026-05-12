@@ -47,6 +47,7 @@ _u._PROVIDER_DISPLAY.update({
     "bankr": "Bankr",
     "xiaomi": "Xiaomi MiMo",
     "cometapi": "CometAPI",
+    "groq": "Groq",
 })
 
 # Was: surgical edit inside ``_PROVIDER_MODELS = { ... }``. Empty lists are
@@ -58,6 +59,8 @@ _u._PROVIDER_MODELS.update({
     "crof": [],
     "bankr": [],
     "xiaomi": [],
+    "cometapi": [],
+    "groq": [],
 })
 
 # Was: surgical edit inside ``_SETTINGS_SKIN_VALUES = { ... }``. Without
@@ -194,6 +197,7 @@ def _wrapped_resolve_model_provider(model_id: str) -> tuple:
         return result
     bare_model, provider_hint, base_url_override = result
 
+    # protect runtime from @<built-in-slug>: leak
     # Only intercept when upstream returned a bare provider hint with no
     # base_url override. If upstream already routed through a
     # ``custom_providers:`` entry it set base_url_override — leave it.

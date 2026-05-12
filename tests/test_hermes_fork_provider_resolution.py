@@ -329,7 +329,11 @@ class TestResolveModelProviderAtPrefixGuard:
 
 
 class TestSourceCodeGuardsWired:
-    SRC = Path(cfg.__file__).read_text(encoding="utf-8")
+    SRC = (
+        Path(cfg.__file__).read_text(encoding="utf-8")
+        + "\n"
+        + (Path(cfg.__file__).with_name("_hermes_fork_config.py")).read_text(encoding="utf-8")
+    )
 
     def test_include_builtin_fallback_param_exists(self):
         assert "include_builtin_fallback: bool = True" in self.SRC, (

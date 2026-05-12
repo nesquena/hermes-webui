@@ -22,6 +22,7 @@ from typing import Any
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _resolve_configured_provider_id,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
@@ -153,6 +154,19 @@ _OAUTH_PROVIDERS = frozenset({
     "openai-codex",
     "qwen-oauth",
 })
+
+_DASHBOARD_OPENAI_COMPATIBLE_PROVIDERS = frozenset({
+    "bankr",
+    "cometapi",
+    "crof",
+    "groq",
+    "venice",
+})
+_OPENAI_COMPATIBLE_KEY_VARS = (
+    "OPENAI_API_KEY",
+    "HERMES_OPENAI_API_KEY",
+    "HERMES_API_KEY",
+)
 
 # >>> hermes-fork: provider logos (HermesOS Cloud)
 # Real-brand logos via Simple Icons CDN (free SVG library, ~3000 brands) for
@@ -354,6 +368,10 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
+    compat_source = _dashboard_openai_compatible_key_source(provider_id)
+    if compat_source:
+        return True
+
     env_var = _PROVIDER_ENV_VAR.get(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -396,6 +414,56 @@ def _provider_has_key(provider_id: str) -> bool:
                     if str(cp.get("api_key") or "").strip():
                         return True
     return False
+
+
+def _dashboard_openai_compatible_key_source(provider_id: str) -> str | None:
+    """Return key source for dashboard-seeded OpenAI-compatible providers.
+
+    HermesOS Dashboard can seed providers such as CrofAI/Venice through the
+    generic OpenAI-compatible runtime path: `provider: custom` (or the
+    provider's first-class display slug), `base_url: ...`, and `OPENAI_API_KEY`.
+    WebUI should show the matching user-facing provider as configured without
+    making the user run a second setup flow or requiring fork-only env names
+    like `CROF_API_KEY`.
+    """
+    provider_id = (provider_id or "").strip().lower()
+    if provider_id not in _DASHBOARD_OPENAI_COMPATIBLE_PROVIDERS:
+        return None
+
+    cfg = get_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        return None
+
+    configured_provider = _resolve_configured_provider_id(
+        model_cfg.get("provider"),
+        cfg,
+        base_url=model_cfg.get("base_url"),
+        resolve_alias=True,
+    )
+    if (configured_provider or "").strip().lower() != provider_id:
+        return None
+
+    model_key = str(model_cfg.get("api_key") or "").strip()
+    if model_key:
+        return "config_yaml"
+
+    env_path = _get_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
+    for key in _OPENAI_COMPATIBLE_KEY_VARS:
+        if env_values.get(key):
+            return "env_file"
+        if os.getenv(key):
+            return "env_var"
+
+    providers_cfg = cfg.get("providers", {})
+    if isinstance(providers_cfg, dict):
+        for key in ("custom", "openai", provider_id):
+            provider_cfg = providers_cfg.get(key, {})
+            if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
+                return "config_yaml"
+
+    return None
 
 
 def _get_provider_api_key(provider_id: str) -> str | None:
@@ -841,33 +909,37 @@ def get_providers() -> dict[str, Any]:
                 logger.debug("hermes_cli auth check failed for %s", pid, exc_info=True)
                 # keep has_key from _provider_has_key()
         elif has_key:
-            env_var = _PROVIDER_ENV_VAR.get(pid)
-            if env_var:
-                env_path = _get_hermes_home() / ".env"
-                env_values = _load_env_file(env_path)
-                if env_values.get(env_var):
-                    key_source = "env_file"
-                elif os.getenv(env_var):
-                    key_source = "env_var"
-                else:
-                    # Canonical name not set; check legacy aliases (e.g. lmstudio's
-                    # pre-#1500 LMSTUDIO_API_KEY) so existing users see "env_file"
-                    # instead of being misreported as "config_yaml" when the key
-                    # actually lives in .env under the old name.
-                    aliased = False
-                    for alias in _PROVIDER_ENV_VAR_ALIASES.get(pid, ()) or ():
-                        if env_values.get(alias):
-                            key_source = "env_file"
-                            aliased = True
-                            break
-                        if os.getenv(alias):
-                            key_source = "env_var"
-                            aliased = True
-                            break
-                    if not aliased:
-                        key_source = "config_yaml"
+            compat_source = _dashboard_openai_compatible_key_source(pid)
+            if compat_source:
+                key_source = compat_source
             else:
-                key_source = "config_yaml"
+                env_var = _PROVIDER_ENV_VAR.get(pid)
+                if env_var:
+                    env_path = _get_hermes_home() / ".env"
+                    env_values = _load_env_file(env_path)
+                    if env_values.get(env_var):
+                        key_source = "env_file"
+                    elif os.getenv(env_var):
+                        key_source = "env_var"
+                    else:
+                        # Canonical name not set; check legacy aliases (e.g. lmstudio's
+                        # pre-#1500 LMSTUDIO_API_KEY) so existing users see "env_file"
+                        # instead of being misreported as "config_yaml" when the key
+                        # actually lives in .env under the old name.
+                        aliased = False
+                        for alias in _PROVIDER_ENV_VAR_ALIASES.get(pid, ()) or ():
+                            if env_values.get(alias):
+                                key_source = "env_file"
+                                aliased = True
+                                break
+                            if os.getenv(alias):
+                                key_source = "env_var"
+                                aliased = True
+                                break
+                        if not aliased:
+                            key_source = "config_yaml"
+                else:
+                    key_source = "config_yaml"
         elif pid not in _PROVIDER_ENV_VAR:
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
@@ -1007,9 +1079,8 @@ def get_providers() -> dict[str, Any]:
             providers.append({
                 "id": cp_id,
                 "display_name": cp_name,
-                # >>> hermes-fork: surface custom_providers as configurable
                 "has_key": cp_has_key,
-                "configurable": True,
+                "configurable": False,
                 "is_oauth": False,
                 "logo_url": _PROVIDER_LOGO_URL.get(cp_name.lower().replace(" ", "")),
                 "logo_hue": _PROVIDER_LOGO_HUE.get(cp_name.lower().replace(" ", "")),

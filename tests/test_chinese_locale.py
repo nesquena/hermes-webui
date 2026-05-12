@@ -86,7 +86,7 @@ def test_chinese_locale_includes_representative_translations():
         "tab_tasks: '任务'",
         "tab_profiles: '配置'",
         "session_time_bucket_today: '今天'",
-        "onboarding_title: '欢迎使用 Hermes Web UI'",
+        "onboarding_title: '欢迎使用 HermesOS'",
         "onboarding_complete: '引导完成'",
     ]
     for entry in expected:

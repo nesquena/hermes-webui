@@ -40,6 +40,13 @@ def test_settings_default_theme():
     assert d.get("theme") == "dark"
 
 
+def test_settings_default_skin_is_hermesos():
+    """HermesOS Cloud fresh installs should boot into the branded skin."""
+    d, status = get("/api/settings")
+    assert status == 200
+    assert d.get("skin") == "hermesos"
+
+
 def test_settings_set_theme_light_persists():
     """Setting theme to 'light' should persist and round-trip."""
     try:
@@ -123,20 +130,47 @@ def test_settings_unknown_theme_falls_back_to_dark_default():
         assert status == 200
         d2, _ = get("/api/settings")
         assert d2.get("theme") == "dark"
-        assert d2.get("skin") == "default"
+        assert d2.get("skin") == "hermesos"
     finally:
-        post("/api/settings", {"theme": "dark", "skin": "default"})
+        post("/api/settings", {"theme": "dark", "skin": "hermesos"})
 
 
 def test_settings_invalid_skin_falls_back_to_default():
-    """Unknown skin names should normalize back to the default accent."""
+    """Unknown skin names should normalize back to the HermesOS accent."""
     try:
         d, status = post("/api/settings", {"skin": "not-a-skin"})
         assert status == 200
         d2, _ = get("/api/settings")
-        assert d2.get("skin") == "default"
+        assert d2.get("skin") == "hermesos"
     finally:
-        post("/api/settings", {"skin": "default"})
+        post("/api/settings", {"skin": "hermesos"})
+
+
+def test_load_settings_migrates_pre_rebrand_default_skin(monkeypatch, tmp_path):
+    """Old settings.json files with skin=default should not override boot's HermesOS skin."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"theme": "dark", "skin": "default"}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+
+    assert loaded["theme"] == "dark"
+    assert loaded["skin"] == "hermesos"
+
+
+def test_load_settings_preserves_explicit_default_after_rebrand(monkeypatch, tmp_path):
+    """Users may still explicitly choose upstream Default after the server migration version."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"theme": "dark", "skin": "default", "skin_rebrand_version": 5}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+
+    assert loaded["theme"] == "dark"
+    assert loaded["skin"] == "default"
 
 
 def test_load_settings_normalizes_legacy_theme_from_file(monkeypatch, tmp_path):

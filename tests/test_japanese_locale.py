@@ -99,7 +99,7 @@ def test_japanese_locale_includes_representative_translations():
         "tab_tasks: 'タスク'",
         "tab_profiles: 'プロファイル'",
         "session_time_bucket_today: '今日'",
-        "onboarding_title: 'Hermes Web UI へようこそ'",
+        "onboarding_title: 'HermesOS へようこそ'",
         "mcp_servers_title: 'MCPサーバー'",
         "tree_view: 'ツリー'",
     ]

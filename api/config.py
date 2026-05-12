@@ -3725,6 +3725,8 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 
 # ── Settings persistence ─────────────────────────────────────────────────────
 
+_HERMESOS_SKIN_REBRAND_VERSION = 5
+
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
@@ -3735,7 +3737,12 @@ _SETTINGS_DEFAULTS = {
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "theme": "dark",  # light | dark | system
-    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
+    # HermesOS Cloud default. The upstream "default" gold skin still exists as
+    # an explicit user choice, but fresh / pre-rebrand settings must boot into
+    # the branded skin so server settings do not overwrite the early HTML skin
+    # migration back to upstream default.
+    "skin": "hermesos",  # accent color skin: hermesos | default | ares | mono | slate | poseidon | sisyphus | charizard
+    "skin_rebrand_version": _HERMESOS_SKIN_REBRAND_VERSION,
     "font_size": "default",  # small | default | large
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -3770,7 +3777,7 @@ _SETTINGS_LEGACY_THEME_MAP = {
     "solarized": ("dark", "poseidon"),
     "monokai": ("dark", "sisyphus"),
     "nord": ("dark", "slate"),
-    "oled": ("dark", "default"),
+    "oled": ("dark", "hermesos"),
 }
 
 
@@ -3783,9 +3790,9 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
         solarized → ("dark", "poseidon")
         monokai   → ("dark", "sisyphus")
         nord      → ("dark", "slate")
-        oled      → ("dark", "default")
+        oled      → ("dark", "hermesos")
 
-    Unknown / custom theme names fall back to ("dark", "default").  This is a
+    Unknown / custom theme names fall back to ("dark", "hermesos").  This is a
     behavior change vs. the pre-PR-#627 state, where the `theme` field was
     open-ended ("no enum gate -- allows custom themes").  Users who set a
     custom CSS theme via `data-theme` will need to re-apply via skin or
@@ -3800,10 +3807,10 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     if legacy:
         next_theme, legacy_skin = legacy
     elif raw_theme in _SETTINGS_THEME_VALUES:
-        next_theme, legacy_skin = raw_theme, "default"
+        next_theme, legacy_skin = raw_theme, "hermesos"
     else:
         # Unknown themes used to exist; default to dark so upgrades stay visually stable.
-        next_theme, legacy_skin = "dark", "default"
+        next_theme, legacy_skin = "dark", "hermesos"
     next_skin = (
         raw_skin
         if raw_skin in _SETTINGS_SKIN_VALUES
@@ -3836,9 +3843,24 @@ def load_settings() -> dict:
                 )
         except Exception:
             logger.debug("Failed to load settings from %s", SETTINGS_FILE)
-    settings["theme"], settings["skin"] = _normalize_appearance(
-        stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
-        stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
+    raw_theme = stored.get("theme") if isinstance(stored, dict) else settings.get("theme")
+    raw_skin = stored.get("skin") if isinstance(stored, dict) else settings.get("skin")
+    try:
+        stored_rebrand_version = int(
+            stored.get("skin_rebrand_version", 0) if isinstance(stored, dict) else 0
+        )
+    except (TypeError, ValueError):
+        stored_rebrand_version = 0
+    if (
+        isinstance(raw_skin, str)
+        and raw_skin.strip().lower() == "default"
+        and stored_rebrand_version < _HERMESOS_SKIN_REBRAND_VERSION
+    ):
+        raw_skin = "hermesos"
+    settings["theme"], settings["skin"] = _normalize_appearance(raw_theme, raw_skin)
+    settings["skin_rebrand_version"] = max(
+        stored_rebrand_version,
+        _HERMESOS_SKIN_REBRAND_VERSION,
     )
     settings["default_model"] = get_effective_default_model()
     return settings

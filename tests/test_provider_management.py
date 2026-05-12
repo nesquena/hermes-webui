@@ -5,6 +5,7 @@ Part of #604 — multi-provider model picker support.
 """
 
 import json
+import pytest
 import sys
 import types
 import urllib.error
@@ -513,6 +514,111 @@ class TestIssue1410OllamaEnvVarBleed:
             config.cfg.clear()
             config.cfg.update(old_cfg)
             config._cfg_mtime = old_mtime
+
+
+class TestHermesOSDashboardSeededOpenAICompatibleProviders:
+    """Dashboard provisioning uses generic OpenAI-compatible credentials.
+
+    The provider card should reflect the configured user-facing provider
+    without forcing users through a second WebUI setup flow.
+    """
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected_provider_id"),
+        [
+            ("https://bankr.com/v1", "bankr"),
+            ("https://api.cometapi.com/v1", "cometapi"),
+            ("https://crof.ai/v1", "crof"),
+            ("https://api.groq.com/openai/v1", "groq"),
+            ("https://venice.ai/api/v1", "venice"),
+        ],
+    )
+    def test_active_custom_base_url_marks_matching_provider_configured(
+        self, monkeypatch, tmp_path, base_url, expected_provider_id,
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-dashboard-seeded\n", encoding="utf-8")
+        dashboard_cfg = {
+            "model": {
+                "provider": "custom",
+                "default": "test-model",
+                "base_url": base_url,
+            }
+        }
+        import api.providers as providers
+        monkeypatch.setattr(providers, "get_config", lambda: dashboard_cfg)
+
+        result = providers.get_providers()
+        by_id = {p["id"]: p for p in result["providers"]}
+        assert by_id[expected_provider_id]["has_key"] is True
+        assert by_id[expected_provider_id]["key_source"] == "env_file"
+
+        unrelated = "venice" if expected_provider_id != "venice" else "crof"
+        assert by_id[unrelated]["has_key"] is False
+
+    def test_active_first_class_openai_compatible_provider_uses_openai_key(
+        self, monkeypatch, tmp_path,
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-dashboard-seeded\n", encoding="utf-8")
+        dashboard_cfg = {
+            "model": {
+                "provider": "venice",
+                "default": "venice-model",
+                "base_url": "https://venice.ai/api/v1",
+            }
+        }
+        import api.providers as providers
+        monkeypatch.setattr(providers, "get_config", lambda: dashboard_cfg)
+
+        result = providers.get_providers()
+        by_id = {p["id"]: p for p in result["providers"]}
+        assert by_id["venice"]["has_key"] is True
+        assert by_id["venice"]["key_source"] == "env_file"
+
+    def test_active_model_api_key_reports_config_yaml_source(
+        self, monkeypatch, tmp_path,
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        dashboard_cfg = {
+            "model": {
+                "provider": "custom",
+                "default": "test-model",
+                "base_url": "https://crof.ai/v1",
+                "api_key": "sk-config-yaml",
+            }
+        }
+        import api.providers as providers
+        monkeypatch.setattr(providers, "get_config", lambda: dashboard_cfg)
+
+        result = providers.get_providers()
+        by_id = {p["id"]: p for p in result["providers"]}
+        assert by_id["crof"]["has_key"] is True
+        assert by_id["crof"]["key_source"] == "config_yaml"
+
+    def test_generic_openai_key_does_not_configure_inactive_dashboard_provider(
+        self, monkeypatch, tmp_path,
+    ):
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-dashboard-seeded\n", encoding="utf-8")
+        dashboard_cfg = {
+            "model": {
+                "provider": "custom",
+                "default": "test-model",
+                "base_url": "https://example.invalid/v1",
+            }
+        }
+        import api.providers as providers
+        monkeypatch.setattr(providers, "get_config", lambda: dashboard_cfg)
+
+        result = providers.get_providers()
+        by_id = {p["id"]: p for p in result["providers"]}
+        assert by_id["crof"]["has_key"] is False
+        assert by_id["venice"]["has_key"] is False
 
     def test_ollama_local_still_configured_via_config_yaml(
         self, monkeypatch, tmp_path,

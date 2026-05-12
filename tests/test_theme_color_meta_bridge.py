@@ -114,7 +114,7 @@ class TestBootJsThemeColorSync:
         # in surrounding code triggers a clear test failure.
         anchor = (
             "function _applySkin(name){\n"
-            "  const key=(name||'default').toLowerCase();\n"
+            "  const key=(name||'hermesos').toLowerCase();\n"
             "  if(key==='default') delete document.documentElement.dataset.skin;\n"
             "  else document.documentElement.dataset.skin=key;\n"
             "  _syncThemeColorMeta();\n"

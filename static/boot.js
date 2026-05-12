@@ -1242,7 +1242,7 @@ const _LEGACY_THEME_MAP={
   solarized:{theme:'dark',skin:'poseidon'},
   monokai:{theme:'dark',skin:'sisyphus'},
   nord:{theme:'dark',skin:'slate'},
-  oled:{theme:'dark',skin:'default'},
+  oled:{theme:'dark',skin:'hermesos'},
 };
 let _systemThemeMq=null;
 let _onSystemThemeChange=null;
@@ -1252,7 +1252,7 @@ function _normalizeAppearance(theme,skin){
   const rawSkin=typeof skin==='string'?skin.trim().toLowerCase():'';
   const legacy=_LEGACY_THEME_MAP[rawTheme];
   const nextTheme=legacy?legacy.theme:(_VALID_THEMES.has(rawTheme)?rawTheme:'dark');
-  const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'default');
+  const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'hermesos');
   return {theme:nextTheme,skin:nextSkin};
 }
 
@@ -1315,7 +1315,7 @@ function _applyTheme(name){
 }
 
 function _applySkin(name){
-  const key=(name||'default').toLowerCase();
+  const key=(name||'hermesos').toLowerCase();
   if(key==='default') delete document.documentElement.dataset.skin;
   else document.documentElement.dataset.skin=key;
   _syncThemeColorMeta();
@@ -1409,7 +1409,7 @@ function _buildSkinPicker(activeSkin){
     btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
     grid.appendChild(btn);
   }
-  _syncSkinPicker((activeSkin||'default').toLowerCase());
+  _syncSkinPicker((activeSkin||'hermesos').toLowerCase());
 }
 
 function applyBotName(){
