@@ -2598,14 +2598,18 @@
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
-      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
-      const widgetRestoreButtons = renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
+      const currentRevision = isCurrentRevision(rev);
+      const timelineLabel = formatRevisionTimelineLabel(rev);
+      const restoreButton = !currentRevision && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
+      const widgetRestoreButtons = currentRevision ? '' : renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
+      const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        (timelineLabel ? '<div class="capy-spaces-muted">'+escapeHtml(timelineLabel)+'</div>' : '') +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         (diffText ? '<div class="capy-spaces-muted">'+escapeHtml(diffText)+'</div>' : '') +
-        '</div><div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div></div>';
+        '</div>'+actions+'</div>';
     }).join('');
   }
 

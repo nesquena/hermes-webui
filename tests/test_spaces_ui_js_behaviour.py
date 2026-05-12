@@ -557,7 +557,7 @@ global.fetch = async function(path, opts = {}) {
           latest_space_repair_event: { event_id: 'evt-space-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } },
           renderer: '<script>bad()</script>',
           revisions: [
-            { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+            { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, timeline_state: 'current', is_current_revision: true, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
             { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' }, restore_preview: { name: 'Broken safe checkpoint', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget', 'raw-html-widget', 'script-widget', 'api_auth_widget', 'source-widget', 'secret-widget'], widgets_to_add: ['added-widget'], widgets_to_remove: ['removed-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
           ],
           widgets: [
@@ -4149,6 +4149,8 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "space.updated" in out["recoveryHtml"]
     assert "rev-before-break" in out["recoveryHtml"]
     assert "Preview: Broken safe checkpoint · 1 widget · Widgets: safe-widget / Safe Widget / markdown" in out["recoveryHtml"]
+    assert "Current revision · timeline: current" in out["recoveryHtml"]
+    assert 'data-event-id="rev-broken"' not in out["recoveryHtml"]
     assert "Preview: Broken current · 2 widgets · Widgets: bad-widget / Bad &lt;Widget&gt; / html, disabled-widget / Disabled Widget / markdown" in out["recoveryHtml"]
     assert "reason: [REDACTED]" in out["recoveryHtml"]
     assert "Disabled: render failed" in out["recoveryHtml"]
