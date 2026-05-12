@@ -163,6 +163,13 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+function syncMobileNav(panel){
+  const nav=document.querySelector('.neo-mobile-nav');
+  if(!nav)return;
+  nav.querySelectorAll('.neo-mobile-nav-item').forEach(btn=>{
+    btn.classList.toggle('active',btn.dataset.panel===panel);
+  });
+}
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
