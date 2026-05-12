@@ -392,9 +392,14 @@ def cleanup_test_sessions():
     Deletes all registered sessions after each test.
     Resets last_workspace to the test workspace to prevent state bleed.
     """
+    # Some tests mutate workspace state; recreate the default workspace before
+    # each test so later chat/session regression tests do not inherit a stale
+    # missing path from prior test ordering.
+    TEST_WORKSPACE.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
     yield created
 
+    TEST_WORKSPACE.mkdir(parents=True, exist_ok=True)
     for sid in created:
         try:
             _post(TEST_BASE, "/api/session/delete", {"session_id": sid})
