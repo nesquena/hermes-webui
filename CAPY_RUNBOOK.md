@@ -42,6 +42,17 @@ Reason: `start.sh` delegates through bootstrap code and can background the real 
 
 Reason: `127.0.0.1` plus Tailscale Serve limits exposure. Do not bind to `0.0.0.0` unless authentication and network exposure are reviewed.
 
+## Capy Spaces product architecture
+
+Capy Spaces is evolving toward a generic safe creator loop rather than only a catalog of demos:
+
+1. Prompt or tool request produces a bounded, metadata-only Space/widget spec.
+2. The spec is previewed in a sandbox and visually QA'd before any durable write.
+3. Patch/repair flows produce metadata-only receipts and events.
+4. Approved changes are committed through the revision system so rollback/time-travel remains available.
+
+Generated/imported widget bodies, raw HTML, scripts, renderer/source/data payloads, prompt echoes, and credential-looking values stay disabled or quarantined until explicit sandbox tests cover richer execution. Visible demo/smoke surfaces should prove capabilities with bounded checklists and receipts, not by rendering generated widget bodies.
+
 ## Health checks
 
 ```bash
