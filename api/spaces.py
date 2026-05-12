@@ -277,10 +277,52 @@ def _payload_runtime_message_type(payload: dict[str, Any]) -> str:
     return aliases[0] if aliases else ""
 
 
+def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max_items: int = 80) -> list[str]:
+    """Return capy-shaped runtime discriminators embedded in nested payload metadata.
+
+    Top-level routing aliases are validated by _payload_runtime_message_type(). Nested
+    payloads can still carry postMessage-shaped envelopes under app data keys such as
+    message/event/messages. Treat only capy-shaped nested discriminator values as runtime
+    contract selectors so benign nested labels like {"type": "form.submit"} stay intact.
+    """
+    found: list[str] = []
+
+    def visit(current: Any, depth: int) -> None:
+        if depth > max_depth or len(found) >= max_items:
+            return
+        if isinstance(current, dict):
+            for key in ("type", "message_type", "messageType"):
+                if key not in current:
+                    continue
+                raw = re.sub(r"\s+", " ", str(current.get(key) or "")).strip()
+                if not raw.lower().startswith("capy:"):
+                    continue
+                message_type = _runtime_message_type_value(raw)
+                if not message_type:
+                    raise ValueError("Blocked by widget runtime contract")
+                found.append(message_type)
+                if len(found) >= max_items:
+                    return
+            for index, nested in enumerate(current.values()):
+                if index >= max_items:
+                    break
+                visit(nested, depth + 1)
+                if len(found) >= max_items:
+                    return
+        elif isinstance(current, list):
+            for nested in current[:max_items]:
+                visit(nested, depth + 1)
+                if len(found) >= max_items:
+                    return
+
+    visit(value, 0)
+    return found
+
+
 def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict[str, Any]) -> None:
     event_type = _runtime_message_type_value(event_name)
     payload_type = _payload_runtime_message_type(payload)
-    for message_type in (event_type, payload_type):
+    for message_type in (event_type, payload_type, *_nested_payload_runtime_message_types(payload)):
         if message_type and (
             _is_blocked_runtime_message_type(message_type) or not _is_allowed_runtime_message_type(message_type)
         ):
