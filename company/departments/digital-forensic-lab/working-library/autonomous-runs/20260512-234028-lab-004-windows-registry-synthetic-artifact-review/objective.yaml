@@ -1,0 +1,17 @@
+schema_version: 1
+run_id: 20260512-234028-lab-004-windows-registry-synthetic-artifact-review
+lab_id: lab-004-windows-registry-synthetic-artifact-review
+objective: Analyze generated registry-like text for fact/inference/unknown separation.
+source_ids:
+- practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- generated registry-like file only
+- no real Windows registry access
+- conclusion_status preliminary_internal_non_final
+baseline_validator_ok: true

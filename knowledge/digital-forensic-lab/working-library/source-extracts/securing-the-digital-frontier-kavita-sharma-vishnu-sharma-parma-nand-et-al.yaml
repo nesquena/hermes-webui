@@ -1,0 +1,73 @@
+schema_version: 1
+source_id: securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+source_title: Securing the Digital Frontier
+source_author: Kavita Sharma, Vishnu Sharma, Parma Nand, et al.
+source_file: knowledge/book-expert-factory/sources/securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al.json
+source_asset: /Users/kei/Desktop/Securing the Digital Frontier Threats and Advanced
+  Techniques in Security and Forensics (Kavita Sharma, Vishnu Sharma, Parma Nand etc.)
+  (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: c36cdc14c16e1818516f6cfb9330b55f5a095e3569b06d09eec9dd440c58f2ea
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: advanced security and forensics threat boundaries
+evidence_anchors:
+- keyword: digital forensics
+  short_anchor: h Emerging Technologies and Regulations 2.5 Conclusion References
+    3 4 Unveiling Cyber Threats and Digital Forensics Nidhi Gupta, Arpita Trivedi,
+    Parveen P. Terang and Hasmat Malik 3.1 Information Security 3.1.1 Issues and Challenges
+    3.1.2 D
+- keyword: forensic
+  short_anchor: 'enerpublishing.com) Securing the Digital Frontier Threats and Advanced
+    Techniques in Security and Forensics Edited by Kavita Sharma Vishnu Sharma Parma
+    Nand Anil Kumar Sagar and Gulshan Shrivastava This edition first published 2025
+    by John '
+- keyword: evidence
+  short_anchor: tool is used for legitimate purposes like for frightening crimes and
+    terrorism. However, number of evidences and investigations have suggested that
+    Pegasus has been used for questionable purposes by some people. The way that this
+    tool opera
+- keyword: smart
+  short_anchor: ve as a platform for books dealing with security concerns of decentralized
+    applications (DApps) and smart contracts that operate on an open blockchain. The
+    book series will be a comprehensive and up-to-date reference on information security
+- keyword: mobile
+  short_anchor: 'designed to address the critical security challenges in today''s
+    computing world including cloud and mobile environments and to discuss mechanisms
+    for defending against those attacks by using classical and modern approaches of
+    cryptography, '
+- keyword: security
+  short_anchor: 'er Scrivener Publishing 100 Cummings Center, Suite 541J Beverly,
+    MA 01915-6106 Advances in Cyber Security Series Editors: Rashmi Agrawal and D.
+    Ganesh Gopal Scope: The purpose of this book series is to present books that are
+    specifically de'
+- keyword: threat
+  short_anchor: fessionals, it facilitates the up-to-date understanding required to
+    stay one step ahead of evolving threats, standards, and regulations. Publishers
+    at Scrivener Martin Scrivener (martin@scrivenerpublishing.com) Phillip Carmical
+    (pcarmical@s
+- keyword: integrity
+  short_anchor: ressing IoT vulnerabilities and implementing robust security measures
+    to safeguard data privacy and integrity. In Chapter 11, “Secured IoT with LWC
+    and Blockchain,” authors Srishti Priya Chaturvedi, Ajay Yadav, Santosh Kumar,
+    and Rahul Mukh
+framework_questions:
+- Which threat concept is safe to convert into a synthetic defensive drill?
+- What evidence-preservation or integrity requirement follows from the threat model?
+- What part would become offensive or external and must be blocked?
+reusable_rules:
+- Translate threats into defensive preservation checks, not attack procedures.
+- Keep advanced techniques synthetic and non-operational.
+- Escalate any real-system or offensive step as forbidden in Phase 0.
+working_library_contributions:
+- defensive-security-interface
+- security-properties-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

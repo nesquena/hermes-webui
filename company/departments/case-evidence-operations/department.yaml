@@ -1,0 +1,11 @@
+department_id: case-evidence-operations
+mission: Future case/evidence workflow design; Phase 0 remains synthetic only.
+current_roles: []
+allowed_work:
+- synthetic_case_flows
+- intake_templates
+forbidden_work:
+- real_victim_or_case_data
+- identifying_private_people
+- unverified_allegations
+activation_gate: kei_explicit_approval

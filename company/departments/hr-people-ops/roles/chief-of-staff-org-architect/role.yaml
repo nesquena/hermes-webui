@@ -1,0 +1,26 @@
+role_id: chief-of-staff-org-architect
+department_id: hr-people-ops
+status: probation
+source: derived_from_personnel_file
+personnel_template_ref: company/workforce/personnel/personnel-chief-of-staff-org-architect-001.yaml
+allowed_tools:
+- read_file
+- search_files
+forbidden_tools:
+- external_messaging
+- production_access
+- spending
+- secrets_reading
+- deployment_tools
+- external_webhooks
+allowed_data:
+- approved_internal_knowledge_notes
+- synthetic_examples
+- public_sources
+forbidden_data:
+- secrets
+- production_data
+- real_employee_personal_data
+- real_victim_or_case_data
+- identifiable_person_data
+receipt_required: true

@@ -1,0 +1,67 @@
+schema_version: 1
+status: phase_0_internal_only
+team_authority: Kei supplied fixed AI Legal-Forensic Intelligence Team; do not rewrite team structure.
+routing_policy:
+  one_writer: qwen36_27b_main
+  deterministic_tools_first: true
+  specialist_outputs_are_candidate_evidence: true
+  final_human_review_required: true
+  receipt_required: true
+  every_claim_needs_evidence_id: true
+  blocked_until_source_verified:
+    - kanon2_embedder
+    - kanon2_reranker
+    - gliner2_pii
+lane_routes:
+  legal_research_ai:
+    retrieval: [kanon2_embedder, qwen3_embedding_06b, qwen3_embedding_4b]
+    rerank: [kanon2_reranker, qwen3_reranker_4b_legal]
+    reviewer: [qwen36_27b_main, llm_jp_4_8b]
+    gates: [evidence_support_checker, overclaim_detector]
+  litigation_strategy_ai:
+    reviewer: [qwen36_27b_main]
+    tools: [evidence_timeline_builder, evidence_support_checker, overclaim_detector]
+  digital_evidence_ai:
+    retrieval: [qwen3_embedding_06b]
+    rerank: [qwen3_reranker_06b, qwen3_reranker_4b_evidence]
+    tools: [forensic_artifact_worker, evidence_support_checker]
+  digital_forensic_ai:
+    tools: [forensic_artifact_worker, evidence_timeline_builder]
+    reviewer: [qwen36_27b_main]
+    gates: [overclaim_detector]
+  cybercrime_incident_response_ai:
+    retrieval: [securebert_family]
+    specialists: [cybersecqwen_4b, security_slm_unsloth_15b, loglm_worker]
+    gates: [overclaim_detector, evidence_support_checker]
+  cloud_saas_evidence_ai:
+    tools: [cloud_audit_log_worker, evidence_timeline_builder]
+    retrieval: [qwen3_embedding_06b]
+    gates: [evidence_support_checker, overclaim_detector]
+  ai_misuse_deepfake_evidence_ai:
+    visual: [qwen3_vl_embedding, qwen3_vl_reranker]
+    provenance: [c2pa_verifier]
+    weak_signal_detectors: [deepfake_detector_ensemble, audio_spoofing_detector_ensemble]
+    gates: [overclaim_detector, evidence_support_checker]
+  osint_attribution_ai:
+    tools: [osint_attribution_confidence_scorer]
+    retrieval: [qwen3_embedding_06b]
+    gates: [overclaim_detector]
+  privacy_data_protection_ai:
+    filters: [openai_privacy_filter, openmed_privacy_filter_multilingual, gliner2_pii]
+    reviewer: [qwen36_27b_main]
+    gates: [evidence_support_checker]
+  platform_terms_tech_contract_ai:
+    retrieval: [qwen3_embedding_06b, qwen3_reranker_06b]
+    reviewer: [qwen36_27b_main, llm_jp_4_8b]
+  expert_report_ai:
+    writer: [qwen36_27b_main]
+    required_gates: [evidence_support_checker, overclaim_detector]
+  cross_examination_ai:
+    writer: [qwen36_27b_main]
+    required_gates: [evidence_support_checker, overclaim_detector]
+  evidence_timeline_ai:
+    tools: [evidence_timeline_builder, cloud_audit_log_worker, forensic_artifact_worker]
+    required_gates: [overclaim_detector]
+  risk_limitation_ai:
+    gates: [overclaim_detector, evidence_support_checker]
+    filters: [openai_privacy_filter, openmed_privacy_filter_multilingual]

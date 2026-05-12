@@ -1,0 +1,18 @@
+schema_version: 1
+run_id: 20260512-202627-lab-008-smart-card-transflash-evidence-register
+lab_id: lab-008-smart-card-transflash-evidence-register
+objective: Create synthetic smart-card/transflash evidence register entries and custody
+  chain.
+source_ids:
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- synthetic evidence IDs
+- custody events complete
+- no final authenticity claim
+baseline_validator_ok: true

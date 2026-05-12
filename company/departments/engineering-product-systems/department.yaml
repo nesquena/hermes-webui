@@ -1,0 +1,12 @@
+department_id: engineering-product-systems
+mission: Internal schemas, validators, prototypes, and product quality systems.
+current_roles: []
+allowed_work:
+- local_tools
+- validators
+- tests
+- internal_prototypes
+forbidden_work:
+- production_deployment
+- external_webhooks_without_approval
+activation_gate: yuto-control

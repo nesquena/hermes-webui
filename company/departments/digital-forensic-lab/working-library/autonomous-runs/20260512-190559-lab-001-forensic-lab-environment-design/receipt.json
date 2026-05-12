@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-190559-lab-001-forensic-lab-environment-design/objective.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-190559-lab-001-forensic-lab-environment-design/exercise.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-190559-lab-001-forensic-lab-environment-design/environment-readiness-checklist.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-190559-lab-001-forensic-lab-environment-design/evaluation.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-190559-lab-001-forensic-lab-environment-design/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-001-forensic-lab-environment-design",
+  "local_llm_backend": "mlx_qwen3.6_27b_8765",
+  "local_llm_used": true,
+  "objective": "Design a synthetic forensic lab environment checklist from lab facility/equipment concepts.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260512-190559-lab-001-forensic-lab-environment-design",
+  "source_grounded": true,
+  "source_ids": [
+    "practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T10:06:17.224472+00:00"
+}

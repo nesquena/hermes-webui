@@ -1,0 +1,14 @@
+playbook_id: synthetic-preservation-phase0-v0.1
+steps:
+  - confirm synthetic_only_and_no_real_case_data
+  - assign evidence_id
+  - record source_description
+  - record hash_placeholder_or_synthetic_hash
+  - create custody_event
+  - write receipt
+  - run validator
+stop_conditions:
+  - real_case_data_present
+  - external_action_requested
+  - final_conclusion_requested
+  - evidence_modification_requested

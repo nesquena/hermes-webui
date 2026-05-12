@@ -1,0 +1,11 @@
+department_id: compliance-safety-expert-network
+mission: Safety gates, expert review routing, red lines, and approval matrices.
+current_roles: []
+allowed_work:
+- risk_review
+- expert_question_lists
+- approval_gate_design
+forbidden_work:
+- claiming_expert_approval_without_expert
+- public_compliance_claims
+activation_gate: kei_or_yuto_control

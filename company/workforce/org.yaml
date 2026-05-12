@@ -1,0 +1,49 @@
+company_phase: phase_0_internal_only
+owner: yuto-control
+final_authority: kei
+purpose: Internal-only workforce kit for Yuto company pilot. Defines employee files, departments, skills, and rules before worker activation.
+departments:
+  - executive-control
+  - hr-people-ops
+  - global-intelligence
+  - research-policy
+  - ai-law-legal-frontier
+  - digital-forensic-lab
+  - security-frontier
+  - case-evidence-operations
+  - engineering-product-systems
+  - knowledge-infrastructure
+  - compliance-safety-expert-network
+approval_gates:
+  - gate_0_need_to_role
+  - gate_1_manifest
+  - gate_2_safety
+  - gate_3_validator
+  - gate_4_probation
+  - gate_5_activation
+  - gate_6_expert_human
+  - gate_7_review_retire
+global_forbidden_actions:
+  - external_messaging
+  - publishing
+  - production_deployment
+  - spending
+  - secrets_access
+  - real_employee_personal_data
+  - real_victim_or_case_data
+  - final_legal_claims
+  - final_forensic_claims
+  - final_security_claims
+  - final_compliance_claims
+  - offensive_cyber_activity
+  - modifying_original_evidence
+  - automated_employment_decisions
+  - covert_monitoring
+phase_0_allowed_work:
+  - internal_org_design
+  - role_manifests
+  - personnel_templates
+  - validators
+  - synthetic_examples
+  - design_receipts
+  - read_only_research_planning

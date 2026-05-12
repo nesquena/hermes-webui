@@ -1,0 +1,6 @@
+{
+  "used": true,
+  "backend": "ollama_qwen3.6_27b_local_api",
+  "returncode": 0,
+  "raw": "{\n  \"strengths\": \"Clear focus on converting threats to preservation queries. Strict synthetic-only boundary ensures safety. Well-defined deliverable keys support structured output.\",\n  \"risks\": \"Ambiguity in 'safe' definition may lead to over-restriction. Lack of specific scenario examples could confuse users. Potential for misinterpreting 'preliminary' status as final.\",\n  \"improvement\": \"Add concrete synthetic examples for each threat type. Clarify 'safe' criteria with explicit do/don't lists. Include validation steps for question relevance. Ensure schema versioning is explicit for updates.\"\n}"
+}

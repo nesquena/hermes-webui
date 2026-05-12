@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "run_id": "20260512-175119-ai-inference-boundary",
+  "task": "digital_forensic_lab_autonomous_learning_worker",
+  "created_at_local": "2026-05-12T17:51:19",
+  "source_grounding": [
+    {
+      "path": "company/departments/digital-forensic-lab/working-library/controls/ai-reliability-boundary-control.yaml",
+      "used_fields": ["AI output labelled as inference", "human review required for authenticity/admissibility/attribution", "model limitations recorded", "no final conclusion status"]
+    },
+    {
+      "path": "company/departments/digital-forensic-lab/working-library/controls/legal-governance-boundary-control.yaml",
+      "used_fields": ["no legal advice", "rights-impacting claims stop at expert gate", "external publication requires Kei approval and expert review", "governance rationale recorded"]
+    },
+    {
+      "path": "company/departments/digital-forensic-lab/working-library/source-extracts/agentic-ai-for-cybersecurity-omar-santos.yaml",
+      "used_fields": ["framework_questions", "reusable_rules", "promotion_blockers"]
+    },
+    {
+      "path": "company/departments/digital-forensic-lab/working-library/source-extracts/ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin.yaml",
+      "used_fields": ["framework_questions", "reusable_rules", "promotion_blockers"]
+    }
+  ],
+  "commands_run": [
+    {
+      "command": "python tools/digital_forensic_lab.py --json",
+      "phase": "baseline",
+      "exit_code": 0,
+      "observed_ok": true
+    },
+    {
+      "command": "date +%Y%m%d-%H%M%S",
+      "phase": "run_id_generation",
+      "exit_code": 0,
+      "observed_output": "20260512-175119"
+    },
+    {
+      "command": "python tools/digital_forensic_lab.py --json",
+      "phase": "post_change_verification",
+      "exit_code": 0,
+      "observed_ok": true
+    },
+    {
+      "command": "python -m pytest tests/test_digital_forensic_lab.py -q",
+      "phase": "post_change_verification_initial_attempt",
+      "exit_code": 2,
+      "observed_error": "ImportError: imported tools from /Users/kei/.hermes/hermes-agent/tools/__init__.py during collection"
+    },
+    {
+      "command": "HOME=/tmp/yuto-nohome HERMES_HOME=/tmp/yuto-nohome/.hermes PYTHONPATH=/Users/kei/kei-jarvis python -m pytest tests/test_digital_forensic_lab.py -q",
+      "phase": "post_change_verification",
+      "exit_code": 0,
+      "observed_output": "7 passed in 1.55s"
+    },
+    {
+      "command": "python - <<'PY' ... package parse assertions ... PY",
+      "phase": "post_change_verification",
+      "exit_code": 0,
+      "observed_output": "autonomous run package parse ok"
+    }
+  ],
+  "artifacts_changed": [
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-175119-ai-inference-boundary/objective.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-175119-ai-inference-boundary/exercise.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-175119-ai-inference-boundary/evaluation.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-175119-ai-inference-boundary/receipt.json",
+    "company/departments/digital-forensic-lab/working-library/autonomous-learning-receipts.jsonl"
+  ],
+  "synthetic_only": true,
+  "real_case_data_present": false,
+  "external_actions_taken": [],
+  "policy_violations": [],
+  "local_llm_used": false,
+  "no_external_paid_api_used": true,
+  "conclusion_status": "preliminary_internal_non_final",
+  "residual_risk": [
+    "autonomous-runs packages are not yet enforced by tools/digital_forensic_lab.py",
+    "official/current source check pending",
+    "human forensic/legal/security expert review pending",
+    "synthetic-only exercise; no real-case readiness implied"
+  ]
+}

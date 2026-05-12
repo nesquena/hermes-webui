@@ -1,0 +1,43 @@
+schema_version: 1
+library_id: digital-forensic-lab-working-library-v0.1
+status: phase0_synthetic_source_grounded_not_authority
+owner: digital-forensic-lab-lead
+safety_boundary:
+- synthetic/internal-only
+- no real case/victim/client/employee data
+- no final forensic/legal/security/compliance claims
+- no external actions
+- no offensive cyber
+source_extract_count: 10
+control_count: 5
+source_extracts:
+- working-library/source-extracts/artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al.yaml
+- working-library/source-extracts/digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al.yaml
+- working-library/source-extracts/artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu.yaml
+- working-library/source-extracts/ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin.yaml
+- working-library/source-extracts/agentic-ai-for-cybersecurity-omar-santos.yaml
+- working-library/source-extracts/securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al.yaml
+- working-library/source-extracts/startup-technical-guide-ai-agents-google-cloud.yaml
+- working-library/source-extracts/securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al.yaml
+- working-library/source-extracts/forensic-investigation-of-smart-digital-devices-farkhund-iqbal.yaml
+- working-library/source-extracts/practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al.yaml
+controls:
+- working-library/controls/evidence-preservation-control.yaml
+- working-library/controls/chain-of-custody-control.yaml
+- working-library/controls/ai-reliability-boundary-control.yaml
+- working-library/controls/legal-governance-boundary-control.yaml
+- working-library/controls/agentops-learning-loop-control.yaml
+learning_cycles:
+- working-library/learning-cycles/cycle-001-source-grounded-preservation.yaml
+- working-library/learning-cycles/cycle-002-custody-and-ai-boundary.yaml
+- working-library/learning-cycles/cycle-003-agentops-scout-readiness.yaml
+promotion_gate:
+- all validator checks pass
+- at least 10 verified source extracts
+- at least 5 working controls
+- at least 3 synthetic learning cycle receipts
+- Scout report generated from validator output
+- official/current source check remains pending before any real use
+- Kei approval before any real data or external action
+practice_lab_queue: working-library/practice-labs/practice-lab-queue.yaml
+practice_lab_count: 12

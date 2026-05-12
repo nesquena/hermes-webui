@@ -1,0 +1,58 @@
+schema_version: 1
+source_id: startup-technical-guide-ai-agents-google-cloud
+source_title: 'Startup Technical Guide: AI Agents'
+source_author: Google Cloud
+source_file: knowledge/book-expert-factory/sources/startup-technical-guide-ai-agents-google-cloud.json
+source_asset: /Users/kei/Desktop/AI-Books/Startup technical guide AI agents(final)
+  (Google Cloud) (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: 6d4d69de5f899bafbf8f56639952af74440db9b9f93060fa365e786f13c9e8a4
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: AgentOps grounding, HITL, and managed learning loop
+evidence_anchors:
+- keyword: risk
+  short_anchor: 'the new feature we launched last week,” or “Which customer cohorts
+    have the highest churn risk based on recent activity?” BigQuery provides instant
+    business intelligence. 12 Section 1: Core concepts of AI agents Section '
+- keyword: human
+  short_anchor: 'ex, multi-file edits across a full project’s context. These agentic
+    workflows incorporate Human in the Loop (HITL) oversight and can integrate with
+    ecosystem tools that follow the MCP. • Google Cloud service integration:'
+- keyword: agent
+  short_anchor: Startup technical guide AI agents Table of contents Introduction 01
+    Core concepts of AI agents 02 An overview of Google Cloud’s agent ecosystem 04
+    Key components of every agent 09 The rol
+- keyword: grounding
+  short_anchor: iew of Google Cloud’s agent ecosystem 04 Key components of every agent
+    09 The role of grounding in agentic systems 17 Key takeaways 23 How to build AI
+    agents 25 A complete toolkit for building AI agents 27 A step-by-step
+- keyword: metadata
+  short_anchor: 'UEFA Euro 2024 winner”, “who won euro 2024”] Searches the web Search
+    results, snippets, metadata Synthesizes answer using search results Spain won
+    Euro 2024, defeating England 1:2 in the final 1. User prompt: The applica'
+- keyword: integrity
+  short_anchor: 'layer is responsible for recording actions and state changes with
+    strong consistency and integrity. It serves as the system of record, often requiring
+    ACID guarantees to ensure reliability. Data service Overview Startup '
+framework_questions:
+- What source grounds this agent output?
+- What HITL gate is required before promotion?
+- Which receipt proves the loop improved a real artifact?
+reusable_rules:
+- Every learning loop cycle needs source grounding, validator output, and receipt.
+- Human-in-the-loop gates are mandatory for promotion beyond synthetic Phase 0.
+- Scout reports validator status, not self-belief.
+working_library_contributions:
+- agentops-control
+- learning-loop-control
+- scout-report-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

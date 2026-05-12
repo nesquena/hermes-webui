@@ -1,0 +1,55 @@
+schema_version: 1
+source_id: artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+source_title: 'Artificial Intelligence and the Rule of Law: The Age of Legal Tech
+  and Digital Governance in a Fractured Digital World'
+source_author: Armando Aliu
+source_file: knowledge/book-expert-factory/sources/artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu.json
+source_asset: /Users/kei/Desktop/AI-Books/Artificial Intelligence and the Rule of
+  Law The Age of Legal Tech and Digital Governance in a Fractured Digital World (Armando
+  Aliu) (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: 2613faa923ab21c6401890037774d266415caffc8d01b2367672f9cb0f175c51
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: rule-of-law and governance boundary
+evidence_anchors:
+- keyword: governance
+  short_anchor: Artificial Intelligence and the Rule of Law The Age of Legal Tech
+    and Digital Governance in a Fractured Digital World Edited by Armando Aliu Artificial
+    Intelligence and the Rule of Law “Artificial Intelligence and the Ru
+- keyword: risk
+  short_anchor: ys of making, applying and understanding the law. This book investigates
+    both chances and risks and offers novel and thoughtful solutions. I very much
+    recommend engaging with it.” — Felix Steffek, Professor of Law and De
+- keyword: human
+  short_anchor: rapidly from analogue to digital, when hybrid forms of governance
+    reduce reliance on both humans and signalling by rules, and when we continue to
+    aspire to good governance. In these challenging conditions, what should we
+- keyword: agent
+  short_anchor: st biases50 . EbD is about the ‘methods, algorithms, and tools needed
+    to endow autonomous agents with the ability to reason about the ethical aspects
+    of their decisions, and the methods, tools, and formalisms to ensure t
+- keyword: integrity
+  short_anchor: '23118 Futuresoriented Governance of Outer Space: Towards Peace, Equity,
+    and Environmental Integrity (FOGOS)’, and the COST working group ‘CA18215 China
+    in Europe research network (CHERN)’ for inviting me to group discuss'
+framework_questions:
+- Does this output affect rights, legal interpretation, or institutional responsibility?
+- What must be labelled as human/legal-review-required?
+- Which governance principle limits automated conclusions?
+reusable_rules:
+- Use governance sources to define stop conditions, not legal advice.
+- Require human expert gate for rights-impacting claims.
+- Keep audit trail and rationale attached to every method update.
+working_library_contributions:
+- legal-governance-boundary-control
+- expert-gate-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

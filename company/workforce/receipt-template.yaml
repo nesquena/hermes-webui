@@ -1,0 +1,28 @@
+template_id: workforce-receipt-v0.1
+required_fields:
+  - receipt_id
+  - timestamp
+  - personnel_id
+  - role_id
+  - department_id
+  - task_id
+  - requester
+  - input_summary
+  - actions_taken
+  - tools_used
+  - files_read
+  - files_modified
+  - external_actions_taken
+  - output_summary
+  - verification_performed
+  - risks_or_open_questions
+  - escalation_needed
+  - downstream_owner
+  - status
+  - evidence_refs
+  - policy_checks_passed
+  - policy_violations
+allowed_statuses: [completed, blocked, partial, failed]
+phase0_required_values:
+  external_actions_taken: []
+  escalation_needed: false_unless_gate_triggered

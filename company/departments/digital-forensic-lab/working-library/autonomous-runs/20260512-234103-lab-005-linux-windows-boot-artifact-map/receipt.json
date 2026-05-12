@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234103-lab-005-linux-windows-boot-artifact-map/objective.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234103-lab-005-linux-windows-boot-artifact-map/exercise.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234103-lab-005-linux-windows-boot-artifact-map/os-boot-artifact-map.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234103-lab-005-linux-windows-boot-artifact-map/evaluation.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234103-lab-005-linux-windows-boot-artifact-map/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-005-linux-windows-boot-artifact-map",
+  "local_llm_backend": "ollama_qwen3.6_27b_local_api",
+  "local_llm_used": false,
+  "objective": "Create OS boot artifact map for Windows/Linux from source-derived headings and synthetic examples.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260512-234103-lab-005-linux-windows-boot-artifact-map",
+  "source_grounded": true,
+  "source_ids": [
+    "practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T14:42:33.587279+00:00"
+}

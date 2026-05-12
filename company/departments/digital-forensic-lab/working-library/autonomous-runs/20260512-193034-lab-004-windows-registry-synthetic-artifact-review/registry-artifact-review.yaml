@@ -1,0 +1,22 @@
+schema_version: 1
+run_id: 20260512-193034-lab-004-windows-registry-synthetic-artifact-review
+lab_id: lab-004-windows-registry-synthetic-artifact-review
+synthetic_only: true
+real_case_data_present: false
+external_actions_taken: []
+conclusion_status: preliminary_internal_non_final
+source_ids:
+- practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+objective: Analyze generated registry-like text for fact/inference/unknown separation.
+safety_boundary:
+- generated toy artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+synthetic_registry_like_entries:
+- key: HKCU\Software\SyntheticApp
+  value: LastOpened=2026-05-12T00:00:00Z
+  classification: generated_fact
+- key: HKCU\Software\SyntheticApp
+  value: UserIntent=unknown
+  classification: unknown_not_inference

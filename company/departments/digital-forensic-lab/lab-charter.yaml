@@ -1,0 +1,26 @@
+phase: phase_0_internal_only
+synthetic_only: true
+owner: yuto-control
+department_id: digital-forensic-lab
+mission: Synthetic-only evidence-preservation methodology, chain-of-custody rehearsal,
+  and forensic reliability checking.
+allowed_work:
+- synthetic_evidence_registers
+- chain_of_custody_templates
+- preservation_playbooks
+- reliability_checklists
+- red_line_failure_drills
+forbidden_work:
+- real_case_or_victim_data
+- final_forensic_determinations
+- legal_advice
+- attack_attribution
+- evidence_modification
+- external_actions
+- offensive_cyber_activity
+output_boundary: preliminary_internal_non_final
+knowledge_source_map: company/departments/digital-forensic-lab/knowledge-source-map.yaml
+learning_roadmap: company/departments/digital-forensic-lab/learning-roadmap.md
+working_library: company/departments/digital-forensic-lab/working-library/library-index.yaml
+growth_loop: read_source_candidate -> extract_framework_questions -> synthetic_template
+  -> validate -> receipt -> review -> update -> scout_report

@@ -1,0 +1,18 @@
+control_id: agentops-learning-loop-control
+requires:
+- source grounding
+- synthetic drill
+- validator run
+- receipt
+- Scout report
+- promotion blockers kept visible
+source_extracts:
+- agentic-ai-for-cybersecurity-omar-santos
+- startup-technical-guide-ai-agents-google-cloud
+schema_version: 1
+status: phase0_internal_control
+forbidden:
+- real case data
+- external action
+- final forensic/legal/security claims
+- offensive cyber

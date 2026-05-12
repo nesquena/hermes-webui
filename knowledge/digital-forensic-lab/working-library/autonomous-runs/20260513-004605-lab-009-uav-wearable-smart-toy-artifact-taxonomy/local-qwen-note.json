@@ -1,0 +1,5 @@
+{
+  "used": false,
+  "backend": "ollama_qwen3.6_27b_local_api",
+  "error": "TimeoutError: timed out"
+}

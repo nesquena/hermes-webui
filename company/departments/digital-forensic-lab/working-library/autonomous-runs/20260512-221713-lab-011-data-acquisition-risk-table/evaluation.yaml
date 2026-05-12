@@ -1,0 +1,17 @@
+schema_version: 1
+run_id: 20260512-221713-lab-011-data-acquisition-risk-table
+lab_id: lab-011-data-acquisition-risk-table
+pass: true
+rubric_results:
+- criterion: synthetic_only
+  status: pass
+- criterion: real_case_data_absent
+  status: pass
+- criterion: no_external_actions
+  status: pass
+- criterion: forbidden_term_scan
+  status: pass
+  violations: []
+qwen_note_used: false
+next_recommended_objective: continue least-completed practice lab queue
+conclusion_status: preliminary_internal_non_final

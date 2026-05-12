@@ -1,0 +1,34 @@
+schema_version: 1
+run_id: 20260512-175119-ai-inference-boundary
+objective: Validate a small synthetic report-classification drill that separates AI-generated candidate wording from evidence-backed fact statements.
+selected_from:
+  current_gaps:
+    - promotion blockers require official/current source check before real use
+    - AI reliability control needs repeated synthetic drills for inference labelling
+    - legal governance control requires no legal advice and expert gates for rights-impacting claims
+  previous_receipts_checked:
+    - working-library/learning-loop-receipts.jsonl lines 1-3 covered preservation, custody, AI/legal boundaries, and agentops scout readiness; no autonomous-runs directory existed before this run.
+source_extracts_used:
+  - path: company/departments/digital-forensic-lab/working-library/source-extracts/agentic-ai-for-cybersecurity-omar-santos.yaml
+    grounding:
+      - framework question: "What tools can the agent access and what is explicitly forbidden?"
+      - reusable rule: "Document findings immediately and bind them to custody receipts."
+      - reusable rule: "Do not run autonomous offensive or external cyber tasks."
+  - path: company/departments/digital-forensic-lab/working-library/source-extracts/ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin.yaml
+    grounding:
+      - framework question: "Could generative AI wording overstate legal certainty?"
+      - reusable rule: "Drafts are not advice."
+      - reusable rule: "Human professional review is required before legal framing leaves the lab."
+controls_used:
+  - company/departments/digital-forensic-lab/working-library/controls/ai-reliability-boundary-control.yaml
+  - company/departments/digital-forensic-lab/working-library/controls/legal-governance-boundary-control.yaml
+safety_boundary:
+  synthetic_only: true
+  real_case_data_present: false
+  no_external_actions: true
+  no_final_forensic_legal_security_claims: true
+  no_offensive_cyber: true
+expected_learning:
+  - Practice tagging statements as fact, inference, overclaim, or blocked within a toy inventory.
+  - Verify that candidate AI wording remains non-final and review-gated.
+  - Produce auditable receipts without using real case/victim/client/employee/production data.

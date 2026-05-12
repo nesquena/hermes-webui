@@ -1,0 +1,27 @@
+evidence_items:
+  - evidence_id: SYN-USB-001
+    synthetic_only: true
+    real_case_data_present: false
+    evidence_type: mock_usb_metadata_record
+    source_description: Fictional metadata record created for Phase 0 chain-of-custody dry run.
+    acquisition_method: synthetic_fixture_generation
+    hash_algorithm: SHA256-placeholder
+    hash_value_or_placeholder: SYNTHETIC_HASH_PLACEHOLDER_DO_NOT_USE_FOR_REAL_EVIDENCE
+    storage_location: knowledge/digital-forensic-lab/synthetic-fixtures/SYN-USB-001
+    preservation_status: preserved_synthetic_record
+    analysis_status: not_analyzed
+    conclusion_status: preliminary_internal_non_final
+    policy_checks_passed: [synthetic_only, no_real_case_data, no_external_action, no_final_claim]
+    policy_violations: []
+    custody_events:
+      - custody_event_id: CUST-SYN-USB-001-001
+        evidence_id: SYN-USB-001
+        timestamp: '2026-05-12T00:00:00Z'
+        actor: digital-forensic-lab-lead
+        action: created_synthetic_fixture_record
+        reason: Phase 0 dry run
+        previous_location: none
+        new_location: knowledge/digital-forensic-lab/evidence-register.yaml
+        integrity_check: placeholder_hash_recorded
+        receipt_ref: dflab-synth-001
+        notes: Synthetic only; not evidence.

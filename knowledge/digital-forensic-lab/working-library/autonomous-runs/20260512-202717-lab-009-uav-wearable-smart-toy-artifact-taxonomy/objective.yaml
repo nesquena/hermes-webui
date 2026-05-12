@@ -1,0 +1,17 @@
+schema_version: 1
+run_id: 20260512-202717-lab-009-uav-wearable-smart-toy-artifact-taxonomy
+lab_id: lab-009-uav-wearable-smart-toy-artifact-taxonomy
+objective: Build taxonomy of smart-device artifact classes and preservation questions.
+source_ids:
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- artifact classes separated by device type
+- risk/unknown fields present
+- no real device workflow
+baseline_validator_ok: true

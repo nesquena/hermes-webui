@@ -1,0 +1,12 @@
+required_fields:
+  - custody_event_id
+  - evidence_id
+  - timestamp
+  - actor
+  - action
+  - reason
+  - previous_location
+  - new_location
+  - integrity_check
+  - receipt_ref
+  - notes

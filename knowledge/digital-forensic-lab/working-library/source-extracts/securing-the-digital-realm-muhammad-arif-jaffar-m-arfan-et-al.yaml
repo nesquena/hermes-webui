@@ -1,0 +1,59 @@
+schema_version: 1
+source_id: securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al
+source_title: Securing the Digital Realm
+source_author: Muhammad Arif, Jaffar M. Arfan, et al.
+source_file: knowledge/book-expert-factory/sources/securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al.json
+source_asset: /Users/kei/Desktop/AI-Books/Securing the Digital Realm Advances in Hardware
+  and Software Security, Communication, and Forensics (Muhammad Arif, Jaffar M. Arfan,
+  etc.) (z-library.sk, 1lib.sk, z-lib.sk).epub
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: 57137e76b01a7d7fa83a889630f348a3af63af94e0266a58b9dfdcc031150592
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: security/forensics fundamentals and secure communication
+evidence_anchors:
+- keyword: digital forensics
+  short_anchor: munication, and forensics Exploration of cutting-edge technologies
+    and trends Emphasis on digital forensics techniques and tools Coverage of ethical
+    and legal aspects of digital security Practical guidance for applying c
+- keyword: cybersecurity
+  short_anchor: Coverage of ethical and legal aspects of digital security Practical
+    guidance for applying cybersecurity principles Additionally, the book highlights
+    the importance of secure communication in the digital age, discussing e
+- keyword: governance
+  short_anchor: 'mmad Imran Tariq, and Aetsam Javed Chapter 22 Challenges and Frameworks
+    in Cloud Security Governance: A Review Farah Taj, Danish Shehzad, Faiqa Irum,
+    Hinna Arqam, and Zaib Unnisa Chapter 23 LTE/Wi-Fi Coexistence in Unlic'
+- keyword: legal
+  short_anchor: ies and trends Emphasis on digital forensics techniques and tools
+    Coverage of ethical and legal aspects of digital security Practical guidance for
+    applying cybersecurity principles Additionally, the book highlights the i
+- keyword: risk
+  short_anchor: king system calls any malicious process can breach this monitoring
+    process. To avoid this risk hash tables can also be used. It will add the performance
+    overhead but with this two way authentication the risk can be avoid
+- keyword: human
+  short_anchor: ctronics and telecommunication, in 2005. She is currently an Associate
+    Professor with the Human and Health Development Department, Stefan cel Mare University
+    of Suceava, Romania. Her current research interests include th
+framework_questions:
+- 'What security property is being protected: integrity, confidentiality, availability,
+  or accountability?'
+- What forensic technique is only a candidate until official/current verification?
+- What communication/storage control is required for evidence handling?
+reusable_rules:
+- Map each lab artifact to a security property.
+- Treat book-derived techniques as candidate frameworks until verified.
+- Prefer preservation and secure handling over interpretation.
+working_library_contributions:
+- security-properties-control
+- secure-handling-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

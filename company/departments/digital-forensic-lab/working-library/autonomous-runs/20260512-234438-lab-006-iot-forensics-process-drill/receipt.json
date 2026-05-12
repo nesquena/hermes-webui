@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234438-lab-006-iot-forensics-process-drill/objective.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234438-lab-006-iot-forensics-process-drill/exercise.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234438-lab-006-iot-forensics-process-drill/iot-process-drill.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234438-lab-006-iot-forensics-process-drill/evaluation.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-234438-lab-006-iot-forensics-process-drill/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-006-iot-forensics-process-drill",
+  "local_llm_backend": "ollama_qwen3.6_27b_local_api",
+  "local_llm_used": true,
+  "objective": "Rehearse IoT forensic process with fictional smart-home device metadata.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260512-234438-lab-006-iot-forensics-process-drill",
+  "source_grounded": true,
+  "source_ids": [
+    "forensic-investigation-of-smart-digital-devices-farkhund-iqbal"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T14:45:51.038806+00:00"
+}

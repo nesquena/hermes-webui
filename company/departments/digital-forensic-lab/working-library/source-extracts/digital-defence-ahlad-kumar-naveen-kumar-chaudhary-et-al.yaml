@@ -1,0 +1,58 @@
+schema_version: 1
+source_id: digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+source_title: Digital Defence
+source_author: Ahlad Kumar, Naveen Kumar Chaudhary, et al.
+source_file: knowledge/book-expert-factory/sources/digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al.json
+source_asset: /Users/kei/Desktop/AI-Books/Digital Defence Harnessing the Power of
+  Artificial Intelligence for Cybersecurity and Digital Forensics (Ahlad Kumar, Naveen
+  Kumar Chaudhary etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: a5a538c85b9810bbddaf797fd9619e649dc27c6d137abf277fd48345070db43a
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: defensive cyber-forensics interface
+evidence_anchors:
+- keyword: digital forensics
+  short_anchor: view of the applications of Artificial Intelligence (AI) in the area
+    of Cybersecurity and Digital Forensics. The various chapters of this book are
+    written to explore how cutting‑edge technologies can be used to improve t
+- keyword: cybersecurity
+  short_anchor: comprehensive overview of the applications of Artificial Intelligence
+    (AI) in the area of Cybersecurity and Digital Forensics. The various chapters
+    of this book are written to explore how cutting‑edge technologies can be
+- keyword: governance
+  short_anchor: bersecurity, underscoring the delicate balance between technological
+    progress and ethical governance. Chapter 7, “Multi‑factor Authentication for Smart
+    Internet Transactions,” explores the growing need for enhanced secur
+- keyword: legal
+  short_anchor: t response and management, real‑time monitoring, automated response
+    analysis, ethical and legal considerations, and visualization. By covering these
+    topics, this book will provide a valuable resource for researchers, stu
+- keyword: risk
+  short_anchor: 'readers with a deep understanding of how AI can be harnessed to secure
+    systems, mitigate risks, and enhance investigative processes in the fight against
+    cybercrime. Throughout the pages of this book, we will explore the '
+- keyword: human
+  short_anchor: on. This chapter stresses the importance of developing legal infrastructures
+    that protect human rights while enabling the continued advancement of AI in cybersecurity,
+    underscoring the delicate balance between technologi
+framework_questions:
+- Is the lab action defensive, internal, and evidence-preserving?
+- What incident-response context is needed without scanning or offensive activity?
+- Which visualization/automation output could mislead a reviewer?
+reusable_rules:
+- Keep cyber context read-only and defensive.
+- Convert security findings into preservation questions, not attack steps.
+- Record uncertainty and stop when evidence would require real-system access.
+working_library_contributions:
+- defensive-security-interface
+- incident-response-boundary-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

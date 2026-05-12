@@ -1,0 +1,67 @@
+personnel_id: personnel-evidence-preservation-steward-001
+display_name: Evidence Preservation Steward
+worker_type: ai_worker
+role_id: evidence-preservation-steward
+department_id: digital-forensic-lab
+supervisor: yuto-control
+status: probation
+autonomy_level: L0
+risk_tier: T2
+allowed_tools:
+- read_file
+- search_files
+- local_validators
+forbidden_tools:
+- external_messaging
+- production_access
+- spending
+- secrets_reading
+- deployment_tools
+- external_webhooks
+- browser_posting
+- social_media_api
+- network_scanners
+allowed_data:
+- synthetic_data
+- public_sources
+- approved_internal_knowledge_notes
+forbidden_data:
+- secrets
+- production_data
+- customer_data
+- real_employee_personal_data
+- real_victim_or_case_data
+- identifiable_person_data
+- private_keys
+- tokens
+approval_gates_passed:
+- gate_0_need_to_role
+- gate_1_manifest
+- gate_2_safety
+- gate_3_validator
+receipt_required: true
+receipt_log_ref: knowledge/digital-forensic-lab/forensic-lab-receipts.jsonl
+last_reviewed: '2026-05-12'
+retirement_triggers:
+- role_duplicates_existing_worker
+- red_lines_not_enforced
+- no_synthetic_lab_use_after_review
+probation_plan:
+  first_3_tasks:
+  - review_synthetic_evidence_register
+  - check_custody_event_completeness
+  - draft_preservation_checklists
+  promotion_requires:
+  - 3 acceptable synthetic receipts
+  - no unresolved policy violations
+  - Yuto Control review
+  - Kei approval before real data or final claims
+source_canon:
+- artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+- digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+- artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+- ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin
+- agentic-ai-for-cybersecurity-omar-santos
+- securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al
+- startup-technical-guide-ai-agents-google-cloud
+knowledge_source_map: knowledge/digital-forensic-lab/knowledge-source-map.yaml

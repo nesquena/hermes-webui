@@ -1,0 +1,139 @@
+departments:
+- department_id: executive-control
+  mission: Route work, enforce approval gates, synthesize decisions, and keep Kei
+    as final authority.
+  current_roles:
+  - yuto-control
+  allowed_work:
+  - intake
+  - routing
+  - verification
+  - internal_decisions
+  forbidden_work:
+  - external_representation_without_approval
+  - production_changes_without_approval
+  activation_gate: kei_or_yuto_control
+- department_id: hr-people-ops
+  mission: Design and govern workforce objects, role lifecycle, onboarding, receipts,
+    and pruning.
+  current_roles:
+  - chief-of-staff-org-architect
+  - hr-role-designer
+  - culture-safety-steward
+  allowed_work:
+  - role_design
+  - personnel_templates
+  - internal_probation_receipts
+  forbidden_work:
+  - employment_decisions
+  - real_employee_sensitive_data
+  activation_gate: yuto-control
+- department_id: global-intelligence
+  mission: Read-only monitoring and signal collection for AI harm/company context.
+  current_roles: []
+  allowed_work:
+  - read_only_monitoring_plans
+  - source_lists
+  - signal_taxonomy
+  forbidden_work:
+  - external_outreach
+  - covert_collection
+  - personal_data_collection
+  activation_gate: compliance-safety-expert-network
+- department_id: research-policy
+  mission: Source-backed research synthesis and policy notes.
+  current_roles: []
+  allowed_work:
+  - research_briefs
+  - source_trails
+  - policy_question_lists
+  forbidden_work:
+  - final_policy_claims
+  - legal_advice
+  activation_gate: compliance-safety-expert-network
+- department_id: ai-law-legal-frontier
+  mission: Legal-tech and AI law frontier research for qualified human review.
+  current_roles: []
+  allowed_work:
+  - issue_spotting
+  - legal_research_questions
+  - source_summaries
+  forbidden_work:
+  - legal_advice
+  - final_legal_claims
+  - client_representation
+  activation_gate: kei_plus_qualified_human_review
+- department_id: digital-forensic-lab
+  mission: Evidence-preservation methodology and forensic reliability research.
+  current_roles:
+  - digital-forensic-lab-lead
+  - evidence-preservation-steward
+  - forensic-lab-validator
+  allowed_work:
+  - synthetic_forensic_playbooks
+  - chain_of_custody_templates
+  - evidence_register_schemas
+  - red_line_drills
+  - forensic_reliability_checklists
+  forbidden_work:
+  - final_forensic_determinations
+  - real_evidence_modification
+  activation_gate: kei_plus_qualified_human_review
+- department_id: security-frontier
+  mission: Defensive AI/cyber abuse research and safety patterns.
+  current_roles: []
+  allowed_work:
+  - defensive_research
+  - threat_model_templates
+  - safety_checklists
+  forbidden_work:
+  - offensive_cyber_activity
+  - external_scanning
+  - exploit_execution
+  activation_gate: kei_plus_security_review
+- department_id: case-evidence-operations
+  mission: Future case/evidence workflow design; Phase 0 remains synthetic only.
+  current_roles: []
+  allowed_work:
+  - synthetic_case_flows
+  - intake_templates
+  forbidden_work:
+  - real_victim_or_case_data
+  - identifying_private_people
+  - unverified_allegations
+  activation_gate: kei_explicit_approval
+- department_id: engineering-product-systems
+  mission: Internal schemas, validators, prototypes, and product quality systems.
+  current_roles: []
+  allowed_work:
+  - local_tools
+  - validators
+  - tests
+  - internal_prototypes
+  forbidden_work:
+  - production_deployment
+  - external_webhooks_without_approval
+  activation_gate: yuto-control
+- department_id: knowledge-infrastructure
+  mission: Knowledge graph, source curation, memory hygiene, and derived indexes.
+  current_roles:
+  - yuto-scout
+  allowed_work:
+  - read_only_scouting
+  - source_indexing
+  - memory_candidates
+  forbidden_work:
+  - automatic_memory_mutation
+  - skill_promotion_without_yuto
+  activation_gate: yuto-control
+- department_id: compliance-safety-expert-network
+  mission: Safety gates, expert review routing, red lines, and approval matrices.
+  current_roles: []
+  allowed_work:
+  - risk_review
+  - expert_question_lists
+  - approval_gate_design
+  forbidden_work:
+  - claiming_expert_approval_without_expert
+  - public_compliance_claims
+  activation_gate: kei_or_yuto_control

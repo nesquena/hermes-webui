@@ -1,0 +1,20 @@
+schema_version: 1
+run_id: 20260512-204429-lab-010-threat-to-preservation-question-conversion
+lab_id: lab-010-threat-to-preservation-question-conversion
+synthetic_only: true
+real_case_data_present: false
+external_actions_taken: []
+conclusion_status: preliminary_internal_non_final
+source_ids:
+- securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+objective: Convert high-level cyber threat scenarios into safe forensic preservation
+  questions.
+safety_boundary:
+- generated toy artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+preservation_questions:
+- What generated logs would need integrity protection?
+- What chain-of-custody step prevents overclaiming?
+- Which actions would become external/offensive and must be blocked?

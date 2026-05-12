@@ -1,0 +1,47 @@
+schema_version: 1
+source_id: ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin
+source_title: 'AI in Legal Tech: How Generative AI Is Transforming Legal Technology
+  and the Practice of Law'
+source_author: Catherine Casey
+source_file: knowledge/book-expert-factory/sources/ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin.json
+source_asset: /Users/kei/Desktop/AI-Books/AI in Legal Tech How Generative AI Is Transforming
+  Legal Technology and the Practice of Law (Catherine Casey) (z-library.sk, 1lib.sk,
+  z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: cedf559c28bcd9be8c9ba018c7e1b710ca82f390b4752ce0317ad622fb7cd26b
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: legal-tech workflow risk and human review
+evidence_anchors:
+- keyword: legal
+  short_anchor: AI IN LEGAL TECH AI IN LEGAL TECH HOW GENERATIVE AI IS TRANSFORMING
+    LEGAL TECHNOLOGY AND THE PRACTICE OF LAW CAT CASEY Copyright © 2026 by John Wiley
+    and Sons, Inc
+- keyword: risk
+  short_anchor: h deck in the industry. It concludes with a deep dive into the ethics
+    of legal AI and the risks that lawyers embracing AI should be aware of. When you
+    leave Part I, you’ll know the tools, see the risks, and be ready to b
+- keyword: human
+  short_anchor: 'fession: If AI can draft a brief or review a million documents, where
+    does that leave the humans? Does this mean white-shoe lawyers are an algorithm
+    away from lining the streets in threadbare Brooks Brothers’ suits holdi'
+framework_questions:
+- Could generative AI wording overstate legal certainty?
+- What legal-tech output is only draft support?
+- Where must a lawyer or domain expert review before external use?
+reusable_rules:
+- Drafts are not advice.
+- Human professional review is required before legal framing leaves the lab.
+- Flag hallucination/overclaim risk in all report skeletons.
+working_library_contributions:
+- legal-draft-boundary-control
+- human-review-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

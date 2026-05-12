@@ -1,0 +1,18 @@
+schema_version: 1
+run_id: 20260512-230916-lab-012-ethics-and-human-factors-stop-gate
+lab_id: lab-012-ethics-and-human-factors-stop-gate
+objective: Design ethics/human-factors stop gate for forensic lab reports.
+source_ids:
+- securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- rights-impacting claims stop
+- expert review gate explicit
+- no legal conclusion
+- synthetic/no real data boundary documented
+baseline_validator_ok: true

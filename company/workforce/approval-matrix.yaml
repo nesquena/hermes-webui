@@ -1,0 +1,33 @@
+approval_rules:
+  - category: external_messaging
+    risk_tier: high
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: publishing
+    risk_tier: high
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: production_deployment
+    risk_tier: critical
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: spending
+    risk_tier: high
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: secrets_access
+    risk_tier: critical
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: real_victim_or_case_data
+    risk_tier: critical
+    required_approver: Kei
+    consequence: stop_and_escalate
+  - category: final_legal_forensic_security_compliance_claims
+    risk_tier: high
+    required_approver: Kei_plus_qualified_human
+    consequence: stop_and_escalate
+  - category: automated_employment_decisions
+    risk_tier: critical
+    required_approver: Kei
+    consequence: stop_and_escalate

@@ -1,0 +1,11 @@
+department_id: research-policy
+mission: Source-backed research synthesis and policy notes.
+current_roles: []
+allowed_work:
+- research_briefs
+- source_trails
+- policy_question_lists
+forbidden_work:
+- final_policy_claims
+- legal_advice
+activation_gate: compliance-safety-expert-network

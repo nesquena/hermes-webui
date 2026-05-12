@@ -1,0 +1,16 @@
+control_id: legal-governance-boundary-control
+requires:
+- no legal advice
+- rights-impacting claims stop at expert gate
+- external publication requires Kei approval and expert review
+- governance rationale recorded
+source_extracts:
+- artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+- ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin
+schema_version: 1
+status: phase0_internal_control
+forbidden:
+- real case data
+- external action
+- final forensic/legal/security claims
+- offensive cyber

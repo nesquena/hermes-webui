@@ -1,0 +1,16 @@
+department_id: digital-forensic-lab
+mission: Evidence-preservation methodology and forensic reliability research.
+current_roles:
+- digital-forensic-lab-lead
+- evidence-preservation-steward
+- forensic-lab-validator
+allowed_work:
+- synthetic_forensic_playbooks
+- chain_of_custody_templates
+- evidence_register_schemas
+- red_line_drills
+- forensic_reliability_checklists
+forbidden_work:
+- final_forensic_determinations
+- real_evidence_modification
+activation_gate: kei_plus_qualified_human_review

@@ -1,0 +1,17 @@
+schema_version: 1
+run_id: 20260512-190714-lab-002-live-vs-dead-acquisition-decision-tree
+lab_id: lab-002-live-vs-dead-acquisition-decision-tree
+pass: true
+rubric_results:
+- criterion: synthetic_only
+  status: pass
+- criterion: real_case_data_absent
+  status: pass
+- criterion: no_external_actions
+  status: pass
+- criterion: forbidden_term_scan
+  status: pass
+  violations: []
+qwen_note_used: true
+next_recommended_objective: continue least-completed practice lab queue
+conclusion_status: preliminary_internal_non_final

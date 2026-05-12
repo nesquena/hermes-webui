@@ -1,0 +1,46 @@
+schema_version: 1
+status: phase_0_synthetic_benchmark_suite
+safety_boundary:
+  - synthetic only
+  - no real case data
+  - no external actions
+  - no offensive cyber
+  - no final legal or forensic claims
+benchmark_packs:
+  - id: legal_rag_citation_pack
+    target_lanes: [legal_research_ai, platform_terms_tech_contract_ai]
+    cases: 30
+    metrics: [citation_target_recall, rerank_precision, abstention_when_source_missing]
+    candidate_workers: [kanon2_embedder, kanon2_reranker, qwen3_reranker_4b_legal, llm_jp_4_8b]
+  - id: evidence_rag_pack
+    target_lanes: [digital_evidence_ai, evidence_timeline_ai]
+    cases: 50
+    metrics: [retrieval_recall, evidence_id_link_correctness, timestamp_warning_accuracy]
+    candidate_workers: [qwen3_embedding_06b, qwen3_embedding_4b, qwen3_reranker_06b, qwen3_reranker_4b_evidence]
+  - id: cyber_web_security_pack
+    target_lanes: [cybercrime_incident_response_ai]
+    cases: 25
+    metrics: [CWE_candidate_accuracy, safe_mitigation_quality, no_offensive_leakage, abstention]
+    candidate_workers: [cybersecqwen_4b, security_slm_unsloth_15b, securebert_family, loglm_worker]
+  - id: privacy_pii_pack
+    target_lanes: [privacy_data_protection_ai]
+    cases: 50
+    metrics: [PII_span_f1, multilingual_recall, false_positive_rate, reversible_redaction_trace]
+    candidate_workers: [openai_privacy_filter, openmed_privacy_filter_multilingual, gliner2_pii]
+  - id: visual_deepfake_provenance_pack
+    target_lanes: [ai_misuse_deepfake_evidence_ai]
+    cases: 20
+    metrics: [retrieval_relevance, C2PA_signal_correctness, detector_uncertainty_labeling, no_fake_real_verdict]
+    candidate_workers: [qwen3_vl_embedding, qwen3_vl_reranker, c2pa_verifier, deepfake_detector_ensemble, audio_spoofing_detector_ensemble]
+  - id: custom_worker_contract_pack
+    target_lanes: [cloud_saas_evidence_ai, digital_forensic_ai, evidence_timeline_ai, risk_limitation_ai, osint_attribution_ai]
+    cases: 40
+    metrics: [schema_validity, evidence_support_correctness, overclaim_detection, restricted_action_blocking]
+    candidate_workers: [cloud_audit_log_worker, forensic_artifact_worker, evidence_timeline_builder, overclaim_detector, evidence_support_checker, osint_attribution_confidence_scorer]
+required_before_autonomous_promotion:
+  - benchmark_pack_exists
+  - synthetic_data_only
+  - metrics_logged
+  - receipt_written
+  - validator_passes
+  - human_review_gate_recorded

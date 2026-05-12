@@ -1,0 +1,17 @@
+template_id: digital-forensic-lab-intake-phase0-v0.1
+required_fields:
+  - task_id
+  - synthetic_only
+  - real_case_data_present
+  - requester
+  - purpose
+  - evidence_items
+  - requested_output
+hard_defaults:
+  synthetic_only: true
+  real_case_data_present: false
+forbidden_requests:
+  - final_forensic_claim
+  - legal_advice
+  - real_case_handling
+  - external_action

@@ -1,0 +1,113 @@
+map_id: digital-forensic-lab-source-map-v0.1
+status: candidate_bound_not_framework_promoted
+copyright_boundary: Use paraphrased framework notes only; do not copy long passages.
+authority_boundary: Books are canon candidates and training sources, not legal/forensic
+  authority. Official/current sources and qualified human review required before real
+  use.
+sources:
+- source_id: artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+  source_file: knowledge/book-expert-factory/sources/artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al.json
+  role: primary_forensic_ai
+  use: AI/digital forensics concepts, applications, risks; framework candidate only
+  status: candidate_unverified_framework
+- source_id: digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+  source_file: knowledge/book-expert-factory/sources/digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al.json
+  role: primary_defensive_context
+  use: defensive cybersecurity + digital forensics context; framework candidate only
+  status: candidate_unverified_framework
+- source_id: artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+  source_file: knowledge/book-expert-factory/sources/artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu.json
+  role: legal_governance_boundary
+  use: rule-of-law/digital governance boundary; not legal authority
+  status: candidate_unverified_framework
+- source_id: ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin
+  source_file: knowledge/book-expert-factory/sources/ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin.json
+  role: legal_tech_boundary
+  use: legal-tech workflow boundary; not legal advice
+  status: candidate_unverified_framework
+- source_id: agentic-ai-for-cybersecurity-omar-santos
+  source_file: knowledge/book-expert-factory/sources/agentic-ai-for-cybersecurity-omar-santos.json
+  role: security_agent_boundary
+  use: agentic security concepts; defensive/read-only only
+  status: candidate_unverified_framework
+- source_id: securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al
+  source_file: knowledge/book-expert-factory/sources/securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al.json
+  role: cybersecurity_boundary
+  use: cybersecurity fundamentals; no offensive action
+  status: candidate_unverified_framework
+- source_id: startup-technical-guide-ai-agents-google-cloud
+  source_file: knowledge/book-expert-factory/sources/startup-technical-guide-ai-agents-google-cloud.json
+  role: agentops_reliability
+  use: AgentOps/reliability/governance for operating the lab as managed AI workforce
+  status: candidate_unverified_framework
+- source_id: securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+  source_file: knowledge/book-expert-factory/sources/securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al.json
+  role: advanced_security_forensics_boundary
+  use: advanced security and forensics threat/technique context; defensive/synthetic
+    only
+  status: candidate_unverified_framework
+- source_id: forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  source_file: knowledge/book-expert-factory/sources/forensic-investigation-of-smart-digital-devices-farkhund-iqbal.json
+  role: smart_device_forensics_training
+  use: smart device forensic investigation concepts and hands-on workflow candidates;
+    synthetic only
+  status: candidate_unverified_framework
+- source_id: practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  source_file: knowledge/book-expert-factory/sources/practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al.json
+  role: windows_linux_practical_training
+  use: practical Windows/Linux forensic workflow candidates; sandboxed synthetic exercises
+    only
+  status: candidate_unverified_framework
+learning_modules:
+- module_id: module_1_evidence_preservation_basics
+  output: preservation checklist and evidence register fields
+  source_ids:
+  - artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+  - digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+- module_id: module_2_chain_of_custody_and_integrity
+  output: custody event template and hash/placeholder policy
+  source_ids:
+  - artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+  - artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+- module_id: module_3_ai_forensic_reliability_risks
+  output: fact/inference/unknown/human-review output boundary
+  source_ids:
+  - artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+  - agentic-ai-for-cybersecurity-omar-santos
+- module_id: module_4_legal_governance_boundaries
+  output: stop conditions for legal/forensic claims
+  source_ids:
+  - artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu
+  - ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin
+- module_id: module_5_defensive_security_interface
+  output: no-offense and no-external-scan boundaries
+  source_ids:
+  - digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+  - agentic-ai-for-cybersecurity-omar-santos
+  - securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al
+- module_id: module_6_agentops_lab_growth
+  output: receipt/test/validator growth loop
+  source_ids:
+  - startup-technical-guide-ai-agents-google-cloud
+- module_id: module_7_practical_device_os_forensics_sandbox
+  output: synthetic smart-device and Windows/Linux forensic sandbox drills with custody
+    and no-real-data checks
+  source_ids:
+  - securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+  - forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+growth_loop:
+- read_source_candidate
+- extract_framework_questions
+- convert_to_synthetic_template
+- run_validator
+- record_receipt
+- review_failures
+- update_playbook_or_tests
+promotion_gate:
+- framework extraction per source
+- cross-book conflict table
+- official/current source check
+- 3 successful synthetic receipts
+- Yuto verification
+- Kei approval before real data

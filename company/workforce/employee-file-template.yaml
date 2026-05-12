@@ -1,0 +1,54 @@
+template_id: yuto-company-employee-file-v0.1
+status: template
+required_fields:
+  - personnel_id
+  - display_name
+  - worker_type
+  - role_id
+  - department_id
+  - supervisor
+  - status
+  - autonomy_level
+  - risk_tier
+  - allowed_tools
+  - forbidden_tools
+  - allowed_data
+  - forbidden_data
+  - approval_gates_passed
+  - receipt_required
+  - receipt_log_ref
+  - last_reviewed
+  - retirement_triggers
+optional_fields:
+  - source_canon
+  - skill_profile
+  - probation_plan
+  - activation_notes
+  - reviewer_burden_minutes
+  - next_review_date
+defaults:
+  supervisor: yuto-control
+  receipt_required: true
+  status: proposed
+  autonomy_level: L0
+  risk_tier: T1
+  worker_type: ai_worker
+example:
+  personnel_id: personnel-hr-role-designer-001
+  display_name: HR Role Designer
+  worker_type: ai_worker
+  role_id: hr-role-designer
+  department_id: hr-people-ops
+  supervisor: yuto-control
+  status: probation
+  autonomy_level: L1
+  risk_tier: T1
+  allowed_tools: [read_file, search_files]
+  forbidden_tools: [external_messaging, production_access, spending, secrets_reading]
+  allowed_data: [approved_internal_knowledge_notes, synthetic_examples, public_sources]
+  forbidden_data: [secrets, production_data, real_employee_personal_data, real_victim_or_case_data]
+  approval_gates_passed: [gate_0_need_to_role, gate_1_manifest, gate_2_safety, gate_3_validator]
+  receipt_required: true
+  receipt_log_ref: knowledge/company-hr-receipts.jsonl
+  last_reviewed: '2026-05-12'
+  retirement_triggers: [duplicate_role, repeated_safety_failure, no_recurring_need]

@@ -1,0 +1,12 @@
+department_id: knowledge-infrastructure
+mission: Knowledge graph, source curation, memory hygiene, and derived indexes.
+current_roles:
+- yuto-scout
+allowed_work:
+- read_only_scouting
+- source_indexing
+- memory_candidates
+forbidden_work:
+- automatic_memory_mutation
+- skill_promotion_without_yuto
+activation_gate: yuto-control

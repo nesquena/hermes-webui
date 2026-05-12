@@ -1,0 +1,16 @@
+checklist_id: workforce-onboarding-phase0-v0.1
+steps:
+  - gate_0_need_to_role_decision
+  - gate_1_manifest_complete
+  - gate_2_safety_review_passed
+  - gate_3_validator_passed
+  - gate_4_three_probation_tasks_defined
+  - gate_5_receipt_log_ready
+  - gate_6_yuto_control_review
+  - gate_7_kei_approval_if_high_risk
+stop_conditions:
+  - external_action_requested
+  - secrets_or_production_access_requested
+  - real_person_or_case_data_requested
+  - final_claim_requested
+receipt_required: true

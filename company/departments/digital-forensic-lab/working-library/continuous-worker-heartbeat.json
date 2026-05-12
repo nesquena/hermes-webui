@@ -1,0 +1,11 @@
+{
+  "last_lab_id": "lab-012-ethics-and-human-factors-stop-gate",
+  "last_pass": true,
+  "last_run_id": "20260513-025903-lab-012-ethics-and-human-factors-stop-gate",
+  "local_llm_backend": "ollama_qwen3.6_27b_local_api",
+  "local_llm_used": true,
+  "pytest_exit_code": 0,
+  "status": "alive",
+  "updated_at_utc": "2026-05-12T17:59:17.866150+00:00",
+  "validator_ok": true
+}

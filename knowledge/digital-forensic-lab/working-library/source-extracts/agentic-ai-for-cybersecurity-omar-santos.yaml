@@ -1,0 +1,58 @@
+schema_version: 1
+source_id: agentic-ai-for-cybersecurity-omar-santos
+source_title: Agentic AI for Cybersecurity
+source_author: Omar Santos
+source_file: knowledge/book-expert-factory/sources/agentic-ai-for-cybersecurity-omar-santos.json
+source_asset: /Users/kei/Desktop/AI-Books/Agentic AI for Cybersecurity Building Autonomous
+  Defenders and Adversaries (Omar Santos) (z-library.sk, 1lib.sk, z-lib.sk).epub
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: 1da41fad95d20f59dc19e280381202903efcc2d532595ab2c1853075bf7fe6b5
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: agentic security controls and evidence accountability
+evidence_anchors:
+- keyword: chain of custody
+  short_anchor: ess to avoid adverse impacts. All findings should be documented immediately,
+    and a strict chain of custody should be maintained for collected evidence to preserve
+    integrity and accountability. In the post-assessment phas
+- keyword: cybersecurity
+  short_anchor: 'Agentic AI for Cybersecurity: Building Autonomous Defenders and Adversaries
+    Agentic AI for Cybersecurity: Building Autonomous Defenders and Adversaries Omar
+    Santos A NOTE FOR EARLY RELE'
+- keyword: governance
+  short_anchor: nts, and coding agents with appropriate tools and guardrails. • Evaluate
+    build-vs-buy and governance options for AI agents in security programs. • Apply
+    security best practices to protect agentic systems from prompt inje
+- keyword: legal
+  short_anchor: ion) and audio intensity (magnitude) are important. c. Searching for
+    semantically similar legal documents of varying lengths. d. Any task involving
+    normalized vectors where speed is the top priority. 8 . In the MCP archi
+- keyword: risk
+  short_anchor: 'he Unique Security Challenges of AI Systems The Coalition for Secure
+    AI (CoSAI) The CoSAI Risk Map: Understanding AI Security Risks Security Controls
+    for AI Systems AI Supply Chain Security AI Incident Response Framework'
+- keyword: human
+  short_anchor: ies that can reason, plan, and execute complex tasks across multiple
+    systems with minimal human intervention. These autonomous agents are reshaping
+    security operations centers (SOCs), software development, offensive secu
+framework_questions:
+- What tools can the agent access and what is explicitly forbidden?
+- How is chain of custody maintained for collected synthetic evidence?
+- What guardrail blocks prompt-injection, supply-chain, or autonomous misuse?
+reusable_rules:
+- Least-privilege tool access only.
+- Document findings immediately and bind them to custody receipts.
+- Do not run autonomous offensive or external cyber tasks.
+working_library_contributions:
+- agentops-control
+- chain-of-custody-control
+- security-guardrail-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

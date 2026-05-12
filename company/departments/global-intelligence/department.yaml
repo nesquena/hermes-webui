@@ -1,0 +1,12 @@
+department_id: global-intelligence
+mission: Read-only monitoring and signal collection for AI harm/company context.
+current_roles: []
+allowed_work:
+- read_only_monitoring_plans
+- source_lists
+- signal_taxonomy
+forbidden_work:
+- external_outreach
+- covert_collection
+- personal_data_collection
+activation_gate: compliance-safety-expert-network

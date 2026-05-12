@@ -1,0 +1,13 @@
+red_lines:
+  - real_case_data
+  - real_victim_or_case_data
+  - identifiable_person_data
+  - secrets
+  - production_data
+  - final_forensic_claim
+  - final_legal_claim
+  - final_security_claim
+  - external_action
+  - offensive_cyber_activity
+  - evidence_modification
+consequence: stop_and_escalate

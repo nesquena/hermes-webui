@@ -1,0 +1,23 @@
+schema_version: 1
+run_id: 20260513-022704-lab-011-data-acquisition-risk-table
+lab_id: lab-011-data-acquisition-risk-table
+synthetic_only: true
+real_case_data_present: false
+external_actions_taken: []
+conclusion_status: preliminary_internal_non_final
+source_ids:
+- securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+objective: Create data acquisition risk table from synthetic evidence contexts.
+safety_boundary:
+- generated toy artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+decision_tree:
+- condition: volatile toy fact would be lost
+  action: record need for human-approved live acquisition in real case; synthetic
+    drill only
+  boundary: no host acquisition
+- condition: stable generated artifact
+  action: prefer preservation copy and hash in sandbox
+  boundary: generated files only

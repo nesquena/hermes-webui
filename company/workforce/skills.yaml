@@ -1,0 +1,81 @@
+skill_levels:
+  L0: prohibited_or_no_access
+  L1: aware_can_identify
+  L2: supervised_execution
+  L3: independent_scoped_execution
+  L4: reviewer_or_approver
+  L5: owner_or_standard_designer
+skill_categories:
+  reasoning_planning:
+    - task_decomposition
+    - ambiguity_resolution
+    - prioritization
+    - hypothesis_generation
+    - decision_logging
+    - risk_assessment
+  communication:
+    - concise_reporting
+    - structured_handoffs
+    - meeting_summarization
+    - stakeholder_updates
+    - multilingual_communication
+    - clarification_requests
+  execution:
+    - tool_use
+    - file_operations
+    - workflow_following
+    - verification_before_claiming
+    - receipt_generation
+  research_analysis:
+    - source_discovery
+    - evidence_collection
+    - synthesis
+    - citation_tracking
+    - document_analysis
+  engineering:
+    - code_reading
+    - code_editing
+    - testing
+    - debugging
+    - git_workflow
+    - security_review
+  operations:
+    - monitoring
+    - incident_triage
+    - runbook_execution
+    - status_reporting
+    - rollback_coordination
+  product_design:
+    - user_story_creation
+    - product_requirements
+    - ux_review
+    - visual_review
+    - acceptance_criteria
+  hr_governance:
+    - role_design
+    - policy_interpretation
+    - compliance_checking
+    - performance_review
+    - onboarding
+    - access_review
+  safety_compliance:
+    - sensitive_data_handling
+    - permission_boundary_awareness
+    - external_action_controls
+    - auditability
+    - policy_escalation
+  collaboration:
+    - cross_agent_handoff
+    - dependency_tracking
+    - reviewer_response
+    - shared_context_management
+category_requirements:
+  research_agents:
+    required: {source_discovery: L3, evidence_collection: L3, synthesis: L3, citation_tracking: L2, verification_before_claiming: L3}
+    prohibited: [unsupported_claims, external_outreach_phase_0, private_data_collection_without_approval]
+  engineering_agents:
+    required: {code_reading: L3, testing: L3, debugging: L3, git_workflow: L2, security_review: L2, verification_before_claiming: L4}
+    prohibited: [destructive_commands_without_approval, secret_exposure, production_deployment_phase_0]
+  hr_governance_agents:
+    required: {role_design: L4, policy_interpretation: L3, compliance_checking: L3, access_review: L3, auditability: L4}
+    prohibited: [sensitive_employee_data_without_approval, unilateral_high_risk_activation, automated_employment_decisions]

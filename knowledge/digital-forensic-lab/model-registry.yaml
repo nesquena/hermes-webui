@@ -1,0 +1,190 @@
+schema_version: 1
+status: phase_0_candidate_registry
+created_utc: '2026-05-12T00:00:00Z'
+policy:
+  acquisition_mode: manifest_only_until_kei_approves_downloads
+  no_auto_download: true
+  no_external_actions_without_approval: true
+  no_real_case_data: true
+  no_offensive_use: true
+  human_review_required: true
+  default_runtime: existing_local_only
+main:
+  - id: qwen36_27b_main
+    display_name: Qwen3.6-27B
+    source_ref: Qwen/Qwen3.6-27B or installed Ollama qwen3.6:27b
+    lane: main_control_reviewer
+    status: adopted_if_existing_local_runtime_available
+    allowed_uses:
+      - case synthesis
+      - fact_inference_opinion_unknown separation
+      - limitation memo drafting
+      - overclaim review
+      - court-friendly explanation draft
+    forbidden_uses:
+      - final legal conclusion
+      - final forensic conclusion
+      - authenticity verdict without evidence tools
+legal_rag:
+  - id: kanon2_embedder
+    display_name: Kanon 2 Embedder
+    source_ref: exact_source_required
+    status: blocked_pending_exact_source
+    allowed_uses: [legal retrieval candidate]
+    forbidden_uses: [production legal RAG until source/license/runtime verified]
+  - id: kanon2_reranker
+    display_name: Kanon 2 Reranker
+    source_ref: exact_source_required
+    status: blocked_pending_exact_source
+    allowed_uses: [legal reranking candidate]
+    forbidden_uses: [production legal RAG until source/license/runtime verified]
+  - id: qwen3_reranker_4b_legal
+    display_name: Qwen3-Reranker-4B
+    source_ref: Qwen/Qwen3-Reranker-4B
+    status: pilot_high_stakes_rerank
+    allowed_uses: [legal rerank, citation candidate rerank]
+    forbidden_uses: [citation fabrication, legal authority]
+evidence_rag:
+  - id: qwen3_embedding_06b
+    display_name: Qwen3-Embedding-0.6B
+    source_ref: Qwen/Qwen3-Embedding-0.6B
+    status: adopt_default_evidence_embedding
+    allowed_uses: [evidence retrieval, multilingual notes retrieval]
+    forbidden_uses: [authenticity verdict]
+  - id: qwen3_embedding_4b
+    display_name: Qwen3-Embedding-4B
+    source_ref: Qwen/Qwen3-Embedding-4B
+    status: pilot_high_value_corpus
+    allowed_uses: [high_recall_evidence_retrieval]
+    forbidden_uses: [authenticity verdict]
+  - id: qwen3_reranker_06b
+    display_name: Qwen3-Reranker-0.6B
+    source_ref: Qwen/Qwen3-Reranker-0.6B
+    status: adopt_default_evidence_reranker
+    allowed_uses: [routine_evidence_rerank]
+    forbidden_uses: [evidence truth source]
+  - id: qwen3_reranker_4b_evidence
+    display_name: Qwen3-Reranker-4B
+    source_ref: Qwen/Qwen3-Reranker-4B
+    status: pilot_high_stakes_evidence_rerank
+    allowed_uses: [high_stakes_evidence_rerank]
+    forbidden_uses: [evidence truth source]
+cyber:
+  - id: cybersecqwen_4b
+    display_name: CyberSecQwen-4B
+    source_ref: athena129/CyberSecQwen-4B or lablab-ai-amd-developer-hackathon/CyberSecQwen-4B
+    status: pilot_defensive_only
+    allowed_uses: [CTI triage, CWE candidate classification, vulnerability explanation]
+    forbidden_uses: [autonomous pentest, exploit generation, attribution conclusion]
+  - id: security_slm_unsloth_15b
+    display_name: security-slm-unsloth-1.5b
+    source_ref: Nguuma/security-slm-unsloth-1.5b
+    status: benchmark_only
+    allowed_uses: [small cyber scout synthetic benchmark]
+    forbidden_uses: [real incident conclusion, offensive workflow]
+  - id: securebert_family
+    display_name: SecureBERT2.0 family
+    source_ref: cisco-ai/SecureBERT2.0-biencoder; cisco-ai/SecureBERT2.0-cross_encoder; cisco-ai/SecureBERT2.0-NER
+    status: adopt_for_cyber_retrieval_and_ner
+    allowed_uses: [CTI retrieval, cyber NER, IOC/threat text rerank]
+    forbidden_uses: [generative legal/forensic conclusion]
+  - id: loglm_worker
+    display_name: LogLM-derived worker
+    source_ref: GreatGoose/loglm-small family or custom local worker
+    status: custom_benchmark_only
+    allowed_uses: [synthetic log classification, anomaly explanation, timeline support]
+    forbidden_uses: [production log conclusion, external scanning]
+privacy:
+  - id: gliner2_pii
+    display_name: GLiNER2-PII
+    source_ref: exact_source_required
+    status: blocked_pending_exact_source
+    allowed_uses: [PII detection candidate]
+    forbidden_uses: [adoption before source verification]
+  - id: openai_privacy_filter
+    display_name: OpenAI Privacy Filter
+    source_ref: openai/privacy-filter
+    status: adopt_with_multilingual_benchmark
+    allowed_uses: [PII token classification, pre-RAG redaction]
+    forbidden_uses: [irreversible deletion without human review]
+  - id: openmed_privacy_filter_multilingual
+    display_name: OpenMed/privacy-filter-multilingual
+    source_ref: OpenMed/privacy-filter-multilingual
+    status: adopt_as_second_privacy_filter
+    allowed_uses: [multilingual PII detection, redaction candidate]
+    forbidden_uses: [irreversible deletion without human review]
+visual_deepfake:
+  - id: qwen3_vl_embedding
+    display_name: Qwen3-VL-Embedding
+    source_ref: Qwen/Qwen3-VL-Embedding-2B or Qwen/Qwen3-VL-Embedding-8B
+    status: adopt_for_visual_retrieval_only
+    allowed_uses: [visual evidence retrieval, screenshot/media clustering]
+    forbidden_uses: [deepfake verdict, authenticity verdict]
+  - id: qwen3_vl_reranker
+    display_name: Qwen3-VL-Reranker
+    source_ref: Qwen/Qwen3-VL-Reranker-2B or Qwen/Qwen3-VL-Reranker-8B
+    status: pilot_visual_rerank
+    allowed_uses: [visual evidence reranking]
+    forbidden_uses: [authenticity verdict]
+  - id: c2pa_verifier
+    display_name: C2PA verifier
+    source_ref: contentauth/c2patool or contentauth/c2pa-rs
+    status: adopt_deterministic_provenance_tool
+    allowed_uses: [C2PA manifest verification, provenance signal reporting]
+    forbidden_uses: [no_C2PA_equals_fake, has_C2PA_equals_true]
+  - id: deepfake_detector_ensemble
+    display_name: Deepfake detector ensemble
+    source_ref: ensemble_exact_sources_required
+    status: pilot_weak_signal_only
+    allowed_uses: [detector disagreement report, authenticity risk signal]
+    forbidden_uses: [single_detector_verdict, final fake/real claim]
+  - id: audio_spoofing_detector_ensemble
+    display_name: Audio spoofing detector ensemble
+    source_ref: ensemble_exact_sources_required
+    status: pilot_weak_signal_only
+    allowed_uses: [voice clone suspicion signal, expert review trigger]
+    forbidden_uses: [speaker identity conclusion, final fake/real claim]
+japanese:
+  - id: llm_jp_4_8b
+    display_name: LLM-jp-4-8B
+    source_ref: llm-jp/llm-jp-4-8b-thinking or llm-jp/llm-jp-4-8b-instruct
+    status: pilot_japanese_reviewer
+    allowed_uses: [Japanese source summary, Japanese legal-language review]
+    forbidden_uses: [legal authority, citation generation without verifier]
+  - id: llm_jp_3_72b
+    display_name: LLM-jp-3-7.2B
+    source_ref: llm-jp/llm-jp-3-7.2b-instruct3
+    status: fallback_compare_only
+    allowed_uses: [fallback Japanese benchmark]
+    forbidden_uses: [default reviewer before 4-8B comparison]
+custom_workers:
+  - id: cloud_audit_log_worker
+    status: build_priority_high
+    source_ref: custom_schema_first_worker
+    allowed_uses: [cloud audit log normalization, retention gap detection]
+    forbidden_uses: [provider access without approval, real production logs in Phase 0]
+  - id: forensic_artifact_worker
+    status: build_priority_high
+    source_ref: custom_schema_first_worker
+    allowed_uses: [artifact manifest parsing, hash metadata source mapping]
+    forbidden_uses: [real device data in Phase 0]
+  - id: evidence_timeline_builder
+    status: build_priority_high
+    source_ref: custom_schema_first_worker
+    allowed_uses: [event normalization, timezone warning, conflict detection]
+    forbidden_uses: [final intent conclusion]
+  - id: overclaim_detector
+    status: build_priority_high
+    source_ref: custom_schema_first_worker
+    allowed_uses: [claim drift detection, forbidden inference detection]
+    forbidden_uses: [replacing human legal/forensic review]
+  - id: evidence_support_checker
+    status: build_priority_high
+    source_ref: custom_schema_first_worker
+    allowed_uses: [claim to evidence-id support checking]
+    forbidden_uses: [citation fabrication]
+  - id: osint_attribution_confidence_scorer
+    status: build_priority_restricted
+    source_ref: custom_read_only_worker
+    allowed_uses: [public-source lead confidence scoring, correlation labeling]
+    forbidden_uses: [doxxing, illegal access, attribution conclusion]

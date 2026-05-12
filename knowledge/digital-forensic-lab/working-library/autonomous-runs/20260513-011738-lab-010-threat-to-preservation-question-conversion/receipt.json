@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-011738-lab-010-threat-to-preservation-question-conversion/objective.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-011738-lab-010-threat-to-preservation-question-conversion/exercise.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-011738-lab-010-threat-to-preservation-question-conversion/threat-preservation-questions.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-011738-lab-010-threat-to-preservation-question-conversion/evaluation.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-011738-lab-010-threat-to-preservation-question-conversion/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-010-threat-to-preservation-question-conversion",
+  "local_llm_backend": "ollama_qwen3.6_27b_local_api",
+  "local_llm_used": true,
+  "objective": "Convert high-level cyber threat scenarios into safe forensic preservation questions.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260513-011738-lab-010-threat-to-preservation-question-conversion",
+  "source_grounded": true,
+  "source_ids": [
+    "securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T16:17:51.900153+00:00"
+}

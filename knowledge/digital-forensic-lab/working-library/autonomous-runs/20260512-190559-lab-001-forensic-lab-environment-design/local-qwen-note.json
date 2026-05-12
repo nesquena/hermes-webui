@@ -1,0 +1,5 @@
+{
+  "used": true,
+  "backend": "mlx_qwen3.6_27b_8765",
+  "raw": "{\n  \"review_id\": \"rev-20260512-001\",\n  \"status\": \"approved_with_notes\",\n  \"strengths\": [\n    \"Explicitly enforces synthetic-only boundaries with no real data or external actions.\",\n    \"Focuses on foundational forensic principles (chain of custody, write-blocking) without requiring physical hardware.\",\n    \"Clear safety boundaries prevent accidental exposure to production environments.\"\n  ],\n  \"risks\": [\n    \"Abstract checklist design may lack practical validation steps for trainees.\",\n    \"Absence of specific synthetic artifact examples might lead to vague implementation of 'non-modification controls'.\"\n  ],\n  \"improvement\": \"Include a sample synthetic YAML snippet demonstrating a valid 'write-blocking' configuration entry to clarify expected output format.\"\n}"
+}

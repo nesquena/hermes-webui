@@ -1,0 +1,103 @@
+{
+  "copied": [
+    {
+      "from": "knowledge/company-workforce",
+      "to": "company/workforce"
+    },
+    {
+      "from": "knowledge/digital-forensic-lab",
+      "to": "company/departments/digital-forensic-lab"
+    }
+  ],
+  "created_utc": "2026-05-12T00:00:00Z",
+  "departments": [
+    {
+      "department_id": "executive-control",
+      "path": "company/departments/executive-control",
+      "roles": [
+        "yuto-control"
+      ]
+    },
+    {
+      "department_id": "hr-people-ops",
+      "path": "company/departments/hr-people-ops",
+      "roles": [
+        "chief-of-staff-org-architect",
+        "hr-role-designer",
+        "culture-safety-steward"
+      ]
+    },
+    {
+      "department_id": "global-intelligence",
+      "path": "company/departments/global-intelligence",
+      "roles": []
+    },
+    {
+      "department_id": "research-policy",
+      "path": "company/departments/research-policy",
+      "roles": []
+    },
+    {
+      "department_id": "ai-law-legal-frontier",
+      "path": "company/departments/ai-law-legal-frontier",
+      "roles": []
+    },
+    {
+      "department_id": "digital-forensic-lab",
+      "path": "company/departments/digital-forensic-lab",
+      "roles": [
+        "digital-forensic-lab-lead",
+        "evidence-preservation-steward",
+        "forensic-lab-validator"
+      ]
+    },
+    {
+      "department_id": "security-frontier",
+      "path": "company/departments/security-frontier",
+      "roles": []
+    },
+    {
+      "department_id": "case-evidence-operations",
+      "path": "company/departments/case-evidence-operations",
+      "roles": []
+    },
+    {
+      "department_id": "engineering-product-systems",
+      "path": "company/departments/engineering-product-systems",
+      "roles": []
+    },
+    {
+      "department_id": "knowledge-infrastructure",
+      "path": "company/departments/knowledge-infrastructure",
+      "roles": [
+        "yuto-scout"
+      ]
+    },
+    {
+      "department_id": "compliance-safety-expert-network",
+      "path": "company/departments/compliance-safety-expert-network",
+      "roles": []
+    }
+  ],
+  "legacy_paths": [
+    "knowledge/company-workforce",
+    "knowledge/digital-forensic-lab"
+  ],
+  "non_destructive": true,
+  "programs": [
+    {
+      "knowledge_refs": [
+        "knowledge/ai-legal-kcl-cambridge-research-roadmap.md",
+        "knowledge/ai-legal-japan-research-target.md",
+        "knowledge/source-ai-legal-research-topic-selection.md",
+        "knowledge/ai-legal-forensic-ai-learning-path.md",
+        "knowledge/systems-thinking-for-phd-learning-project.md"
+      ],
+      "path": "company/programs/phd-research-program",
+      "program_id": "phd-research-program"
+    }
+  ],
+  "rule": "company/ is operational truth candidate; knowledge/ remains source/KG truth and legacy fallback until cutover verified",
+  "schema_version": 1,
+  "status": "phase_0_inventory_and_copy_complete"
+}

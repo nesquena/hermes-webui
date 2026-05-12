@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-202652-lab-008-smart-card-transflash-evidence-register/objective.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-202652-lab-008-smart-card-transflash-evidence-register/exercise.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-202652-lab-008-smart-card-transflash-evidence-register/smart-card-transflash-register.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-202652-lab-008-smart-card-transflash-evidence-register/evaluation.yaml",
+    "company/departments/digital-forensic-lab/working-library/autonomous-runs/20260512-202652-lab-008-smart-card-transflash-evidence-register/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-008-smart-card-transflash-evidence-register",
+  "local_llm_backend": "disabled",
+  "local_llm_used": false,
+  "objective": "Create synthetic smart-card/transflash evidence register entries and custody chain.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260512-202652-lab-008-smart-card-transflash-evidence-register",
+  "source_grounded": true,
+  "source_ids": [
+    "forensic-investigation-of-smart-digital-devices-farkhund-iqbal"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T11:26:52.448860+00:00"
+}

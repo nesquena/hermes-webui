@@ -1,0 +1,14 @@
+department_id: executive-control
+mission: Route work, enforce approval gates, synthesize decisions, and keep Kei as
+  final authority.
+current_roles:
+- yuto-control
+allowed_work:
+- intake
+- routing
+- verification
+- internal_decisions
+forbidden_work:
+- external_representation_without_approval
+- production_changes_without_approval
+activation_gate: kei_or_yuto_control

@@ -1,0 +1,22 @@
+schema_version: 1
+run_id: 20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy
+lab_id: lab-009-uav-wearable-smart-toy-artifact-taxonomy
+synthetic_only: true
+real_case_data_present: false
+external_actions_taken: []
+conclusion_status: preliminary_internal_non_final
+source_ids:
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+objective: Build taxonomy of smart-device artifact classes and preservation questions.
+safety_boundary:
+- generated toy artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+artifact_taxonomy:
+- device_type: fictional smart sensor
+  artifact_class: timestamp
+  preservation_question: Was the generated timestamp copied without modification?
+- device_type: fictional wearable
+  artifact_class: mock location
+  preservation_question: Is location explicitly fictional and not tied to a person?

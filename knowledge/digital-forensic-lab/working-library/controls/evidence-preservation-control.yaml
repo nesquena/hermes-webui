@@ -1,0 +1,18 @@
+control_id: evidence-preservation-control
+requires:
+- synthetic_only=true
+- real_case_data_present=false
+- custody_events>=1
+- integrity/hash placeholder or explicit unavailable reason
+- fact/inference/unknown split
+source_extracts:
+- artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+- digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al
+- securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al
+schema_version: 1
+status: phase0_internal_control
+forbidden:
+- real case data
+- external action
+- final forensic/legal/security claims
+- offensive cyber

@@ -1,0 +1,18 @@
+control_id: chain-of-custody-control
+requires:
+- custody actor
+- timestamp
+- action
+- receipt_ref
+- handoff boundary
+- no evidence modification
+source_extracts:
+- artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+- agentic-ai-for-cybersecurity-omar-santos
+schema_version: 1
+status: phase0_internal_control
+forbidden:
+- real case data
+- external action
+- final forensic/legal/security claims
+- offensive cyber

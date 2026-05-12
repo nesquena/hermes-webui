@@ -1,0 +1,16 @@
+required_fields:
+  - evidence_id
+  - synthetic_only
+  - real_case_data_present
+  - evidence_type
+  - source_description
+  - acquisition_method
+  - hash_algorithm
+  - hash_value_or_placeholder
+  - custody_events
+  - storage_location
+  - preservation_status
+  - analysis_status
+  - conclusion_status
+  - policy_checks_passed
+  - policy_violations

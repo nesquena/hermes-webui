@@ -1,0 +1,18 @@
+schema_version: 1
+run_id: 20260512-190740-lab-003-toy-file-hash-and-custody-drill
+lab_id: lab-003-toy-file-hash-and-custody-drill
+objective: Generate toy files, compute hashes, and record custody events without touching
+  real evidence.
+source_ids:
+- practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- hashes are from generated files only
+- custody event has actor/time/action/receipt
+- original toy file preserved
+baseline_validator_ok: true

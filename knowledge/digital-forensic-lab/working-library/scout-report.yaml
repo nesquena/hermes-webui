@@ -1,0 +1,15 @@
+schema_version: 1
+report_id: digital-forensic-lab-working-library-scout-report-2026-05-12
+status: ready_for_scout_validator_reporting
+claim_boundary: Reports artifact/validator evidence only; does not claim forensic
+  expertise or real-case readiness.
+expected_validator_fields:
+- working_library_source_extracts
+- working_library_controls
+- learning_cycle_receipts
+- source_extracts_sha_verified
+- source_extracts_with_anchors
+residual_risk:
+- official/current source check pending
+- human forensic/legal/security expert review pending
+- Phase 0 synthetic-only

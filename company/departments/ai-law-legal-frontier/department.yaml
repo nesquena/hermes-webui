@@ -1,0 +1,12 @@
+department_id: ai-law-legal-frontier
+mission: Legal-tech and AI law frontier research for qualified human review.
+current_roles: []
+allowed_work:
+- issue_spotting
+- legal_research_questions
+- source_summaries
+forbidden_work:
+- legal_advice
+- final_legal_claims
+- client_representation
+activation_gate: kei_plus_qualified_human_review

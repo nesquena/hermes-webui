@@ -1,0 +1,17 @@
+schema_version: 1
+run_id: 20260512-234438-lab-006-iot-forensics-process-drill
+lab_id: lab-006-iot-forensics-process-drill
+objective: Rehearse IoT forensic process with fictional smart-home device metadata.
+source_ids:
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- device metadata fictional
+- acquisition/preservation logged before analysis
+- human expert gate stated
+baseline_validator_ok: true

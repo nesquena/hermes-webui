@@ -1,0 +1,19 @@
+program_id: phd-research-program
+status: phase_0_internal_only
+operational_home: company/programs/phd-research-program
+knowledge_refs:
+- knowledge/ai-legal-kcl-cambridge-research-roadmap.md
+- knowledge/ai-legal-japan-research-target.md
+- knowledge/source-ai-legal-research-topic-selection.md
+- knowledge/ai-legal-forensic-ai-learning-path.md
+- knowledge/systems-thinking-for-phd-learning-project.md
+related_departments:
+- research-policy
+- ai-law-legal-frontier
+- digital-forensic-lab
+- privacy-data-protection
+- compliance-safety-expert-network
+red_lines:
+- no final legal claims without qualified human review
+- no real case/victim data in Phase 0
+- source-backed research only

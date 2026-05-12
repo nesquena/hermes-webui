@@ -1,0 +1,12 @@
+department_id: security-frontier
+mission: Defensive AI/cyber abuse research and safety patterns.
+current_roles: []
+allowed_work:
+- defensive_research
+- threat_model_templates
+- safety_checklists
+forbidden_work:
+- offensive_cyber_activity
+- external_scanning
+- exploit_execution
+activation_gate: kei_plus_security_review

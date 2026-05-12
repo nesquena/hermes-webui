@@ -1,0 +1,15 @@
+department_id: hr-people-ops
+mission: Design and govern workforce objects, role lifecycle, onboarding, receipts,
+  and pruning.
+current_roles:
+- chief-of-staff-org-architect
+- hr-role-designer
+- culture-safety-steward
+allowed_work:
+- role_design
+- personnel_templates
+- internal_probation_receipts
+forbidden_work:
+- employment_decisions
+- real_employee_sensitive_data
+activation_gate: yuto-control

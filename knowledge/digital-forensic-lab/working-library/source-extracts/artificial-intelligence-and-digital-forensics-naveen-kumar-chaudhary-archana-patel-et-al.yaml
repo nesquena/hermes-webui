@@ -1,0 +1,59 @@
+schema_version: 1
+source_id: artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+source_title: Artificial Intelligence and Digital Forensics
+source_author: Naveen Kumar Chaudhary, Archana Patel, et al.
+source_file: knowledge/book-expert-factory/sources/artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al.json
+source_asset: /Users/kei/Desktop/AI-Books/Artificial Intelligence and Digital Forensics
+  Advancements, Applications, Challenges, and Solutions (Naveen Kumar Chaudhary, Archana
+  Patel etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: ba9680be2ad2056e502b5d4591d23603cc14ae3e9e7926817496d5c6d99c1bc7
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: AI-assisted digital forensics reliability and preservation
+evidence_anchors:
+- keyword: chain of custody
+  short_anchor: s and expert techniques to collect such evidence while keeping it
+    intact. They manage its chain of custody to ensure its admissibility in a court
+    of law [1]. After they are collected, the obtained evidence is analyzed to
+- keyword: digital forensics
+  short_anchor: Artificial Intelligence and Digital Forensics Artificial intelligence
+    (AI) has revolutionized several sectors, with digital forensics being one that
+    has been notably affected by its rapid advancemen
+- keyword: digital evidence
+  short_anchor: his field, helping authorities examine large datasets, identify developments,
+    and uncover digital evidence that is essential to cracking cybercrimes. Despite
+    these promising developments, using AI in digital forensics pr
+- keyword: cybersecurity
+  short_anchor: "ource and title. xv About the Editors\uFEFF Naveen Kumar Chaudhary\
+    \ has been a professor of cybersecurity and dean at the National Forensic Sciences\
+    \ University, Gandhinagar, Gujarat, India, since 2019. He is also a courtesy re"
+- keyword: governance
+  short_anchor: implementation of policies and techno-legal frameworks in the domain
+    of cybersecurity, e-governance, and forensic science. He is actively involved
+    in promoting start-up ecosystems for developing low-cost indigenous cyber
+- keyword: legal
+  short_anchor: t also offers insights into the ethical use of AI technologies and
+    guidance on navigating legal requirements and ensuring responsible and compliant
+    practices. This book caters to industry professionals from diverse backg
+framework_questions:
+- What is the evidence item and what is only an AI-derived clue?
+- What custody, integrity, and metadata fields must be captured before analysis?
+- Which AI output needs human forensic review before reuse?
+- What legal/ethical boundary prevents a final claim?
+reusable_rules:
+- Separate raw/synthetic evidence facts from AI-generated inferences.
+- Require custody event, integrity placeholder, and reviewer boundary for every item.
+- Never promote AI analysis to authenticity, attribution, or admissibility claim.
+working_library_contributions:
+- evidence-preservation-control
+- ai-reliability-boundary-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

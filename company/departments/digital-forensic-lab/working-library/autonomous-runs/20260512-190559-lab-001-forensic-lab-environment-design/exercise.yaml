@@ -1,0 +1,21 @@
+schema_version: 1
+run_id: 20260512-190559-lab-001-forensic-lab-environment-design
+lab_id: lab-001-forensic-lab-environment-design
+synthetic_only: true
+real_case_data_present: false
+external_actions_taken: []
+conclusion_status: preliminary_internal_non_final
+source_ids:
+- practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+objective: Design a synthetic forensic lab environment checklist from lab facility/equipment
+  concepts.
+safety_boundary:
+- generated toy artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+checklist:
+- define custody station
+- define non-modification control
+- record expert-review gate
+- record no-real-data boundary

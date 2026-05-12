@@ -1,0 +1,18 @@
+schema_version: 1
+run_id: 20260512-200825-lab-007-smartphone-acquisition-boundary-drill
+lab_id: lab-007-smartphone-acquisition-boundary-drill
+objective: Draft smartphone acquisition boundary checklist without interacting with
+  a real phone.
+source_ids:
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- no real phone/data used
+- Murphy/model-like extraction treated as framework candidate
+- legal/human review gate present
+baseline_validator_ok: true

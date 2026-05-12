@@ -1,0 +1,71 @@
+schema_version: 1
+source_id: practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+source_title: Practical Digital Forensics
+source_author: Akashdeep Bhardwaj, Pradeep Singh, et al.
+source_file: knowledge/book-expert-factory/sources/practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al.json
+source_asset: /Users/kei/Desktop/Practical Digital Forensics A Guide for Windows and
+  Linux Users (Akashdeep Bhardwaj, Pradeep Singh etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf
+source_asset_exists: true
+source_type: book
+sha256_from_metadata: ac1839e794a7761610224c4f738f7a5df780cc7426a25ac8b3a5d3f5bec7d3fd
+sha256_verified: true
+status: working_library_candidate_not_authority
+authority_boundary: Framework extraction for synthetic/internal lab learning only;
+  not legal, forensic, security, or court authority.
+copyright_boundary: Paraphrased notes and short anchors only; no long copied passages.
+library_topic: Windows/Linux practical forensic drill design
+evidence_anchors:
+- keyword: chain of custody
+  short_anchor: 'TION Reports for Case Assessment & Planning Case Intake Report [12]:
+    Evidence Identification Report Chain of Custody Form Forensic Analysis Report
+    Final Investigation Report Closure Report Cases of Mishandled or Inappropriate
+    Reports Case 1'
+- keyword: digital forensics
+  short_anchor: ': FOREWORD PREFACE Navigating the Ethical Landscape of Digital Investigations
+    Abstract INTRODUCTION DIGITAL FORENSICS PRINCIPLES LEGAL AND ETHICAL CONSIDERATIONS
+    TRAITS OF FORENSIC INVESTIGATORS Digital Investigations Use Case Examples Fina'
+- keyword: digital evidence
+  short_anchor: s has developed over the last ten years or more. To handle the increasing
+    number of cases involving digital evidence, new forensic techniques and technology
+    have emerged. But it is clear that practitioners are having trouble keeping up
+    with
+- keyword: forensic
+  short_anchor: RD PREFACE Navigating the Ethical Landscape of Digital Investigations
+    Abstract INTRODUCTION DIGITAL FORENSICS PRINCIPLES LEGAL AND ETHICAL CONSIDERATIONS
+    TRAITS OF FORENSIC INVESTIGATORS Digital Investigations Use Case Examples Financial
+    Fr
+- keyword: evidence
+  short_anchor: N Role of Network Forensics in Cybersecurity Incident Response Investigation
+    and Threat Detection Evidence Collection and Analysis Network Security Monitoring
+    and Analysis Network Forensics Process Acquisition Preservation Analysis Reportin
+- keyword: smart
+  short_anchor: 'pecialists has grown. These specialists are experts in recovering
+    data from mobile devices, such as smartphones and tablets. • Cloud Forensics:
+    Cloud forensics is a new and emerging specialization that focuses on investigating
+    crimes that i'
+- keyword: mobile
+  short_anchor: 'se a variety of tools and techniques to track down the source of
+    attacks and to collect evidence. • Mobile Device Forensics: As mobile devices
+    have become more and more popular, the need for mobile device forensics specialists
+    has grown. Th'
+- keyword: windows
+  short_anchor: Parameter Block (BPB) Globally Unique Identifier (GUID) GUID Partition
+    Table (GPT) BOOT PROCESS OF WINDOWS AND LINUX Boot Process Essential Windows System
+    Files Bios-mbr Methods UEFI-GPT Windows Boot Process Guid Partition Table (GPT)
+    Exami
+framework_questions:
+- Which OS artifact is being simulated and what is the preservation boundary?
+- What command or tool concept must remain sandbox-only?
+- What evidence register field proves the drill did not use real user data?
+reusable_rules:
+- Only run commands against toy files or generated sandbox data.
+- Document OS, artifact type, hash placeholder, and custody event for every drill.
+- Do not inspect real user directories, browser data, credentials, or production logs.
+working_library_contributions:
+- evidence-preservation-control
+- agentops-learning-loop-control
+promotion_blockers:
+- official/current source check missing
+- qualified human forensic/legal/security review missing
+- real-case validation prohibited in Phase 0
+promoted_to_authority: false

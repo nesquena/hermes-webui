@@ -1,0 +1,25 @@
+{
+  "artifacts_created": [
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy/objective.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy/exercise.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy/smart-device-artifact-taxonomy.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy/evaluation.yaml",
+    "knowledge/digital-forensic-lab/working-library/autonomous-runs/20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy/receipt.json"
+  ],
+  "conclusion_status": "preliminary_internal_non_final",
+  "external_actions_taken": [],
+  "lab_id": "lab-009-uav-wearable-smart-toy-artifact-taxonomy",
+  "local_llm_backend": "ollama_qwen3.6_27b_local_api",
+  "local_llm_used": false,
+  "objective": "Build taxonomy of smart-device artifact classes and preservation questions.",
+  "pass": true,
+  "policy_violations": [],
+  "real_case_data_present": false,
+  "run_id": "20260513-004605-lab-009-uav-wearable-smart-toy-artifact-taxonomy",
+  "source_grounded": true,
+  "source_ids": [
+    "forensic-investigation-of-smart-digital-devices-farkhund-iqbal"
+  ],
+  "synthetic_only": true,
+  "timestamp_utc": "2026-05-12T15:47:35.823187+00:00"
+}

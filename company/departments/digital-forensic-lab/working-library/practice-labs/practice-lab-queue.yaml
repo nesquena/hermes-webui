@@ -1,0 +1,152 @@
+schema_version: 1
+queue_id: digital-forensic-lab-practice-labs-v0.1
+status: phase0_synthetic_training_queue
+source_scope:
+- securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+- forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+- practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+sandbox_policy:
+  allowed: toy files, generated logs, generated registry-like text, mock metadata,
+    mock device inventories, local temp directories under the run folder
+  forbidden: real home directory artifacts, browser histories, messages, photos, credentials,
+    real device images, production logs, network scanning, malware/exploit material
+labs:
+- lab_id: lab-001-forensic-lab-environment-design
+  source_ids:
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  objective: Design a synthetic forensic lab environment checklist from lab facility/equipment
+    concepts.
+  sandbox_required: false
+  deliverable: environment-readiness-checklist.yaml
+  success_criteria:
+  - chain-of-custody station defined
+  - write-blocking/non-modification control represented
+  - no real device required
+- lab_id: lab-002-live-vs-dead-acquisition-decision-tree
+  source_ids:
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  objective: Build a decision tree for live vs dead acquisition using fictional incident
+    facts.
+  sandbox_required: true
+  deliverable: acquisition-decision-tree.yaml
+  success_criteria:
+  - synthetic_only true
+  - volatile-data risk stated
+  - no real acquisition command against host
+- lab_id: lab-003-toy-file-hash-and-custody-drill
+  source_ids:
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  objective: Generate toy files, compute hashes, and record custody events without
+    touching real evidence.
+  sandbox_required: true
+  deliverable: toy-custody-register.yaml
+  success_criteria:
+  - hashes are from generated files only
+  - custody event has actor/time/action/receipt
+  - original toy file preserved
+- lab_id: lab-004-windows-registry-synthetic-artifact-review
+  source_ids:
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  objective: Analyze generated registry-like text for fact/inference/unknown separation.
+  sandbox_required: true
+  deliverable: registry-artifact-review.yaml
+  success_criteria:
+  - generated registry-like file only
+  - no real Windows registry access
+  - conclusion_status preliminary_internal_non_final
+- lab_id: lab-005-linux-windows-boot-artifact-map
+  source_ids:
+  - practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al
+  objective: Create OS boot artifact map for Windows/Linux from source-derived headings
+    and synthetic examples.
+  sandbox_required: false
+  deliverable: os-boot-artifact-map.yaml
+  success_criteria:
+  - OS artifact classes mapped
+  - preservation questions included
+  - no host inspection
+- lab_id: lab-006-iot-forensics-process-drill
+  source_ids:
+  - forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  objective: Rehearse IoT forensic process with fictional smart-home device metadata.
+  sandbox_required: true
+  deliverable: iot-process-drill.yaml
+  success_criteria:
+  - device metadata fictional
+  - acquisition/preservation logged before analysis
+  - human expert gate stated
+- lab_id: lab-007-smartphone-acquisition-boundary-drill
+  source_ids:
+  - forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  objective: Draft smartphone acquisition boundary checklist without interacting with
+    a real phone.
+  sandbox_required: false
+  deliverable: smartphone-acquisition-boundary.yaml
+  success_criteria:
+  - no real phone/data used
+  - Murphy/model-like extraction treated as framework candidate
+  - legal/human review gate present
+- lab_id: lab-008-smart-card-transflash-evidence-register
+  source_ids:
+  - forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  objective: Create synthetic smart-card/transflash evidence register entries and
+    custody chain.
+  sandbox_required: true
+  deliverable: smart-card-transflash-register.yaml
+  success_criteria:
+  - synthetic evidence IDs
+  - custody events complete
+  - no final authenticity claim
+- lab_id: lab-009-uav-wearable-smart-toy-artifact-taxonomy
+  source_ids:
+  - forensic-investigation-of-smart-digital-devices-farkhund-iqbal
+  objective: Build taxonomy of smart-device artifact classes and preservation questions.
+  sandbox_required: false
+  deliverable: smart-device-artifact-taxonomy.yaml
+  success_criteria:
+  - artifact classes separated by device type
+  - risk/unknown fields present
+  - no real device workflow
+- lab_id: lab-010-threat-to-preservation-question-conversion
+  source_ids:
+  - securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+  objective: Convert high-level cyber threat scenarios into safe forensic preservation
+    questions.
+  sandbox_required: false
+  deliverable: threat-preservation-questions.yaml
+  success_criteria:
+  - defensive questions only
+  - no exploit/scanning steps
+  - evidence integrity/control questions present
+  - synthetic/no real data boundary documented
+- lab_id: lab-011-data-acquisition-risk-table
+  source_ids:
+  - securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+  objective: Create data acquisition risk table from synthetic evidence contexts.
+  sandbox_required: false
+  deliverable: data-acquisition-risk-table.yaml
+  success_criteria:
+  - risk to integrity documented
+  - mitigation/control mapped
+  - external action blocked
+  - synthetic/no real data boundary documented
+- lab_id: lab-012-ethics-and-human-factors-stop-gate
+  source_ids:
+  - securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+  objective: Design ethics/human-factors stop gate for forensic lab reports.
+  sandbox_required: false
+  deliverable: ethics-human-factors-stop-gate.yaml
+  success_criteria:
+  - rights-impacting claims stop
+  - expert review gate explicit
+  - no legal conclusion
+  - synthetic/no real data boundary documented
+autonomous_loop_instruction: The recurring Digital Forensic Lab autonomous learning
+  loop should prefer these practice labs as its exercise backlog. Complete one lab
+  per run when no higher-priority validator failure exists, and append a receipt.

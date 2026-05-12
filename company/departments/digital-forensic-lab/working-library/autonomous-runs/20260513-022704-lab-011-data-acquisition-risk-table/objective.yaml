@@ -1,0 +1,18 @@
+schema_version: 1
+run_id: 20260513-022704-lab-011-data-acquisition-risk-table
+lab_id: lab-011-data-acquisition-risk-table
+objective: Create data acquisition risk table from synthetic evidence contexts.
+source_ids:
+- securing-the-digital-frontier-kavita-sharma-vishnu-sharma-parma-nand-et-al
+safety_boundary:
+- synthetic generated artifacts only
+- no real user/device/case/client/employee/production data
+- no external network/scanning/offensive actions
+- no final forensic/legal/security claims
+- human expert review required before real use
+expected_learning:
+- risk to integrity documented
+- mitigation/control mapped
+- external action blocked
+- synthetic/no real data boundary documented
+baseline_validator_ok: true

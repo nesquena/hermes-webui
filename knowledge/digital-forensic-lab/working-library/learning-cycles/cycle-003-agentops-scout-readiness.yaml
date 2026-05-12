@@ -1,0 +1,17 @@
+cycle_id: cycle-003-agentops-scout-readiness
+objective: Make the lab report itself to Scout via validator-grounded counters rather
+  than self-assessment.
+inputs:
+- 'Startup Technical Guide: AI Agents'
+- Agentic AI for Cybersecurity
+outputs:
+- agentops-learning-loop-control
+- scout-report-control
+validator_focus:
+- working library counters
+- learning cycle receipts
+- Scout summary fields
+result: pass
+schema_version: 1
+status: synthetic_internal_complete
+evidence_boundary: No real case data used; source-derived frameworks remain candidate_unverified_framework.

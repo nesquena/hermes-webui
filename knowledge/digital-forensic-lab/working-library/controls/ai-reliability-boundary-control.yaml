@@ -1,0 +1,17 @@
+control_id: ai-reliability-boundary-control
+requires:
+- AI output labelled as inference
+- human review required for authenticity/admissibility/attribution
+- model limitations recorded
+- no final conclusion status
+source_extracts:
+- artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al
+- agentic-ai-for-cybersecurity-omar-santos
+- startup-technical-guide-ai-agents-google-cloud
+schema_version: 1
+status: phase0_internal_control
+forbidden:
+- real case data
+- external action
+- final forensic/legal/security claims
+- offensive cyber

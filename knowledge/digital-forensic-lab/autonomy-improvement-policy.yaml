@@ -1,0 +1,42 @@
+schema_version: 1
+status: phase_0_autonomous_improvement_contract
+autonomy_level: L1_bounded_internal_synthetic_only
+purpose: Keep the team improving continuously without touching real cases, production systems, external targets, secrets, paid services, or legal/forensic final conclusions.
+allowed_autonomous_actions:
+  - run synthetic practice labs from the approved queue
+  - update heartbeat and receipts
+  - run validators and tests
+  - score candidate workers on synthetic benchmark cases
+  - propose source/model promotion candidates
+  - write non-final internal limitation memos
+forbidden_autonomous_actions:
+  - download large models without Kei approval
+  - start heavy model runtimes without Kei approval
+  - use real victim/client/employee/device/production data
+  - scan external targets
+  - generate exploit instructions or offensive playbooks
+  - send messages, publish, deploy, spend money, or access provider accounts
+  - produce final legal/forensic/security/compliance conclusions
+promotion_gates:
+  candidate_to_pilot:
+    requires:
+      - exact source URL or local implementation path
+      - license checked
+      - safety posture recorded
+      - synthetic benchmark defined
+      - no offensive default behavior
+  pilot_to_default:
+    requires:
+      - at least 30 synthetic benchmark cases where relevant
+      - false positive and false negative notes
+      - evidence-link correctness measured
+      - abstention behavior tested
+      - overclaim detector pass
+      - human review by Kei or designated expert
+continuous_loop:
+  existing_worker: tools/dflab_continuous_worker.py
+  heartbeat: knowledge/digital-forensic-lab/working-library/continuous-worker-heartbeat.json
+  receipts: knowledge/digital-forensic-lab/working-library/autonomous-learning-receipts.jsonl
+  validator: python tools/digital_forensic_lab.py --json
+  tests: python -m pytest tests/test_digital_forensic_lab.py -q
+  report_to: knowledge/yuto-memory-scout.md

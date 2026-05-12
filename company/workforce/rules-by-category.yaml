@@ -1,0 +1,137 @@
+phase: phase_0_internal_only
+rules:
+  - rule_id: internal-planning
+    category: internal_planning_drafting
+    risk_tier: low
+    allowed_actions: [internal_notes, draft_policies, mock_workflows, synthetic_examples, meeting_receipts]
+    forbidden_actions: [publishing, presenting_drafts_as_approved_policy]
+    allowed_data: [internal_notes, synthetic_data]
+    forbidden_data: [confidential_third_party_data_without_approval]
+    allowed_tools: [read_file, search_files, local_validators]
+    forbidden_tools: [external_messaging]
+    requires_kei_approval: false
+    escalation_triggers: [affects_hiring_firing_compensation, public_claims, security_posture, compliance_obligation]
+    evidence_required: [source_refs_or_repo_refs]
+    human_gate_required: false
+    red_line: false
+    consequence_if_triggered: proceed_with_review
+  - rule_id: employee-files
+    category: employee_files_workforce_kit
+    risk_tier: medium
+    allowed_actions: [templates, synthetic_employee_examples, internal_schemas]
+    forbidden_actions: [automated_employment_decisions, collecting_sensitive_employee_data]
+    allowed_data: [synthetic_data, approved_internal_notes]
+    forbidden_data: [medical_data, financial_data, protected_class_data, disciplinary_records, background_checks]
+    allowed_tools: [read_file, search_files, local_validators]
+    forbidden_tools: [external_messaging, production_access]
+    requires_kei_approval: true
+    escalation_triggers: [personally_identifiable_information, performance_evaluation, compensation, disciplinary_record]
+    evidence_required: [approval_record_if_real_person_data]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: skills-agent-capabilities
+    category: skills_agent_capabilities
+    risk_tier: medium
+    allowed_actions: [internal_skill_definitions, read_only_procedures, verification_checklists]
+    forbidden_actions: [approval_bypass, data_exfiltration, autonomous_external_action]
+    allowed_data: [approved_internal_notes, synthetic_examples]
+    forbidden_data: [secrets, production_data]
+    allowed_tools: [read_file, search_files, local_validators]
+    forbidden_tools: [secrets_reading, external_messaging, spending, production_access]
+    requires_kei_approval: true
+    escalation_triggers: [write_access, network_access, credential_handling, production_access, autonomous_scheduling]
+    evidence_required: [manifest_and_validator]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: external-communications
+    category: external_communications
+    risk_tier: high
+    allowed_actions: [internal_drafts_marked_internal_only]
+    forbidden_actions: [sending_email, posting_publicly, representing_company]
+    allowed_data: [draft_text]
+    forbidden_data: [private_person_data, secrets]
+    allowed_tools: [read_file]
+    forbidden_tools: [external_messaging, browser_posting, social_media_api]
+    requires_kei_approval: true
+    escalation_triggers: [any_content_leaves_internal_environment, official_position]
+    evidence_required: [kei_approval]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: legal-compliance-forensic-security-claims
+    category: legal_compliance_forensic_security_claims
+    risk_tier: high
+    allowed_actions: [issue_spotting, risk_registers, questions_for_professionals, preliminary_non_final_notes]
+    forbidden_actions: [legal_opinions, compliance_certification_claims, forensic_conclusions, attack_attribution, security_guarantees]
+    allowed_data: [public_sources, synthetic_examples]
+    forbidden_data: [real_case_data_without_approval]
+    allowed_tools: [read_file, search_files]
+    forbidden_tools: [external_messaging, production_access]
+    requires_kei_approval: true
+    escalation_triggers: [could_be_relied_on_by_leadership_customers_regulators_courts_auditors_public]
+    evidence_required: [source_refs, qualified_human_review_if_final]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: security-credentials
+    category: security_operations_credentials
+    risk_tier: critical
+    allowed_actions: [read_only_policy_review, synthetic_examples, general_security_recommendations]
+    forbidden_actions: [accessing_secrets, offensive_tools, external_scanning, production_infrastructure_changes]
+    allowed_data: [synthetic_security_examples]
+    forbidden_data: [tokens, private_keys, production_logs, vulnerability_details_without_scope]
+    allowed_tools: [read_file]
+    forbidden_tools: [secrets_reading, network_scanners, production_access]
+    requires_kei_approval: true
+    escalation_triggers: [credentials, tokens, private_keys, vulnerabilities, incident_response, third_party_systems]
+    evidence_required: [explicit_scope_and_approval]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: victim-case-sensitive-data
+    category: victim_case_investigation_sensitive_data
+    risk_tier: critical
+    allowed_actions: [synthetic_examples, anonymized_templates]
+    forbidden_actions: [real_victim_data, real_case_files, doxxing, private_person_identification, unverified_allegations]
+    allowed_data: [synthetic_data]
+    forbidden_data: [identifiable_person_data, alleged_crime_data, abuse_material, financial_harm_data]
+    allowed_tools: [read_file]
+    forbidden_tools: [external_messaging, production_access, scraping_tools]
+    requires_kei_approval: true
+    escalation_triggers: [identifiable_person, alleged_harm, crime, abuse, medical_issue, financial_harm, investigation]
+    evidence_required: [kei_explicit_approval_and_safety_plan]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: financial-procurement
+    category: financial_procurement_spending
+    risk_tier: high
+    allowed_actions: [cost_estimates, vendor_comparison_drafts, budget_planning]
+    forbidden_actions: [purchases, subscriptions, contract_acceptance, payment_method_use, vendor_commitments]
+    allowed_data: [public_pricing]
+    forbidden_data: [payment_details, contracts_without_approval]
+    allowed_tools: [read_file, search_files]
+    forbidden_tools: [spending, external_messaging]
+    requires_kei_approval: true
+    escalation_triggers: [cost, obligation, renewal, legal_terms, vendor_relationship]
+    evidence_required: [kei_approval]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate
+  - rule_id: production-deployment-automation
+    category: production_deployment_automation
+    risk_tier: critical
+    allowed_actions: [local_mockups, dry_run_plans, read_only_inspection, internal_prototypes]
+    forbidden_actions: [deployments, production_database_changes, live_automations, external_webhooks]
+    allowed_data: [synthetic_data, local_test_data]
+    forbidden_data: [production_data, customer_data]
+    allowed_tools: [local_validators, tests]
+    forbidden_tools: [production_access, external_webhooks, deployment_tools]
+    requires_kei_approval: true
+    escalation_triggers: [affects_users, production_data, external_systems, uptime, billing, irreversible_state]
+    evidence_required: [kei_approval_and_rollback_plan]
+    human_gate_required: true
+    red_line: true
+    consequence_if_triggered: stop_and_escalate

@@ -1,0 +1,18 @@
+cycle_id: cycle-001-source-grounded-preservation
+objective: Convert source candidates into a preservation checklist and synthetic evidence
+  register controls.
+inputs:
+- Artificial Intelligence and Digital Forensics
+- Digital Defence
+- Securing the Digital Realm
+outputs:
+- evidence-preservation-control
+- chain-of-custody-control
+validator_focus:
+- synthetic evidence items
+- custody events
+- receipt refs
+result: pass
+schema_version: 1
+status: synthetic_internal_complete
+evidence_boundary: No real case data used; source-derived frameworks remain candidate_unverified_framework.
