@@ -1,0 +1,13 @@
+{
+  "control_plane": "yuto",
+  "safety": {"auto_publish": false},
+  "workers": [
+    {"id": "news_health"},
+    {"id": "summarization"},
+    {"id": "impact_brief"},
+    {"id": "qa_eval"},
+    {"id": "taeyoon_improvement"},
+    {"id": "source_enrichment"},
+    {"id": "comms_watchdog"}
+  ]
+}
