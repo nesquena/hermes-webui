@@ -3009,6 +3009,22 @@ def _space_tool_widget_id(payload: dict[str, Any]) -> str:
     return str(raw or "").strip()
 
 
+def _space_tool_assert_matching_aliases(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+    message: str,
+    *positional_values: Any,
+) -> None:
+    values = [
+        str(payload.get(key) or "").strip()
+        for key in keys
+        if key in payload and str(payload.get(key) or "").strip()
+    ]
+    values.extend(str(value or "").strip() for value in positional_values if str(value or "").strip())
+    if values and any(value != values[0] for value in values):
+        raise ValueError(message)
+
+
 def _space_tool_event_id(payload: dict[str, Any]) -> str:
     """Return a revision event id from Hermes or Space Agent-style payloads."""
     raw = (
@@ -4067,6 +4083,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": list_widget_events(space_id, widget_id, data.get("limit", 20)),
         }
     if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
+        args = data.get("args")
+        positional_space_id = _space_tool_arg(data, 0) if isinstance(args, (list, tuple)) else ""
+        positional_widget_id = _space_tool_arg(data, 1) if isinstance(args, (list, tuple)) and len(args) > 1 else ""
+        _space_tool_assert_matching_aliases(
+            data,
+            ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"),
+            "Conflicting widget event selector aliases",
+            positional_space_id,
+        )
+        _space_tool_assert_matching_aliases(
+            data,
+            ("widget_id", "widgetId", "id"),
+            "Conflicting widget event selector aliases",
+            positional_widget_id,
+        )
         space_id = validate_space_id(
             _space_tool_current_id(data)
             if name == "space.current.widget.event"

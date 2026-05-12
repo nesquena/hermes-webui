@@ -3911,6 +3911,76 @@ def test_space_tool_adapter_rejects_conflicting_widget_event_name_aliases_metada
     assert "renderer" not in serialized
 
 
+def test_space_tool_adapter_rejects_conflicting_widget_event_selector_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-selector-conflict-lab", "name": "Tool Selector Conflict Lab"})
+    spaces.create_space({"space_id": "other-selector-lab", "name": "Other Selector Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+    spaces.upsert_widget(created["space_id"], {"id": "other-card", "kind": "prompt", "title": "Other Card"})
+
+    hostile_payload = {
+        "query": "Claude Mythos",
+        "renderer": "<script>bad()</script>",
+        "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+        "source": "SECRET_SOURCE",
+    }
+    conflicting_payloads = (
+        {
+            "space_id": created["space_id"],
+            "spaceId": "other-selector-lab",
+            "widgetId": "research-card",
+        },
+        {
+            "activeSpaceId": created["space_id"],
+            "currentSpaceId": "other-selector-lab",
+            "widgetId": "research-card",
+            "action": "space.current.widget.event",
+        },
+        {
+            "spaceId": created["space_id"],
+            "widget_id": "research-card",
+            "widgetId": "other-card",
+        },
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "research-card",
+            "args": ["other-selector-lab", "research-card"],
+        },
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "research-card",
+            "args": [created["space_id"], "other-card"],
+        },
+    )
+
+    for payload in conflicting_payloads:
+        action = payload.get("action", "space.widget.event")
+        tool_payload = {key: value for key, value in payload.items() if key != "action"}
+        with pytest.raises(ValueError, match="selector aliases"):
+            spaces.run_space_tool(
+                action,
+                {
+                    **tool_payload,
+                    "eventName": "agent.prompt",
+                    "messageType": "capy:agent:prompt",
+                    "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                    "payload": hostile_payload,
+                },
+            )
+
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps(events).lower()
+    assert events["events"] == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "source" not in serialized
+
+
 def test_space_tool_adapter_rejects_shadowed_top_level_type_runtime_alias_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-runtime-type-shadow-lab", "name": "Tool Runtime Type Shadow Lab"})
