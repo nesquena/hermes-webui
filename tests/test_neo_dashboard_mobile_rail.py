@@ -66,8 +66,13 @@ def test_mobile_breakpoint_makes_right_rail_a_drawer():
 def test_mobile_breakpoint_chat_panel_fills_viewport():
     media = STYLE[STYLE.find("@media(max-width:760px)"):]
     media = media[: media.find("@media(min-width:761px)")]
-    assert "main.main.showing-dashboard .dashboard-chat-panel{height:100%" in media, (
+    assert "main.main.showing-dashboard .dashboard-chat-panel{" in media, (
         "chat panel must fill the viewport on mobile"
+    )
+    panel_rule = media[media.find("main.main.showing-dashboard .dashboard-chat-panel{"):]
+    panel_rule = panel_rule[:panel_rule.find("}") + 1]
+    assert "flex:1" in panel_rule or "height:100%" in panel_rule, (
+        "chat panel must fill viewport via flex:1 or height:100%"
     )
 
 

@@ -2714,7 +2714,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
    sidebar resize handle on top of the Neo dashboard menu (visible on the
    VPS post-deploy on iOS/Android <641px). Desktop-only sizing stays inside
    the @media block below. */
-body.dashboard-shell-mode .layout{height:100vh;height:100dvh;}
+body.dashboard-shell-mode .layout{flex:1 1 0;min-height:0;}
 body.dashboard-shell-mode .rail,
 body.dashboard-shell-mode .sidebar-nav,
 body.dashboard-shell-mode #sidebarResize{display:none!important;}
@@ -2939,11 +2939,11 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
      hosting the chat embed. Hero / KPI / quick-actions move into a
      slide-in drawer on the right, accessed via the new mobile rail
      button in the topbar. Composer stays anchored at the bottom. */
-  body.dashboard-shell-mode main.main.showing-dashboard .main-view-body{padding:0;height:100%;overflow:hidden;}
-  body.dashboard-shell-mode main.main.showing-dashboard .main-view-content{padding:0;height:100%;max-width:none;}
-  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-grid{grid-template-columns:1fr;gap:0;height:100%;min-height:0;}
-  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-center{height:100%;min-height:0;}
-  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-chat-panel{height:100%;border-radius:0;border-left:0;border-right:0;border-top:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .main-view-body{padding:0;flex:1 1 0;min-height:0;overflow:hidden;}
+  body.dashboard-shell-mode main.main.showing-dashboard .main-view-content{padding:0;flex:1 1 0;min-height:0;max-width:none;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-grid{grid-template-columns:1fr;gap:0;flex:1 1 0;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-center{flex:1 1 0;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-chat-panel{flex:1 1 0;min-height:0;border-radius:0;border-left:0;border-right:0;border-top:0;display:flex;flex-direction:column;overflow:hidden;}
   body.dashboard-shell-mode main.main.showing-dashboard .dashboard-right{
     position:fixed;right:calc(-1 * min(360px, 92vw));top:0;bottom:0;
     width:min(360px,92vw);height:100%;
