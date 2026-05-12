@@ -24,6 +24,7 @@ def test_batch_archive_delete_confirmations_count_worktree_sessions():
     src = read("static/sessions.js")
     i18n = read("static/i18n.js")
     assert "function _worktreeSessionCount(ids)" in src
+    assert "function _worktreeResponseCount(results)" in src
     assert "session_batch_delete_worktree_confirm" in src
     assert "session_batch_archive_worktree_confirm" in src
     assert "session_batch_delete_worktree_confirm" in i18n
@@ -41,6 +42,23 @@ def test_archive_and_delete_action_descriptions_are_worktree_specific():
     assert "session_delete_worktree_desc" in i18n
     assert "session_archive_worktree_desc: 'Hide this conversation; keep its worktree on disk'" in i18n
     assert "session_archived_worktree: 'Session archived. Worktree remains on disk.'" in i18n
+
+
+def test_archive_delete_success_copy_prefers_response_worktree_retained():
+    src = read("static/sessions.js")
+    assert "function _sessionResponseRetainsWorktree(response, session)" in src
+    assert "typeof response.worktree_retained==='boolean'" in src
+    assert "return response.worktree_retained;" in src
+    assert "return !!(session&&session.worktree_path);" in src
+    assert src.index("return response.worktree_retained;") < src.index(
+        "return !!(session&&session.worktree_path);"
+    )
+    assert "function _sessionArchiveToast(response, session)" in src
+    assert "session.archived?_sessionArchiveToast(response,session):t('session_restored')" in src
+    assert "_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree')" in src
+    assert "const retainedCount=_worktreeResponseCount(results)" in src
+    assert "showToast(retainedCount?t('session_archived_worktree'):t('session_archived'))" in src
+    assert "showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))" in src
 
 
 def test_worktree_archive_delete_api_responses_are_explicit():

@@ -1290,11 +1290,20 @@ function _worktreeSessionCount(ids){
     return count+(session&&session.worktree_path?1:0);
   },0);
 }
+function _sessionResponseRetainsWorktree(response, session){
+  if(response&&typeof response.worktree_retained==='boolean') return response.worktree_retained;
+  return !!(session&&session.worktree_path);
+}
+function _worktreeResponseCount(results){
+  return (results||[]).reduce((count,result)=>{
+    return count+(_sessionResponseRetainsWorktree(result&&result.response,result&&result.session)?1:0);
+  },0);
+}
 function _sessionArchiveDescription(session){
   return session&&session.worktree_path?t('session_archive_worktree_desc'):t('session_archive_desc');
 }
-function _sessionArchiveToast(session){
-  return session&&session.worktree_path?t('session_archived_worktree'):t('session_archived');
+function _sessionArchiveToast(response, session){
+  return _sessionResponseRetainsWorktree(response,session)?t('session_archived_worktree'):t('session_archived');
 }
 function _sessionDeleteDescription(session){
   return session&&session.worktree_path?t('session_delete_worktree_desc'):t('session_delete_desc');
@@ -1398,14 +1407,20 @@ function _renderBatchActionBar(){
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
+    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
     const ok=await showConfirmDialog({
       message:wtCount?t('session_batch_archive_worktree_confirm',ids.length,wtCount):t('session_batch_archive_confirm',ids.length),
       confirmLabel:t('session_batch_archive'),
       danger:true
     });
     if(!ok)return;
-    try{await Promise.all(ids.map(sid=>api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})})));
-      showToast(wtCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList();
+    try{
+      const results=await Promise.all(ids.map(async sid=>{
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
+        return {response,session:sessionsById.get(sid)||null};
+      }));
+      const retainedCount=_worktreeResponseCount(results);
+      showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Archive failed: '+(e.message||e));}
   };bar.appendChild(archiveBtn);
   // Move
@@ -1418,6 +1433,7 @@ function _renderBatchActionBar(){
   deleteBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
+    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
     const ok=await showConfirmDialog({
       message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
       confirmLabel:t('delete_title'),
@@ -1425,7 +1441,11 @@ function _renderBatchActionBar(){
     });
     if(!ok)return;
     try{
-      await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
+      const results=await Promise.all(ids.map(async sid=>{
+        const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+        return {response,session:sessionsById.get(sid)||null};
+      }));
+      const retainedCount=_worktreeResponseCount(results);
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
@@ -1433,7 +1453,7 @@ function _renderBatchActionBar(){
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
       }
-      showToast((wtCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+      showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
@@ -1606,11 +1626,11 @@ function _openSessionActionMenu(session, anchorEl){
     async()=>{
       closeSessionActionMenu();
       try{
-        await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
         session.archived=!session.archived;
         if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
         await renderSessionList();
-        showToast(session.archived?_sessionArchiveToast(session):t('session_restored'));
+        showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
       }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
@@ -3051,8 +3071,9 @@ async function deleteSession(sid){
     danger:true
   });
   if(!ok)return;
+  let response=null;
   try{
-    await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+    response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
     _clearHandoffStorageForSession(sid);
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
   if(S.session&&S.session.session_id===sid){
@@ -3072,7 +3093,7 @@ async function deleteSession(sid){
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
-  showToast(session&&session.worktree_path?t('session_deleted_worktree'):t('session_deleted'));
+  showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   await renderSessionList();
 }
 
