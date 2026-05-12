@@ -96,6 +96,8 @@ docker run -d --rm --name "${CONTAINER_NAME}" \
   -v "${WORKDIR}/profile:/home/hermeswebui/.hermes" \
   -e "WANTED_UID=1024" -e "WANTED_GID=1024" \
   -e "HERMES_WEBUI_HOST=0.0.0.0" -e "HERMES_WEBUI_PORT=8787" \
+  -e "HERMES_HOME=/home/hermeswebui/.hermes" \
+  -e "HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui" \
   -e "OPENAI_API_KEY=sk-smoke-test-not-real" \
   "${IMAGE}" >/dev/null
 
