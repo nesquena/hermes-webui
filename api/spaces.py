@@ -3973,7 +3973,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.spaces.refreshwidget",
     }:
         space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        widget_id_raw = ""
+        args = data.get("args")
+        if data.get("widget_id") or data.get("widgetId") or data.get("id"):
+            widget_id_raw = _space_tool_widget_id(data)
+        elif isinstance(args, (list, tuple)) and len(args) > 1:
+            widget_id_raw = str(args[1] or "").strip()
+        widget_id = validate_widget_id(widget_id_raw)
         payload = {"action": "reload"}
         if isinstance(data.get("payload"), dict):
             for key, value in data["payload"].items():
@@ -3990,8 +3996,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         )
         return {"ok": True, "action": name, **result}
     if name in {"widget.events", "widget.event.list", "space.widget.events", "space.widget.event.list", "space.current.widget.events", "space.current.widget.event.list"}:
-        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
-        widget_id_raw = _space_tool_widget_id(data) or None
+        space_id = validate_space_id(
+            _space_tool_current_id(data)
+            if name.startswith("space.current.")
+            else (data.get("space_id") or data.get("spaceId") or _space_tool_arg(data, 0))
+        )
+        widget_id_raw = ""
+        args = data.get("args")
+        if data.get("widget_id") or data.get("widgetId") or data.get("id"):
+            widget_id_raw = _space_tool_widget_id(data)
+        elif isinstance(args, (list, tuple)) and len(args) > 1:
+            widget_id_raw = str(args[1] or "").strip()
         widget_id = validate_widget_id(widget_id_raw) if widget_id_raw else None
         return {
             "ok": True,
@@ -4000,13 +4015,50 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": list_widget_events(space_id, widget_id, data.get("limit", 20)),
         }
     if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
-        space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.event" else data.get("space_id"))
-        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        space_id = validate_space_id(
+            _space_tool_current_id(data)
+            if name == "space.current.widget.event"
+            else (data.get("space_id") or data.get("spaceId") or _space_tool_arg(data, 0))
+        )
+        widget_id_raw = ""
+        args = data.get("args")
+        if data.get("widget_id") or data.get("widgetId") or data.get("id"):
+            widget_id_raw = _space_tool_widget_id(data)
+        elif isinstance(args, (list, tuple)) and len(args) > 1:
+            widget_id_raw = str(args[1] or "").strip()
+        widget_id = validate_widget_id(widget_id_raw)
+        if "event_name" in data and "eventName" in data and str(data.get("event_name") or "") != str(data.get("eventName") or ""):
+            raise ValueError("Conflicting widget event name aliases")
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        payload = dict(payload)
+        runtime_alias_values: list[str] = []
+        for source in (payload, data):
+            for alias in ("type", "message_type", "messageType"):
+                if alias in source:
+                    alias_value = str(source.get(alias) or "").strip()
+                    if alias == "type" and not alias_value.lower().startswith("capy:"):
+                        continue
+                    if alias_value:
+                        runtime_alias_values.append(alias_value)
+        if runtime_alias_values and any(value.lower() != runtime_alias_values[0].lower() for value in runtime_alias_values):
+            raise ValueError("Blocked by widget runtime contract")
+        for alias in ("type", "message_type", "messageType"):
+            if alias not in data:
+                continue
+            alias_value = str(data.get(alias) or "").strip()
+            if alias == "type" and not alias_value.lower().startswith("capy:"):
+                continue
+            runtime_value = _runtime_message_type_value(alias_value)
+            if not runtime_value or _is_blocked_runtime_message_type(runtime_value) or not _is_allowed_runtime_message_type(runtime_value):
+                raise ValueError("Blocked by widget runtime contract")
+        for alias in ("type", "message_type", "messageType"):
+            if alias in data and alias not in payload:
+                payload[alias] = data.get(alias)
         result = queue_widget_event(
             space_id,
             widget_id,
-            data.get("event_name") or "agent.prompt",
-            data.get("payload") if isinstance(data.get("payload"), dict) else {},
+            data.get("event_name") or data.get("eventName") or "agent.prompt",
+            payload,
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
         )

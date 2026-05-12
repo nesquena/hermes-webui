@@ -3789,6 +3789,222 @@ def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_meta
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_camelcase_widget_event_runtime_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "camel-runtime-event-lab", "name": "Camel Runtime Event Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-card",
+            "kind": "prompt",
+            "title": "Research Card",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    queued = spaces.run_space_tool(
+        "space.widget.event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "research-card",
+            "eventName": "agent.prompt",
+            "messageType": "capy:agent:prompt",
+            "prompt": "Summarize this widget safely.",
+            "payload": {
+                "query": "Claude Mythos",
+                "type": "form.submit",
+                "renderer": "<script>bad()</script>",
+                "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+                "source": "SECRET_SOURCE",
+            },
+        },
+    )
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps({"queued": queued, "events": events}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.widget.event"
+    assert queued["space_id"] == created["space_id"]
+    assert queued["widget_id"] == "research-card"
+    assert queued["event_name"] == "agent.prompt"
+    assert queued["payload_summary"]["query"] == "Claude Mythos"
+    assert queued["payload_summary"]["type"] == "form.submit"
+    assert events["ok"] is True
+    assert events["action"] == "space.widget.events"
+    assert events["events"][0]["widget_id"] == "research-card"
+    assert events["events"][0]["event_name"] == "agent.prompt"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "source" not in serialized
+
+
+def test_space_tool_adapter_rejects_conflicting_widget_event_runtime_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-runtime-conflict-lab", "name": "Tool Runtime Conflict Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="runtime contract"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "research-card",
+                "eventName": "agent.prompt",
+                "messageType": "capy:raw:eval",
+                "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {
+                    "messageType": "capy:agent:prompt",
+                    "query": "Claude Mythos",
+                    "renderer": "<script>bad()</script>",
+                    "source": "SECRET_SOURCE",
+                },
+            },
+        )
+
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps(events).lower()
+    assert events["events"] == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "capy:raw" not in serialized
+
+
+def test_space_tool_adapter_rejects_conflicting_widget_event_name_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-event-name-conflict-lab", "name": "Tool Event Name Conflict Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="event name aliases"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "research-card",
+                "event_name": "agent.prompt",
+                "eventName": "widget.refresh",
+                "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {"query": "Claude Mythos", "renderer": "<script>bad()</script>"},
+            },
+        )
+
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps(events).lower()
+    assert events["events"] == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_space_tool_adapter_rejects_shadowed_top_level_type_runtime_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-runtime-type-shadow-lab", "name": "Tool Runtime Type Shadow Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="runtime contract"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "research-card",
+                "eventName": "agent.prompt",
+                "type": "capy:raw:eval",
+                "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {
+                    "type": "form.submit",
+                    "query": "Claude Mythos",
+                    "renderer": "<script>bad()</script>",
+                    "source": "SECRET_SOURCE",
+                },
+            },
+        )
+
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps(events).lower()
+    assert events["events"] == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "capy:raw" not in serialized
+
+
+def test_space_tool_adapter_lists_widget_events_with_positional_space_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-positional-event-list-lab", "name": "Tool Positional Event List Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+    queued = spaces.run_space_tool(
+        "space.widget.event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "research-card",
+            "eventName": "agent.prompt",
+            "messageType": "capy:agent:prompt",
+            "prompt": "Summarize safely.",
+            "payload": {"query": "Claude Mythos"},
+        },
+    )
+
+    listed = spaces.run_space_tool("space.widget.events", {"args": [created["space_id"]], "limit": 5})
+
+    assert listed["ok"] is True
+    assert listed["active_space_id"] == created["space_id"]
+    assert [event["event_id"] for event in listed["events"]] == [queued["event_id"]]
+    assert listed["events"][0]["widget_id"] == "research-card"
+    assert listed["events"][0]["payload_summary"] == {"query": "Claude Mythos", "messageType": "capy:agent:prompt"}
+
+
+def test_space_tool_adapter_event_requires_explicit_positional_widget_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "same-id", "name": "Same Id Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "same-id", "kind": "prompt", "title": "Same Id Widget"})
+
+    with pytest.raises(ValueError, match="Invalid widget_id"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "args": [created["space_id"]],
+                "eventName": "agent.prompt",
+                "messageType": "capy:agent:prompt",
+                "prompt": "Do not infer the widget from the space id.",
+                "payload": {"query": "Claude Mythos"},
+            },
+        )
+
+    events = spaces.run_space_tool("space.widget.events", {"spaceId": created["space_id"], "limit": 5})
+    assert events["events"] == []
+
+
+def test_space_tool_adapter_reload_requires_explicit_positional_widget_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "reload-same-id", "name": "Reload Same Id Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "reload-same-id", "kind": "panel", "title": "Reload Same Id Widget"})
+
+    with pytest.raises(ValueError, match="Invalid widget_id"):
+        spaces.run_space_tool("space.widget.reload", {"args": [created["space_id"]]})
+
+    events = spaces.run_space_tool("space.widget.events", {"spaceId": created["space_id"], "limit": 5})
+    assert events["events"] == []
+
+
 def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-see-reload-lab", "name": "Widget See Reload Lab"})
