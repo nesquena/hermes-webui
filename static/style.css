@@ -1196,12 +1196,12 @@
     .messages-inner{padding:12px 10px 20px;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
-    .composer-wrap{padding:8px 10px 12px!important;}
+    .composer-wrap{padding:6px 8px 8px!important;}
     .composer-box{border-radius:12px;}
-    .composer-box textarea{min-height:40px;font-size:16px;}
-    .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;}
+    .composer-box textarea{min-height:36px;max-height:120px;font-size:16px;}
+    .composer-footer{padding:4px 8px 6px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
     .composer-left{gap:4px;flex:0 0 auto;}
-    .composer-right{gap:6px;flex:0 0 auto;margin-left:auto;}
+    .composer-right{gap:4px;flex:0 0 auto;margin-left:auto;flex-direction:row;align-items:center;}
     .composer-profile-label,
     .composer-workspace-label,
     .composer-model-label,
@@ -1286,7 +1286,7 @@
     .card{width:90vw;max-width:320px;padding:28px 24px;}
     /* ── Neo mobile bottom-nav (Phase 3) ── */
     .neo-mobile-nav{display:flex;}
-    body{padding-bottom:calc(56px + env(safe-area-inset-bottom,0));}
+    .composer-wrap{padding-bottom:calc(56px + env(safe-area-inset-bottom,0))!important;}
     /* Hero card reduced on mobile */
     .hero-card{height:clamp(120px,20vh,160px);}
     /* Topbar chips fade indicators */

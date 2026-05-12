@@ -59,10 +59,10 @@ def test_bottom_nav_visible_mobile():
         "neo-mobile-nav must be display:flex in mobile breakpoint"
 
 
-def test_body_padding_bottom_mobile():
+def test_composer_padding_bottom_mobile():
     block = _mobile_640_block()
     assert "padding-bottom:" in block, \
-        "body must have padding-bottom on mobile for bottom-nav clearance"
+        "composer-wrap must have padding-bottom on mobile for bottom-nav clearance"
 
 
 def test_hero_card_reduced_mobile():
