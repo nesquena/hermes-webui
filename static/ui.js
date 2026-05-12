@@ -3773,8 +3773,11 @@ async function refreshSession() {
 // ── Update banner ──
 function _formatUpdateTargetStatus(label,info){
   if(!info||!(info.behind>0)) return null;
-  const branch=info.branch?` (${info.branch})`:'';
-  return `${label}${branch}: ${info.behind} update${info.behind>1?'s':''}`;
+  const release=(info.release_based&&info.latest_version)
+    ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
+    :(info.branch?` (${info.branch})`:'');
+  const noun=info.release_based?'release':'update';
+  return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
 function _showUpdateBanner(data){
   const parts=[];

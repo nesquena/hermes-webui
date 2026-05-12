@@ -104,6 +104,61 @@ class TestUpdateChecker:
 
         assert result['repo_url'] == 'https://github.com/nesquena/hermes-webui'
 
+    def test_release_check_ignores_post_release_branch_commits(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v2026.5.7\nv2026.4.30', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v2026.5.7', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/NousResearch/hermes-agent.git', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/main', True
+            if args[:2] == ['rev-list', '--count']:
+                return '16', True
+            if args[0] == 'merge-base':
+                return '3800972dd', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'agent')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v2026.5.7'
+        assert result['latest_version'] == 'v2026.5.7'
+        assert result['behind'] == 0
+
+    def test_release_check_counts_release_gap(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v0.51.35\nv0.51.34\nv0.51.33', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v0.51.34', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v0.51.34'
+        assert result['latest_version'] == 'v0.51.35'
+        assert result['behind'] == 1
+        assert result['branch'] == 'v0.51.35'
+
 
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""
@@ -475,10 +530,12 @@ class TestUiJsUpdateBanner:
 
 
 class TestUpdateBannerUx:
-    def test_update_banner_includes_repo_branch_labels(self):
+    def test_update_banner_includes_release_labels(self):
         src = read('static/ui.js')
         assert 'function _formatUpdateTargetStatus' in src
-        assert 'info.branch' in src
+        assert 'info.release_based' in src
+        assert 'info.current_version' in src
+        assert 'info.latest_version' in src
         assert "_formatUpdateTargetStatus('WebUI',data.webui)" in src
         assert "_formatUpdateTargetStatus('Agent',data.agent)" in src
 
