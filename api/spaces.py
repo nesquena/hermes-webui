@@ -4192,6 +4192,7 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
         if rev not in merged_revision_events:
             merged_revision_events.append(rev)
     restored["revision_events"] = merged_revision_events
+    restored = _preserve_admin_space_recovery_control_state(current, restored)
     saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id}, allow_stale_revision=True)
     return {
         "ok": True,
@@ -4861,6 +4862,22 @@ def read_widget_detail(space_id: str, widget_id: str) -> dict[str, Any]:
     if widget.get("revision_event_id"):
         detail["revision_event_id"] = _payload_text_summary(widget.get("revision_event_id"), 120)
     return detail
+
+
+def _preserve_admin_space_recovery_control_state(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    """Keep current whole-Space recovery-control state during rollback.
+
+    Revision snapshots can contain older recovery envelopes. Explicit admin
+    enable/disable controls own the live recovery state, so rollback must not
+    clear a current quarantine or resurrect an old one after enable.
+    """
+    existing_recovery = existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {}
+    control_keys = ("safe_mode_available", "disabled", "disabled_reason")
+    if not any(key in existing_recovery for key in control_keys):
+        return candidate
+    preserved = dict(candidate)
+    preserved["recovery"] = {key: copy.deepcopy(existing_recovery[key]) for key in control_keys if key in existing_recovery}
+    return preserved
 
 
 def _preserve_admin_disabled_widget_recovery(existing: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
