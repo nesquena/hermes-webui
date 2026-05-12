@@ -1,0 +1,76 @@
+type: object
+required:
+  - receipt_version
+  - task_id
+  - lane_id
+  - runtime
+  - input_refs
+  - output_artifacts
+  - claims
+  - checks_performed
+  - failures_or_warnings
+  - handoff_request
+  - human_review_required
+  - completion_status
+additionalProperties: false
+properties:
+  receipt_version:
+    const: 1
+  task_id:
+    type: string
+    minLength: 1
+    maxLength: 128
+  lane_id:
+    type: string
+    minLength: 1
+    maxLength: 128
+  runtime:
+    enum: [codex, claude_code, local_llm, hermes, script, human]
+  input_refs:
+    type: array
+    maxItems: 50
+    items:
+      type: string
+      maxLength: 500
+  output_artifacts:
+    type: array
+    maxItems: 50
+    items:
+      type: string
+      maxLength: 500
+  claims:
+    type: array
+    maxItems: 100
+    items:
+      type: object
+      required: [claim, evidence_ref, confidence]
+      additionalProperties: false
+      properties:
+        claim:
+          type: string
+          maxLength: 700
+        evidence_ref:
+          type: string
+          maxLength: 500
+        confidence:
+          enum: [low, medium, high]
+  checks_performed:
+    type: array
+    maxItems: 50
+    items:
+      type: string
+      maxLength: 300
+  failures_or_warnings:
+    type: array
+    maxItems: 50
+    items:
+      type: string
+      maxLength: 300
+  handoff_request:
+    anyOf:
+      - type: "null"
+      - type: object
+  human_review_required:
+    type: boolean
+  completion_status:
+    enum: [pass, partial, fail]

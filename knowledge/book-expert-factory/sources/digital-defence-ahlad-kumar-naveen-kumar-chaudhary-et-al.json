@@ -1,0 +1,53 @@
+{
+  "author": "Ahlad Kumar, Naveen Kumar Chaudhary, et al.",
+  "book_set_group": "new",
+  "classification": {
+    "domain_signal_score": 2,
+    "method_signal_score": 0,
+    "needs_human_framework_review": true,
+    "primary_domain": "systems-thinking",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "systems-thinking-expert",
+    "skillability": "medium"
+  },
+  "created_at": "2026-05-11T18:44:11.889305+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Digital Defence Harnessing the Power of Artificial Intelligence for Cybersecurity and Digital Forensics (Ahlad Kumar, Naveen Kumar Chaudhary etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "a5a538c85b9810bbddaf797fd9619e649dc27c6d137abf277fd48345070db43a",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Digital Defence",
+  "updated_at": "2026-05-11T18:44:11.889310+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_retry_2026_05_12": {
+    "binary_read_ok": true,
+    "note": "Registered after macOS TCC/xattr retry; source remains candidate_unverified_framework until framework extraction/review.",
+    "toc_or_sample_verified": true
+  },
+  "version": "0.1.0"
+}

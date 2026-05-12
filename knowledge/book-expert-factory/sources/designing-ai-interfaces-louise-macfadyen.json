@@ -1,0 +1,53 @@
+{
+  "author": "Louise Macfadyen",
+  "book_set_group": "new",
+  "classification": {
+    "domain_signal_score": 1,
+    "method_signal_score": 1,
+    "needs_human_framework_review": true,
+    "primary_domain": "systems-thinking",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "systems-thinking-expert",
+    "skillability": "low"
+  },
+  "created_at": "2026-05-11T18:44:11.765338+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Designing AI Interfaces Design Principles for Creative and Autonomous AI (Louise Macfadyen) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "59704d2d13d4a1a449c69bfd4c0c8b952612371cf76ba5ce809f366562bc9917",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "designing-ai-interfaces-louise-macfadyen",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Designing AI Interfaces",
+  "updated_at": "2026-05-11T18:44:11.765344+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_retry_2026_05_12": {
+    "binary_read_ok": true,
+    "note": "Registered after macOS TCC/xattr retry; source remains candidate_unverified_framework until framework extraction/review.",
+    "toc_or_sample_verified": true
+  },
+  "version": "0.1.0"
+}

@@ -1,0 +1,84 @@
+id: correctness-reviewer
+name: Correctness Reviewer
+purpose: Find execution-path bugs, regressions, edge cases, and missing verification.
+owner_employee: chamin
+lane_type: reviewer
+standing_worker: false
+
+when_to_use:
+  - Code, PR, branch, bug report, or implementation output must be checked.
+  - A claim says behavior works and needs evidence.
+when_not_to_use:
+  - Pure copy review with no behavior change.
+  - Tiny factual questions Chamin can answer directly.
+
+input_schema:
+  type: object
+  required: [target_ref, scope]
+  additionalProperties: false
+  properties:
+    target_ref: {type: string}
+    scope: {enum: [astro, next, shared, unknown]}
+    changed_files: {type: array, items: {type: string}}
+
+output_schema:
+  type: object
+  required: [status, findings, evidence_checked, verification_gaps]
+  additionalProperties: false
+  properties:
+    status: {enum: [pass, partial, fail]}
+    findings:
+      type: array
+      items:
+        type: object
+        required: [severity, issue, evidence_ref, fix_or_check]
+        additionalProperties: false
+        properties:
+          severity: {enum: [blocker, major, minor, note]}
+          issue: {type: string}
+          evidence_ref: {type: string}
+          fix_or_check: {type: string}
+    evidence_checked: {type: array, items: {type: string}}
+    verification_gaps: {type: array, items: {type: string}}
+
+allowed_tools:
+  - read_file
+  - search_files
+  - git_diff_read
+  - test_read
+forbidden_tools:
+  - write_file
+  - patch
+  - send_message
+  - deploy
+  - destructive_ops
+
+allowed_context:
+  - changed files
+  - nearby tests
+  - relevant logs
+forbidden_context:
+  - unrelated app surface
+  - raw secrets
+
+safety_rules:
+  - Findings must cite code, output, or missing verification.
+  - Do not infer runtime behavior without evidence.
+  - Report scope crossing as a finding.
+
+handoff_allowed_to:
+  - qa-critic
+  - security-reviewer
+  - data-auth-reviewer
+  - frontend-ui-a11y-reviewer
+  - content-claims-seo-reviewer
+
+verification_gate:
+  required_by: chamin
+  checks:
+    - evidence refs exist
+    - scope respected
+    - missing tests stated
+
+receipt_required: true
+human_gate: false

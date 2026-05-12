@@ -1,0 +1,53 @@
+{
+  "author": "Akashdeep Bhardwaj, Pradeep Singh, et al.",
+  "classification": {
+    "domain_signal_score": 5,
+    "method_signal_score": 5,
+    "needs_human_framework_review": true,
+    "primary_domain": "legal-forensic-evidence",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "windows-linux-forensics-lab-source",
+    "skillability": "high"
+  },
+  "created_at": "2026-05-12T08:56:56.418851+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/Practical Digital Forensics A Guide for Windows and Linux Users (Akashdeep Bhardwaj, Pradeep Singh etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "ac1839e794a7761610224c4f738f7a5df780cc7426a25ac8b3a5d3f5bec7d3fd",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "practical-digital-forensics-akashdeep-bhardwaj-pradeep-singh-et-al",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Practical Digital Forensics",
+  "updated_at": "2026-05-12T08:56:56.418858+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_lab_reinspect_2026_05_12": {
+    "authority_boundary": "High-value training/lab source, still candidate_unverified_framework until full framework extraction, official/current checks, and human expert review.",
+    "lab_training_value": "high",
+    "note": "Re-inspected TOC: explicit lab facility/equipment, hands-on live data acquisition, FTK Imager, file systems, Windows Registry, Windows/Linux boot and network forensics.",
+    "toc_reinspected": true
+  },
+  "version": "0.1.0"
+}

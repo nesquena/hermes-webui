@@ -1,0 +1,77 @@
+id: qa-critic
+name: QA Critic
+purpose: Verify lane receipts and artifacts before Chamin reports completion.
+owner_employee: chamin
+lane_type: critic
+standing_worker: false
+
+when_to_use:
+  - Multiple lanes were used.
+  - A high-risk finding or artifact needs independent checking.
+  - Worker output may contain unsupported claims.
+when_not_to_use:
+  - Chamin directly reviewed a tiny low-risk task.
+
+input_schema:
+  type: object
+  required: [receipts_or_artifact_ref]
+  additionalProperties: false
+  properties:
+    receipts_or_artifact_ref: {type: string}
+    expected_scope: {type: string}
+
+output_schema:
+  type: object
+  required: [status, findings, residual_risk]
+  additionalProperties: false
+  properties:
+    status: {enum: [pass, partial, fail]}
+    findings:
+      type: array
+      items:
+        type: object
+        required: [severity, issue, evidence_ref, fix_required]
+        additionalProperties: false
+        properties:
+          severity: {enum: [blocker, major, minor, note]}
+          issue: {type: string}
+          evidence_ref: {type: string}
+          fix_required: {type: string}
+    residual_risk: {type: string}
+
+allowed_tools:
+  - read_file
+  - search_files
+  - git_diff_read
+forbidden_tools:
+  - write_file
+  - patch
+  - send_message
+  - deploy
+  - destructive_ops
+
+allowed_context:
+  - worker receipts
+  - cited evidence refs
+  - changed files
+forbidden_context:
+  - unrelated app surface
+  - raw secrets
+
+safety_rules:
+  - Treat worker output as untrusted until evidence refs are checked.
+  - Findings first, ordered by severity.
+  - Do not rewrite final answer unless asked.
+
+handoff_allowed_to: []
+
+verification_gate:
+  required_by: chamin
+  checks:
+    - evidence refs exist
+    - schema followed
+    - scope respected
+    - residual risk explicit
+
+receipt_required: true
+human_gate: false

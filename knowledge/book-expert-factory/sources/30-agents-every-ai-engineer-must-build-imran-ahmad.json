@@ -1,0 +1,53 @@
+{
+  "author": "Imran Ahmad",
+  "book_set_group": "old",
+  "classification": {
+    "domain_signal_score": 1,
+    "method_signal_score": 2,
+    "needs_human_framework_review": true,
+    "primary_domain": "systems-thinking",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "systems-thinking-expert",
+    "skillability": "medium"
+  },
+  "created_at": "2026-05-11T18:44:11.926021+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/30 Agents Every AI Engineer Must Build Build production-ready agent systems using proven architectures and patterns (Imran Ahmad) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "e2a378f0d1059a63764422e3975109ec860fce8a21ec3193a253e3995a1cbe5f",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "30-agents-every-ai-engineer-must-build-imran-ahmad",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "30 Agents Every AI Engineer Must Build",
+  "updated_at": "2026-05-11T18:44:11.926030+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_retry_2026_05_12": {
+    "binary_read_ok": true,
+    "note": "Registered after macOS TCC/xattr retry; source remains candidate_unverified_framework until framework extraction/review.",
+    "toc_or_sample_verified": true
+  },
+  "version": "0.1.0"
+}

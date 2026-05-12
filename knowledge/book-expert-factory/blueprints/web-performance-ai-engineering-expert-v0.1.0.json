@@ -1,0 +1,68 @@
+{
+  "canon_books": [
+    {
+      "author": "Addy Osmani",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Web Performance Engineering in the Age of AI: Mastering Speed and Quality for AI-Generated Applications"
+    },
+    {
+      "author": "Louise Macfadyen",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Designing AI Interfaces"
+    },
+    {
+      "author": "Diana Montalion",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Learning Systems Thinking"
+    }
+  ],
+  "created_at": "2026-05-12T06:01:38.116469+00:00",
+  "expert_id": "web-performance-ai-engineering-expert",
+  "schema_version": 1,
+  "skills": [
+    "web-performance-ai-engineering-expert-diagnose",
+    "web-performance-ai-engineering-expert-apply",
+    "web-performance-ai-engineering-expert-update-scout"
+  ],
+  "source_count": 3,
+  "source_ids": [
+    "web-performance-engineering-in-the-age-of-ai-mastering-speed-and-quality-for-ai-generated-applicatio",
+    "designing-ai-interfaces-louise-macfadyen",
+    "learning-systems-thinking-diana-montalion"
+  ],
+  "source_policy": {
+    "book_role": "canon/framework base",
+    "conflict_rule": "books govern reusable method; official/current sources govern current facts; label conflicts explicitly",
+    "copyright_rule": "store paraphrased frameworks, not long source text",
+    "hierarchy": [
+      "user_context",
+      "canon_books_frameworks",
+      "official_current_sources",
+      "primary_research_or_cases",
+      "credible_secondary_sources",
+      "team_receipts_and_verified_outputs",
+      "model_inference"
+    ],
+    "web_role": "current facts/update layer"
+  },
+  "status": "blueprint_unverified",
+  "update_sources": [
+    "current Chrome / web.dev / Core Web Vitals documentation",
+    "current framework-specific performance docs",
+    "project RUM/Lighthouse/WebPageTest measurements"
+  ],
+  "verification_gate": {
+    "checks": [
+      "source file verified",
+      "framework traceability checked against TOC/sample pages",
+      "cross-book agreement/conflict table completed",
+      "web update sources verified if current facts are used",
+      "positive/negative activation tests passed"
+    ],
+    "required_before_promote": true
+  },
+  "version": "0.1.0"
+}

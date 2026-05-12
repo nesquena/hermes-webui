@@ -1,0 +1,30 @@
+type: object
+required:
+  - type
+  - target_lane
+  - payload
+additionalProperties: false
+properties:
+  type:
+    const: handoff_request
+  target_lane:
+    type: string
+    minLength: 1
+    maxLength: 128
+  payload:
+    type: object
+    required: [artifact_ref, reason, required_check]
+    additionalProperties: false
+    properties:
+      artifact_ref:
+        type: string
+        minLength: 1
+        maxLength: 500
+      reason:
+        type: string
+        minLength: 1
+        maxLength: 500
+      required_check:
+        type: string
+        minLength: 1
+        maxLength: 300

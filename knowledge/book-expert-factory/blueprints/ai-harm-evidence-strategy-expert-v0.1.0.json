@@ -1,0 +1,104 @@
+{
+  "canon_books": [
+    {
+      "author": "Muhammad Arif, Jaffar M. Arfan, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Securing the Digital Realm"
+    },
+    {
+      "author": "Omar Santos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic AI for Cybersecurity"
+    },
+    {
+      "author": "Naveen Kumar Chaudhary, Archana Patel, et al.",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "Artificial Intelligence and Digital Forensics"
+    },
+    {
+      "author": "Ahlad Kumar, Naveen Kumar Chaudhary, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Digital Defence"
+    },
+    {
+      "author": "Diana Montalion",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Learning Systems Thinking"
+    },
+    {
+      "author": "Catherine Casey",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "AI in Legal Tech: How Generative AI Is Transforming Legal Technology and the Practice of Law"
+    },
+    {
+      "author": "Armando Aliu",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "Artificial Intelligence and the Rule of Law: The Age of Legal Tech and Digital Governance in a Fractured Digital World"
+    },
+    {
+      "author": "Google Cloud",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Startup Technical Guide: AI Agents"
+    }
+  ],
+  "created_at": "2026-05-12T06:01:38.116268+00:00",
+  "expert_id": "ai-harm-evidence-strategy-expert",
+  "schema_version": 1,
+  "skills": [
+    "ai-harm-evidence-strategy-expert-diagnose",
+    "ai-harm-evidence-strategy-expert-apply",
+    "ai-harm-evidence-strategy-expert-update-scout"
+  ],
+  "source_count": 8,
+  "source_ids": [
+    "securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al",
+    "agentic-ai-for-cybersecurity-omar-santos",
+    "artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al",
+    "digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al",
+    "learning-systems-thinking-diana-montalion",
+    "ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin",
+    "artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu",
+    "startup-technical-guide-ai-agents-google-cloud"
+  ],
+  "source_policy": {
+    "book_role": "canon/framework base",
+    "conflict_rule": "books govern reusable method; official/current sources govern current facts; label conflicts explicitly",
+    "copyright_rule": "store paraphrased frameworks, not long source text",
+    "hierarchy": [
+      "user_context",
+      "canon_books_frameworks",
+      "official_current_sources",
+      "primary_research_or_cases",
+      "credible_secondary_sources",
+      "team_receipts_and_verified_outputs",
+      "model_inference"
+    ],
+    "web_role": "current facts/update layer"
+  },
+  "status": "blueprint_unverified",
+  "update_sources": [
+    "Japan official legal/privacy/AI governance sources",
+    "forensic standards/guidelines",
+    "current cyber incident and AI harm case sources",
+    "official legal-tech ethics/current-practice sources"
+  ],
+  "verification_gate": {
+    "checks": [
+      "source file verified",
+      "framework traceability checked against TOC/sample pages",
+      "cross-book agreement/conflict table completed",
+      "web update sources verified if current facts are used",
+      "positive/negative activation tests passed"
+    ],
+    "required_before_promote": true
+  },
+  "version": "0.1.0"
+}

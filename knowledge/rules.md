@@ -46,7 +46,7 @@ Active memory should be an anchor and router, not a full rule database. Keep onl
 
 ## Research / Study Answer Structure
 
-For research, reading, or study requests, answer in Thai with this 10-part structure unless Kei asks for another format:
+For research, reading, study, tool/library evaluation, or “ลองดู / ลองศึกษา / ลองวิจัย” requests, answer in Thai with this 10-part structure unless Kei asks for another format:
 
 1. คืออะไร
 2. สำคัญอย่างไร

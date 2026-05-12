@@ -1,0 +1,73 @@
+id: code-implementation-worker
+name: Code Implementation Worker
+purpose: Implement scoped code changes after Yuto defines acceptance criteria and verification plan.
+owner: yuto-control
+runtime_options:
+  - codex
+  - claude_code
+  - opencode
+  - hermes_delegate_task
+when_to_use:
+  - a concrete code change has clear acceptance criteria
+  - implementation is safer/faster in a dedicated coding worker
+when_not_to_use:
+  - task is planning, review-only, destructive, production-touching, or lacks acceptance criteria
+allowed_tools:
+  - read_file
+  - search_files
+  - patch
+  - write_file
+  - terminal_tests
+forbidden_tools:
+  - deploy
+  - send_message
+  - production_data
+  - secrets_reading
+  - destructive_ops_without_approval
+  - read_raw_untrusted_docs
+input_schema:
+  type: object
+  required: [repo_path, goal, acceptance_criteria]
+  additionalProperties: false
+  properties:
+    repo_path: {type: string, maxLength: 256}
+    goal: {type: string, maxLength: 1000}
+    acceptance_criteria:
+      type: array
+      minItems: 1
+      items: {type: string, maxLength: 300}
+    verification_command: {type: string, maxLength: 500}
+output_schema:
+  type: object
+  required: [changed_files, verification, residual_risk]
+  additionalProperties: false
+  properties:
+    changed_files:
+      type: array
+      items: {type: string, maxLength: 256}
+    verification:
+      type: array
+      items:
+        type: object
+        required: [command, result]
+        additionalProperties: false
+        properties:
+          command: {type: string, maxLength: 500}
+          result: {enum: [pass, fail, not_run]}
+          output_ref: {type: string, maxLength: 256}
+    residual_risk: {type: string, maxLength: 1000}
+safety_rules:
+  - Do not touch production, secrets, deployments, or broad destructive changes without explicit approval.
+  - Keep changes focused.
+  - Run proportional tests or explain why not.
+verification_gate:
+  required_by: qa-critic
+  checks:
+    - diff matches acceptance criteria
+    - tests/linters were run or residual risk states why not
+handoff_allowed_to:
+  - qa-critic
+receipt_required: true
+human_gate: false
+write_holder: true
+standing_worker: false

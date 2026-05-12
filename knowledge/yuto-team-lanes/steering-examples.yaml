@@ -1,0 +1,33 @@
+examples:
+  - id: japan-ai-harm-consultation-prep
+    request: Build a consultation-prep packet from a synthetic AI scam evidence set.
+    lanes:
+      - evidence-doc-reader
+      - japan-compliance-checker
+      - forensic-reviewer
+      - report-writer
+      - qa-critic
+    stop_condition: Markdown packet exists with source inventory, timeline, uncertainty, expert questions, and QA result.
+    human_gate: true
+
+  - id: repo-research-brief
+    request: Study a GitHub repo and explain how it should improve Yuto.
+    lanes:
+      - researcher-source-reader
+      - qa-critic
+    stop_condition: Source trail note exists, links verified, CocoIndex/graph healthy, and final adoption recommendation is delivered.
+    human_gate: false
+
+  - id: scoped-code-change
+    request: Implement a small feature in an existing repo.
+    lanes:
+      - code-implementation-worker
+      - qa-critic
+    stop_condition: Changed files listed, tests run, residual risk stated, and Yuto verifies before claiming done.
+    human_gate: false
+
+  - id: direct-yuto-only
+    request: Answer a small factual question from already verified context.
+    lanes: []
+    stop_condition: Yuto answers directly with evidence if needed.
+    human_gate: false

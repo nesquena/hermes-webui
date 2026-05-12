@@ -1,9 +1,9 @@
 # Second Brain Dashboard
 
-Updated: 2026-05-02
+Updated: 2026-05-04
 
 Conclusion:
-Yuto's second brain is active and should be improved in small verified loops, not by adding a large RAG/database layer before the graph and routing are useful.
+Yuto's second brain is active and should optimize for fast, location-aware recall: know what exists, where it lives, and retrieve the right source quickly without bloating active memory. Improve in small verified loops, not by adding a large RAG/database layer before the graph and routing are useful.
 
 Current source of truth:
 - Active memory: `USER.md`, `MEMORY.md`
@@ -23,7 +23,11 @@ Fast commands:
 ```bash
 cd /Users/kei/kei-jarvis
 python3 tools/second_brain.py status
+python3 tools/second_brain.py recent --query "AI-Books Book Expert Factory" --limit 5
 python3 tools/second_brain.py search "memory routing"
+python3 tools/second_brain.py memory candidates --min-chars 140
+python3 tools/second_brain.py palace search "latest recall"
+python3 tools/second_brain.py palace doctor
 python3 tools/second_brain.py path dashboard
 python3 tools/second_brain.py new "Source title" --type source --why "why it matters" --evidence "path or URL" --next "next review action"
 ```
@@ -33,10 +37,16 @@ Use from chat:
 - "เก็บเข้า second brain" -> create a focused note only after evidence/source/path is known.
 - "second brain status" -> run `python3 tools/second_brain.py status`.
 
+Fast recall protocol:
+1. If Kei asks where something is, search known paths first; answer with exact path(s), not a lecture.
+2. If Kei references recent/latest work ("ล่าสุด", "เมื่อกี๊", "คุยกันล่าสุด"), inspect raw sessions by mtime first with `python3 tools/second_brain.py recent --query "<topic>" --limit 5`; do not rely on `session_search` summaries as first source.
+3. If Kei references older prior work, use `session_search` after checking likely knowledge/source paths.
+4. If the item is durable and reusable, route it to `knowledge/` or a skill; keep active memory as pointers only.
+5. If the claim depends on current files/tools/models, verify live before answering.
+
 Today status:
-- Core graph after memory/KG organization: `nodes=58 edges=227 broken=0 orphans=0`.
-- Active `USER.md` pressure after pruning: `1045/1375 chars`.
-- Active `MEMORY.md` pressure after pruning: `1565/2200 chars`.
+- Current second-brain status on 2026-05-04: `nodes=68 edges=247 broken=0 orphans=6`.
+- Active memory pressure after adding Kei's fast-recall preference: `USER.md` about 95% full; keep future additions compact or route to `knowledge/rules.md`.
 - Obsidian bridge exists at `/Users/kei/Documents/Obsidian Vault/Yuto Second Brain.md`.
 - Retrieval/use CLI exists at `/Users/kei/kei-jarvis/tools/second_brain.py`.
 

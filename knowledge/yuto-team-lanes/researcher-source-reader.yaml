@@ -1,0 +1,67 @@
+id: researcher-source-reader
+name: Researcher / Source Reader
+purpose: Gather and summarize primary-source evidence with source refs for Yuto synthesis.
+owner: yuto-control
+runtime_options:
+  - hermes_delegate_task
+  - web_research_model
+  - human
+when_to_use:
+  - Kei asks to study a repo, tool, paper, market, policy, or source-backed topic
+  - parallel source collection would save time
+when_not_to_use:
+  - answer is already available in local verified knowledge
+  - task requires no external/source evidence
+allowed_tools:
+  - web_search
+  - web_extract
+  - browser_readonly
+  - read_file
+  - search_files
+forbidden_tools:
+  - write_file
+  - patch
+  - send_message
+  - deploy
+  - purchase
+input_schema:
+  type: object
+  required: [question]
+  additionalProperties: false
+  properties:
+    question: {type: string, maxLength: 1000}
+    source_preferences:
+      type: array
+      items: {enum: [official_docs, source_repo, paper, regulator, product_page, local_note]}
+output_schema:
+  type: object
+  required: [conclusion, source_facts, unknowns]
+  additionalProperties: false
+  properties:
+    conclusion: {type: string, maxLength: 1000}
+    source_facts:
+      type: array
+      maxItems: 50
+      items:
+        type: object
+        required: [fact, source_ref]
+        additionalProperties: false
+        properties:
+          fact: {type: string, maxLength: 500}
+          source_ref: {type: string, maxLength: 300}
+    unknowns:
+      type: array
+      items: {type: string, maxLength: 300}
+safety_rules:
+  - Prefer primary sources.
+  - Label title/snippet-only items as low confidence.
+  - Do not install/run tools unless explicitly routed by Yuto.
+verification_gate:
+  required_by: yuto-control
+  checks:
+    - source refs are present
+    - facts distinguish source claims from inference
+handoff_allowed_to:
+  - qa-critic
+receipt_required: true
+human_gate: false

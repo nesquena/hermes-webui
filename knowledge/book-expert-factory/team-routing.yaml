@@ -1,0 +1,200 @@
+version: 1
+system: yuto-multi-book-expert-skill-factory
+principle: Yuto routes and verifies; departments use only allowed expert actions; promotion requires Executive/Control plus relevant human/expert gate.
+actions:
+  classify_source: triage a dropped book/source into a candidate domain
+  register_source: write verified file metadata and unverified candidate record
+  extract_framework: paraphrase steps/rules/mistakes/questions from verified source samples
+  compare_books: compare multiple canon sources and identify agreement/conflict
+  diagnose: use a verified expert lens to analyze a situation
+  apply: create a usable artifact from verified expert frameworks
+  update_scout: check official/current web sources for fact changes
+  promote_expert: promote reviewed blueprint/skill to shared KG/skill/team lane
+  use_externally: use output in external/published/client-facing contexts
+restricted_actions:
+  - promote_expert
+  - use_externally
+promotion_owner: executive-control-office
+universal_rules:
+  - Workers never promote sources, skills, or KG truth directly.
+  - Books provide canon/frameworks; official/current sources provide current facts.
+  - Every department must return receipts for diagnose/apply/update_scout work.
+  - Legal, forensic, security, evidence, external publishing, and production use require human gate.
+  - Copyright boundary: paraphrase frameworks; do not copy long passages into skills.
+divisions:
+  - id: executive-control-office
+    name: Executive / Control Office
+    role_in_factory: owner, router, final verifier, promotion gate
+    allowed_actions: [classify_source, register_source, extract_framework, compare_books, diagnose, apply, update_scout, promote_expert]
+    forbidden_actions: [use_externally_without_kei_approval]
+    human_gate: [promote_expert, use_externally]
+    receipt_required: true
+    roles:
+      - id: yuto-control
+        title: Yuto Control Tower
+        allowed_actions: [classify_source, register_source, compare_books, diagnose, apply, update_scout, promote_expert]
+      - id: scope-planner
+        title: Scope Planner
+        allowed_actions: [diagnose, compare_books]
+      - id: qa-critic
+        title: QA Critic
+        allowed_actions: [diagnose]
+      - id: promotion-reviewer
+        title: Promotion Reviewer
+        allowed_actions: [promote_expert]
+  - id: global-intelligence-division
+    name: Global Intelligence Division
+    role_in_factory: update layer and current-source scout
+    allowed_actions: [update_scout, diagnose]
+    forbidden_actions: [promote_expert, register_source, use_externally]
+    human_gate: [legal_or_forensic_current_claims]
+    receipt_required: true
+    roles:
+      - id: ai-harm-news-scout
+        title: AI Harm News Scout
+        allowed_actions: [update_scout]
+      - id: source-quality-analyst
+        title: Source Quality Analyst
+        allowed_actions: [diagnose, update_scout]
+      - id: japan-relevance-tagger
+        title: Japan Relevance Tagger
+        allowed_actions: [diagnose]
+  - id: research-policy-division
+    name: Research & Policy Division
+    role_in_factory: canon comparison and research synthesis
+    allowed_actions: [extract_framework, compare_books, diagnose, update_scout]
+    forbidden_actions: [promote_expert, apply_as_final_policy, use_externally]
+    human_gate: [policy_claims, academic_claims]
+    receipt_required: true
+    roles:
+      - id: literature-scout
+        title: Literature Scout
+        allowed_actions: [update_scout, compare_books]
+      - id: framework-synthesizer
+        title: Framework Synthesizer
+        allowed_actions: [extract_framework, compare_books]
+      - id: policy-analyst
+        title: Policy Analyst
+        allowed_actions: [diagnose, update_scout]
+  - id: ai-law-legal-frontier-division
+    name: AI Law & Legal Frontier Division
+    role_in_factory: legal boundary review and current law update layer
+    allowed_actions: [diagnose, update_scout, compare_books]
+    forbidden_actions: [promote_expert, legal_advice, use_externally]
+    human_gate: [legal_claims, japan_attorney_act_article_72, appi_claims]
+    receipt_required: true
+    roles:
+      - id: japan-legal-boundary-checker
+        title: Japan Legal Boundary Checker
+        allowed_actions: [diagnose, update_scout]
+      - id: appi-privacy-reviewer
+        title: APPI / Privacy Reviewer
+        allowed_actions: [diagnose, update_scout]
+      - id: legal-language-risk-reviewer
+        title: Legal Language Risk Reviewer
+        allowed_actions: [diagnose]
+  - id: digital-forensic-lab
+    name: Digital Forensic Lab
+    role_in_factory: evidence-method and chain-of-custody lens
+    allowed_actions: [diagnose, compare_books, update_scout]
+    forbidden_actions: [promote_expert, mutate_original_evidence, claim_authenticity_proven, use_externally]
+    human_gate: [forensic_reliability_claims, evidence_sop_claims]
+    receipt_required: true
+    roles:
+      - id: provenance-reviewer
+        title: Provenance Reviewer
+        allowed_actions: [diagnose]
+      - id: chain-of-custody-reviewer
+        title: Chain of Custody Reviewer
+        allowed_actions: [diagnose]
+      - id: forensic-standards-scout
+        title: Forensic Standards Scout
+        allowed_actions: [update_scout, compare_books]
+  - id: security-frontier-division
+    name: Security Frontier Division
+    role_in_factory: security/dual-use/source safety review
+    allowed_actions: [diagnose, update_scout, compare_books]
+    forbidden_actions: [promote_expert, offensive_instructions, malware_or_evasion, use_externally]
+    human_gate: [security_claims, dual_use_methods]
+    receipt_required: true
+    roles:
+      - id: defensive-security-reviewer
+        title: Defensive Security Reviewer
+        allowed_actions: [diagnose]
+      - id: dual-use-risk-reviewer
+        title: Dual-use Risk Reviewer
+        allowed_actions: [diagnose]
+      - id: security-source-scout
+        title: Security Source Scout
+        allowed_actions: [update_scout]
+  - id: case-evidence-operations-division
+    name: Case & Evidence Operations Division
+    role_in_factory: apply verified expert methods to synthetic or approved evidence-prep workflows
+    allowed_actions: [diagnose, apply]
+    forbidden_actions: [register_source, extract_framework, promote_expert, raw_victim_evidence_auto_memory, legal_advice, forensic_conclusion]
+    human_gate: [real_case_material, victim_evidence, lawyer_or_expert_handoff]
+    receipt_required: true
+    roles:
+      - id: intake-prep-operator
+        title: Intake Prep Operator
+        allowed_actions: [diagnose]
+      - id: timeline-builder
+        title: Timeline Builder
+        allowed_actions: [apply]
+      - id: consultation-packet-builder
+        title: Consultation Packet Builder
+        allowed_actions: [apply]
+  - id: engineering-product-systems-division
+    name: Engineering / Product Systems Division
+    role_in_factory: implement CLI, validators, schemas, tests, and product wrappers
+    allowed_actions: [classify_source, register_source, apply]
+    forbidden_actions: [promote_expert_without_yuto, use_externally, read_raw_legal_or_victim_evidence]
+    human_gate: [production_changes, destructive_ops, external_deploy]
+    receipt_required: true
+    roles:
+      - id: cli-implementation-worker
+        title: CLI Implementation Worker
+        allowed_actions: [classify_source, register_source, apply]
+      - id: schema-validator-engineer
+        title: Schema / Validator Engineer
+        allowed_actions: [apply]
+      - id: product-workflow-designer
+        title: Product Workflow Designer
+        allowed_actions: [diagnose, apply]
+  - id: knowledge-learning-infrastructure-division
+    name: Knowledge & Learning Infrastructure Division
+    role_in_factory: registry, KG, skill drafts, versioning, and retrieval hygiene
+    allowed_actions: [register_source, extract_framework, compare_books, diagnose, apply]
+    forbidden_actions: [promote_expert_without_yuto, index_raw_quarantine, copy_long_book_passages]
+    human_gate: [skill_promotion, active_memory_update]
+    receipt_required: true
+    roles:
+      - id: source-registrar
+        title: Source Registrar
+        allowed_actions: [register_source]
+      - id: framework-extractor
+        title: Framework Extractor
+        allowed_actions: [extract_framework]
+      - id: skill-draft-writer
+        title: Skill Draft Writer
+        allowed_actions: [apply]
+      - id: kg-librarian
+        title: KG Librarian
+        allowed_actions: [compare_books, diagnose]
+  - id: compliance-safety-expert-network-division
+    name: Compliance / Safety / Expert Network Division
+    role_in_factory: final risk and human/expert review layer
+    allowed_actions: [diagnose, update_scout]
+    forbidden_actions: [promote_expert, use_externally_without_approval]
+    human_gate: [all_high_risk_claims, expert_network_handoff, public_release]
+    receipt_required: true
+    roles:
+      - id: safety-officer
+        title: Safety Officer
+        allowed_actions: [diagnose]
+      - id: expert-network-coordinator
+        title: Expert Network Coordinator
+        allowed_actions: [diagnose]
+      - id: compliance-gate-reviewer
+        title: Compliance Gate Reviewer
+        allowed_actions: [diagnose, update_scout]

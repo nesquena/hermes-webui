@@ -1,0 +1,140 @@
+{
+  "canon_books": [
+    {
+      "author": "Imran Ahmad",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "30 Agents Every AI Engineer Must Build"
+    },
+    {
+      "author": "Omar Santos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic AI for Cybersecurity"
+    },
+    {
+      "author": "Ali Arsanjani, Juan Pablo Bustos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic Architectural Patterns for Building Multi-Agent Systems"
+    },
+    {
+      "author": "Catherine Casey",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "AI in Legal Tech: How Generative AI Is Transforming Legal Technology and the Practice of Law"
+    },
+    {
+      "author": "Naveen Kumar Chaudhary, Archana Patel, et al.",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "Artificial Intelligence and Digital Forensics"
+    },
+    {
+      "author": "Armando Aliu",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "Artificial Intelligence and the Rule of Law: The Age of Legal Tech and Digital Governance in a Fractured Digital World"
+    },
+    {
+      "author": "Louise Macfadyen",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Designing AI Interfaces"
+    },
+    {
+      "author": "Ahlad Kumar, Naveen Kumar Chaudhary, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Digital Defence"
+    },
+    {
+      "author": "Diana Montalion",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Learning Systems Thinking"
+    },
+    {
+      "author": "Heiko Hotz, Sokratis Kartakis",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Multimodal, Real-Time AI Agent Systems"
+    },
+    {
+      "author": "Muhammad Arif, Jaffar M. Arfan, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Securing the Digital Realm"
+    },
+    {
+      "author": "Google Cloud",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Startup Technical Guide: AI Agents"
+    },
+    {
+      "author": "Addy Osmani",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Web Performance Engineering in the Age of AI: Mastering Speed and Quality for AI-Generated Applications"
+    }
+  ],
+  "created_at": "2026-05-12T06:01:38.115858+00:00",
+  "expert_id": "yuto-ai-books-combined-expert",
+  "schema_version": 1,
+  "skills": [
+    "yuto-ai-books-combined-expert-diagnose",
+    "yuto-ai-books-combined-expert-apply",
+    "yuto-ai-books-combined-expert-update-scout"
+  ],
+  "source_count": 13,
+  "source_ids": [
+    "30-agents-every-ai-engineer-must-build-imran-ahmad",
+    "agentic-ai-for-cybersecurity-omar-santos",
+    "agentic-architectural-patterns-for-building-multi-agent-systems-ali-arsanjani-juan-pablo-bustos",
+    "ai-in-legal-tech-how-generative-ai-is-transforming-legal-technology-and-the-practice-of-law-catherin",
+    "artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al",
+    "artificial-intelligence-and-the-rule-of-law-the-age-of-legal-tech-and-digital-governance-in-a-fractu",
+    "designing-ai-interfaces-louise-macfadyen",
+    "digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al",
+    "learning-systems-thinking-diana-montalion",
+    "multimodal-real-time-ai-agent-systems-heiko-hotz-sokratis-kartakis",
+    "securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al",
+    "startup-technical-guide-ai-agents-google-cloud",
+    "web-performance-engineering-in-the-age-of-ai-mastering-speed-and-quality-for-ai-generated-applicatio"
+  ],
+  "source_policy": {
+    "book_role": "canon/framework base",
+    "conflict_rule": "books govern reusable method; official/current sources govern current facts; label conflicts explicitly",
+    "copyright_rule": "store paraphrased frameworks, not long source text",
+    "hierarchy": [
+      "user_context",
+      "canon_books_frameworks",
+      "official_current_sources",
+      "primary_research_or_cases",
+      "credible_secondary_sources",
+      "team_receipts_and_verified_outputs",
+      "model_inference"
+    ],
+    "web_role": "current facts/update layer"
+  },
+  "status": "blueprint_unverified",
+  "update_sources": [
+    "official AI/security/legal documentation for current facts",
+    "Japan privacy/AI governance sources for current legal claims",
+    "vendor docs for MCP/A2A/agent tooling changes",
+    "Google Cloud official agent/AgentOps docs for implementation-current claims",
+    "current Web Vitals / Chrome / web platform docs for performance-current claims"
+  ],
+  "verification_gate": {
+    "checks": [
+      "source file verified",
+      "framework traceability checked against TOC/sample pages",
+      "cross-book agreement/conflict table completed",
+      "web update sources verified if current facts are used",
+      "positive/negative activation tests passed"
+    ],
+    "required_before_promote": true
+  },
+  "version": "0.1.0"
+}

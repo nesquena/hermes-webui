@@ -1,0 +1,53 @@
+{
+  "author": "Naveen Kumar Chaudhary, Archana Patel, et al.",
+  "book_set_group": "new",
+  "classification": {
+    "domain_signal_score": 3,
+    "method_signal_score": 0,
+    "needs_human_framework_review": true,
+    "primary_domain": "legal-forensic-evidence",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "legal-forensic-evidence-expert",
+    "skillability": "medium"
+  },
+  "created_at": "2026-05-11T18:44:11.860753+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Artificial Intelligence and Digital Forensics Advancements, Applications, Challenges, and Solutions (Naveen Kumar Chaudhary, Archana Patel etc.) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "ba9680be2ad2056e502b5d4591d23603cc14ae3e9e7926817496d5c6d99c1bc7",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Artificial Intelligence and Digital Forensics",
+  "updated_at": "2026-05-11T18:44:11.860763+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_retry_2026_05_12": {
+    "binary_read_ok": true,
+    "note": "Registered after macOS TCC/xattr retry; source remains candidate_unverified_framework until framework extraction/review.",
+    "toc_or_sample_verified": true
+  },
+  "version": "0.1.0"
+}

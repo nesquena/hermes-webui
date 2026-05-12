@@ -1,0 +1,63 @@
+id: forensic-reviewer
+name: Forensic Reviewer
+purpose: Review evidence-handling posture for provenance, hash, timestamp, source trail, chain of custody, and contamination risk.
+owner: yuto-control
+runtime_options:
+  - hermes_delegate_task
+  - human_forensic_expert
+when_to_use:
+  - evidence metadata, timeline, or chain-of-custody quality matters
+  - a consultation-prep packet needs forensic defensibility notes
+  - AI may have touched working copies and contamination risk must be checked
+when_not_to_use:
+  - the user wants AI to prove authenticity or replace a forensic expert
+allowed_tools:
+  - read_file
+  - search_files
+forbidden_tools:
+  - write_file
+  - patch
+  - send_message
+  - deploy
+  - original_evidence_mutation
+input_schema:
+  type: object
+  required: [evidence_inventory_ref]
+  additionalProperties: false
+  properties:
+    evidence_inventory_ref: {type: string, maxLength: 256}
+    extracted_facts_ref: {type: string, maxLength: 256}
+output_schema:
+  type: object
+  required: [status, findings, required_human_review]
+  additionalProperties: false
+  properties:
+    status: {enum: [pass, partial, fail]}
+    findings:
+      type: array
+      maxItems: 100
+      items:
+        type: object
+        required: [severity, issue, evidence_ref, recommendation]
+        additionalProperties: false
+        properties:
+          severity: {enum: [blocker, high, medium, low]}
+          issue: {type: string, maxLength: 500}
+          evidence_ref: {type: string, maxLength: 256}
+          recommendation: {type: string, maxLength: 500}
+    required_human_review: {type: boolean}
+safety_rules:
+  - Do not claim authenticity as proven.
+  - Do not alter original evidence.
+  - Separate original evidence from working copies.
+verification_gate:
+  required_by: yuto-control
+  checks:
+    - provenance/hash/timestamp gaps are explicit
+    - expert-review need is flagged
+    - no authenticity guarantee appears
+handoff_allowed_to:
+  - report-writer
+  - qa-critic
+receipt_required: true
+human_gate: true

@@ -1,0 +1,47 @@
+{
+  "author": "Google Cloud",
+  "classification": {
+    "domain_signal_score": 3,
+    "method_signal_score": 4,
+    "needs_human_framework_review": true,
+    "primary_domain": "productivity",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "productivity-coach",
+    "skillability": "high"
+  },
+  "created_at": "2026-05-12T05:57:18.757939+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Startup technical guide AI agents(final) (Google Cloud) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "6d4d69de5f899bafbf8f56639952af74440db9b9f93060fa365e786f13c9e8a4",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "startup-technical-guide-ai-agents-google-cloud",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Startup Technical Guide: AI Agents",
+  "updated_at": "2026-05-12T05:57:18.757950+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "version": "0.1.0"
+}

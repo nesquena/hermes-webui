@@ -52,6 +52,15 @@ Steps:
 
 Reference: [[source-recursive-language-models]] [[yuto-recursive-context-operator]]
 
+## Yuto Team Lanes
+
+Use [[yuto-team-lanes-reuse-playbook]] when a task needs reusable worker-lane routing, least-privilege boundaries, receipts, schema validation, or safe handling of untrusted documents.
+
+Fast rule:
+- Use Yuto alone for small tasks.
+- Use Team Lanes when untrusted input, high-risk claims, final artifacts, or multiple separable phases require reader/reviewer/writer separation.
+- Keep worker count small: default max 3 workers, one writer, one critic.
+
 Evaluation:
 - For substantial tasks, score with [[yuto-rlm-evaluation-plan]] before claiming the new loop is effective.
 - Do not claim RLM-style improved Yuto until scored task evidence exists.

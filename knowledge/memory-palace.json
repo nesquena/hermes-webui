@@ -1,0 +1,243 @@
+[
+  {
+    "palace_id": "ke-iprefs-core",
+    "wing": "user",
+    "room": "preferences",
+    "title": "Kei core collaboration preferences",
+    "summary": "Thai discussion, English technical terms, evidence-first concise answers, confirmation gates, and detailed rules pointer.",
+    "paths": [
+      "/Users/kei/.hermes/memories/USER.md",
+      "knowledge/rules.md"
+    ],
+    "commands": [
+      "python tools/second_brain.py palace search Kei preferences",
+      "python tools/second_brain.py search rules"
+    ],
+    "tags": [
+      "USER",
+      "rules",
+      "preferences",
+      "thai",
+      "evidence-first"
+    ]
+  },
+  {
+    "palace_id": "yuto-recall-latest",
+    "wing": "memory",
+    "room": "recent-recall",
+    "title": "Latest-context recall protocol",
+    "summary": "For ล่าสุด/เมื่อกี๊/คุยกันล่าสุด, inspect raw Hermes sessions by mtime before relying on session_search summaries.",
+    "paths": [
+      "knowledge/memory-system.md",
+      "knowledge/second-brain-dashboard.md",
+      "/Users/kei/.hermes/sessions"
+    ],
+    "commands": [
+      "python tools/second_brain.py recent --query \"AI-Books Book Expert Factory\" --limit 5",
+      "python tools/second_brain.py palace search latest recall"
+    ],
+    "tags": [
+      "latest",
+      "recent",
+      "session",
+      "recall",
+      "raw-session"
+    ]
+  },
+  {
+    "palace_id": "yuto-memory-demotion",
+    "wing": "memory",
+    "room": "demotion",
+    "title": "Active-memory demotion lane",
+    "summary": "Move old/long active memory to knowledge, skills, or raw sessions; keep USER.md/MEMORY.md as hot pointers only.",
+    "paths": [
+      "knowledge/memory-system.md",
+      "knowledge/memory-palace.json",
+      "/Users/kei/.hermes/memories/USER.md",
+      "/Users/kei/.hermes/memories/MEMORY.md"
+    ],
+    "commands": [
+      "python tools/second_brain.py memory entries",
+      "python tools/second_brain.py memory candidates --min-chars 140",
+      "python tools/second_brain.py palace doctor"
+    ],
+    "tags": [
+      "demotion",
+      "active-memory",
+      "USER",
+      "MEMORY",
+      "palace"
+    ]
+  },
+  {
+    "palace_id": "yuto-memory-scout",
+    "wing": "memory",
+    "room": "scout",
+    "title": "Read-only Memory Scout",
+    "summary": "Background observer for memory pressure, latest raw-session signals, Second Brain/CocoIndex health, Book Expert Factory, and team receipts.",
+    "paths": [
+      "knowledge/yuto-memory-scout.md",
+      "tools/memory_scout.py",
+      "tests/test_memory_scout.py",
+      "/Users/kei/.hermes/scripts/yuto_memory_scout.py"
+    ],
+    "commands": [
+      "python tools/memory_scout.py --session-limit 8",
+      "python -m pytest tests/test_memory_scout.py tests/test_second_brain.py -q"
+    ],
+    "tags": [
+      "memory-scout",
+      "cron",
+      "observer",
+      "receipts",
+      "CocoIndex"
+    ]
+  },
+  {
+    "palace_id": "second-brain-cocoindex",
+    "wing": "knowledge",
+    "room": "derived-index",
+    "title": "Second Brain + CocoIndex",
+    "summary": "Markdown knowledge is truth; CocoIndex is derived cache/search with health checks and no authority over facts.",
+    "paths": [
+      "tools/second_brain.py",
+      "tools/cocoindex_secondbrain",
+      ".cocoindex-secondbrain",
+      "knowledge/second-brain-dashboard.md",
+      "knowledge/source-cocoindex.md"
+    ],
+    "commands": [
+      "python tools/second_brain.py status",
+      "python tools/second_brain.py coco doctor",
+      "python tools/second_brain.py coco search \"memory routing\""
+    ],
+    "tags": [
+      "second-brain",
+      "CocoIndex",
+      "markdown",
+      "cache",
+      "search"
+    ]
+  },
+  {
+    "palace_id": "book-expert-factory",
+    "wing": "knowledge",
+    "room": "books",
+    "title": "Book Expert Factory",
+    "summary": "Registry and v0.1 blueprint pipeline for dropped books; verify framework extraction before promoting callable expert skills.",
+    "paths": [
+      "knowledge/yuto-multi-book-expert-skill-factory.md",
+      "knowledge/book-expert-factory",
+      "tools/book_expert_factory.py",
+      "tests/test_book_expert_factory.py"
+    ],
+    "commands": [
+      "python tools/book_expert_factory.py validate-routing",
+      "python tools/second_brain.py palace search Book Expert Factory",
+      "python -m pytest tests/test_book_expert_factory.py -q"
+    ],
+    "tags": [
+      "books",
+      "Book Expert Factory",
+      "skills",
+      "expert",
+      "AI-Books"
+    ]
+  },
+  {
+    "palace_id": "systems-thinking-templates",
+    "wing": "knowledge",
+    "room": "templates",
+    "title": "Systems thinking templates",
+    "summary": "Reusable systems-thinking ready reference and PhD/project planning templates used before new work and learning plans.",
+    "paths": [
+      "knowledge/systems-thinking-ready-reference.md",
+      "knowledge/systems-thinking-for-phd-learning-project.md",
+      "knowledge/systems-thinking-general-template.md"
+    ],
+    "commands": [
+      "python tools/second_brain.py palace search systems thinking",
+      "python tools/second_brain.py search \"systems thinking\""
+    ],
+    "tags": [
+      "systems-thinking",
+      "template",
+      "planning",
+      "PhD"
+    ]
+  },
+  {
+    "palace_id": "ai-harm-evidence-company",
+    "wing": "project",
+    "room": "ai-harm-evidence",
+    "title": "Japan-first AI harm evidence company",
+    "summary": "Japan-first AI harm evidence company context, legal-forensic learning path, and team operating model.",
+    "paths": [
+      "knowledge/ai-era-legal-advocacy-company-blueprint.md",
+      "knowledge/yuto-ai-harm-evidence-company-team-v0.2.md",
+      "knowledge/ai-legal-forensic-ai-learning-path.md"
+    ],
+    "commands": [
+      "python tools/second_brain.py palace search AI harm evidence",
+      "python tools/second_brain.py search \"Japan-first AI harm evidence\""
+    ],
+    "tags": [
+      "AI harm",
+      "Japan",
+      "legal",
+      "forensic",
+      "company"
+    ]
+  },
+  {
+    "palace_id": "palace-storage-budget-100gb",
+    "wing": "memory",
+    "room": "storage-budget",
+    "title": "Memory Palace storage budget",
+    "summary": "Kei explicitly allows up to 100 GB for palace-backed durable recall, but the space is a budget for verified sources, indexes, embeddings, and receipts—not permission to dump raw noise into active memory.",
+    "paths": [
+      "knowledge/memory-palace.md",
+      "knowledge/memory-palace.json",
+      "knowledge/memory-palace"
+    ],
+    "commands": [
+      "du -sh /Users/kei/kei-jarvis/knowledge /Users/kei/kei-jarvis/.cocoindex-secondbrain 2>/dev/null || true",
+      "python tools/second_brain.py palace search \"100 GB\"",
+      "python tools/second_brain.py palace doctor"
+    ],
+    "tags": [
+      "storage",
+      "budget",
+      "100GB",
+      "palace",
+      "durable-recall"
+    ]
+  },
+  {
+    "palace_id": "yuto-codebase-search-toolbelt",
+    "wing": "code",
+    "room": "self-improvement-search",
+    "title": "Yuto codebase search toolbelt",
+    "summary": "CocoIndex Code plus Yuto hybrid lexical/semantic wrapper for foreground Yuto self-improvement without delegating Yuto-project changes.",
+    "paths": [
+      "knowledge/yuto-codebase-search-toolbelt.md",
+      "tools/yuto_code_search.py",
+      "tools/yuto_code_search_benchmark.py",
+      "tests/test_yuto_code_search.py",
+      "tests/test_yuto_code_search_benchmark.py",
+      ".cocoindex_code/settings.yml"
+    ],
+    "commands": [
+      "python tools/yuto_code_search.py \"memory palace doctor\" --limit 8",
+      "python tools/yuto_code_search_benchmark.py --min-score 9.0",
+      "ccc doctor"
+    ],
+    "tags": [
+      "codebase-search",
+      "CocoIndex Code",
+      "self-improvement",
+      "Yuto",
+      "benchmark"
+    ]
+  }
+]

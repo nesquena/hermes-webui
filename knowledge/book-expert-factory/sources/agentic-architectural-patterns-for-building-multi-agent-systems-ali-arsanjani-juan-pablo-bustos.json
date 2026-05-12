@@ -1,0 +1,53 @@
+{
+  "author": "Ali Arsanjani, Juan Pablo Bustos",
+  "book_set_group": "old",
+  "classification": {
+    "domain_signal_score": 2,
+    "method_signal_score": 1,
+    "needs_human_framework_review": true,
+    "primary_domain": "systems-thinking",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "systems-thinking-expert",
+    "skillability": "medium"
+  },
+  "created_at": "2026-05-11T18:44:11.994840+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Agentic Architectural Patterns for Building Multi-Agent Systems Proven design patterns and practices for GenAI, agents, RAG,… (Dr. Ali Arsanjani, Juan Pablo Bustos) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "05c715f1493be1a2a2e7233d81f0edb481a62930897b20d88c3d3f1edb8d7502",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "agentic-architectural-patterns-for-building-multi-agent-systems-ali-arsanjani-juan-pablo-bustos",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Agentic Architectural Patterns for Building Multi-Agent Systems",
+  "updated_at": "2026-05-11T18:44:11.994845+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "verified_by_yuto_retry_2026_05_12": {
+    "binary_read_ok": true,
+    "note": "Registered after macOS TCC/xattr retry; source remains candidate_unverified_framework until framework extraction/review.",
+    "toc_or_sample_verified": true
+  },
+  "version": "0.1.0"
+}

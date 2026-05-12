@@ -1,0 +1,47 @@
+{
+  "author": "Addy Osmani",
+  "classification": {
+    "domain_signal_score": 2,
+    "method_signal_score": 1,
+    "needs_human_framework_review": true,
+    "primary_domain": "productivity",
+    "recommended_skill_pair": [
+      "diagnose",
+      "apply"
+    ],
+    "recommended_update_layer": "web-update-scout",
+    "role_suggestion": "productivity-coach",
+    "skillability": "medium"
+  },
+  "created_at": "2026-05-12T06:01:38.108627+00:00",
+  "next_actions": [
+    "extract framework questions/steps/rules/mistakes",
+    "compare with other canon books in the same expert domain",
+    "create diagnose/apply/update-scout skill drafts only after Yuto verification"
+  ],
+  "path": "/Users/kei/Desktop/AI-Books/Web Performance Engineering in the Age of AI Mastering Speed and Quality for AI-Generated Applications (Addy Osmani) (z-library.sk, 1lib.sk, z-lib.sk).pdf",
+  "schema_version": 1,
+  "sha256": "628852795c45d1f2a5e8fdfeb90a65d7674c0d196ec2867ad50b5756bb032a43",
+  "source_hierarchy": [
+    "user_context",
+    "canon_books_frameworks",
+    "official_current_sources",
+    "primary_research_or_cases",
+    "credible_secondary_sources",
+    "team_receipts_and_verified_outputs",
+    "model_inference"
+  ],
+  "source_id": "web-performance-engineering-in-the-age-of-ai-mastering-speed-and-quality-for-ai-generated-applicatio",
+  "source_type": "book",
+  "status": "candidate_unverified_framework",
+  "title": "Web Performance Engineering in the Age of AI: Mastering Speed and Quality for AI-Generated Applications",
+  "updated_at": "2026-05-12T06:01:38.108631+00:00",
+  "verification": {
+    "copyright_boundary": "paraphrase/framework only; do not copy long passages into skills",
+    "file_exists": true,
+    "framework_reviewed_by_yuto": false,
+    "sample_extracted": true,
+    "web_update_checked": false
+  },
+  "version": "0.1.0"
+}

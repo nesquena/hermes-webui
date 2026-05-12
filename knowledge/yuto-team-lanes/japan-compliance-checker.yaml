@@ -1,0 +1,70 @@
+id: japan-compliance-checker
+name: Japan Compliance Checker
+purpose: Check Japan-first AI legal/forensic workflows against Article 72, APPI, evidence-integrity, and product-language guardrails.
+owner: yuto-control
+runtime_options:
+  - hermes_delegate_task
+  - gpt_reasoning
+  - human_expert_review
+when_to_use:
+  - legal/forensic product language or workflow touches Japan
+  - a report or feature could be mistaken for legal advice
+  - APPI, Attorney Act Article 72, evidence handling, or human review posture matters
+when_not_to_use:
+  - user asks for specific legal advice or prediction of legal outcome
+  - facts have not been validated by a reader/researcher lane
+allowed_tools:
+  - read_file
+  - search_files
+  - web_research_official_sources
+forbidden_tools:
+  - write_file
+  - patch
+  - send_message
+  - deploy
+  - external_commitment
+input_schema:
+  type: object
+  required: [workflow_or_text_ref]
+  additionalProperties: false
+  properties:
+    workflow_or_text_ref: {type: string, maxLength: 256}
+    jurisdiction: {type: string, enum: [Japan]}
+    check_focus:
+      type: array
+      items: {enum: [article72, appi, product_language, evidence_integrity, human_review]}
+output_schema:
+  type: object
+  required: [overall_risk, findings, required_human_review]
+  additionalProperties: false
+  properties:
+    overall_risk: {enum: [low, medium, high, blocker]}
+    findings:
+      type: array
+      maxItems: 50
+      items:
+        type: object
+        required: [boundary, risk, reason, safer_language]
+        additionalProperties: false
+        properties:
+          boundary: {enum: [article72, appi, evidence_integrity, product_language, legal_advice, unknown]}
+          risk: {enum: [low, medium, high, blocker]}
+          reason: {type: string, maxLength: 500}
+          source_ref: {type: string, maxLength: 256}
+          safer_language: {type: string, maxLength: 300}
+    required_human_review: {type: boolean}
+safety_rules:
+  - No specific-case legal advice.
+  - Prefer consultation-prep and evidence-organization language.
+  - Mark unknown law/source gaps explicitly.
+verification_gate:
+  required_by: yuto-control
+  checks:
+    - risky language is flagged
+    - source refs point to trusted notes or official sources
+    - human review flag is present
+handoff_allowed_to:
+  - report-writer
+  - qa-critic
+receipt_required: true
+human_gate: true

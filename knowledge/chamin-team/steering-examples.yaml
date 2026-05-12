@@ -1,0 +1,37 @@
+examples:
+  - id: lawlabo-pr-review-basic
+    request: "review this LawLabo PR"
+    cookbook: lawlabo-pr-review
+    required_lanes:
+      - correctness-reviewer
+    optional_lanes:
+      - security-reviewer
+      - data-auth-reviewer
+      - frontend-ui-a11y-reviewer
+      - content-claims-seo-reviewer
+      - qa-critic
+    stop_condition: "Chamin returns verdict, findings, evidence checked, verification, and remaining risk."
+    human_gate: false
+
+  - id: lawlabo-auth-payment-risk
+    request: "check this auth/payment/webhook change"
+    cookbook: lawlabo-pr-review
+    required_lanes:
+      - correctness-reviewer
+      - data-auth-reviewer
+      - security-reviewer
+    optional_lanes:
+      - qa-critic
+    stop_condition: "Real execution path and trust boundaries are verified or explicit gaps are reported."
+    human_gate: true
+
+  - id: lawlabo-public-copy-seo-risk
+    request: "review this public page copy or SEO change"
+    cookbook: lawlabo-pr-review
+    required_lanes:
+      - content-claims-seo-reviewer
+    optional_lanes:
+      - frontend-ui-a11y-reviewer
+      - correctness-reviewer
+    stop_condition: "Claims, metadata, schema, and visual risk are reviewed against source refs."
+    human_gate: false

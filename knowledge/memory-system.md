@@ -10,9 +10,11 @@ Related: [[maintenance]] [[yuto]] [[decisions]] [[workflows]] [[yuto-growth-loop
 - `USER.md`: Kei's stable preference anchors; link to [[rules]] only for detailed operating rules, not arbitrary context.
 - `MEMORY.md`: active router, high-risk reminders, and current pointers.
 - `knowledge/`: durable self-improvement context, decisions, sources, research trails, and self-lessons.
+- [[memory-palace]] / `knowledge/memory-palace.json`: stable retrieval map for demoted memory rooms; use it to find details after active memory is shortened.
 - [[yuto-growth-loop]]: companion-first + research-OS growth loop and promotion gates.
 - `skills/`: repeatable procedures proven by real use.
 - `session_search`: old conversation detail that should not live in active memory.
+- Raw Hermes sessions: `/Users/kei/.hermes/sessions/session_*.json`; use `python tools/second_brain.py recent --query "..."` first when Kei says "ล่าสุด", "เมื่อกี๊", or "คุยกันล่าสุด".
 - [[yuto-autopilot]]: event-driven loop for autonomous triage, retrieval, and skill maintenance.
 
 ## What Belongs Where
@@ -85,6 +87,7 @@ Separate persistent memory into three kinds:
    - Historical events, sessions, prior work, mistakes, task outcomes.
    - Store as archive/reflection/knowledge, not active instruction memory.
    - Use `session_search` or raw session sources for detail.
+   - If Kei says "ล่าสุด", "เมื่อกี๊", "คุยกันล่าสุด", or corrects Yuto's recall, check raw session files by mtime first via `python tools/second_brain.py recent --query "<topic>"`; then verify durable state in `knowledge/`/CocoIndex/Book Expert Factory as needed. Use `session_search` as fallback for older cross-session recall, not first source for live/latest recall.
 
 3. `procedural`
    - Skills, workflows, runbooks, verification steps, canaries.
@@ -145,6 +148,29 @@ Controls:
 6. Run a canary after promotion to check that the memory helps without creating
    drift or false authority.
 7. Prefer removing/staling suspicious memory over trying to reason around it.
+
+## Active-Memory Demotion
+
+Use active memory as a hot pointer layer only. When an entry grows beyond pointer size or becomes old detail:
+
+1. Move durable detail to the right home:
+   - source/research trail -> `knowledge/sources.md` or a focused `knowledge/source-*.md`
+   - operating policy -> `knowledge/memory-system.md`, `knowledge/rules.md`, or a focused workflow note
+   - repeatable procedure -> skill after repeated use/failure
+   - episodic detail -> raw sessions / `session_search`
+2. Replace the active-memory entry with a short pointer and retrieval command.
+3. Ensure the demoted detail has a palace room in `knowledge/memory-palace.json`.
+4. Check pressure and palace health with:
+
+```bash
+cd /Users/kei/kei-jarvis
+python tools/second_brain.py memory entries
+python tools/second_brain.py memory candidates --min-chars 140
+python tools/second_brain.py palace search "<topic>"
+python tools/second_brain.py palace doctor
+```
+
+This command only inspects candidates; Yuto still verifies and edits active memory deliberately.
 
 ## Lightweight Maintenance Loop
 

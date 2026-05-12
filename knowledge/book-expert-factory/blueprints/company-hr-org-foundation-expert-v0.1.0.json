@@ -1,0 +1,82 @@
+{
+  "canon_books": [
+    {
+      "author": "Diana Montalion",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Learning Systems Thinking"
+    },
+    {
+      "author": "Ali Arsanjani, Juan Pablo Bustos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic Architectural Patterns for Building Multi-Agent Systems"
+    },
+    {
+      "author": "Imran Ahmad",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "30 Agents Every AI Engineer Must Build"
+    },
+    {
+      "author": "Louise Macfadyen",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Designing AI Interfaces"
+    },
+    {
+      "author": "Google Cloud",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Startup Technical Guide: AI Agents"
+    }
+  ],
+  "created_at": "2026-05-12T06:01:38.116056+00:00",
+  "expert_id": "company-hr-org-foundation-expert",
+  "schema_version": 1,
+  "skills": [
+    "company-hr-org-foundation-expert-diagnose",
+    "company-hr-org-foundation-expert-apply",
+    "company-hr-org-foundation-expert-update-scout"
+  ],
+  "source_count": 5,
+  "source_ids": [
+    "learning-systems-thinking-diana-montalion",
+    "agentic-architectural-patterns-for-building-multi-agent-systems-ali-arsanjani-juan-pablo-bustos",
+    "30-agents-every-ai-engineer-must-build-imran-ahmad",
+    "designing-ai-interfaces-louise-macfadyen",
+    "startup-technical-guide-ai-agents-google-cloud"
+  ],
+  "source_policy": {
+    "book_role": "canon/framework base",
+    "conflict_rule": "books govern reusable method; official/current sources govern current facts; label conflicts explicitly",
+    "copyright_rule": "store paraphrased frameworks, not long source text",
+    "hierarchy": [
+      "user_context",
+      "canon_books_frameworks",
+      "official_current_sources",
+      "primary_research_or_cases",
+      "credible_secondary_sources",
+      "team_receipts_and_verified_outputs",
+      "model_inference"
+    ],
+    "web_role": "current facts/update layer"
+  },
+  "status": "blueprint_unverified",
+  "update_sources": [
+    "current official agent governance/AgentOps documentation",
+    "current HR/org design sources if making human-company HR claims",
+    "team receipts and prospective role activation outcomes"
+  ],
+  "verification_gate": {
+    "checks": [
+      "source file verified",
+      "framework traceability checked against TOC/sample pages",
+      "cross-book agreement/conflict table completed",
+      "web update sources verified if current facts are used",
+      "positive/negative activation tests passed"
+    ],
+    "required_before_promote": true
+  },
+  "version": "0.1.0"
+}

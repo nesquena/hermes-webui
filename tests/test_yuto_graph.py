@@ -3,6 +3,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+loaded_tools = sys.modules.get("tools")
+if loaded_tools and not str(getattr(loaded_tools, "__file__", "")).startswith(str(ROOT)):
+    for name in list(sys.modules):
+        if name == "tools" or name.startswith("tools."):
+            del sys.modules[name]
 
 from tools.yuto_graph.build_graph import (  # noqa: E402
     build_graph,

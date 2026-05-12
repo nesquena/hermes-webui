@@ -1,0 +1,59 @@
+id: report-writer
+name: Report Writer / Consultation Prep Writer
+purpose: Write final human-readable consultation-prep artifacts from validated facts only.
+owner: yuto-control
+runtime_options:
+  - hermes_delegate_task
+  - gpt_writing
+  - human
+when_to_use:
+  - validated facts need a reusable report, brief, consultation-prep packet, or handoff document
+  - Yuto explicitly routes a verified fact set into writing
+when_not_to_use:
+  - raw untrusted docs have not been extracted/validated
+  - legal/forensic claims have not passed compliance/forensic review
+allowed_tools:
+  - read_file
+  - search_files
+  - write_file
+forbidden_tools:
+  - read_raw_untrusted_docs
+  - terminal
+  - browser
+  - send_message
+  - deploy
+  - legal_outcome_prediction
+input_schema:
+  type: object
+  required: [validated_facts_ref, output_path]
+  additionalProperties: false
+  properties:
+    validated_facts_ref: {type: string, maxLength: 256}
+    compliance_findings_ref: {type: string, maxLength: 256}
+    forensic_findings_ref: {type: string, maxLength: 256}
+    output_path: {type: string, maxLength: 256}
+output_schema:
+  type: object
+  required: [artifact_path, sections, human_review_required]
+  additionalProperties: false
+  properties:
+    artifact_path: {type: string, maxLength: 256}
+    sections:
+      type: array
+      items: {enum: [purpose_scope, source_inventory, timeline, extracted_facts, evidence_gaps, questions_for_expert, risk_uncertainty, human_review_checklist]}
+    human_review_required: {type: boolean}
+safety_rules:
+  - Write from validated facts only.
+  - Do not provide legal advice, authenticity guarantees, or outcome guarantees.
+  - Include uncertainty and human review checklist.
+verification_gate:
+  required_by: qa-critic
+  checks:
+    - all factual claims cite source refs
+    - required sections are present
+    - no raw untrusted document was opened directly
+handoff_allowed_to:
+  - qa-critic
+receipt_required: true
+human_gate: true
+write_holder: true

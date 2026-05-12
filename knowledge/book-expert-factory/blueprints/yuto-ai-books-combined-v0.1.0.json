@@ -1,0 +1,110 @@
+{
+  "canon_books": [
+    {
+      "author": "Muhammad Arif, Jaffar M. Arfan, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Securing the Digital Realm"
+    },
+    {
+      "author": "Louise Macfadyen",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Designing AI Interfaces"
+    },
+    {
+      "author": "Omar Santos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic AI for Cybersecurity"
+    },
+    {
+      "author": "Naveen Kumar Chaudhary, Archana Patel, et al.",
+      "domain": "legal-forensic-evidence",
+      "role": "legal-forensic-evidence-expert",
+      "title": "Artificial Intelligence and Digital Forensics"
+    },
+    {
+      "author": "Ahlad Kumar, Naveen Kumar Chaudhary, et al.",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Digital Defence"
+    },
+    {
+      "author": "Imran Ahmad",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "30 Agents Every AI Engineer Must Build"
+    },
+    {
+      "author": "Ali Arsanjani, Juan Pablo Bustos",
+      "domain": "systems-thinking",
+      "role": "systems-thinking-expert",
+      "title": "Agentic Architectural Patterns for Building Multi-Agent Systems"
+    },
+    {
+      "author": "Heiko Hotz, Sokratis Kartakis",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Multimodal, Real-Time AI Agent Systems"
+    },
+    {
+      "author": "Diana Montalion",
+      "domain": "productivity",
+      "role": "productivity-coach",
+      "title": "Learning Systems Thinking"
+    }
+  ],
+  "created_at": "2026-05-11T18:44:12.039725+00:00",
+  "expert_id": "yuto-ai-books-combined-expert",
+  "schema_version": 1,
+  "skills": [
+    "yuto-ai-books-combined-expert-diagnose",
+    "yuto-ai-books-combined-expert-apply",
+    "yuto-ai-books-combined-expert-update-scout"
+  ],
+  "source_count": 9,
+  "source_ids": [
+    "securing-the-digital-realm-muhammad-arif-jaffar-m-arfan-et-al",
+    "designing-ai-interfaces-louise-macfadyen",
+    "agentic-ai-for-cybersecurity-omar-santos",
+    "artificial-intelligence-and-digital-forensics-naveen-kumar-chaudhary-archana-patel-et-al",
+    "digital-defence-ahlad-kumar-naveen-kumar-chaudhary-et-al",
+    "30-agents-every-ai-engineer-must-build-imran-ahmad",
+    "agentic-architectural-patterns-for-building-multi-agent-systems-ali-arsanjani-juan-pablo-bustos",
+    "multimodal-real-time-ai-agent-systems-heiko-hotz-sokratis-kartakis",
+    "learning-systems-thinking-diana-montalion"
+  ],
+  "source_policy": {
+    "book_role": "canon/framework base",
+    "conflict_rule": "books govern reusable method; official/current sources govern current facts; label conflicts explicitly",
+    "copyright_rule": "store paraphrased frameworks, not long source text",
+    "hierarchy": [
+      "user_context",
+      "canon_books_frameworks",
+      "official_current_sources",
+      "primary_research_or_cases",
+      "credible_secondary_sources",
+      "team_receipts_and_verified_outputs",
+      "model_inference"
+    ],
+    "web_role": "current facts/update layer"
+  },
+  "status": "blueprint_unverified",
+  "update_sources": [
+    "official AI/security/legal documentation for current facts",
+    "Japan privacy/AI governance sources for current legal claims",
+    "vendor docs for MCP/A2A/agent tooling changes"
+  ],
+  "verification_gate": {
+    "checks": [
+      "source file verified",
+      "framework traceability checked against TOC/sample pages",
+      "cross-book agreement/conflict table completed",
+      "web update sources verified if current facts are used",
+      "positive/negative activation tests passed"
+    ],
+    "required_before_promote": true
+  },
+  "version": "0.1.0"
+}
