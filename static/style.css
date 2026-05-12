@@ -1284,9 +1284,22 @@
     .onboarding-actions .sm-btn{width:100%;min-height:44px;}
     /* Login page responsive */
     .card{width:90vw;max-width:320px;padding:28px 24px;}
+    /* ── Neo mobile bottom-nav (Phase 3) ── */
+    .neo-mobile-nav{display:flex;}
+    body{padding-bottom:calc(56px + env(safe-area-inset-bottom,0));}
+    /* Hero card reduced on mobile */
+    .hero-card{height:clamp(120px,20vh,160px);}
+    /* Topbar chips fade indicators */
+    .topbar-chips{position:relative;mask-image:linear-gradient(to right,transparent 0,#000 12px,#000 calc(100% - 12px),transparent 100%);-webkit-mask-image:linear-gradient(to right,transparent 0,#000 12px,#000 calc(100% - 12px),transparent 100%);}
   }
 
 
+/* ── Neo mobile bottom-nav ── */
+.neo-mobile-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:250;background:var(--sidebar);border-top:1px solid var(--border);padding:4px 0 max(4px,env(safe-area-inset-bottom));justify-content:space-around;align-items:center;}
+.neo-mobile-nav-item{display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--muted);font-size:10px;font-weight:500;padding:6px 8px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .12s;min-width:48px;}
+.neo-mobile-nav-item.active{color:var(--accent-text);}
+.neo-mobile-nav-item:hover{color:var(--text);}
+.neo-mobile-nav-item svg{flex-shrink:0;}
 /* ── Workspace dropdown (topbar) ── */
 .ws-chip{user-select:none;}
 .ws-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;right:0;min-width:200px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:320px;overflow-y:auto;}

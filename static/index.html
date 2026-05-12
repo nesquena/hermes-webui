@@ -1556,6 +1556,28 @@
 <script src="static/dashboard.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/kanban.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<nav class="neo-mobile-nav" id="neoMobileNav" aria-label="Mobile navigation">
+  <button class="neo-mobile-nav-item active" data-panel="dashboard" onclick="switchPanel('dashboard')" type="button" aria-label="Dashboard">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+    <span>Dashboard</span>
+  </button>
+  <button class="neo-mobile-nav-item" data-panel="chat" onclick="switchPanel('chat')" type="button" aria-label="Chat">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <span>Chat</span>
+  </button>
+  <button class="neo-mobile-nav-item" data-panel="projects" onclick="switchPanel('projects')" type="button" aria-label="Projetos">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    <span>Projetos</span>
+  </button>
+  <button class="neo-mobile-nav-item" data-panel="tasks" onclick="switchPanel('tasks')" type="button" aria-label="Tarefas">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    <span>Tarefas</span>
+  </button>
+  <button class="neo-mobile-nav-item" data-panel="more" onclick="toggleMobileSidebar()" type="button" aria-label="Mais">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+    <span>Mais</span>
+  </button>
+</nav>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 <div class="composer-bottomsheet-overlay" id="composerBottomSheetOverlay" onclick="toggleComposerBottomSheet(false)"></div>

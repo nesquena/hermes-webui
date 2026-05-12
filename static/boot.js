@@ -218,6 +218,13 @@ document.addEventListener('click',function(e){
   const effort=seg.dataset.effort;
   if(typeof setReasoningEffort==='function')setReasoningEffort(effort);
 });
+function syncMobileNav(panel){
+  const nav=document.querySelector('.neo-mobile-nav');
+  if(!nav)return;
+  nav.querySelectorAll('.neo-mobile-nav-item').forEach(btn=>{
+    btn.classList.toggle('active',btn.dataset.panel===panel);
+  });
+}
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
