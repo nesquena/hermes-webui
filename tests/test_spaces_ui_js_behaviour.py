@@ -1340,6 +1340,22 @@ async function dispatchWindowMessage(data, opts) {
       prompt: 'Do not queue this prompt',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeReadyDuplicate') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    const readyMessage = {
+      type: 'capy:ready',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+    };
+    await dispatchWindowMessage(readyMessage);
+    await dispatchWindowMessage(readyMessage);
   } else if (scenario === 'runtimeConflictingMessageType') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2708,6 +2724,24 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "SECRET" not in out["rootHtml"]
 
 
+def test_spaces_ui_widget_details_renders_opaque_metadata_only_sandbox_iframe(driver_path):
+    out = _run_spaces_scenario(driver_path, "viewWidgetDetails")
+    html = out["rootHtml"]
+
+    assert "Sandbox event bridge" in html
+    assert "<iframe" in html
+    assert "sandbox=\"allow-scripts\"" in html
+    assert "allow-same-origin" not in html
+    assert "referrerpolicy=\"no-referrer\"" in html
+    assert "srcdoc=" in html
+    assert "data-runtime-token=" in html
+    assert "capy:ready" in html
+    assert "capy:agent:prompt" in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+
+
 def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues_metadata_only_event(driver_path):
     out = _run_spaces_scenario(driver_path, "runtimePromptMessage")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
@@ -2783,6 +2817,20 @@ def test_spaces_ui_sandbox_postmessage_blocks_unlisted_capy_messages_without_lea
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_ready_handshake_is_deduped_per_runtime_token(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeReadyDuplicate")
+    html = out["rootHtml"]
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert html.count("Sandbox ready") == 1
+    assert "weather · metadata-only runtime handshake" in html
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
 
 
 def test_spaces_ui_sandbox_postmessage_rejects_conflicting_message_type_aliases(driver_path):

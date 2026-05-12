@@ -1200,14 +1200,26 @@
       '<div class="capy-spaces-muted">'+escapeHtml(message || 'Metadata-only sandbox event handled.')+'</div></div>';
   }
 
+  function renderSandboxRuntimeSrcdoc(session){
+    const readyPayload = JSON.stringify({
+      type: 'capy:ready',
+      runtime_token: session.token,
+      space_id: session.spaceId,
+      widget_id: session.widgetId,
+    });
+    return '<!doctype html><html><body><main>Capy metadata-only sandbox ready. Allowed messages: capy:ready, capy:resize, capy:agent:prompt.</main><script>parent.postMessage('+readyPayload+', "*");</script></body></html>';
+  }
+
   function renderSandboxRuntimeShell(spaceId, widgetId, title){
     if (!spaceId || !widgetId) return '';
     const session = registerWidgetRuntimeSession(spaceId, widgetId, title);
+    const srcdoc = renderSandboxRuntimeSrcdoc(session);
     return '<div class="capy-spaces-widget capy-spaces-sandbox-shell" data-runtime-token="'+escapeHtml(session.token)+'" data-space-id="'+escapeHtml(session.spaceId)+'" data-widget-id="'+escapeHtml(session.widgetId)+'">' +
       '<div><strong>Sandbox event bridge</strong>' +
       '<div class="capy-spaces-muted">postMessage contract: capy:ready, capy:resize, capy:agent:prompt</div>' +
       '<div class="capy-spaces-muted">Generated bodies remain disabled; prompts require approval and metadata-only queueing.</div>' +
       '<div class="capy-spaces-muted">Runtime status: waiting for safe sandbox message</div>' +
+      '<iframe class="capy-spaces-sandbox-frame" title="Capy metadata-only sandbox" sandbox="allow-scripts" referrerpolicy="no-referrer" data-runtime-token="'+escapeHtml(session.token)+'" srcdoc="'+escapeHtml(srcdoc)+'"></iframe>' +
       '</div></div>';
   }
 
@@ -1275,6 +1287,8 @@
     }
     const type = typeInfo.type;
     if (type === 'capy:ready') {
+      if (session.readyAcknowledged) return;
+      session.readyAcknowledged = true;
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox ready', session.widgetId+' · metadata-only runtime handshake'));
       return;
     }
