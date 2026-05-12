@@ -68,7 +68,19 @@ jobs:
           GITHUB_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Pull image
-        run: docker pull ${{ steps.tag.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.tag.outputs.image }}"
+          for attempt in $(seq 1 12); do
+            if docker pull "${image}"; then
+              exit 0
+            fi
+            echo "Image ${image} not pullable yet (attempt ${attempt}/12); waiting for GHCR propagation..."
+            sleep 10
+          done
+          echo "FAIL: image ${image} was not pullable after 12 attempts" >&2
+          exit 1
 
       - name: Run smoke test
         id: smoke
