@@ -8,6 +8,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 SPACES_JS_PATH = REPO_ROOT / "static" / "spaces.js"
+SPACES_CSS_PATH = REPO_ROOT / "static" / "spaces.css"
 NODE = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -2479,6 +2480,15 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "Open details" in canvas_html
     assert "data-capy-canvas-widget-id=\"browser-card\"" in canvas_html
     assert "capy-spaces-canvas-widget-grid" in canvas_html
+    assert "data-capy-widget-resizable=\"true\"" in canvas_html
+    assert "capy-spaces-canvas-resize-grip" in canvas_html
+    assert "aria-hidden=\"true\"" in canvas_html
+    assert "aria-label=\"Resize widget\"" not in canvas_html
+    assert "role=\"button\"" not in canvas_html
+    assert "tabindex=\"0\"" not in canvas_html
+    assert canvas_html.count('class="capy-spaces-canvas-widget metadata-only-shell"') == 2
+    assert canvas_html.count('data-capy-widget-resizable="true"') == 2
+    assert canvas_html.count('capy-spaces-canvas-resize-grip') == 2
     assert "capy-spaces-canvas-orbit" not in canvas_html
     assert "Widget shell" not in canvas_html
     assert "generated code disabled" not in canvas_html
@@ -2493,6 +2503,15 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_canvas_widgets_are_css_resizable():
+    css = SPACES_CSS_PATH.read_text()
+    assert '.capy-spaces-canvas-widget[data-capy-widget-resizable="true"]' in css
+    assert "resize: both;" in css
+    assert ".capy-spaces-canvas-resize-grip" in css
+    assert "cursor: nwse-resize;" in css
+    assert "pointer-events: none;" in css
 
 
 def test_spaces_ui_revision_history_labels_current_and_return_to_present_metadata_only(driver_path):

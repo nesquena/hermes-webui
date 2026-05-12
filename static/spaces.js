@@ -750,10 +750,11 @@
       const title = safeDisplayMetadataText(w && w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
       const kind = safeDisplayMetadataText(w && w.kind, 'custom') || 'custom';
       const initial = title.trim().charAt(0).toUpperCase() || '•';
-      return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'">' +
+      return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'" data-capy-widget-resizable="true">' +
         '<div class="capy-spaces-canvas-widget-bar"><span class="capy-spaces-window-dots" aria-hidden="true"><i></i><i></i><i></i></span><strong>'+escapeHtml(title)+'</strong><span class="capy-spaces-canvas-kind">'+escapeHtml(kind)+'</span></div>' +
         '<div class="capy-spaces-canvas-widget-preview"><span class="capy-spaces-canvas-widget-glyph" aria-hidden="true">'+escapeHtml(initial)+'</span><div><strong>Canvas preview</strong><span>'+escapeHtml(kind)+' · Sandbox review required</span></div></div>' +
         '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Open details</button></div>' +
+        '<span class="capy-spaces-canvas-resize-grip" aria-hidden="true"></span>' +
         '</article>';
     }).join('');
   }

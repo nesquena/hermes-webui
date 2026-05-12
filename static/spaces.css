@@ -816,9 +816,18 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   border-radius: 16px;
   box-shadow: 0 16px 42px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.04);
   gap: 12px;
-  min-width: 0;
   padding: 14px;
   position: relative;
+}
+
+.capy-spaces-canvas-widget[data-capy-widget-resizable="true"] {
+  max-height: 100%;
+  max-width: 100%;
+  min-height: 176px;
+  min-width: 220px;
+  overflow: auto;
+  padding: 14px 14px 24px;
+  resize: both;
 }
 
 .capy-spaces-canvas-widget-bar {
@@ -918,6 +927,27 @@ button.capy-spaces-product-space-card { cursor: pointer; }
 .capy-spaces-canvas-widget-actions {
   align-items: center;
   justify-content: flex-end;
+}
+
+.capy-spaces-canvas-resize-grip {
+  background:
+    linear-gradient(135deg, transparent 0 45%, rgba(255,255,255,.18) 45% 52%, transparent 52%),
+    linear-gradient(135deg, transparent 0 62%, rgba(255,255,255,.24) 62% 69%, transparent 69%);
+  border-radius: 0 0 12px 0;
+  bottom: 6px;
+  cursor: nwse-resize;
+  display: block;
+  height: 22px;
+  opacity: .8;
+  pointer-events: none;
+  position: absolute;
+  right: 6px;
+  width: 22px;
+}
+
+.capy-spaces-canvas-widget:focus-within .capy-spaces-canvas-resize-grip,
+.capy-spaces-canvas-widget:hover .capy-spaces-canvas-resize-grip {
+  opacity: 1;
 }
 
 .capy-spaces-canvas-agent-dock {
