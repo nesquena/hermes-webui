@@ -1320,6 +1320,9 @@
     }
     if (type === 'capy:resize') {
       const height = Math.max(120, Math.min(900, parseInt(data.height || data.h || 0, 10) || 240));
+      const safeToken = String(token || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const frame = typeof document !== 'undefined' && document.querySelector ? document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="'+safeToken+'"]') : null;
+      if (frame && frame.style) frame.style.height = height+'px';
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox resize noted', session.widgetId+' · bounded height '+height+'px'));
       return;
     }

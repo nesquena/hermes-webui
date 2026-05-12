@@ -25,6 +25,7 @@ const switchedPanels = [];
 const capySpaceSyncs = [];
 const windowListeners = {};
 const sandboxFrameWindows = {};
+const sandboxFrames = {};
 let beforeHtml = '';
 const values = {
   '#capyWidgetId': 'notes',
@@ -97,7 +98,8 @@ global.document = {
     const html = root && root.innerHTML ? root.innerHTML : '';
     if (!html.includes('class="capy-spaces-sandbox-frame"') || !html.includes('data-runtime-token="' + match[1] + '"')) return null;
     sandboxFrameWindows[match[1]] = sandboxFrameWindows[match[1]] || { capySandboxFrameToken: match[1] };
-    return { contentWindow: sandboxFrameWindows[match[1]] };
+    sandboxFrames[match[1]] = sandboxFrames[match[1]] || { contentWindow: sandboxFrameWindows[match[1]], style: {} };
+    return sandboxFrames[match[1]];
   },
 };
 global.fetch = async function(path, opts = {}) {
@@ -1405,6 +1407,23 @@ async function dispatchWindowMessage(data, opts) {
     };
     await dispatchWindowMessage(readyMessage);
     await dispatchWindowMessage(readyMessage);
+  } else if (scenario === 'runtimeResizeMessage') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:resize',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      height: 2000,
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   } else if (scenario === 'runtimeConflictingMessageType') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2367,7 +2386,7 @@ async function dispatchWindowMessage(data, opts) {
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, beforeHtml, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels, capySpaceSyncs }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, beforeHtml, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels, capySpaceSyncs, sandboxFrameStyles: Object.fromEntries(Object.entries(sandboxFrames).map(function(entry){ return [entry[0], entry[1].style || {}]; })) }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -2948,6 +2967,23 @@ def test_spaces_ui_sandbox_ready_handshake_is_deduped_per_runtime_token(driver_p
     assert "Sandbox event bridge" in out["beforeHtml"]
     assert html.count("Sandbox ready") == 1
     assert "weather · metadata-only runtime handshake" in html
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+
+
+def test_spaces_ui_sandbox_resize_applies_bounded_iframe_height_without_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeResizeMessage")
+    html = out["rootHtml"]
+    frame_styles = list(out["sandboxFrameStyles"].values())
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert "Sandbox resize noted" in html
+    assert "weather · bounded height 900px" in html
+    assert frame_styles and any(style.get("height") == "900px" for style in frame_styles)
+    assert out["dialogs"] == []
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
     assert "<script>" not in html
     assert "renderer" not in html.lower()
