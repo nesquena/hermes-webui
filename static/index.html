@@ -903,6 +903,32 @@
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz" style="display:none">
+            <button class="icon-btn composer-plus-btn" id="btnComposerPlus" type="button" title="Mais ações" aria-label="Mais ações" onclick="toggleComposerPlusMenu()">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            </button>
+            <div class="composer-plus-menu" id="composerPlusMenu">
+              <button class="composer-plus-item" type="button" onclick="document.getElementById('fileInput').click();toggleComposerPlusMenu(false)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                <span>Anexar arquivo</span>
+              </button>
+              <button class="composer-plus-item" type="button" onclick="toggleWorkspacePanel();toggleComposerPlusMenu(false)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span>Workspace files</span>
+              </button>
+              <button class="composer-plus-item" type="button" onclick="cmdYolo();toggleComposerPlusMenu(false)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                <span>YOLO mode</span>
+              </button>
+              <button class="composer-plus-item" type="button" onclick="openComposerTerminal();toggleComposerPlusMenu(false)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                <span>Terminal</span>
+              </button>
+            </div>
+            <button class="composer-context-chip" id="composerContextChip" type="button" onclick="toggleComposerBottomSheet()" aria-label="Modelo e contexto">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+              <span class="composer-context-label" id="composerContextLabel"></span>
+              <svg class="composer-context-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
             <button class="icon-btn" id="btnAttach" title="Attach files">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
@@ -1526,5 +1552,32 @@
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+<div class="composer-bottomsheet-overlay" id="composerBottomSheetOverlay" onclick="toggleComposerBottomSheet(false)"></div>
+<div class="composer-bottomsheet" id="composerBottomSheet">
+  <div class="composer-bottomsheet-handle" aria-hidden="true"></div>
+  <div class="composer-bottomsheet-title">Modelo e contexto</div>
+  <div class="composer-bottomsheet-section">
+    <label class="composer-bottomsheet-label">Modelo</label>
+    <div class="composer-bottomsheet-model" id="bottomSheetModelWrap"></div>
+  </div>
+  <div class="composer-bottomsheet-section">
+    <label class="composer-bottomsheet-label">Profile</label>
+    <div class="composer-bottomsheet-profile" id="bottomSheetProfileWrap"></div>
+  </div>
+  <div class="composer-bottomsheet-section">
+    <label class="composer-bottomsheet-label">Workspace</label>
+    <div class="composer-bottomsheet-workspace" id="bottomSheetWorkspaceWrap"></div>
+  </div>
+  <div class="composer-bottomsheet-section" id="bottomSheetReasoningSection" style="display:none">
+    <label class="composer-bottomsheet-label">Raciocínio</label>
+    <div class="composer-bottomsheet-reasoning">
+      <div class="reasoning-segmented" id="bottomSheetReasoning">
+        <button class="reasoning-seg" data-effort="none" type="button">Rápido</button>
+        <button class="reasoning-seg active" data-effort="medium" type="button">Normal</button>
+        <button class="reasoning-seg" data-effort="high" type="button">Profundo</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
