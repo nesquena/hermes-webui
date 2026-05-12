@@ -102,20 +102,43 @@ def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> di
     return {"session_id": str(session_id), "events": events, "malformed": malformed}
 
 
-def derive_turn_journal_states(events: Iterable[dict]) -> dict[str, dict]:
-    """Return the latest event per ``turn_id``."""
+def derive_turn_journal_states(events: Iterable[dict]) -> tuple[dict[str, dict], list[dict]]:
+    '''Return the latest event per ``turn_id`` and any terminal-collision entries.
+
+    The first element is the latest event per turn_id (same overwrite-by-timestamp
+    behaviour as before).  The second element is a list of collision records, one
+    per turn_id that had more than one terminal event.  Each collision record
+    contains ``turn_id`` and the ``events`` list (in ascending created_at order).
+
+    A collision means the same logical turn recorded both ``completed`` and
+    ``interrupted`` terminal events -- the derived state still picks the latest
+    by timestamp, but callers can now detect and audit the double-terminal
+    situation explicitly rather than having it silently collapse.
+    '''
     states: dict[str, dict] = {}
+    # Collect all terminal events per turn_id to detect collisions
+    terminal_events: dict[str, list[dict]] = {}
     for event in events:
         if not isinstance(event, dict):
             continue
-        turn_id = str(event.get("turn_id") or "").strip()
+        turn_id = str(event.get('turn_id') or '').strip()
         if not turn_id:
             continue
+        # Track terminal events for collision detection
+        if is_terminal_turn_event(event):
+            terminal_events.setdefault(turn_id, []).append(event)
+        # Existing latest-by-timestamp derivation
         previous = states.get(turn_id)
-        if previous is None or float(event.get("created_at") or 0) >= float(previous.get("created_at") or 0):
+        if previous is None or float(event.get('created_at') or 0) >= float(previous.get('created_at') or 0):
             states[turn_id] = event
-    return states
 
+    # Build collision list: turn_ids with more than one terminal event
+    collisions = [
+        {'turn_id': tid, 'events': sorted(evts, key=lambda e: float(e.get('created_at') or 0))}
+        for tid, evts in terminal_events.items()
+        if len(evts) > 1
+    ]
+    return states, collisions
 
 def _latest_turn_id_for_stream(events: Iterable[dict], stream_id: str) -> str | None:
     stream = str(stream_id or "").strip()

@@ -499,7 +499,7 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
 
     for session_id in iter_turn_journal_session_ids(session_dir):
         journal = read_turn_journal(session_id, session_dir=session_dir)
-        states = derive_turn_journal_states(journal.get('events') or [])
+        states, _ = derive_turn_journal_states(journal.get('events') or [])
         live_path = session_dir / f"{session_id}.json"
         live_messages = _msg_count(live_path)
         existing_user_messages: set[str] = set()

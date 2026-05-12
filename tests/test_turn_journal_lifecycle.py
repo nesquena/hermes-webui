@@ -21,7 +21,7 @@ def test_append_turn_journal_event_for_stream_reuses_submitted_turn_id(tmp_path)
 
     assert submitted["turn_id"] == "turn-1"
     assert worker["turn_id"] == "turn-1"
-    states = derive_turn_journal_states([submitted, worker])
+    states, _ = derive_turn_journal_states([submitted, worker])
     assert states["turn-1"]["event"] == "worker_started"
 
 
