@@ -109,7 +109,7 @@
   }
 
   function renderSpacesList(spaces, demos){
-    const activeSpaceId = currentActiveSpaceId();
+    const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
     return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId) +
       renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);

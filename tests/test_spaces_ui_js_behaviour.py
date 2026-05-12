@@ -1922,6 +1922,9 @@ async function dispatchWindowMessage(data, opts) {
     await click('openSpace', { spaceId: 'data-lab' });
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', { spaceId: 'data-lab', creatorPromptSelector: '#capyCanvasCreatorPrompt' });
+  } else if (scenario === 'homeCanvasUnsafeActiveSpaceId') {
+    global.S.session.active_space_id = 'creator/../lab';
+    await window.loadCapySpaces();
   } else if (scenario === 'deleteSharedDataNoDialog') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -2597,6 +2600,20 @@ def test_spaces_ui_canvas_docked_input_preserves_path_safe_data_space_target(dri
     assert "Creator preview ready" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
+def test_spaces_ui_canvas_docked_input_redacts_unsafe_home_active_space_target(driver_path):
+    out = _run_spaces_scenario(driver_path, "homeCanvasUnsafeActiveSpaceId")
+
+    assert "Onscreen Capy agent dock" in out["rootHtml"]
+    assert "data-capy-action=\"previewCreatorSpec\"" in out["rootHtml"]
+    assert "data-creator-prompt-selector=\"#capyCanvasCreatorPrompt\"" in out["rootHtml"]
+    assert "creator/../lab" not in out["rootHtml"]
+    assert "data-space-id=\"creator" not in out["rootHtml"]
+    assert "data-capy-action=\"openSafeRecovery\" data-space-id=\"creator" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
 
