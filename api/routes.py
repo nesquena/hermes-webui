@@ -2877,6 +2877,50 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
 
+    if parsed.path == "/api/knowledge/status":
+        try:
+            from api.knowledge import status_payload
+
+            j(handler, status_payload())
+        except Exception as exc:
+            logger.exception("knowledge status failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
+
+    if parsed.path == "/api/knowledge/search":
+        try:
+            from api.knowledge import search_payload
+
+            qs = parse_qs(parsed.query)
+            query = (qs.get("q") or qs.get("query") or [""])[0]
+            limit = int((qs.get("limit") or [10])[0] or 10)
+            source_types = qs.get("source_type") or qs.get("source_types") or []
+            j(handler, search_payload(query, limit=limit, source_types=source_types))
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("knowledge search failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
+
+    if parsed.path == "/api/knowledge/read":
+        try:
+            from api.knowledge import read_payload
+
+            qs = parse_qs(parsed.query)
+            path = (qs.get("path") or [""])[0]
+            offset = int((qs.get("offset") or [1])[0] or 1)
+            limit = int((qs.get("limit") or [120])[0] or 120)
+            j(handler, read_payload(path, offset=offset, limit=limit))
+        except PermissionError as exc:
+            bad(handler, _sanitize_error(exc), status=403)
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("knowledge read failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 
@@ -4430,6 +4474,18 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
+
+    if parsed.path == "/api/notes/capture":
+        try:
+            from api.knowledge import capture_note_payload
+
+            j(handler, capture_note_payload(body))
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("note capture failed")
+            bad(handler, _sanitize_error(exc), status=500)
+        return True
 
     if parsed.path == "/api/background":
         return _handle_background(handler, body)

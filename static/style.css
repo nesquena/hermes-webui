@@ -2287,17 +2287,19 @@ main.main > #mainSettings,
 main.main > #mainCapySpaces,
 main.main > #mainSkills,
 main.main > #mainMemory,
+main.main > #mainKnowledge,
 main.main > #mainTasks,
 main.main > #mainKanban,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-capy-spaces):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-capy-spaces):not(.showing-skills):not(.showing-memory):not(.showing-knowledge):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-capy-spaces > #mainCapySpaces{display:flex;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
+main.main.showing-knowledge > #mainKnowledge{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
 main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
@@ -3713,3 +3715,25 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .log-line-debug{color:var(--muted);opacity:.75;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
+
+/* Knowledge & Notes */
+.knowledge-sidebar{display:flex;flex-direction:column;gap:10px;padding:12px;}
+.knowledge-search-row{margin:0;}
+.knowledge-status{color:var(--muted);font-size:12px;line-height:1.4;}
+.knowledge-main-body{display:flex;gap:0;min-height:0;overflow:hidden;}
+.knowledge-content{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,42%);gap:12px;padding:16px;overflow:auto;}
+.knowledge-results,.knowledge-source{min-height:0;}
+.knowledge-result{border:1px solid var(--border);border-radius:12px;background:var(--sidebar);padding:12px;margin-bottom:10px;}
+.knowledge-result-head{display:flex;flex-direction:column;gap:3px;margin-bottom:8px;}
+.knowledge-result-head strong{color:var(--text);font-size:13px;}
+.knowledge-result-head span{color:var(--muted);font-size:11px;}
+.knowledge-snippet{color:var(--text);font-size:12px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;}
+.knowledge-result-actions{display:flex;gap:8px;align-items:center;margin-top:10px;}
+.knowledge-obsidian-link{color:var(--accent);font-size:12px;text-decoration:none;}
+.knowledge-source-head{display:flex;justify-content:space-between;gap:8px;align-items:center;color:var(--text);font-size:12px;margin-bottom:8px;}
+.knowledge-source-pre{border:1px solid var(--border);border-radius:12px;background:rgba(0,0,0,.18);padding:12px;white-space:pre-wrap;overflow:auto;max-height:52vh;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;}
+.knowledge-note-form{width:320px;min-width:280px;border-left:1px solid var(--border);padding:16px;display:flex;flex-direction:column;gap:10px;background:var(--sidebar);}
+.knowledge-note-form input,.knowledge-note-form textarea{width:100%;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px;font:inherit;font-size:13px;}
+.knowledge-note-form textarea{resize:vertical;min-height:140px;}
+.knowledge-note-status{color:var(--muted);font-size:12px;line-height:1.4;}
+@media (max-width: 900px){.knowledge-main-body{flex-direction:column;overflow:auto}.knowledge-content{grid-template-columns:1fr}.knowledge-note-form{width:auto;border-left:0;border-top:1px solid var(--border)}}

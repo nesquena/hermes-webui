@@ -200,7 +200,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','capy-spaces','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','capy-spaces','skills','memory','knowledge','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -213,6 +213,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
+  if (nextPanel === 'knowledge') await loadKnowledge();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
   if (nextPanel === 'todos') loadTodos();
@@ -4488,6 +4489,94 @@ async function deleteProfile(name) {
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }
+}
+
+// ── Knowledge & Notes panel ──
+let _knowledgeLoaded = false;
+let _knowledgeLastResults = [];
+
+async function loadKnowledge(force) {
+  const statusEl = $('knowledgeStatus');
+  const mainStatusEl = $('knowledgeMainStatus');
+  if (_knowledgeLoaded && !force) return;
+  try {
+    const data = await api('/api/knowledge/status');
+    _knowledgeLoaded = true;
+    const msg = data.available === false
+      ? t('knowledge_unavailable')
+      : `${esc(t('knowledge_local_only'))} ${esc(data.source_count || 0)} sources · ${esc(data.chunk_count || 0)} chunks`;
+    if (statusEl) statusEl.innerHTML = msg;
+    if (mainStatusEl) mainStatusEl.innerHTML = msg;
+  } catch (e) {
+    const msg = `${esc(t('error_prefix'))}${esc(e.message)}`;
+    if (statusEl) statusEl.innerHTML = msg;
+    if (mainStatusEl) mainStatusEl.innerHTML = msg;
+  }
+}
+
+async function searchKnowledge() {
+  const input = $('knowledgeSearch');
+  const resultsEl = $('knowledgeResults');
+  const query = (input && input.value || '').trim();
+  if (!query) { if (input) input.focus(); return; }
+  if (resultsEl) resultsEl.innerHTML = `<div class="logs-empty">${esc(t('loading'))}</div>`;
+  try {
+    const data = await api('/api/knowledge/search?q=' + encodeURIComponent(query) + '&limit=12');
+    _knowledgeLastResults = data.results || [];
+    _renderKnowledgeResults(_knowledgeLastResults);
+  } catch (e) {
+    if (resultsEl) resultsEl.innerHTML = `<div class="logs-empty">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+function _renderKnowledgeResults(results) {
+  const el = $('knowledgeResults');
+  if (!el) return;
+  if (!results || !results.length) {
+    el.innerHTML = `<div class="main-view-empty-title">${esc(t('knowledge_no_results'))}</div>`;
+    return;
+  }
+  el.innerHTML = results.map((r, idx) => {
+    const title = esc(r.title || r.path || t('untitled'));
+    const meta = [r.source_type, r.heading_path, r.start_line ? `L${r.start_line}` : ''].filter(Boolean).map(esc).join(' · ');
+    const snippet = esc(r.snippet || '');
+    const readBtn = `<button class="btn secondary compact" onclick="readKnowledgeSource(${idx})">${esc(t('open'))}</button>`;
+    const obsidian = r.obsidian_url ? `<a class="knowledge-obsidian-link" href="${esc(r.obsidian_url)}" target="_blank" rel="noopener noreferrer">Obsidian</a>` : '';
+    return `<div class="knowledge-result"><div class="knowledge-result-head"><strong>${title}</strong><span>${meta}</span></div><div class="knowledge-snippet">${snippet}</div><div class="knowledge-result-actions">${readBtn}${obsidian}</div></div>`;
+  }).join('');
+}
+
+async function readKnowledgeSource(index) {
+  const sourceEl = $('knowledgeSource');
+  const item = _knowledgeLastResults[index];
+  if (!item || !item.path) return;
+  if (sourceEl) sourceEl.innerHTML = `<div class="logs-empty">${esc(t('loading'))}</div>`;
+  try {
+    const data = await api('/api/knowledge/read?path=' + encodeURIComponent(item.path) + '&offset=' + encodeURIComponent(item.start_line || 1) + '&limit=120');
+    const obsidian = data.obsidian_url ? `<a class="knowledge-obsidian-link" href="${esc(data.obsidian_url)}" target="_blank" rel="noopener noreferrer">Obsidian</a>` : '';
+    if (sourceEl) sourceEl.innerHTML = `<div class="knowledge-source-head"><strong>${esc(data.path || item.path)}</strong>${obsidian}</div><pre class="knowledge-source-pre"><code>${esc(data.content || '')}</code></pre>`;
+  } catch (e) {
+    if (sourceEl) sourceEl.innerHTML = `<div class="logs-empty">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+async function captureKnowledgeNote() {
+  const titleEl = $('knowledgeNoteTitle');
+  const contentEl = $('knowledgeNoteContent');
+  const statusEl = $('knowledgeNoteStatus');
+  const title = (titleEl && titleEl.value || '').trim();
+  const content = (contentEl && contentEl.value || '').trim();
+  if (!content) { if (contentEl) contentEl.focus(); return; }
+  if (statusEl) statusEl.textContent = t('loading');
+  try {
+    const data = await api('/api/notes/capture', {method:'POST', body: JSON.stringify({title, content, folder:'00_Inbox', tags:['capy','knowledge']})});
+    if (contentEl) contentEl.value = '';
+    const link = data.obsidian_url ? ` <a href="${esc(data.obsidian_url)}" target="_blank" rel="noopener noreferrer">Obsidian</a>` : '';
+    if (statusEl) statusEl.innerHTML = `${esc(t('knowledge_note_saved'))}${link}`;
+    if (typeof showToast === 'function') showToast(t('knowledge_note_saved'));
+  } catch (e) {
+    if (statusEl) statusEl.textContent = t('error_prefix') + e.message;
+  }
 }
 
 // ── Memory panel ──
