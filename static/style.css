@@ -2027,17 +2027,16 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
 body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── Tool call cards ── */
-/* Running indicator dot (pulsing) */
+/* Running indicator: single circular spinner in the icon slot. */
 .tool-card-running-dot{
-  display:inline-block;
-  width:7px;
-  height:7px;
+  display:block;
+  width:13px;
+  height:13px;
+  box-sizing:border-box;
   border-radius:50%;
-  background:var(--blue);
-  opacity:.8;
-  flex-shrink:0;
-  vertical-align:middle;
-  animation:pulse 1.2s ease-in-out infinite;
+  border:2px solid rgba(var(--accent-rgb,212,175,55),.24);
+  border-top-color:currentColor;
+  animation:spin .7s linear infinite;
 }
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}

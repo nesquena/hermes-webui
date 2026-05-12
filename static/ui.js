@@ -5338,7 +5338,8 @@ function toolIcon(name){
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
-  const icon=toolIcon(tc.name);
+  const isRunning=tc.done===false;
+  const icon=isRunning?'<span class="tool-card-running-dot" aria-hidden="true"></span>':toolIcon(tc.name);
   const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
   if(tc.snippet){
@@ -5351,10 +5352,9 @@ function buildToolCard(tc){
     }
   }
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
-  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
+  const cardClass='tool-card'+(isRunning?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
   let previewText=tc.preview||displaySnippet||'';
@@ -5362,7 +5362,6 @@ function buildToolCard(tc){
   row.innerHTML=`
     <div class="${cardClass}">
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
-        ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>

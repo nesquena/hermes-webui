@@ -154,11 +154,22 @@ def test_cron_output_window_without_response_uses_tail(cleanup_test_sessions):
 def test_tool_card_running_dot_in_css(cleanup_test_sessions):
     src, _ = get_text("/static/style.css")
     assert "tool-card-running-dot" in src
+    marker = "/* Running indicator: single circular spinner in the icon slot. */"
+    start = src.index(".tool-card-running-dot{", src.index(marker))
+    block = src[start:src.find("}", start)]
+    assert "border-radius:50%" in block
+    assert "animation:spin" in block
 
 def test_tool_card_show_more_in_ui_js(cleanup_test_sessions):
     src, _ = get_text("/static/ui.js")
     assert "Show more" in src
     assert "tool-card-more" in src
+
+def test_running_tool_uses_spinner_in_icon_slot(cleanup_test_sessions):
+    src, _ = get_text("/static/ui.js")
+    assert "const isRunning=tc.done===false;" in src
+    assert "const icon=isRunning?'<span class=\"tool-card-running-dot\"" in src
+    assert "${runIndicator}" not in src
 
 def test_tool_card_smart_truncation_in_ui_js(cleanup_test_sessions):
     src, _ = get_text("/static/ui.js")
