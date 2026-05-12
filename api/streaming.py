@@ -44,6 +44,26 @@ from api.turn_journal import append_turn_journal_event_for_stream
 _ENV_LOCK = threading.Lock()
 
 
+def _prefer_pool_base_url(resolved_base_url, runtime, resolved_provider):
+    """Prefer the credential pool's base_url over config.yaml's model.base_url.
+
+    config.yaml can hold a stale path suffix (e.g. ``api.kimi.com/coding/v1``
+    instead of ``api.kimi.com/coding``) that doubles up when the SDK appends
+    ``/v1/messages`` to the Anthropic-wire endpoint, yielding a 404. The
+    credential pool's base_url is the source of truth, written by
+    ``hermes model`` and used by the CLI and gateway. Custom providers
+    (``custom`` / ``custom:<slug>``) keep their config.yaml URL because
+    ``custom_providers[]`` is where their base_url legitimately lives.
+    """
+    pool_base = runtime.get("base_url") if runtime else None
+    is_custom = isinstance(resolved_provider, str) and (
+        resolved_provider == "custom" or resolved_provider.startswith("custom:")
+    )
+    if pool_base and not is_custom:
+        return pool_base
+    return resolved_base_url or pool_base
+
+
 def _prewarm_skill_tool_modules():
     """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
 
@@ -2708,8 +2728,9 @@ def _run_agent_streaming(
                 resolved_api_key = _rt.get("api_key")
                 if not resolved_provider:
                     resolved_provider = _rt.get("provider")
-                if not resolved_base_url:
-                    resolved_base_url = _rt.get("base_url")
+                resolved_base_url = _prefer_pool_base_url(
+                    resolved_base_url, _rt, resolved_provider
+                )
             except Exception as _e:
                 print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
@@ -3188,8 +3209,9 @@ def _run_agent_streaming(
                             resolved_api_key = _heal_rt.get('api_key')
                             if not resolved_provider:
                                 resolved_provider = _heal_rt.get('provider')
-                            if not resolved_base_url:
-                                resolved_base_url = _heal_rt.get('base_url')
+                            resolved_base_url = _prefer_pool_base_url(
+                                resolved_base_url, _heal_rt, resolved_provider
+                            )
                             if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
                                 _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
                                 if not resolved_api_key and _cp_key:
@@ -3885,8 +3907,9 @@ def _run_agent_streaming(
                     resolved_api_key = _heal_rt.get('api_key')
                     if not resolved_provider:
                         resolved_provider = _heal_rt.get('provider')
-                    if not resolved_base_url:
-                        resolved_base_url = _heal_rt.get('base_url')
+                    resolved_base_url = _prefer_pool_base_url(
+                        resolved_base_url, _heal_rt, resolved_provider
+                    )
                     if isinstance(resolved_provider, str) and resolved_provider.startswith('custom:'):
                         _cp_key, _cp_base = resolve_custom_provider_connection(resolved_provider)
                         if not resolved_api_key and _cp_key:
