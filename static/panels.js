@@ -5545,7 +5545,7 @@ async function _refreshProviderQuota(card,button){
   }catch(e){
     failed=true;
   }
-  if(button){
+  if(card.isConnected&&button){
     button.disabled=false;
     button.textContent='Refresh usage';
     button.removeAttribute('aria-busy');

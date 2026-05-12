@@ -563,6 +563,7 @@ def test_provider_quota_card_has_manual_refresh_control():
     assert "Refresh usage" in panels
     assert "Provider usage refreshed" in panels
     assert "Provider usage refresh failed" in panels
+    assert "card.isConnected&&button" in panels
     assert "Last checked" in panels
 
 
