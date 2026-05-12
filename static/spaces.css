@@ -713,93 +713,75 @@ button.capy-spaces-product-space-card { cursor: pointer; }
 }
 
 
-/* Stronger Space Agent-like open Space canvas. */
+/* Polished open-Space product canvas. */
 .capy-spaces-canvas-shell {
   background:
-    radial-gradient(circle at 20% 16%, rgba(96,165,250,.22), transparent 26%),
-    radial-gradient(circle at 82% 26%, rgba(251,146,60,.14), transparent 24%),
-    radial-gradient(circle at 50% 90%, rgba(14,165,233,.14), transparent 34%),
-    linear-gradient(180deg, #050711 0%, #071225 50%, #03050b 100%);
-  border-color: rgba(125, 211, 252, 0.25);
-  border-radius: 30px;
-  box-shadow: 0 28px 90px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.05);
-  min-height: 760px;
+    radial-gradient(circle at 22% 12%, rgba(94, 106, 210, .20), transparent 24%),
+    radial-gradient(circle at 86% 18%, rgba(113, 112, 255, .12), transparent 22%),
+    linear-gradient(180deg, #08090a 0%, #0b0d13 52%, #050609 100%);
+  border-color: rgba(255, 255, 255, .08);
+  border-radius: 28px;
+  box-shadow: 0 28px 90px rgba(0,0,0,.36), inset 0 1px 0 rgba(255,255,255,.05);
+  min-height: 680px;
 }
 
 .capy-spaces-canvas-shell .capy-spaces-starfield {
   background-image:
-    radial-gradient(circle, rgba(255,255,255,.86) 1px, transparent 1.4px),
-    radial-gradient(circle, rgba(147,197,253,.58) 1px, transparent 1.2px),
-    radial-gradient(circle, rgba(251,146,60,.42) 1px, transparent 1.2px);
-  background-position: 0 0, 31px 41px, 83px 17px;
-  background-size: 84px 84px, 132px 132px, 190px 190px;
-  opacity: .68;
-}
-
-.capy-spaces-canvas-orbit {
-  border: 1px solid rgba(147,197,253,.12);
-  border-radius: 999px;
-  filter: blur(.2px);
-  pointer-events: none;
-  position: absolute;
-  transform: rotate(-18deg);
-  z-index: 0;
-}
-
-.capy-spaces-canvas-orbit-one {
-  height: 340px;
-  right: -120px;
-  top: 86px;
-  width: 520px;
-}
-
-.capy-spaces-canvas-orbit-two {
-  bottom: -110px;
-  height: 260px;
-  left: -90px;
-  transform: rotate(22deg);
-  width: 420px;
+    radial-gradient(circle, rgba(255,255,255,.44) 1px, transparent 1.3px),
+    radial-gradient(circle, rgba(130,143,255,.28) 1px, transparent 1.2px);
+  background-position: 0 0, 35px 46px;
+  background-size: 118px 118px, 176px 176px;
+  opacity: .34;
 }
 
 .capy-spaces-canvas-topbar {
-  background: rgba(6, 12, 25, .76);
-  border-color: rgba(125, 211, 252, .28);
-  box-shadow: 0 16px 44px rgba(0,0,0,.30);
+  background: rgba(15, 16, 17, .74);
+  border-color: rgba(255,255,255,.08);
+  box-shadow: 0 16px 44px rgba(0,0,0,.26);
   left: 28px;
+  padding: 8px 10px;
   right: 28px;
   top: 18px;
 }
 
 .capy-spaces-canvas-space-switcher {
-  background: rgba(15, 23, 42, .72);
-  border: 1px solid rgba(147,197,253,.20);
+  background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.08);
   border-radius: 999px;
-  min-width: min(320px, 36vw);
-  padding: 8px 16px;
+  min-width: min(300px, 36vw);
+  padding: 7px 16px;
 }
 
 .capy-spaces-canvas-stage {
-  inset: 96px 28px 104px;
+  display: grid;
+  gap: 22px;
+  grid-template-columns: minmax(240px, 310px) 1fr;
+  inset: 96px 28px 116px;
 }
 
 .capy-spaces-canvas-prompt-card {
-  background: rgba(8, 18, 35, .80);
-  border-color: rgba(147,197,253,.26);
-  border-radius: 24px;
-  box-shadow: 0 24px 70px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.04);
+  align-self: start;
+  background: rgba(15, 16, 17, .72);
+  border-color: rgba(255,255,255,.08);
+  border-radius: 18px;
+  box-shadow: 0 18px 54px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.04);
   display: flex;
-  left: 0;
-  max-width: 330px;
+  max-width: none;
   padding: 18px;
-  position: absolute;
-  top: 0;
-  z-index: 2;
+}
+
+.capy-spaces-canvas-prompt-card strong {
+  color: #f7f8f8;
+  font-size: 18px;
+  font-weight: 590;
+  letter-spacing: -.02em;
+  line-height: 1.18;
 }
 
 .capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples {
   align-items: stretch;
   flex-direction: column;
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples > span {
@@ -807,37 +789,67 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   text-transform: uppercase;
 }
 
+.capy-spaces-canvas-example {
+  background: rgba(255,255,255,.035);
+  border-color: rgba(255,255,255,.08);
+  color: #d0d6e0;
+  text-align: left;
+}
+
 .capy-spaces-canvas-grid {
-  left: 352px;
-  top: 0;
+  align-content: start;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  left: auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 1px 2px 8px;
+  position: relative;
+  right: auto;
+  top: auto;
 }
 
 .capy-spaces-canvas-widget {
-  background: rgba(10, 22, 42, .82);
-  border-color: rgba(148,163,184,.28);
-  border-radius: 22px;
-  box-shadow: 0 22px 58px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.04);
-  gap: 10px;
+  background: rgba(25, 26, 27, .76);
+  border-color: rgba(255,255,255,.08);
+  border-radius: 16px;
+  box-shadow: 0 16px 42px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.04);
+  gap: 12px;
+  min-width: 0;
   padding: 14px;
+  position: relative;
 }
 
 .capy-spaces-canvas-widget-bar {
-  border-bottom: 1px solid rgba(148,163,184,.14);
-  padding-bottom: 9px;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  min-width: 0;
+  padding-bottom: 10px;
+}
+
+.capy-spaces-canvas-widget-bar strong {
+  color: #f7f8f8;
+  flex: 1;
+  font-weight: 590;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .capy-spaces-window-dots {
   display: inline-flex;
   gap: 4px;
-  min-width: 42px;
+  min-width: 40px;
 }
 
 .capy-spaces-window-dots i {
-  background: #64748b;
+  background: #62666d;
   border-radius: 999px;
   display: block;
-  height: 8px;
-  width: 8px;
+  height: 7px;
+  opacity: .78;
+  width: 7px;
 }
 
 .capy-spaces-window-dots i:nth-child(1) { background: #fb7185; }
@@ -845,58 +857,81 @@ button.capy-spaces-product-space-card { cursor: pointer; }
 .capy-spaces-window-dots i:nth-child(3) { background: #34d399; }
 
 .capy-spaces-canvas-kind {
-  background: rgba(96,165,250,.12);
-  border: 1px solid rgba(147,197,253,.22);
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
   border-radius: 999px;
+  color: #8a8f98 !important;
+  font-size: 11px !important;
+  max-width: 96px;
+  overflow: hidden;
   padding: 3px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .capy-spaces-canvas-widget-preview {
-  background:
-    linear-gradient(135deg, rgba(96,165,250,.13), rgba(15,23,42,.64)),
-    repeating-linear-gradient(90deg, rgba(255,255,255,.045) 0 1px, transparent 1px 16px);
-  border: 1px solid rgba(147,197,253,.16);
-  border-radius: 16px;
+  align-items: center;
+  background: rgba(255,255,255,.025);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 14px;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-height: 64px;
-  justify-content: center;
+  flex-direction: row;
+  gap: 12px;
+  min-height: 74px;
   padding: 12px;
 }
 
-.capy-spaces-canvas-widget-preview span {
-  color: rgba(226,232,240,.70);
-  font-size: 12px;
+.capy-spaces-canvas-widget-glyph {
+  align-items: center;
+  background: linear-gradient(135deg, rgba(94,106,210,.78), rgba(113,112,255,.36));
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 12px;
+  color: #fff !important;
+  display: inline-flex;
+  flex: 0 0 42px;
+  font-size: 19px !important;
+  font-weight: 590;
+  height: 42px;
+  justify-content: center;
+  letter-spacing: -.03em;
+  width: 42px;
 }
 
-.capy-spaces-canvas-widget-controls span {
-  background: rgba(255,255,255,.075);
-  border-color: rgba(255,255,255,.12);
+.capy-spaces-canvas-widget-preview div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.capy-spaces-canvas-widget-preview strong {
+  color: #f7f8f8;
+  font-weight: 510;
+}
+
+.capy-spaces-canvas-widget-preview span {
+  color: #8a8f98;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .capy-spaces-canvas-widget-actions {
   align-items: center;
-  justify-content: space-between;
-}
-
-.capy-spaces-canvas-resize-handle {
-  color: rgba(226,232,240,.48);
-  font-size: 11px;
+  justify-content: flex-end;
 }
 
 .capy-spaces-canvas-agent-dock {
   align-items: center;
-  background: rgba(4, 9, 20, .84);
-  border-color: rgba(251,146,60,.36);
-  border-radius: 999px;
-  bottom: 20px;
-  box-shadow: 0 18px 48px rgba(0,0,0,.34);
+  background: rgba(15, 16, 17, .86);
+  border-color: rgba(255,255,255,.10);
+  border-radius: 18px;
+  bottom: 22px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.04);
   flex-direction: row;
-  gap: 9px;
+  gap: 10px;
   left: 50%;
   max-width: min(760px, calc(100% - 56px));
-  padding: 8px 10px;
+  padding: 9px 10px;
   right: auto;
   text-align: left;
   transform: translateX(-50%);
@@ -908,29 +943,28 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   flex: 1;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .capy-spaces-canvas-agent-dock textarea {
   background: transparent;
   border: 0;
-  color: #fff;
+  color: #f7f8f8;
   min-height: 22px;
   outline: none;
   resize: none;
 }
 
-.capy-spaces-canvas-dock-note {
-  color: rgba(226,232,240,.58) !important;
-  flex-basis: 100%;
-  font-size: 11px;
-  text-align: center;
+.capy-spaces-canvas-agent-dock .capy-spaces-agent-key {
+  background: #5e6ad2;
+  border-color: rgba(255,255,255,.10);
+  color: #fff;
 }
 
 @media (max-width: 900px) {
-  .capy-spaces-canvas-shell { min-height: 900px; }
-  .capy-spaces-canvas-stage { inset: 92px 18px 136px; }
-  .capy-spaces-canvas-prompt-card { left: 0; max-width: none; right: 0; }
+  .capy-spaces-canvas-shell { min-height: 920px; }
+  .capy-spaces-canvas-topbar { align-items: stretch; border-radius: 18px; flex-direction: column; }
+  .capy-spaces-canvas-stage { grid-template-columns: 1fr; inset: 154px 18px 138px; }
   .capy-spaces-canvas-prompt-card .capy-spaces-canvas-examples { flex-direction: row; }
-  .capy-spaces-canvas-grid { left: 0; top: 220px; }
-  .capy-spaces-canvas-agent-dock { align-items: stretch; border-radius: 24px; flex-wrap: wrap; }
+  .capy-spaces-canvas-agent-dock { align-items: stretch; border-radius: 18px; flex-wrap: wrap; }
 }

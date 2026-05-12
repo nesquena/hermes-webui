@@ -710,28 +710,24 @@
     const widgetCards = renderSpaceAgentCanvasWidgets(spaceId, widgets || []);
     return '<section class="capy-spaces-canvas-shell" aria-label="Current Space canvas">' +
       '<div class="capy-spaces-starfield" aria-hidden="true"></div>' +
-      '<div class="capy-spaces-canvas-orbit capy-spaces-canvas-orbit-one" aria-hidden="true"></div>' +
-      '<div class="capy-spaces-canvas-orbit capy-spaces-canvas-orbit-two" aria-hidden="true"></div>' +
       '<div class="capy-spaces-canvas-topbar">' +
       '<button type="button" class="capy-spaces-canvas-pill capy-spaces-canvas-home" data-capy-action="reloadSpaces"><span aria-hidden="true">⌂</span> Home</button>' +
       '<div class="capy-spaces-canvas-title capy-spaces-canvas-space-switcher"><span>Current Space</span><strong>'+escapeHtml(name)+' <span aria-hidden="true">⌄</span></strong></div>' +
       '<div class="capy-spaces-canvas-actions">' +
-      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Menu</button>' +
+      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Details</button>' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Share</button>' +
       '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="openSafeRecovery" data-space-id="'+escapeHtml(spaceId)+'">Recovery</button>' +
-      '<button type="button" class="capy-spaces-canvas-pill" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Rearrange</button>' +
       '</div></div>' +
       '<div class="capy-spaces-canvas-stage">' +
-      '<aside class="capy-spaces-canvas-prompt-card"><div class="capy-spaces-product-eyebrow">BUILD WITH CAPY</div><strong>Ask Capy to build, edit, or repair this Space</strong><span>Metadata-only shell · '+escapeHtml(String(widgetCount))+' widgets · revision '+escapeHtml(revision)+'</span>' +
+      '<aside class="capy-spaces-canvas-prompt-card"><div class="capy-spaces-product-eyebrow">BUILD WITH CAPY</div><strong>Ask Capy to build, edit, or repair this Space</strong><span>'+escapeHtml(String(widgetCount))+' widgets · revision '+escapeHtml(revision)+'</span>' +
       renderSpaceAgentExamplePrompts() + '</aside>' +
-      '<div class="capy-spaces-canvas-grid">'+widgetCards+'</div>' +
+      '<div class="capy-spaces-canvas-grid capy-spaces-canvas-widget-grid">'+widgetCards+'</div>' +
       '</div>' +
       '<div class="capy-spaces-canvas-dock capy-spaces-canvas-agent-dock" aria-label="Docked Capy input">' +
       '<div class="capy-spaces-agent-mascot" aria-hidden="true">☄</div>' +
-      '<label><span>Ready… · Docked Capy input</span><textarea id="capyCanvasCreatorPrompt" rows="1" autocomplete="off" placeholder="Ask Capy to build, edit, or repair this Space"></textarea></label>' +
+      '<label><span>Ready</span><textarea id="capyCanvasCreatorPrompt" rows="1" autocomplete="off" placeholder="Ask Capy to build, edit, or repair this Space"></textarea></label>' +
       '<button type="button" class="capy-spaces-agent-key" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt">Preview safely</button>' +
-      '<button type="button" class="capy-spaces-product-icon" data-capy-action="previewCreatorSpec" data-space-id="'+escapeHtml(spaceId)+'" data-creator-prompt-selector="#capyCanvasCreatorPrompt" aria-label="Send">↑</button>' +
-      '<div class="capy-spaces-canvas-dock-note">Metadata-only creator preview · sandbox and visual QA required before commit</div></div>' +
+      '</div>' +
       '</section>';
   }
 
@@ -751,20 +747,13 @@
     return safeWidgets.map(function(w){
       const rawWidgetId = w && w.id ? String(w.id) : '';
       const widgetId = safeCreatorIdText(rawWidgetId) || '';
-      const layout = widgetLayout(w || {});
       const title = safeDisplayMetadataText(w && w.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
       const kind = safeDisplayMetadataText(w && w.kind, 'custom') || 'custom';
-      const x = Math.min(95, Math.max(2, layout.x * 4));
-      const y = Math.min(48, Math.max(8, layout.y * 7));
-      const width = Math.min(48, Math.max(20, layout.w * 5));
-      const height = Math.min(44, Math.max(16, layout.h * 6));
-      return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'" style="left:'+x+'%;top:'+y+'%;width:'+width+'%;min-height:'+height+'px">' +
+      const initial = title.trim().charAt(0).toUpperCase() || '•';
+      return '<article class="capy-spaces-canvas-widget metadata-only-shell" data-capy-canvas-widget-id="'+escapeHtml(widgetId)+'">' +
         '<div class="capy-spaces-canvas-widget-bar"><span class="capy-spaces-window-dots" aria-hidden="true"><i></i><i></i><i></i></span><strong>'+escapeHtml(title)+'</strong><span class="capy-spaces-canvas-kind">'+escapeHtml(kind)+'</span></div>' +
-        '<div class="capy-spaces-canvas-widget-preview"><strong>Widget shell</strong><span>'+escapeHtml(kind)+' · safe metadata window</span></div>' +
-        '<div class="capy-spaces-canvas-widget-controls" aria-label="Widget controls"><span>Drag</span><span>Resize</span><span>Minimize</span></div>' +
-        '<div class="capy-spaces-canvas-widget-meta">'+escapeHtml(formatWidgetLayout(layout))+'</div>' +
-        '<div class="capy-spaces-canvas-widget-safe">generated code disabled · metadata-only-shell</div>' +
-        '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Inspect</button><span class="capy-spaces-canvas-resize-handle">Resize handle</span></div>' +
+        '<div class="capy-spaces-canvas-widget-preview"><span class="capy-spaces-canvas-widget-glyph" aria-hidden="true">'+escapeHtml(initial)+'</span><div><strong>Canvas preview</strong><span>'+escapeHtml(kind)+' · Sandbox review required</span></div></div>' +
+        '<div class="capy-spaces-canvas-widget-actions"><button type="button" class="capy-spaces-canvas-pill" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Open details</button></div>' +
         '</article>';
     }).join('');
   }

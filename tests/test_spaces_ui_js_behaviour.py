@@ -2453,36 +2453,40 @@ def test_spaces_ui_widget_manager_shows_weather_observation_preview(driver_path)
 def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_only(driver_path):
     out = _run_spaces_scenario(driver_path, "openSpaceDetail")
 
-    assert "capy-spaces-canvas-shell" in out["rootHtml"]
-    assert "capy-spaces-starfield" in out["rootHtml"]
-    assert "Current Space" in out["rootHtml"]
-    assert "Lab &lt;Detail&gt;" in out["rootHtml"]
-    assert "capy-spaces-canvas-orbit" in out["rootHtml"]
-    assert "capy-spaces-canvas-agent-dock" in out["rootHtml"]
-    assert "capy-spaces-canvas-space-switcher" in out["rootHtml"]
-    assert "Home" in out["rootHtml"]
-    assert "Menu" in out["rootHtml"]
-    assert "Share" in out["rootHtml"]
-    assert "Rearrange" in out["rootHtml"]
-    assert "Ready…" in out["rootHtml"]
-    assert "Docked Capy input" in out["rootHtml"]
-    assert "Ask Capy to build, edit, or repair this Space" in out["rootHtml"]
-    assert "Example prompts" in out["rootHtml"]
-    assert "Add a weather widget" in out["rootHtml"]
-    assert "Turn this into a dashboard" in out["rootHtml"]
-    assert "Repair broken widgets" in out["rootHtml"]
-    assert "data-capy-canvas-widget-id=\"weather\"" in out["rootHtml"]
-    assert "metadata-only-shell" in out["rootHtml"]
-    assert "generated code disabled" in out["rootHtml"]
-    assert "capy-spaces-window-dots" in out["rootHtml"]
-    assert "Widget shell" in out["rootHtml"]
-    assert "Resize handle" in out["rootHtml"]
-    assert "Drag" in out["rootHtml"]
-    assert "Resize" in out["rootHtml"]
-    assert "Minimize" in out["rootHtml"]
-    assert "x12 y3 · 5×4" in out["rootHtml"]
-    assert "data-capy-canvas-widget-id=\"browser-card\"" in out["rootHtml"]
-    assert "left:32%;top:48%;width:35%;min-height:30px" in out["rootHtml"]
+    canvas_html = out["rootHtml"].split('<div class="capy-spaces-card"', 1)[0]
+
+    assert "capy-spaces-canvas-shell" in canvas_html
+    assert "capy-spaces-starfield" in canvas_html
+    assert "Current Space" in canvas_html
+    assert "Lab &lt;Detail&gt;" in canvas_html
+    assert "capy-spaces-canvas-agent-dock" in canvas_html
+    assert "capy-spaces-canvas-space-switcher" in canvas_html
+    assert "Home" in canvas_html
+    assert "Share" in canvas_html
+    assert "Details" in canvas_html
+    assert "Recovery" in canvas_html
+    assert "Ready" in canvas_html
+    assert "Ask Capy to build, edit, or repair this Space" in canvas_html
+    assert "Example prompts" in canvas_html
+    assert "Add a weather widget" in canvas_html
+    assert "Turn this into a dashboard" in canvas_html
+    assert "Repair broken widgets" in canvas_html
+    assert "data-capy-canvas-widget-id=\"weather\"" in canvas_html
+    assert "metadata-only-shell" in canvas_html
+    assert "capy-spaces-window-dots" in canvas_html
+    assert "Canvas preview" in canvas_html
+    assert "Sandbox review required" in canvas_html
+    assert "Open details" in canvas_html
+    assert "data-capy-canvas-widget-id=\"browser-card\"" in canvas_html
+    assert "capy-spaces-canvas-widget-grid" in canvas_html
+    assert "capy-spaces-canvas-orbit" not in canvas_html
+    assert "Widget shell" not in canvas_html
+    assert "generated code disabled" not in canvas_html
+    assert "Resize handle" not in canvas_html
+    assert "Drag" not in canvas_html
+    assert "Minimize" not in canvas_html
+    assert "x12 y3 · 5×4" not in canvas_html
+    assert "left:32%;top:48%;width:35%;min-height:30px" not in canvas_html
     assert {"path": "api/spaces/get?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/revisions?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in out["rootHtml"]
