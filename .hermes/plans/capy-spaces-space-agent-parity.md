@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Static sandbox/postMessage handling now treats the published runtime message list as a front-end allowlist too: unlisted `capy:*` messages with a valid token and opaque sandbox origin render only a generic blocked status, open no approval dialog, queue no widget event, and omit hostile type/prompt/renderer markers plus secret-looking sentinels. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Revision history UI now treats the current revision as informational only: current rows keep the fixed `Current revision · timeline: current` label while omitting full-Space and widget restore actions; return-to-present candidates still render exactly one `Return to present` action and future non-candidates keep ordinary `Restore`, with hostile renderer/API-auth/secret-looking fixture values omitted from DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): hide current revision restore actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving current revision rows expose no `data-event-id` restore actions, while the return-to-present candidate keeps `Return to present` and a future non-candidate keeps `Restore`.
+  - Hardened `renderRevisionHistory(...)` with a shared current-revision check so both full-Space restore and per-widget restore buttons are suppressed for the active manifest row, keeping the row as metadata-only rollback context rather than a no-op destructive control.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related revision/detail tests passed (`2 passed`); Spaces UI behavior + demo parity suites passed (`155 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static revision harness browser leak checks passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_2cbe90cc2f694468a37553120f3b9c49.png`.
 
 - `fix(spaces): block unlisted sandbox messages in UI`
   - Added RED/GREEN real-`static/spaces.js` coverage proving an unlisted runtime message (`capy:debug:SECRET_VALUE_DO_NOT_LEAK`) with a valid runtime token and `origin: "null"` opens no dialog, sends no `api/spaces/widget/event` request, renders only the generic `Sandbox message blocked` status, and omits hostile type/prompt/renderer/script markers plus secret-looking sentinels from DOM.
