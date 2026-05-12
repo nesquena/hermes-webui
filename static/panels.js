@@ -4332,7 +4332,12 @@ async function searchExternalMemoryReview() {
 async function editExternalMemoryCandidate(id) {
   const all = [...((_externalMemoryData.candidate||{}).candidates||[]), ...((_externalMemoryData.approved||{}).candidates||[])];
   const item = all.find(x => x.id === id);
-  const next = prompt('Edit semantic statement before approval:', item ? item.text : '');
+  const next = await showPromptDialog({
+    title:'Edit External Memory candidate',
+    message:'Edit semantic statement before approval:',
+    value:item ? item.text : '',
+    confirmLabel:'Save',
+  });
   if (next == null) return;
   const provider = _activeExternalMemoryProvider();
   await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/edit`, {method:'POST', body:JSON.stringify({provider,text:next})});
@@ -4348,9 +4353,15 @@ async function approveExternalMemoryCandidate(id) {
 }
 
 async function rejectExternalMemoryCandidate(id) {
-  const reason = prompt('Reject reason:', 'not durable external memory') || '';
+  const reason = await showPromptDialog({
+    title:'Reject External Memory candidate',
+    message:'Reject reason:',
+    value:'not durable external memory',
+    confirmLabel:'Reject',
+  });
+  if (reason == null) return;
   const provider = _activeExternalMemoryProvider();
-  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/reject`, {method:'POST', body:JSON.stringify({provider,reason})});
+  await api(`/api/external-memory/candidates/${encodeURIComponent(id)}/reject`, {method:'POST', body:JSON.stringify({provider,reason:reason||''})});
   showToast('External Memory candidate rejected');
   await loadExternalMemoryReview(true);
 }
