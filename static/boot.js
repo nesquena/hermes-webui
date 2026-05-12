@@ -163,6 +163,10 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+function handleNewChat(){
+  if(typeof newChat==='function')newChat();
+  else if(typeof switchPanel==='function')switchPanel('chat');
+}
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
