@@ -24,6 +24,7 @@ const dialogs = [];
 const switchedPanels = [];
 const capySpaceSyncs = [];
 const windowListeners = {};
+const sandboxFrameWindows = {};
 let beforeHtml = '';
 const values = {
   '#capyWidgetId': 'notes',
@@ -88,6 +89,15 @@ global.document = {
       if (!html.includes('id="' + id + '"')) return null;
     }
     return makeElement(id);
+  },
+  querySelector(selector) {
+    const match = String(selector || '').match(/\.capy-spaces-sandbox-frame\[data-runtime-token="([^"]+)"\]/);
+    if (!match) return null;
+    const root = elements.capySpacesRoot;
+    const html = root && root.innerHTML ? root.innerHTML : '';
+    if (!html.includes('class="capy-spaces-sandbox-frame"') || !html.includes('data-runtime-token="' + match[1] + '"')) return null;
+    sandboxFrameWindows[match[1]] = sandboxFrameWindows[match[1]] || { capySandboxFrameToken: match[1] };
+    return { contentWindow: sandboxFrameWindows[match[1]] };
   },
 };
 global.fetch = async function(path, opts = {}) {
@@ -1234,7 +1244,8 @@ async function dispatchWindowMessage(data, opts) {
   const listener = windowListeners.message;
   if (!listener) return;
   opts = opts || {};
-  await listener({ data, origin: opts.origin || 'null', source: opts.source || { mockFrame: true } });
+  const frame = data && data.runtime_token ? document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="' + data.runtime_token + '"]') : null;
+  await listener({ data, origin: opts.origin || 'null', source: Object.prototype.hasOwnProperty.call(opts, 'source') ? opts.source : (frame ? frame.contentWindow : { mockFrame: true }) });
 }
 
 (async () => {
@@ -1411,6 +1422,38 @@ async function dispatchWindowMessage(data, opts) {
       prompt: 'Queue this prompt with mismatched selectors and SECRET_VALUE_DO_NOT_LEAK',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimePromptMissingSelectors') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      prompt: 'Queue this prompt without selectors and SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+    });
+  } else if (scenario === 'runtimePromptWrongFrameSource') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Queue this prompt from the wrong frame and SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+    }, { source: { capySandboxFrameToken: 'other-frame' } });
   } else if (scenario === 'runtimePromptCancelled') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2873,6 +2916,32 @@ def test_spaces_ui_sandbox_postmessage_rejects_mismatched_camelcase_selectors(dr
     assert "Queue this prompt" not in out["rootHtml"]
     assert "other-lab" not in out["rootHtml"]
     assert "other-widget" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_requires_explicit_space_and_widget_selectors(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptMissingSelectors")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this prompt" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_wrong_frame_source_even_with_valid_token(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePromptWrongFrameSource")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this prompt" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

@@ -1258,12 +1258,19 @@
     return String(event && event.origin || '') === 'null';
   }
 
+  function runtimeMessageSourceAllowed(event, token){
+    if (!event || !event.source || !token || typeof document === 'undefined' || !document.querySelector) return false;
+    const safeToken = String(token || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const frame = document.querySelector('.capy-spaces-sandbox-frame[data-runtime-token="'+safeToken+'"]');
+    return !!(frame && frame.contentWindow && event.source === frame.contentWindow);
+  }
+
   function runtimeMessageSelectorMatches(data, snakeKey, camelKey, expected){
-    if (!data || typeof data !== 'object') return true;
+    if (!data || typeof data !== 'object') return false;
     const values = [];
     if (Object.prototype.hasOwnProperty.call(data, snakeKey)) values.push(runtimeTokenPart(data[snakeKey], ''));
     if (Object.prototype.hasOwnProperty.call(data, camelKey)) values.push(runtimeTokenPart(data[camelKey], ''));
-    return values.every(function(value){ return value && value === expected; });
+    return values.length > 0 && values.every(function(value){ return value && value === expected; });
   }
 
   function prependRuntimeStatus(html){
@@ -1279,6 +1286,7 @@
     const session = token ? widgetRuntimeSessions[token] : null;
     if (!session) return;
     if (!runtimeSessionStillVisible(token)) return;
+    if (!runtimeMessageSourceAllowed(event, token)) return;
     if (!runtimeMessageSelectorMatches(data, 'space_id', 'spaceId', session.spaceId)) return;
     if (!runtimeMessageSelectorMatches(data, 'widget_id', 'widgetId', session.widgetId)) return;
     if (typeInfo.blocked) {
