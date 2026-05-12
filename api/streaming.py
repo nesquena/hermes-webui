@@ -633,6 +633,8 @@ def _message_text(value) -> str:
 
 _WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
 _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
+_WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
+_LEGACY_WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace:[^\]]+\]\s*')
 
 
 def _escape_workspace_prefix_path(path: str) -> str:
@@ -650,6 +652,27 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     if include_legacy and stripped == value:
         stripped = _LEGACY_WORKSPACE_PREFIX_RE.sub('', value, count=1)
     return stripped.strip()
+
+
+def _looks_like_current_user_turn(msg, msg_text) -> bool:
+    """Match the current human turn even if an internal workspace tag leaked mid-text.
+
+    Normal model-facing messages start with the workspace sentinel. A failed
+    retry/merge path can also return an optimistic draft followed by the
+    sentinel and the real prompt. Only treat that shape as the current turn
+    when the text after the sentinel exactly matches the submitted prompt.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'user':
+        return False
+    needle = " ".join(str(msg_text or '').split())
+    if not needle:
+        return False
+    text = _message_text(msg.get('content', ''))
+    candidates = [_strip_workspace_prefix(text, include_legacy=True)]
+    for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
+        for match in pattern.finditer(text):
+            candidates.append(text[match.end():])
+    return any(" ".join(str(candidate or '').split()) == needle for candidate in candidates)
 
 
 def _first_exchange_snippets(messages):
@@ -1543,6 +1566,8 @@ def _find_current_user_turn(messages, msg_text):
         if not isinstance(msg, dict) or msg.get('role') != 'user':
             continue
         fallback = idx
+        if _looks_like_current_user_turn(msg, msg_text):
+            return idx
         text = " ".join(
             _strip_workspace_prefix(
                 _message_text(msg.get('content', '')),
@@ -1594,10 +1619,15 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     seen = {_message_identity(m) for m in merged}
     current_user_key = _message_identity({'role': 'user', 'content': msg_text})
     current_user_in_candidates = any(
-        _message_identity(m) == current_user_key for m in candidates
+        _message_identity(m) == current_user_key or _looks_like_current_user_turn(m, msg_text)
+        for m in candidates
     )
     current_user_already_checkpointed = bool(
-        merged and _message_identity(merged[-1]) == current_user_key
+        merged
+        and (
+            _message_identity(merged[-1]) == current_user_key
+            or _looks_like_current_user_turn(merged[-1], msg_text)
+        )
     )
     if (
         current_user_key is not None
@@ -1622,11 +1652,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     for msg in candidates:
         key = _message_identity(msg)
+        is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
         if (
-            key is not None
-            and key == current_user_key
+            ((key is not None and key == current_user_key) or is_current_user_turn)
             and merged
-            and _message_identity(merged[-1]) == key
+            and (
+                _message_identity(merged[-1]) == current_user_key
+                or _looks_like_current_user_turn(merged[-1], msg_text)
+            )
         ):
             # Eager session-save mode can checkpoint the current user turn
             # before the agent runs. When the agent returns that same user turn
@@ -1636,13 +1669,35 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
         display_msg = msg
-        if key is not None and key == current_user_key and isinstance(msg, dict) and msg.get('role') == 'user':
+        if (
+            ((key is not None and key == current_user_key) or is_current_user_turn)
+            and isinstance(msg, dict)
+            and msg.get('role') == 'user'
+        ):
             display_msg = copy.deepcopy(msg)
             display_msg['content'] = msg_text
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
     return merged
+
+
+def _assistant_reply_added_after_current_turn(result_messages, previous_context, msg_text) -> bool:
+    """Return True only when the just-finished turn produced assistant text."""
+    result_messages = list(result_messages or [])
+    previous_context = list(previous_context or [])
+    if _messages_have_prefix(result_messages, previous_context):
+        candidates = result_messages[len(previous_context):]
+    else:
+        current_user_idx = _find_current_user_turn(result_messages, msg_text)
+        candidates = result_messages[current_user_idx + 1:] if current_user_idx is not None else result_messages
+    return any(
+        isinstance(m, dict)
+        and m.get('role') == 'assistant'
+        and not m.get('_error')
+        and str(m.get('content') or '').strip()
+        for m in candidates
+    )
 
 
 _TOOL_RESULT_SNIPPET_MAX = 4000
@@ -2782,9 +2837,10 @@ def _run_agent_streaming(
                 # an empty final_response without raising — the stream would end with
                 # a done event containing zero assistant messages, leaving the user with
                 # no feedback. Emit an apperror so the client shows an inline error.
-                _assistant_added = any(
-                    m.get('role') == 'assistant' and str(m.get('content') or '').strip()
-                    for m in (result.get('messages') or [])
+                _assistant_added = _assistant_reply_added_after_current_turn(
+                    result.get('messages') or [],
+                    _previous_context_messages,
+                    msg_text,
                 )
                 # _token_sent tracks whether on_token() was called (any streamed text)
                 if not _assistant_added and not _token_sent:

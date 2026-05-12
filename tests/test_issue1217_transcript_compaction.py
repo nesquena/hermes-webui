@@ -2,6 +2,7 @@ from api.models import Session
 import contextlib
 
 from api.streaming import (
+    _assistant_reply_added_after_current_turn,
     _merge_display_messages_after_agent_result,
     _sanitize_messages_for_api,
     _session_context_messages,
@@ -75,6 +76,96 @@ def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
         "continuing",
     ]
     assert sum(1 for m in merged if m.get("role") == "user" and "Ok, mache weiter" in m.get("content", "")) == 1
+
+
+def test_embedded_workspace_prefixed_current_user_delta_is_deduped():
+    """A failed provider path can echo draft text before the workspace tag."""
+    current = "正常来说，chrome for testing 不是有独立的profile嘛，为什么会有 user-data-dir 冲突的问题？"
+    previous_display = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": "正常来说，chrome"},
+        {"role": "user", "content": current},
+    ]
+    previous_context = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    result_messages = previous_context + [
+        {
+            "role": "user",
+            "content": (
+                "正常来说，chrome\n\n"
+                "[Workspace::v1: /mnt/e/vscode_workspace/hermes_workspace]\n"
+                f"{current}"
+            ),
+        },
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        current,
+    )
+
+    assert merged == previous_display
+    assert all("Workspace::v1" not in str(m.get("content") or "") for m in merged)
+
+
+def test_embedded_workspace_prefixed_current_user_delta_displays_clean_prompt():
+    current = "正常来说，chrome for testing 不是有独立的profile嘛，为什么会有 user-data-dir 冲突的问题？"
+    previous_display = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    previous_context = list(previous_display)
+    result_messages = previous_context + [
+        {
+            "role": "user",
+            "content": (
+                "正常来说，chrome\n\n"
+                "[Workspace::v1: /mnt/e/vscode_workspace/hermes_workspace]\n"
+                f"{current}"
+            ),
+        },
+        {"role": "assistant", "content": "Chrome for Testing 本身没有固定独立 profile。"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        current,
+    )
+
+    assert [m["content"] for m in merged[-2:]] == [
+        current,
+        "Chrome for Testing 本身没有固定独立 profile。",
+    ]
+    assert all("Workspace::v1" not in str(m.get("content") or "") for m in merged)
+
+
+def test_assistant_added_detection_ignores_prior_history():
+    previous_context = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    current = "new prompt"
+    result_messages = previous_context + [
+        {"role": "user", "content": f"[Workspace::v1: /tmp/project]\n{current}"},
+    ]
+
+    assert not _assistant_reply_added_after_current_turn(
+        result_messages,
+        previous_context,
+        current,
+    )
+    assert _assistant_reply_added_after_current_turn(
+        result_messages + [{"role": "assistant", "content": "new answer"}],
+        previous_context,
+        current,
+    )
 
 
 def test_compacted_agent_result_keeps_old_prompts_and_appends_current_turn():
