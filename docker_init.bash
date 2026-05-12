@@ -224,7 +224,19 @@ if [ "A${whoami}" == "Aroot" ]; then
 
   export UV_CACHE_DIR=${UV_CACHE_DIR:-/uv_cache}
   mkdir -p "${UV_CACHE_DIR}" || error_exit "Failed to create ${UV_CACHE_DIR} directory"
-  chown hermeswebui:hermeswebui "${UV_CACHE_DIR}" || error_exit "Failed to set owner of ${UV_CACHE_DIR} to hermeswebui user"
+  _hermes_home="${HERMES_HOME:-/home/hermeswebui/.hermes}"
+  _uv_cache_chown_target="${UV_CACHE_DIR}"
+  case "${UV_CACHE_DIR}" in
+    "${_hermes_home}"/*/*)
+      _uv_cache_tail="${UV_CACHE_DIR#"${_hermes_home}"/}"
+      _uv_cache_chown_target="${_hermes_home}/${_uv_cache_tail%%/*}"
+      ;;
+  esac
+  if ! chown -R hermeswebui:hermeswebui "${_uv_cache_chown_target}"; then
+    echo "!! UV cache permission diagnostic:"
+    stat -c '!!   %a %U:%G %n' "${_uv_cache_chown_target}" "${UV_CACHE_DIR}" 2>/dev/null || true
+    error_exit "Failed to set owner of ${_uv_cache_chown_target} to hermeswebui user"
+  fi
 
   chown -R "${WANTED_UID}:${WANTED_GID}" "$itdir" || error_exit "Failed to set owner of $itdir"
   save_env /tmp/hermeswebui_root_env.txt
@@ -302,7 +314,11 @@ fi
 export UV_PROJECT_ENVIRONMENT=venv
 
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/uv_cache}
-mkdir -p "${UV_CACHE_DIR}" || error_exit "Failed to create ${UV_CACHE_DIR} directory"
+if ! mkdir -p "${UV_CACHE_DIR}"; then
+  echo "!! UV cache permission diagnostic:"
+  stat -c '!!   %a %U:%G %n' "$(dirname "${UV_CACHE_DIR}")" "${UV_CACHE_DIR}" 2>/dev/null || true
+  error_exit "Failed to create ${UV_CACHE_DIR} directory"
+fi
 test -w "${UV_CACHE_DIR}" || error_exit "${UV_CACHE_DIR} is not writable by hermeswebui"
 
 cd /app

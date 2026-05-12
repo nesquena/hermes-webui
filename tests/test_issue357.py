@@ -128,6 +128,36 @@ class TestInitScriptUvSkip:
             "for the case where uv is installed at runtime via curl"
         )
 
+    def test_root_init_chowns_uv_cache_subtree_not_only_leaf(self):
+        """Root init must not leave ~/.hermes/cache as root:root mode 700.
+
+        The script runs with umask 0077. If root creates
+        ~/.hermes/cache/uv and only chowns the final uv directory, the
+        re-execed hermeswebui user cannot traverse the root-owned cache
+        parent and the runtime mkdir -p fails with Permission denied.
+        """
+        root_section = INIT_SCRIPT[
+            INIT_SCRIPT.find('if [ "A${whoami}" == "Aroot" ]; then'):
+            INIT_SCRIPT.find('exec su')
+        ]
+        mkdir_pos = root_section.find('mkdir -p "${UV_CACHE_DIR}"')
+        chown_target_pos = root_section.find('_uv_cache_chown_target="${_hermes_home}/${_uv_cache_tail%%/*}"')
+        chown_pos = root_section.find('chown -R hermeswebui:hermeswebui "${_uv_cache_chown_target}"')
+        assert mkdir_pos != -1, "root init must create UV_CACHE_DIR"
+        assert chown_target_pos != -1, "root init must promote chown target to the cache subtree"
+        assert chown_pos != -1, "root init must recursively chown the selected UV cache subtree"
+        assert mkdir_pos < chown_target_pos < chown_pos, (
+            "root init must create UV_CACHE_DIR, then select the cache subtree, "
+            "then chown it before dropping privileges"
+        )
+
+    def test_runtime_uv_cache_mkdir_logs_permission_diagnostics(self):
+        """Runtime mkdir failure must log owner/mode context for future root-cause work."""
+        runtime_section = INIT_SCRIPT[INIT_SCRIPT.find('export UV_PROJECT_ENVIRONMENT=venv'):]
+        assert 'if ! mkdir -p "${UV_CACHE_DIR}"; then' in runtime_section
+        assert "UV cache permission diagnostic" in runtime_section
+        assert 'stat -c' in runtime_section and '$(dirname "${UV_CACHE_DIR}")' in runtime_section
+
 
 # ── docker_init.bash: workspace directory permissions ────────────────────────
 
