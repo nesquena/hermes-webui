@@ -1199,9 +1199,13 @@
     .composer-wrap{padding:6px 8px 8px!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:36px;max-height:120px;font-size:16px;}
-    .composer-footer{padding:4px 8px 6px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
-    .composer-left{gap:4px;flex:0 0 auto;}
-    .composer-right{gap:4px;flex:0 0 auto;margin-left:auto;flex-direction:row;align-items:center;}
+    .composer-footer{padding:4px 8px 6px!important;gap:6px;flex-wrap:nowrap!important;align-items:center;}
+    .composer-left{gap:4px;flex:0 0 auto!important;}
+    .composer-right{gap:4px;flex:0 0 auto!important;margin-left:auto;flex-direction:row;align-items:center;width:auto!important;}
+    .dashboard-chat-composer .composer-footer{flex-wrap:nowrap!important;gap:6px;}
+    .dashboard-chat-composer .composer-left{flex:0 0 auto!important;flex-basis:auto!important;}
+    .dashboard-chat-composer .composer-right{width:auto!important;flex:0 0 auto;margin-left:auto;}
+    .dashboard-chat-composer .composer-wrap{padding:6px 8px 8px!important;}
     .composer-profile-label,
     .composer-workspace-label,
     .composer-model-label,
@@ -2940,9 +2944,9 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
      slide-in drawer on the right, accessed via the new mobile rail
      button in the topbar. Composer stays anchored at the bottom. */
   body.dashboard-shell-mode main.main.showing-dashboard .main-view-body{padding:0;flex:1 1 0;min-height:0;overflow:hidden;}
-  body.dashboard-shell-mode main.main.showing-dashboard .main-view-content{padding:0;flex:1 1 0;min-height:0;max-width:none;}
-  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-grid{grid-template-columns:1fr;gap:0;flex:1 1 0;min-height:0;}
-  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-center{flex:1 1 0;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .main-view-content{padding:0;flex:1 1 0;min-height:0;max-width:none;display:flex;flex-direction:column;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-grid{grid-template-columns:1fr;grid-template-rows:1fr;gap:0;flex:1 1 0;min-height:0;}
+  body.dashboard-shell-mode main.main.showing-dashboard .dashboard-center{height:100%;min-height:0;display:flex;flex-direction:column;}
   body.dashboard-shell-mode main.main.showing-dashboard .dashboard-chat-panel{flex:1 1 0;min-height:0;border-radius:0;border-left:0;border-right:0;border-top:0;display:flex;flex-direction:column;overflow:hidden;}
   body.dashboard-shell-mode main.main.showing-dashboard .dashboard-right{
     position:fixed;right:calc(-1 * min(360px, 92vw));top:0;bottom:0;
