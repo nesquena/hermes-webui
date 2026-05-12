@@ -1559,6 +1559,29 @@ def _is_messaging_session_record(session) -> bool:
     return _is_known_messaging_source(raw)
 
 
+def _session_requires_cli_metadata_lookup(session) -> bool:
+    if not session:
+        return False
+
+    def _field(name):
+        return session.get(name) if isinstance(session, dict) else getattr(session, name, None)
+
+    if _is_messaging_session_record(session):
+        return True
+    if bool(_field("is_cli_session")) or bool(_field("read_only")):
+        return True
+    session_source = _normalize_messaging_source(_safe_first(_field("session_source")))
+    if session_source in {"messaging", "external_agent", "external-agent"}:
+        return True
+    return bool(_safe_first(
+        _field("source_tag"),
+        _field("raw_source"),
+        _field("source"),
+        _field("source_label"),
+        _field("platform"),
+    ))
+
+
 def _is_messaging_session_id(sid: str) -> bool:
     """Detect messaging-backed sessions from WebUI metadata or Agent rows."""
     try:
@@ -3125,7 +3148,7 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid)
+            cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             if is_messaging_session:
