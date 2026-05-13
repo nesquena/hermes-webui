@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-12 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-13 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Safe recovery rollback rows now mirror the Space detail revision timeline by labeling `is_return_to_present_candidate` future revisions with a `Return to present` action while ordinary rollback points keep `Restore revision`, and the recovery panel remains metadata-only with generated renderer/API-auth/secret-looking fixture values omitted from DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Space detail revision history now labels ordinary non-candidate future rollback rows with `timeline: future` while preserving the stronger `Return-to-present candidate · timeline: future` label/action for the direct return candidate and keeping current rows non-actionable. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): label non-candidate future revisions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving a non-candidate future revision row renders a visible `timeline: future` label, keeps the ordinary `Restore` action, and does not steal the `Return to present` action from the candidate row.
+  - Hardened `formatRevisionTimelineLabel(...)` so all backend-provided future timeline states are visible in the Space detail/recovery row renderer while preserving current-row action suppression and metadata-only redaction of generated renderer/API-auth/secret-looking fixture values.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related revision/recovery label tests passed (`3 passed`); Spaces UI behavior + demo parity suites passed (`168 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static future-revision browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/future-revision-label-qa.png`.
 
 - `fix(spaces): label recovery return to present`
   - Added RED/GREEN real-`static/spaces.js` coverage proving safe recovery rollback rows label future `is_return_to_present_candidate` revisions as `Return to present` instead of generic `Restore revision`, while past rollback points keep the ordinary restore label.

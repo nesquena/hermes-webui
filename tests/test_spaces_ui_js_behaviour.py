@@ -2556,6 +2556,20 @@ def test_spaces_ui_revision_history_labels_current_and_return_to_present_metadat
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
 
 
+def test_spaces_ui_revision_history_labels_non_candidate_future_rows_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+
+    assert out["rootHtml"].count("timeline: future") == 2
+    assert "Return-to-present candidate · timeline: future" in out["rootHtml"]
+    assert "data-event-id=\"rev2\">Return to present</button>" in out["rootHtml"]
+    assert "data-event-id=\"rev3\">Restore</button>" in out["rootHtml"]
+    assert "Lab intermediate" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
 def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driver_path):
     out = _run_spaces_scenario(driver_path, "openSpaceCanvasRecovery")
 

@@ -952,6 +952,7 @@
     if (!rev || typeof rev !== 'object' || Array.isArray(rev)) return '';
     if (isCurrentRevision(rev)) return 'Current revision · timeline: current';
     if (isReturnToPresentRevision(rev)) return 'Return-to-present candidate · timeline: future';
+    if (rev.timeline_state === 'future') return 'timeline: future';
     if (rev.timeline_state === 'past') return 'timeline: past';
     return '';
   }
