@@ -620,7 +620,20 @@ global.fetch = async function(path, opts = {}) {
             { id: 'still-listed', kind: 'markdown', title: 'Still Listed', disabled: false, renderer: '<script>bad()</script>' },
           ],
         }
-      ],
+      ].concat(scenario === 'recoveryUnsafeSpaceId' ? [{
+        space_id: 'source/../api_key',
+        name: 'Unsafe recovery Space',
+        description: 'Unsafe selector should remain non-actionable',
+        widget_count: 1,
+        revision_event_id: 'rev-unsafe-space',
+        disabled: false,
+        widgets: [
+          { id: 'safe-widget', kind: 'markdown', title: 'Safe Widget', disabled: false },
+        ],
+        revisions: [
+          { event_id: 'rev-unsafe-space', event_type: 'space.updated', created_at: 1710000300, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget'] } },
+        ],
+      }] : []),
     });
   }
   if (path === 'api/spaces/widgets?space_id=demo-notes-app') {
@@ -2068,7 +2081,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery') {
+  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -4577,6 +4590,24 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "/api/spaces/revision/restore-widget" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_panel_redacts_unsafe_space_id_and_omits_actions(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryUnsafeSpaceId")
+
+    assert "Unsafe recovery Space" in out["recoveryHtml"]
+    assert "Unsafe selector should remain non-actionable" in out["recoveryHtml"]
+    assert "Space ID: [REDACTED]" in out["recoveryHtml"]
+    assert "source/../api_key" not in out["recoveryHtml"]
+    assert "data-space-id=\"source" not in out["recoveryHtml"]
+    assert "data-space-id=\"\"" not in out["recoveryHtml"]
+    assert 'data-event-id="rev-unsafe-space">Restore revision</button>' not in out["recoveryHtml"]
+    assert 'data-capy-action="restoreRecoveryWidgetRevision" data-space-id=""' not in out["recoveryHtml"]
+    assert "Safe Widget" in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
 
 
