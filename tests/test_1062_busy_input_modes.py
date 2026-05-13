@@ -106,7 +106,7 @@ class TestSlashCommandHandlers:
         # The shared helper must contain the fallback path
         helper_idx = COMMANDS_JS.find("async function _trySteer(")
         assert helper_idx >= 0, "_trySteer helper must exist"
-        helper_body = COMMANDS_JS[helper_idx:helper_idx + 1500]
+        helper_body = COMMANDS_JS[helper_idx:helper_idx + 2000]
         assert "queueSessionMessage" in helper_body
         assert "cancelStream" in helper_body
         # Toast should differ from interrupt to signal it's the steer path
@@ -139,7 +139,7 @@ class TestSlashCommandHandlers:
         # cmdSteer delegates to _trySteer; that helper clears pendingFiles
         idx_try = COMMANDS_JS.find("function _trySteer(")
         assert idx_try >= 0, "_trySteer not found"
-        try_body = COMMANDS_JS[idx_try:idx_try + 1200]
+        try_body = COMMANDS_JS[idx_try:idx_try + 1600]
         assert "S.pendingFiles=[]" in try_body, (
             "_trySteer must clear S.pendingFiles in its fallback path — "
             "without this, files are lost on steer→interrupt fallback"

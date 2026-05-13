@@ -796,6 +796,10 @@
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
+  /* Steer indicator: transient banner below messages, removed on renderMessages rebuild */
+  .steer-indicator{display:flex;align-items:baseline;gap:8px;padding:10px 0;opacity:.65;font-style:italic;color:var(--accent-text);}
+  .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
+  .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}

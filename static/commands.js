@@ -875,6 +875,26 @@ async function cmdSteer(args){
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
  *   (vs the busy-mode auto-fallback). Affects toast wording only.
  */
+function _showSteerIndicator(text){
+  const inner=document.getElementById('msgInner');
+  if(!inner) return;
+  // Remove any existing steer indicator
+  const old=inner.querySelector('.steer-indicator');
+  if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='steer-indicator';
+  const badge=document.createElement('span');
+  badge.className='steer-badge';
+  badge.textContent='Steer';
+  const body=document.createElement('span');
+  body.className='steer-body';
+  body.textContent=text.length>120?text.slice(0,117)+'…':text;
+  el.appendChild(badge);
+  el.appendChild(body);
+  inner.appendChild(el);
+  if(typeof scrollToBottom==='function') scrollToBottom();
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -887,6 +907,11 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    // Show a transient steer indicator in the chat (NOT in S.messages — it must
+    // survive the done event's S.messages=d.session.messages replacement).
+    // The indicator self-removes when the turn completes (done/cancel/error
+    // all call renderMessages which rebuilds msgInner).
+    _showSteerIndicator(msg);
     showToast(t('cmd_steer_delivered'),2500);
     return;
   }
