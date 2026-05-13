@@ -2906,6 +2906,72 @@ def test_creator_commit_strips_generated_body_metadata_from_preview_receipts(mon
     assert "<section" not in persisted
 
 
+def test_creator_commit_redacts_generated_html_values_under_safe_metadata_keys(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Generated Html Value Lab",
+            "widgets": [
+                {
+                    "widgetId": "safe-panel",
+                    "title": "Safe Panel",
+                    "kind": "markdown",
+                    "metadata": {
+                        "safe_label": "Visible safe label",
+                        "summary": "<section>Generated widget body</section>",
+                        "primary_note": "generated widget code should not persist",
+                        "secondary_note": "generatedWidgetHtml should not persist",
+                        "tertiary_note": "generated widget source should not persist",
+                        "quaternary_note": "generatedWidgetScript should not persist",
+                        "safe_nested": {
+                            "label": "<article>Generated widget body nested</article>",
+                            "nested_note": "generatedWidgetSource should not persist",
+                        },
+                    },
+                    "status": {"content": "<div>Generated widget body</div>"},
+                }
+            ],
+        },
+    )
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+    manifest = spaces.read_space("generated-html-value-lab")
+    event_path = spaces.events_dir() / f"{committed['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(
+        {
+            "preview": preview,
+            "committed": committed,
+            "manifest": manifest,
+            "event": event,
+        }
+    ).lower()
+
+    metadata = manifest["widgets"][0]["metadata"]
+    assert metadata["safe_label"] == "Visible safe label"
+    assert "<div" not in serialized
+    assert "<section" not in serialized
+    assert "<article" not in serialized
+    assert "generated widget body" not in serialized
+    assert "generated widget code" not in serialized
+    assert "generatedwidgethtml" not in serialized
+    assert "generated widget source" not in serialized
+    assert "generatedwidgetscript" not in serialized
+    assert "generatedwidgetsource" not in serialized
+    assert preview["safety"]["omitted_field_count"] >= 6
+    assert committed["safety"]["omitted_field_count"] >= 6
+
+
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

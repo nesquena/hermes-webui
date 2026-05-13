@@ -2904,6 +2904,16 @@ def _space_creator_safe_widget_input(raw_widget: dict[str, Any], index: int, use
     return safe_widget, omitted
 
 
+_SPACE_CREATOR_UNSAFE_VALUE_RE = re.compile(
+    r"<\s*/?\s*[a-z][^>]*>|"
+    r"\bfunction\s+render\b|"
+    r"\bgenerated(?:[ _-]?widget)?[ _-]?(?:body|code|html|script|source)\b|"
+    r"\braw[ _-]?prompt\b|"
+    r"\bapi[ _-]?auth\b|\bapiauth\b",
+    re.IGNORECASE,
+)
+
+
 def _space_creator_metadata_key_is_unsafe(key: Any) -> bool:
     """Return True when creator metadata key names generated bodies or unsafe material."""
     text = str(key or "")
@@ -2986,6 +2996,11 @@ def _space_creator_strip_prompt_metadata(value: Any, depth: int = 0) -> tuple[An
             clean_items.append(clean_item)
             omitted += nested_omitted
         return clean_items, omitted
+    if isinstance(value, str):
+        safe_text = _payload_text_summary(value, 1000)
+        if safe_text == "[REDACTED]" or _SPACE_CREATOR_UNSAFE_VALUE_RE.search(safe_text):
+            return "[REDACTED]", 1
+        return value, 0
     return value, 0
 
 
