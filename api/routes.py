@@ -3127,8 +3127,9 @@ def handle_get(handler, parsed) -> bool:
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid)
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+            is_cli_session = bool(getattr(s, 'is_cli_session', None) or (cli_meta or {}).get('is_cli_session'))
             cli_messages = []
-            if is_messaging_session:
+            if is_messaging_session or is_cli_session:
                 cli_messages = get_cli_session_messages(sid)
             _t2 = _time.monotonic()
             effective_model = (
@@ -3143,7 +3144,7 @@ def handle_get(handler, parsed) -> bool:
             )
             _t3 = _time.monotonic()
             if load_messages:
-                if is_messaging_session and cli_messages:
+                if (is_messaging_session or is_cli_session) and cli_messages:
                     sidecar_messages = getattr(s, "messages", []) or []
                     # Recovery/aggregate sidecars can intentionally contain a
                     # longer visible conversation than the single state.db
@@ -3405,6 +3406,11 @@ def handle_get(handler, parsed) -> bool:
                         for key in ("source_tag", "raw_source", "session_source", "source_label"):
                             if not s.get(key) and meta.get(key):
                                 s[key] = meta[key]
+                    # Sync live message count from CLI store so the sidebar
+                    # reflects messages added after the initial import.
+                    cli_msg_count = meta.get("message_count") or meta.get("actual_message_count") or 0
+                    if cli_msg_count > (s.get("message_count") or 0):
+                        s["message_count"] = cli_msg_count
                 # Apply the same CLI visibility semantics to imported local copies so
                 # low-value imported artifacts do not leak into the sidebar.
                 webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
