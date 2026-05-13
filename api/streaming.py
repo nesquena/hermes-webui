@@ -36,6 +36,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.models import reconciled_state_db_messages_for_session
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -3176,9 +3177,9 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _previous_messages = list(s.messages or [])
+            _previous_messages = list(reconciled_state_db_messages_for_session(s) or [])
             _previous_context_messages = _drop_checkpointed_current_user_from_context(
-                _session_context_messages(s),
+                reconciled_state_db_messages_for_session(s, prefer_context=True),
                 msg_text,
             )
             _pre_compression_count = getattr(

@@ -448,12 +448,15 @@ async function newSession(flash, options={}){
   // don't call renderSessionList here - callers do it when needed
 }
 
-async function loadSession(sid){
+async function loadSession(sid, opts){
+  opts = opts || {};
+  const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
-  // to the top even though the user did not navigate anywhere.
-  if(currentSid===sid) return;
+  // to the top even though the user did not navigate anywhere. Explicit
+  // refresh paths pass {force:true} when external state.db changes arrive.
+  if(currentSid===sid && !forceReload) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
@@ -469,14 +472,14 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
   }
-  if (currentSid !== sid) {
+  if (currentSid !== sid || forceReload) {
     S.messages = [];
     S.toolCalls = [];
     _messagesTruncated = false;
     _oldestIdx = 0;
     _loadingOlder = false;
     const _msgInner = $('msgInner');
-    if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+    if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching.
   // Guard against network/server failures to prevent a permanently stuck loading state.
@@ -1825,6 +1828,7 @@ function _applySessionListPayload(sessData, projData){
     stopStreamingPoll();
   }
   ensureSessionTimeRefreshPoll();
+  ensureActiveSessionExternalRefreshPoll();
   renderSessionListFromCache();  // no-ops if rename is in progress
 }
 
@@ -1858,8 +1862,11 @@ let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
 const _streamingPollMs = 5000;
 const _sessionTimeRefreshMs = 60000;
+const _activeSessionExternalRefreshMs = 5000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
+let _activeSessionExternalRefreshTimer = null;
+let _activeSessionExternalRefreshInFlight = false;
 
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
@@ -1879,6 +1886,50 @@ function ensureSessionTimeRefreshPoll(){
   _sessionTimeRefreshTimer = setInterval(() => {
     renderSessionListFromCache();
   }, _sessionTimeRefreshMs);
+}
+
+async function refreshActiveSessionIfExternallyUpdated(reason){
+  if(_activeSessionExternalRefreshInFlight) return;
+  if(!S.session || !S.session.session_id) return;
+  if(S.busy || S.activeStreamId) return;
+  if(typeof document !== 'undefined' && document.hidden) return;
+  const sid = S.session.session_id;
+  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
+  const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
+  _activeSessionExternalRefreshInFlight = true;
+  try{
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    if(!data || !data.session) return;
+    if(!S.session || S.session.session_id !== sid) return;
+    if(S.busy || S.activeStreamId) return;
+    const remoteCount = Number(data.session.message_count || 0);
+    const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
+    if(remoteCount > localCount || remoteLast > localLast){
+      await loadSession(sid, {force:true, externalRefreshReason:reason||'poll'});
+      if(typeof renderSessionList==='function') void renderSessionList();
+    }
+  }catch(e){
+    // Ignore transient refresh failures; the next poll/focus event will retry.
+  }finally{
+    _activeSessionExternalRefreshInFlight = false;
+  }
+}
+
+function ensureActiveSessionExternalRefreshPoll(){
+  if(_activeSessionExternalRefreshTimer) return;
+  _activeSessionExternalRefreshTimer = setInterval(() => {
+    void refreshActiveSessionIfExternallyUpdated('poll');
+  }, _activeSessionExternalRefreshMs);
+  if(typeof document !== 'undefined' && !document._hermesExternalRefreshVisibilityHook){
+    document.addEventListener('visibilitychange', () => {
+      if(!document.hidden) void refreshActiveSessionIfExternallyUpdated('visible');
+    });
+    document._hermesExternalRefreshVisibilityHook = true;
+  }
+  if(typeof window !== 'undefined' && !window._hermesExternalRefreshFocusHook){
+    window.addEventListener('focus', () => { void refreshActiveSessionIfExternallyUpdated('focus'); });
+    window._hermesExternalRefreshFocusHook = true;
+  }
 }
 
 function startGatewayPollFallback(ms){
