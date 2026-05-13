@@ -1,10 +1,15 @@
-"""Neo Agents Activity — SSE endpoint for pixel-agents visualization."""
+"""Neo Agents Activity — SSE endpoint for pixel-agents visualization.
+
+Provides real-time agent presence via polling state.db every few seconds.
+Emits ServerMessage events that the pixel-agents React bundle understands.
+"""
 
 import json
 import time
 from pathlib import Path
 
 SPRITES_BUNDLE_PATH = Path(__file__).parent.parent / "static" / "agents-app" / "sprites-bundle.json"
+POLL_INTERVAL = 5  # seconds between state.db polls
 
 _sprites_cache = None
 
@@ -69,14 +74,7 @@ def generate_init_events():
 
     # Existing agents (non-child sessions = top-level agents)
     sessions = get_active_sessions()
-    agent_ids = []
-    folder_names = {}
-    next_id = 1
-    for s in sessions:
-        if not s.get("parent_session_id"):
-            agent_ids.append(next_id)
-            folder_names[next_id] = s.get("project") or "Neo"
-            next_id += 1
+    agent_ids, folder_names, session_map = _build_agent_list(sessions)
 
     # If no active sessions, show a demo agent so the panel isn't empty
     if not agent_ids:
@@ -94,6 +92,89 @@ def generate_init_events():
     layout = sprites.get("layout") if sprites else None
     version = 1 if layout else 0
     yield _sse_data({"type": "layoutLoaded", "layout": layout, "version": version})
+
+
+def stream_activity(write_fn):
+    """Poll state.db and emit agentCreated/agentClosed events in real-time.
+
+    Args:
+        write_fn: callable that takes bytes and writes to the SSE response.
+                  Should raise on client disconnect.
+    """
+    known_sessions = {}  # session_id -> agent_id
+    next_id = [1]
+
+    def _poll():
+        sessions = get_active_sessions()
+        current_ids = set()
+        events = []
+
+        for s in sessions:
+            sid = s["session_id"]
+            current_ids.add(sid)
+            if sid not in known_sessions:
+                # New session appeared
+                aid = next_id[0]
+                next_id[0] += 1
+                known_sessions[sid] = aid
+                name = s.get("project") or "Neo"
+                # Top-level agents get agentCreated
+                if not s.get("parent_session_id"):
+                    events.append({"type": "agentCreated", "id": aid, "folderName": name})
+                else:
+                    # Subagent — find parent's agent_id
+                    parent_sid = s["parent_session_id"]
+                    parent_aid = known_sessions.get(parent_sid)
+                    if parent_aid:
+                        events.append({
+                            "type": "agentToolStart",
+                            "id": parent_aid,
+                            "toolId": f"subtask-{sid[:8]}",
+                            "status": f"Subtask: {name}",
+                        })
+
+        # Check for closed sessions
+        closed = set(known_sessions.keys()) - current_ids
+        for sid in closed:
+            aid = known_sessions.pop(sid)
+            events.append({"type": "agentClosed", "id": aid})
+
+        return events
+
+    # Initial snapshot to seed known_sessions
+    sessions = get_active_sessions()
+    for s in sessions:
+        if not s.get("parent_session_id"):
+            known_sessions[s["session_id"]] = next_id[0]
+            next_id[0] += 1
+
+    # Poll loop
+    while True:
+        time.sleep(POLL_INTERVAL)
+        try:
+            events = _poll()
+            for ev in events:
+                write_fn(_sse_data(ev))
+            # Heartbeat even if no events (keeps connection alive)
+            if not events:
+                write_fn(SSE_HEARTBEAT)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            break
+
+
+def _build_agent_list(sessions):
+    """Build agent ID list from sessions."""
+    agent_ids = []
+    folder_names = {}
+    session_map = {}
+    next_id = 1
+    for s in sessions:
+        if not s.get("parent_session_id"):
+            agent_ids.append(next_id)
+            folder_names[next_id] = s.get("project") or "Neo"
+            session_map[s["session_id"]] = next_id
+            next_id += 1
+    return agent_ids, folder_names, session_map
 
 
 def _sse_data(data: dict) -> bytes:

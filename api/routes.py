@@ -999,7 +999,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, get_onboarding_status())
 
     if parsed.path == "/api/agents/stream":
-        from api.agents_activity import generate_init_events, SSE_HEARTBEAT
+        from api.agents_activity import generate_init_events, stream_activity
         handler.send_response(200)
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
@@ -1010,10 +1010,11 @@ def handle_get(handler, parsed) -> bool:
             for event in generate_init_events():
                 handler.wfile.write(event)
                 handler.wfile.flush()
-            while True:
-                time.sleep(30)
-                handler.wfile.write(SSE_HEARTBEAT)
+            # Real-time polling loop — emits agentCreated/agentClosed
+            def _write(data):
+                handler.wfile.write(data)
                 handler.wfile.flush()
+            stream_activity(_write)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass
         return True
