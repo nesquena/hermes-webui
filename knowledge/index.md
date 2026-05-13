@@ -132,6 +132,21 @@ Operational reference docs tracked by the core graph:
 - [[personal-assistant-control-tower-2026-05-05]]
 - [[yuto-team-org-v0.1-2026-05-06]]
 - [[yuto-knowledge-autopilot/references/yuto-team-feature-audit-2026-05-12]]
+- [[company-workforce/_MIGRATION_POINTER]]
+- [[digital-forensic-lab/_MIGRATION_POINTER]]
+- [[operational-structure-migration]]
+- [[operational-structure-migration/references/company-ops-migration-2026-05-13]]
+- [[systematic-debugging/references/full-suite-repair-patterns]]
+- [[systematic-debugging/references/full-suite-stabilization]]
+- [[test-driven-development/references/documentation-contract-harness]]
+- [[yuto-pm-mode/references/ai-legal-forensic-stack-registration-2026-05-12]]
+- [[yuto-pm-mode/references/digital-forensic-lab-autonomous-learning-loop-2026-05-12]]
+- [[yuto-pm-mode/references/digital-forensic-lab-autonomous-practice-backlog-2026-05-12]]
+- [[yuto-pm-mode/references/digital-forensic-lab-continuous-worker-2026-05-12]]
+- [[yuto-pm-mode/references/digital-forensic-lab-phase0-activation-2026-05-12]]
+- [[yuto-pm-mode/references/digital-forensic-lab-qwen-api-worker-2026-05-12]]
+- [[yuto-pm-mode/references/hr-role-manifest-validator-pilot-2026-05-12]]
+- [[yuto-pm-mode/references/team-lanes-tier-progress-contract-2026-05-12]]
 
 ## Promotion Rules
 
