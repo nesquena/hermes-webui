@@ -3742,8 +3742,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = delete_shared_data_slot(space_id, data.get("key"))
         return {"ok": True, "action": name, **result}
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
+        is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_research_artifact(space_id, data.get("title") or data.get("name"), data.get("markdown") or data.get("content") or "")
+        if is_current:
+            result["active_space_id"] = space_id
         return {"ok": True, "action": name, **result}
     if name in {
         "space.research.progress.set",

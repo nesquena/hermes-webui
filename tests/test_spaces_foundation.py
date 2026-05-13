@@ -4574,6 +4574,36 @@ def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeyp
     assert "api_key" not in serialized
 
 
+def test_space_tool_adapter_current_research_artifact_aliases_return_active_space_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for index, action in enumerate(("space.current.research.artifact.set", "space.current.research.report.set"), start=1):
+        installed = spaces.install_template("research", space_id=f"current-research-artifact-{index}")
+        result = spaces.run_space_tool(
+            action,
+            {
+                "activeSpaceId": installed["space"]["space_id"],
+                "title": "Active research brief",
+                "markdown": "# Active brief\nPublic notes.\napi_key=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+        serialized = json.dumps(result).lower()
+
+        assert result["ok"] is True
+        assert result["action"] == action
+        assert result["active_space_id"] == installed["space"]["space_id"]
+        assert result["artifact"]["key"] == "research-summary"
+        assert result["artifact"]["value_summary"]["title"] == "Active research brief"
+        assert result["artifact"]["value_summary"]["status"] == "ready"
+        assert "public notes" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert "api_key" not in serialized
+
+
 def test_spaces_research_progress_route_updates_harness_widgets_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("research", space_id="research-progress-route")
