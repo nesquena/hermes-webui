@@ -33,5 +33,8 @@ jobs:
           # importorskip and the matrix stays green.
           pip install mcp || echo "mcp install failed — test_mcp_server.py will importorskip"
 
+      - name: Validate workflow definitions
+        run: python scripts/validate_track_upstream_workflow.py
+
       - name: Run tests
         run: pytest tests/ -v --timeout=60
