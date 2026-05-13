@@ -130,7 +130,7 @@
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="todos" onclick="switchPanel('todos')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 3 3 5-6"/></svg></span><span data-i18n="tab_tasks">Tarefas</span></button>
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="profiles" onclick="switchPanel('profiles')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><span data-i18n="tab_profiles">Pessoal</span></button>
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="finance" onclick="switchPanel('finance')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/></svg></span><span data-i18n="tab_finance">Finanças</span></button>
-        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="agents" onclick="switchPanel('agents')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg></span><span data-i18n="tab_agents">Agentes</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="agents" onclick="switchPanel('agents')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg></span><span data-i18n="tab_agents">Escritório</span></button>
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="skills" onclick="switchPanel('skills')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m13 2-8 12h7l-1 8 8-12h-7z"/></svg></span><span data-i18n="tab_skills">Skills</span></button>
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="tasks" onclick="switchPanel('tasks')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><path d="m5.6 5.6 2.8 2.8"/><path d="m15.6 15.6 2.8 2.8"/><path d="m18.4 5.6-2.8 2.8"/><path d="m8.4 15.6-2.8 2.8"/></svg></span><span data-i18n="tab_automation">Automação</span></button>
         <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="settings" onclick="switchPanel('settings')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15 4.6h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 20.91 10H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg></span><span data-i18n="tab_settings">Configurações</span></button>
@@ -756,14 +756,15 @@
     <div id="mainAgents" class="main-view">
       <div class="main-view-header">
         <div>
-          <div class="main-view-title" data-i18n="tab_agents">Agentes</div>
-          <div class="main-view-subtitle" data-i18n="neo_agents_subtitle">Mapa de subagentes ativos</div>
+          <div class="main-view-title" data-i18n="tab_agents">Escritório</div>
+          <div class="main-view-subtitle" data-i18n="neo_agents_subtitle">Visualização dos agentes em tempo real</div>
         </div>
       </div>
-      <div class="main-view-body">
-        <div class="neo-placeholder-panel">
-          <div class="main-view-empty-title" data-i18n="neo_agents_placeholder_title">Painel de agentes futuro</div>
-          <div class="main-view-empty-sub" data-i18n="neo_agents_placeholder">Este painel depende da PoC de runtime e custo descrita para Sprint 5+.</div>
+      <div class="main-view-body agents-app-container">
+        <iframe id="agentsAppFrame" class="agents-app-frame" style="display:none;" sandbox="allow-scripts allow-same-origin"></iframe>
+        <div id="agentsEmptyState" class="neo-placeholder-panel">
+          <div class="main-view-empty-title" data-i18n="neo_agents_empty">Nenhum agente trabalhando agora</div>
+          <div class="main-view-empty-sub" data-i18n="neo_agents_empty_sub">Quando o Neo iniciar uma sessão, os agentes aparecerão aqui.</div>
         </div>
       </div>
     </div>

@@ -998,6 +998,26 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
+    if parsed.path == "/api/agents/stream":
+        from api.agents_activity import generate_init_events, SSE_HEARTBEAT
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        try:
+            for event in generate_init_events():
+                handler.wfile.write(event)
+                handler.wfile.flush()
+            while True:
+                time.sleep(30)
+                handler.wfile.write(SSE_HEARTBEAT)
+                handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        return True
+
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
 
@@ -2284,9 +2304,11 @@ _STATIC_MIME = {
     "webp": "image/webp",
     "woff": "font/woff",
     "woff2": "font/woff2",
+    "json": "application/json",
+    "ttf": "font/ttf",
 }
 # MIME types that are text-based and should carry charset=utf-8
-_TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
+_TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain", "application/json"}
 
 
 def _serve_static(handler, parsed):

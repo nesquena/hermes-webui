@@ -194,6 +194,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel !== 'settings' && typeof restoreDashboardSettings === 'function') restoreDashboardSettings();
   if (nextPanel !== 'skills' && typeof restoreDashboardSkills === 'function') restoreDashboardSkills();
   if (nextPanel !== 'tasks' && typeof restoreDashboardTasks === 'function') restoreDashboardTasks();
+  if (nextPanel !== 'agents' && typeof restoreDashboardAgents === 'function') restoreDashboardAgents();
   if (nextPanel !== 'chat' && typeof restoreDashboardChatList === 'function') restoreDashboardChatList();
   // Lazy-load panel data
   if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
@@ -213,6 +214,7 @@ async function switchPanel(name, opts = {}) {
     if (typeof renderNeoPersonalPanel === 'function') renderNeoPersonalPanel();
   }
   if (nextPanel === 'projects' && typeof loadProjectsCommandCenter === 'function') await loadProjectsCommandCenter();
+  if (nextPanel === 'agents' && typeof mountDashboardAgents === 'function') mountDashboardAgents();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'settings') {
     if (typeof mountDashboardSettings === 'function') mountDashboardSettings();

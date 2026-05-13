@@ -692,4 +692,23 @@ async function loadDashboard() {
   _dashboardLoaded = true;
 }
 
+function mountDashboardAgents() {
+  var frame = document.getElementById('agentsAppFrame');
+  if (!frame) return;
+  if (!frame.src || frame.src === 'about:blank' || frame.src === '') {
+    frame.src = '/static/agents-app/index-neo.html';
+  }
+  frame.style.display = 'block';
+  var empty = document.getElementById('agentsEmptyState');
+  if (empty) empty.style.display = 'none';
+}
+
+function restoreDashboardAgents() {
+  var frame = document.getElementById('agentsAppFrame');
+  if (!frame) return;
+  frame.style.display = 'none';
+  var empty = document.getElementById('agentsEmptyState');
+  if (empty) empty.style.display = '';
+}
+
 document.addEventListener('DOMContentLoaded', _initPullToRefresh);
