@@ -1053,37 +1053,47 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
             </div>
             <div class="settings-branding-grid">
-              <div class="settings-field">
-                <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
-                <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field">
-                <label for="settingsBotLogoUpload" data-i18n="settings_label_bot_logo">Assistant Logo</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_logo">Use PNG, JPG, WebP, GIF, or ICO. Must be 64×64 to 4096×4096 and up to 12 MB. Clear it for the Hermes default.</div>
-                <input type="hidden" id="settingsBotLogo">
-                <input type="file" id="settingsBotLogoFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
-                <div class="brand-file-control" data-branding-kind="logo">
-                  <span class="brand-file-name" id="settingsBotLogoFileName" data-i18n="settings_branding_no_file">No file selected</span>
-                  <button type="button" class="brand-file-clear" id="settingsBotLogoClear" aria-label="Clear assistant logo" title="Clear assistant logo">×</button>
+              <div class="settings-field settings-branding-card">
+                <div class="settings-branding-card-head">
+                  <div>
+                    <label>Assistant Branding</label>
+                    <div>Personalize how Hermes appears in this WebUI with a custom display name, assistant logo, and browser icon.</div>
+                  </div>
                 </div>
-                <div class="brand-file-actions">
-                  <button type="button" class="brand-file-action" id="settingsBotLogoUpload" data-i18n="settings_branding_upload">Upload file</button>
-                  <button type="button" class="brand-file-action" id="settingsBotLogoWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
-                </div>
-              </div>
-              <div class="settings-field">
-                <label for="settingsBotFaviconUpload" data-i18n="settings_label_bot_favicon">Favicon</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_favicon">Use PNG, JPG, WebP, GIF, or ICO. Must be 16×16 to 512×512 and up to 12 MB. Clear it for the Hermes default.</div>
-                <input type="hidden" id="settingsBotFavicon">
-                <input type="file" id="settingsBotFaviconFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
-                <div class="brand-file-control" data-branding-kind="favicon">
-                  <span class="brand-file-name" id="settingsBotFaviconFileName" data-i18n="settings_branding_no_file">No file selected</span>
-                  <button type="button" class="brand-file-clear" id="settingsBotFaviconClear" aria-label="Clear favicon" title="Clear favicon">×</button>
-                </div>
-                <div class="brand-file-actions">
-                  <button type="button" class="brand-file-action" id="settingsBotFaviconUpload" data-i18n="settings_branding_upload">Upload file</button>
-                  <button type="button" class="brand-file-action" id="settingsBotFaviconWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
+                <div class="settings-branding-card-grid">
+                  <div class="settings-branding-name-slot">
+                    <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
+                    <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+                    <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                  </div>
+                  <div class="settings-branding-asset-slot settings-branding-logo-slot">
+                    <label for="settingsBotLogoUpload" data-i18n="settings_label_bot_logo">Custom Assistant Logo</label>
+                    <div class="settings-branding-asset-desc" data-i18n="settings_desc_bot_logo">Use PNG, JPG, WebP, GIF, or ICO. Must be 64×64 to 4096×4096 and up to 12 MB. Clear it for the Hermes default.</div>
+                    <input type="hidden" id="settingsBotLogo">
+                    <input type="file" id="settingsBotLogoFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
+                    <div class="brand-file-control" data-branding-kind="logo">
+                      <span class="brand-file-name" id="settingsBotLogoFileName" data-i18n="settings_branding_no_file">No file selected</span>
+                      <button type="button" class="brand-file-clear" id="settingsBotLogoClear" aria-label="Clear assistant logo" title="Clear assistant logo">×</button>
+                    </div>
+                    <div class="brand-file-actions">
+                      <button type="button" class="brand-file-action" id="settingsBotLogoUpload" data-i18n="settings_branding_upload">Upload file</button>
+                      <button type="button" class="brand-file-action" id="settingsBotLogoWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
+                    </div>
+                  </div>
+                  <div class="settings-branding-asset-slot settings-branding-favicon-slot">
+                    <label for="settingsBotFaviconUpload" data-i18n="settings_label_bot_favicon">Custom Favicon</label>
+                    <div class="settings-branding-asset-desc" data-i18n="settings_desc_bot_favicon">Use PNG, JPG, WebP, GIF, or ICO. Must be 16×16 to 512×512 and up to 12 MB. Clear it for the Hermes default.</div>
+                    <input type="hidden" id="settingsBotFavicon">
+                    <input type="file" id="settingsBotFaviconFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
+                    <div class="brand-file-control" data-branding-kind="favicon">
+                      <span class="brand-file-name" id="settingsBotFaviconFileName" data-i18n="settings_branding_no_file">No file selected</span>
+                      <button type="button" class="brand-file-clear" id="settingsBotFaviconClear" aria-label="Clear favicon" title="Clear favicon">×</button>
+                    </div>
+                    <div class="brand-file-actions">
+                      <button type="button" class="brand-file-action" id="settingsBotFaviconUpload" data-i18n="settings_branding_upload">Upload file</button>
+                      <button type="button" class="brand-file-action" id="settingsBotFaviconWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

@@ -237,14 +237,31 @@ def test_custom_logo_retains_skin_accent_glow():
     assert ".brand-logo.is-custom{background:transparent;border-color:var(--border2);box-shadow:none" not in style
 
 
-def test_branding_settings_grid_keeps_favicon_tucked_under_name():
+def test_branding_settings_grid_groups_assistant_branding_controls():
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
-    assert 'grid-template-areas:"name logo" "favicon logo"' in style
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    assert 'class="settings-field settings-branding-card"' in html
+    assert "Assistant Branding" in html
+    assert "Personalize how Hermes appears in this WebUI" in html
+    assert "Custom Assistant Logo" in html
+    assert "Custom Favicon" in html
+    assert "settings_label_bot_logo: 'Custom Assistant Logo'" in i18n
+    assert "settings_label_bot_favicon: 'Custom Favicon'" in i18n
+    assert "Make it yours" not in html
+    assert "Set the assistant name, logo, and favicon in one place" not in html
+    assert "Logo and favicon stay independent" not in html
+    assert 'grid-template-areas:"name name" "logo favicon"' in style
+    assert "align-items:stretch" in style
+    assert ".settings-branding-asset-slot{min-width:0;display:flex;flex-direction:column;" in style
+    assert ".settings-branding-asset-desc{font-size:11px;color:var(--muted);line-height:1.45;margin-bottom:8px;min-height:48px;}" in style
+    assert ".settings-branding-asset-slot .brand-file-control{margin-top:auto;}" in style
     assert "#mainSettings .settings-branding-grid > .settings-field{margin-bottom:0;}" in style
-    assert ".settings-branding-grid > .settings-field:nth-child(1){grid-area:name;}" in style
-    assert ".settings-branding-grid > .settings-field:nth-child(2){grid-area:logo;}" in style
-    assert ".settings-branding-grid > .settings-field:nth-child(3){grid-area:favicon;}" in style
-    assert '@media (max-width:680px){.settings-branding-grid{grid-template-columns:1fr;grid-template-areas:"name" "logo" "favicon";}}' in style
+    assert ".settings-branding-name-slot{grid-area:name;}" in style
+    assert ".settings-branding-logo-slot{grid-area:logo;}" in style
+    assert ".settings-branding-favicon-slot{grid-area:favicon;}" in style
+    assert '@media (max-width:760px){.settings-branding-card-grid{grid-template-columns:1fr;grid-template-areas:"name" "logo" "favicon";}.settings-branding-asset-desc{min-height:0;}}' in style
 
 
 def test_cached_custom_logo_hides_default_logo_before_boot_reconciliation():
