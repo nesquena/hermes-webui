@@ -1969,7 +1969,11 @@
         if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitBlockedResult('Complete sandbox preview and visual QA checks before committing.') + refreshedRoot.innerHTML;
         return;
       }
-      if (typeof showConfirmDialog !== 'function') return;
+      if (typeof showConfirmDialog !== 'function') {
+        const refreshedRoot = document.getElementById('capySpacesRoot');
+        if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorCommitBlockedResult('Shared confirmation dialog unavailable; refresh and try again before committing.') + refreshedRoot.innerHTML;
+        return;
+      }
       const confirmed = await showConfirmDialog({
         title: 'Commit creator preview?',
         message: 'Commit this sandbox-previewed, visually QA-approved creator spec as a revisioned metadata-only Space.',

@@ -2438,6 +2438,9 @@ async function dispatchWindowMessage(data, opts) {
   } else if (scenario === 'creatorCommitNoDialog') {
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
+    makeElement('capyCreatorGateSandbox_preview-safe-1').checked = true;
+    makeElement('capyCreatorGateVisualQa_preview-safe-1').checked = true;
+    beforeHtml = root.innerHTML;
     await click('commitCreatorSpec', { previewId: 'preview-safe-1' });
   } else {
     throw new Error('unknown scenario: ' + scenario);
@@ -5496,5 +5499,15 @@ def test_creator_commit_stale_failure_renders_safe_blocked_status(driver_path):
 def test_creator_commit_fails_closed_without_shared_confirm_dialog(driver_path):
     out = _run_spaces_scenario(driver_path, "creatorCommitNoDialog")
 
+    assert "capyCreatorGateSandbox_preview-safe-1" in out["beforeHtml"]
+    assert "capyCreatorGateVisualQa_preview-safe-1" in out["beforeHtml"]
     assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
     assert "Creator preview ready" in out["rootHtml"]
+    assert "Creator commit blocked" in out["rootHtml"]
+    assert "Shared confirmation dialog unavailable; refresh and try again before committing." in out["rootHtml"]
+    assert "Creator commit saved" not in out["rootHtml"]
+    assert out["dialogs"] == []
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()

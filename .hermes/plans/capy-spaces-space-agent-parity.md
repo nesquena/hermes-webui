@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-13 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space detail revision history now labels ordinary non-candidate future rollback rows with `timeline: future` while preserving the stronger `Return-to-present candidate · timeline: future` label/action for the direct return candidate and keeping current rows non-actionable. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: The safe creator-loop commit path now renders a fixed metadata-only blocked status when the shared confirmation dialog helper is unavailable after sandbox/visual-QA gates are checked, keeping the prior preview visible and refusing to send any `space.creator.commit` request. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): block creator commits without confirm dialog`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving that a creator preview with both sandbox and visual-QA gates checked still fails closed when `showConfirmDialog` is unavailable: no commit POST is sent, the metadata-only preview remains visible, and a fixed safe `Creator commit blocked` card is rendered.
+  - Hardened the `commitCreatorSpec` click path to prepend the blocked receipt instead of silently returning, preserving the shared-dialog safety envelope while avoiding generated renderer/API-auth/secret-looking DOM leaks.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); focused creator preview/commit regressions passed (`12 passed, 146 deselected`); Spaces UI behavior + demo parity suites passed (`170 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static creator no-dialog browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/creator-no-dialog-qa.png`.
 
 - `fix(spaces): label non-candidate future revisions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving a non-candidate future revision row renders a visible `timeline: future` label, keeps the ordinary `Restore` action, and does not steal the `Return to present` action from the candidate row.
