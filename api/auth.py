@@ -11,6 +11,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
 
 from api.config import STATE_DIR, load_settings
@@ -27,6 +28,15 @@ COOKIE_NAME = 'hermes_session'
 SESSION_TTL = 86400  # 24 hours
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
+
+# Env-password hashing is intentionally expensive (PBKDF2 600k iterations),
+# but the env password itself only changes on process restart in production.
+# Cache the derived hash so every authenticated API request does not pay a
+# ~500ms CPU tax just to answer "is auth enabled?" / verify a session cookie.
+# The cache key is an HMAC fingerprint, not the raw password, so the cache does
+# not retain an extra plaintext copy beyond the process environment itself.
+_ENV_PASSWORD_HASH_CACHE: tuple[str, str] | None = None
+_ENV_PASSWORD_HASH_LOCK = threading.Lock()
 
 
 def _load_sessions() -> dict[str, float]:
@@ -128,12 +138,28 @@ def _hash_password(password):
     return dk.hex()
 
 
+def _env_password_cache_key(password: str) -> str:
+    """Return a cheap stable fingerprint for the env password cache key."""
+    return hmac.new(_signing_key(), password.encode(), hashlib.sha256).hexdigest()
+
+
 def get_password_hash() -> str | None:
     """Return the active password hash, or None if auth is disabled.
     Priority: env var > settings.json."""
+    global _ENV_PASSWORD_HASH_CACHE
     env_pw = os.getenv('HERMES_WEBUI_PASSWORD', '').strip()
     if env_pw:
-        return _hash_password(env_pw)
+        cache_key = _env_password_cache_key(env_pw)
+        cached = _ENV_PASSWORD_HASH_CACHE
+        if cached and cached[0] == cache_key:
+            return cached[1]
+        with _ENV_PASSWORD_HASH_LOCK:
+            cached = _ENV_PASSWORD_HASH_CACHE
+            if cached and cached[0] == cache_key:
+                return cached[1]
+            hashed = _hash_password(env_pw)
+            _ENV_PASSWORD_HASH_CACHE = (cache_key, hashed)
+            return hashed
     settings = load_settings()
     return settings.get('password_hash') or None
 

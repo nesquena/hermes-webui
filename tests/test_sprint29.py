@@ -665,6 +665,30 @@ class TestPasswordHashing:
             else:
                 save_settings({"_clear_password": True})
 
+    def test_env_password_hash_is_cached(self, monkeypatch):
+        """Env password hash must be derived once, not on every API request."""
+        from api import auth as _auth
+
+        calls = []
+
+        def fake_hash(password):
+            calls.append(password)
+            return f"hash:{password}"
+
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "cached_pw")
+        monkeypatch.setattr(_auth, "_hash_password", fake_hash)
+        monkeypatch.setattr(_auth, "_ENV_PASSWORD_HASH_CACHE", None)
+
+        assert _auth.get_password_hash() == "hash:cached_pw"
+        assert _auth.get_password_hash() == "hash:cached_pw"
+        assert calls == ["cached_pw"]
+        assert _auth._ENV_PASSWORD_HASH_CACHE is not None
+        assert _auth._ENV_PASSWORD_HASH_CACHE[0] != "cached_pw"
+
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "new_pw")
+        assert _auth.get_password_hash() == "hash:new_pw"
+        assert calls == ["cached_pw", "new_pw"]
+
 
 # ── 10. Non-loopback Startup Warning ─────────────────────────────────────
 
