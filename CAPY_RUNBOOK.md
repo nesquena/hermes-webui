@@ -83,6 +83,41 @@ launchctl print gui/$(id -u)/com.capy.logrotate
 
 Expected: plist lint is OK, py_compile is quiet, and launchd has the `com.capy.logrotate` job loaded.
 
+## Update notes
+
+### 2026-05-12 20:20 CDT — Hermes Agent + WebUI upstream sync
+
+- Hermes Agent repo: `/Users/bschmidy10/.hermes/hermes-agent`
+  - Branch: `main`
+  - Updated by rebasing local Capy commits onto `origin/main`.
+  - Post-update head: `0258b0467`.
+  - Rollback checkpoint: `backup/capy-before-update-20260512-195910`.
+  - Verification: targeted gateway/runtime tests passed with `-o addopts=`, `hermes doctor` passed with only expected missing optional API-key warnings, gateway restarted via user LaunchAgent.
+- WebUI repo: `/Users/bschmidy10/hermes-webui`
+  - Branch: `feat/capy-spaces-foundation`
+  - Merged `origin/master`; merge commit `4959d8e`.
+  - Rollback checkpoint: `backup/capy-before-update-20260512-195910`.
+  - Manual conflict resolutions kept Capy Spaces nav/shell plus upstream dashboard/logs/sidebar changes, kept Bash 3.2-compatible `ctl.sh`, preserved route alias safety checks, and made health checks use live stream registry aliases.
+  - Test adjustments isolated session-recovery global state and updated the Capy Spaces static-shell assertion for rail-click options.
+  - Verification: full WebUI test suite passed: `5760 passed, 2 skipped, 3 xpassed, 8 subtests passed`; `py_compile`/`bash -n` passed; WebUI restarted via `com.capy.webui`; local `/health` returned `ok`; browser visual smoke loaded `Capy` and the Capy Spaces panel without JS errors.
+- Rollback commands if needed:
+
+```bash
+# WebUI rollback to the pre-merge checkpoint
+cd /Users/bschmidy10/hermes-webui
+git switch feat/capy-spaces-foundation
+git reset --hard backup/capy-before-update-20260512-195910
+launchctl kickstart -k gui/$(id -u)/com.capy.webui
+curl -fsS http://127.0.0.1:8787/health
+
+# Hermes Agent rollback to the pre-rebase checkpoint
+cd /Users/bschmidy10/.hermes/hermes-agent
+git switch main
+git reset --hard backup/capy-before-update-20260512-195910
+launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
+/Users/bschmidy10/.local/bin/hermes doctor
+```
+
 ## Debug checklist
 
 1. Check local health before restarting.
