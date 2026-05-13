@@ -3253,40 +3253,7 @@ def handle_get(handler, parsed) -> bool:
             if load_messages:
                 if is_messaging_session and cli_messages:
                     sidecar_messages = getattr(s, "messages", []) or []
-                    # Recovery/aggregate sidecars can intentionally contain a
-                    # longer visible conversation than the single state.db
-                    # segment for this messaging session id. Prefer the longer
-                    # sidecar so repaired WebUI history is not hidden behind the
-                    # canonical per-segment transcript. When both sources carry
-                    # different slices of the same stitched conversation, merge
-                    # them chronologically and dedupe exact repeats.
-                    if sidecar_messages and sidecar_messages != cli_messages:
-                        merged_messages = []
-                        seen_message_keys = set()
-                        for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                            float(m.get("timestamp") or 0),
-                            str(m.get("role") or ""),
-                            str(m.get("content") or ""),
-                        )):
-                            message_identity = msg.get("id") or msg.get("message_id")
-                            if message_identity:
-                                key = ("message_id", str(message_identity))
-                            else:
-                                key = (
-                                    "legacy",
-                                    str(msg.get("role") or ""),
-                                    str(msg.get("content") or ""),
-                                    str(msg.get("timestamp") or ""),
-                                    str(msg.get("tool_call_id") or ""),
-                                    str(msg.get("tool_name") or msg.get("name") or ""),
-                                )
-                            if key in seen_message_keys:
-                                continue
-                            seen_message_keys.add(key)
-                            merged_messages.append(msg)
-                        _all_msgs = merged_messages
-                    else:
-                        _all_msgs = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+                    _all_msgs = _merge_messaging_session_display_messages(sidecar_messages, cli_messages)
                 else:
                     _all_msgs = s.messages
             else:
@@ -9218,6 +9185,84 @@ def _is_messages_refresh_prefix_match(existing_messages: list, fresh_messages: l
         if _normalize_message_for_import_refresh(existing_message) != _normalize_message_for_import_refresh(fresh_message):
             return False
     return True
+
+
+def _normalized_message_timestamp_for_display_merge(value):
+    if value is None or value == "":
+        return ""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if timestamp.is_integer():
+        return str(int(timestamp))
+    return ("%.6f" % timestamp).rstrip("0").rstrip(".")
+
+
+def _message_timestamp_as_float(message):
+    if not isinstance(message, dict):
+        return None
+    value = message.get("timestamp")
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _display_message_merge_key(message):
+    if not isinstance(message, dict):
+        return ("non_dict", repr(message))
+    message_identity = message.get("id") or message.get("message_id")
+    if message_identity:
+        return ("message_id", str(message_identity))
+    return (
+        "legacy",
+        str(message.get("role") or ""),
+        str(message.get("content") or ""),
+        _normalized_message_timestamp_for_display_merge(message.get("timestamp")),
+        str(message.get("tool_call_id") or ""),
+        str(message.get("tool_name") or message.get("name") or ""),
+    )
+
+
+def _merge_messaging_session_display_messages(sidecar_messages: list, cli_messages: list) -> list:
+    """Merge messaging-session display rows without reordering sidecar history.
+
+    The WebUI sidecar is the authoritative visible transcript once a messaging
+    session has been imported or repaired. state.db/CLI rows can still contain a
+    newer tail that the sidecar has not seen yet, but after compression they may
+    also represent the agent's current context window rather than the full UI
+    transcript. Preserve sidecar order and append only truly newer CLI rows.
+    """
+    sidecar_messages = list(sidecar_messages or [])
+    cli_messages = list(cli_messages or [])
+    if not cli_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return cli_messages
+
+    merged_messages = []
+    seen_message_keys = set()
+    max_sidecar_timestamp = None
+    for message in sidecar_messages:
+        timestamp = _message_timestamp_as_float(message)
+        if timestamp is not None:
+            max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
+        seen_message_keys.add(_display_message_merge_key(message))
+        merged_messages.append(message)
+
+    for message in cli_messages:
+        timestamp = _message_timestamp_as_float(message)
+        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+            continue
+        key = _display_message_merge_key(message)
+        if key in seen_message_keys:
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(message)
+    return merged_messages
 
 
 def _handle_session_import_cli(handler, body):

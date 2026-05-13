@@ -280,4 +280,58 @@ def test_messaging_session_loader_prefers_longer_sidecar_transcript():
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
     assert "sidecar_messages = getattr(s, \"messages\", []) or []" in handler
-    assert "len(sidecar_messages) > len(cli_messages)" in handler
+    assert "_merge_messaging_session_display_messages(sidecar_messages, cli_messages)" in handler
+
+
+def test_messaging_session_display_merge_preserves_sidecar_order_when_timestamps_collide():
+    import api.routes as routes
+
+    sidecar_messages = [
+        {"role": "user", "content": "z user happened first", "timestamp": 1000},
+        {"role": "assistant", "content": "a assistant happened second", "timestamp": 1000},
+        {"role": "tool", "content": "m tool happened third", "timestamp": 1000, "tool_call_id": "call_1"},
+    ]
+    cli_messages = [
+        {"role": "user", "content": "z user happened first", "timestamp": 1000.0},
+        {"role": "assistant", "content": "a assistant happened second", "timestamp": 1000.0},
+        {"role": "tool", "content": "m tool happened third", "timestamp": 1000.0, "tool_call_id": "call_1"},
+    ]
+
+    merged = routes._merge_messaging_session_display_messages(sidecar_messages, cli_messages)
+
+    assert merged == sidecar_messages
+
+
+def test_messaging_session_display_merge_appends_only_newer_cli_tail():
+    import api.routes as routes
+
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001},
+    ]
+    cli_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+        {"role": "assistant", "content": "new tail", "timestamp": 1002.0},
+    ]
+
+    merged = routes._merge_messaging_session_display_messages(sidecar_messages, cli_messages)
+
+    assert [m["content"] for m in merged] == ["old user", "old assistant", "new tail"]
+
+
+def test_messaging_session_display_merge_preserves_repeated_sidecar_rows():
+    import api.routes as routes
+
+    sidecar_messages = [
+        {"role": "assistant", "content": "", "timestamp": 1000},
+        {"role": "assistant", "content": "", "timestamp": 1000},
+        {"role": "assistant", "content": "done", "timestamp": 1001},
+    ]
+    cli_messages = [
+        {"role": "assistant", "content": "", "timestamp": 1000.0},
+    ]
+
+    merged = routes._merge_messaging_session_display_messages(sidecar_messages, cli_messages)
+
+    assert [m["content"] for m in merged] == ["", "", "done"]
