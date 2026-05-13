@@ -268,7 +268,7 @@ class TestSendBusyBranchDispatch:
 
     def test_send_calls_cancel_stream_on_interrupt(self):
         send_idx = MESSAGES_JS.find("async function send(")
-        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        send_body = MESSAGES_JS[send_idx:send_idx + 5000]
         # The interrupt branch must call cancelStream
         assert "cancelStream" in send_body
         # And queue before cancel (otherwise the drain has nothing to pick up)
