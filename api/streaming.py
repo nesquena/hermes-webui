@@ -3421,7 +3421,9 @@ def _run_agent_streaming(
                         or _compression_summary_from_messages(s.context_messages)
                     )
                     put('compressed', {
+                        'session_id': s.session_id,
                         'message': 'Context auto-compressed to continue the conversation',
+                        'usage': _live_usage_snapshot(),
                     })
 
                 # Stamp 'timestamp' on any messages that don't have one yet

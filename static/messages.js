@@ -1197,7 +1197,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      if(d.session_id&&d.session_id!==activeSid) return;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      if(d.usage&&typeof _syncCtxIndicator==='function'){
+        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        _syncCtxIndicator(S.lastUsage);
+      }
       if(typeof setCompressionUi==='function'){
         setCompressionUi({
           sessionId:activeSid,

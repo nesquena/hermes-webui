@@ -87,6 +87,28 @@ def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
     assert guard in block
     assert block.index(guard) < block.index("setCompressionUi")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
+    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+
+
+def test_auto_compression_done_sse_refreshes_context_indicator_usage():
+    block = _compressed_listener_block()
+
+    assert "if(d.usage&&typeof _syncCtxIndicator==='function')" in block
+    assert "S.lastUsage={...(S.lastUsage||{}),...d.usage};" in block
+    assert "_syncCtxIndicator(S.lastUsage);" in block
+    assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("setCompressionUi")
+
+
+def test_auto_compression_done_payload_includes_live_usage_snapshot():
+    src = _read("api/streaming.py")
+    start = src.find("put('compressed'")
+    assert start != -1, "compressed SSE payload not found"
+    end = src.find("})", start)
+    assert end != -1, "compressed SSE payload end not found"
+    block = src[start:end]
+
+    assert "'session_id': s.session_id" in block
+    assert "'usage': _live_usage_snapshot()" in block
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
