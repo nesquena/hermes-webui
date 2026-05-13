@@ -6596,7 +6596,20 @@ def queue_widget_event(
     payload_data = payload or {}
     _assert_widget_event_runtime_contract_allowed(name, payload_data)
     space = read_space(sid)
-    _widget_index(space, wid)
+    idx = _widget_index(space, wid)
+    raw_space_recovery = space.get("recovery")
+    space_recovery = raw_space_recovery if isinstance(raw_space_recovery, dict) else {}
+    if space_recovery.get("disabled"):
+        raise ValueError("Space is disabled for recovery")
+    raw_widgets = space.get("widgets")
+    widgets = raw_widgets if isinstance(raw_widgets, list) else []
+    widget = widgets[idx] if idx < len(widgets) else {}
+    if not isinstance(widget, dict):
+        widget = {}
+    raw_widget_recovery = widget.get("recovery")
+    widget_recovery = raw_widget_recovery if isinstance(raw_widget_recovery, dict) else {}
+    if widget_recovery.get("disabled"):
+        raise ValueError("Widget is disabled for recovery")
     local_message_type = _local_runtime_message_type(name, payload_data)
     if local_message_type:
         return {

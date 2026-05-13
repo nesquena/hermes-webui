@@ -10631,6 +10631,40 @@ def test_widget_event_queues_agent_bridge_request_without_widget_bodies_or_secre
     assert "SECRET_VALUE_DO_NOT_LEAK" not in json.dumps(event)
 
 
+def test_widget_event_rejects_recovery_disabled_widget_and_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "disabled-event-lab", "name": "Disabled Event Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "bad-widget", "kind": "html", "title": "Bad Widget"})
+
+    spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "bad-widget",
+        reason="manual recovery quarantine",
+    )
+    with pytest.raises(ValueError, match="disabled for recovery"):
+        spaces.queue_widget_event(
+            created["space_id"],
+            "bad-widget",
+            "agent.prompt",
+            {"message_type": "capy:agent:prompt", "query": "repair"},
+            prompt="should not queue",
+        )
+
+    spaces.enable_widget_for_recovery(created["space_id"], "bad-widget")
+    spaces.disable_space_for_recovery(created["space_id"], reason="space shell failed")
+    with pytest.raises(ValueError, match="disabled for recovery"):
+        spaces.queue_widget_event(
+            created["space_id"],
+            "bad-widget",
+            "agent.prompt",
+            {"message_type": "capy:agent:prompt", "query": "repair"},
+            prompt="should not queue",
+        )
+
+    persisted_events = [json.loads(path.read_text(encoding="utf-8")) for path in spaces.events_dir().glob("*.json")]
+    assert all(event.get("event_type") != "widget.event.queued" for event in persisted_events)
+
+
 def test_widget_event_rejects_blocked_postmessage_contract_messages_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Runtime Event Gate"})
