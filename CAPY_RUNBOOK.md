@@ -118,6 +118,39 @@ launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
 /Users/bschmidy10/.local/bin/hermes doctor
 ```
 
+### 2026-05-13 13:29 CDT — Post-update smoke, Spaces enablement, and fork push
+
+- Visible-browser chat smoke passed:
+  - Created a fresh WebUI conversation.
+  - Sent `Reply with exactly WEBUI_SMOKE_OK.`
+  - Received `WEBUI_SMOKE_OK` in about 4 seconds.
+  - Refreshed the page and confirmed the conversation recovered without `Session not found`.
+- Capy Spaces was enabled locally by adding `HERMES_WEBUI_SPACES_ENABLED=1` to the user LaunchAgent environment in `/Users/bschmidy10/Library/LaunchAgents/com.capy.webui.plist`.
+  - LaunchAgent backup: `/Users/bschmidy10/Library/LaunchAgents/com.capy.webui.plist.bak-20260513-130413`.
+  - After changing the plist, `launchctl kickstart` alone was not enough to pick up the new environment. The working sequence was `launchctl enable`, `launchctl bootstrap gui/$(id -u) ...`, then `launchctl kickstart -k`.
+- Capy Spaces browser QA passed enough for continued development:
+  - `/api/spaces` is no longer disabled in the browser session.
+  - Recovery/control-plane metadata renders.
+  - Product-home canvas renders with starfield shell, welcome card, resource links, demo shortcuts, creator dock, and panel buttons.
+  - No browser console JS errors were reported.
+  - Visual QA screenshot: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_5735efca2bc5491fae9a6b89b1de2dcc.png`.
+  - Follow-up polish findings: lower canvas is sparse, `open_in_new` material icon labels render as literal text, welcome-card close button is cramped, and recovery-hard-gate messaging may confuse users while no Spaces exist.
+- Cleaned the Hermes Agent repo by moving an unrelated untracked screenshot out of the repo:
+  - From: `/Users/bschmidy10/.hermes/hermes-agent/comfyui-capy-workflows-visible.png`
+  - To: `/Users/bschmidy10/.hermes/artifacts/comfyui/comfyui-capy-workflows-visible-20260513-131150.png`
+- Pushed WebUI branch to Brendan's fork:
+  - Remote: `capy-fork`
+  - Branch: `feat/capy-spaces-foundation`
+  - Head: `4b5a722`
+  - GitHub suggested PR URL: `https://github.com/bschmidy10/hermes-webui/pull/new/feat/capy-spaces-foundation`
+  - No GitHub Actions workflow runs were listed for this branch in either the fork or upstream at check time.
+- Ten-minute post-update monitor passed:
+  - Log: `/tmp/capy-post-update-monitor-20260513-131923.log`
+  - 20/20 health checks returned `status=ok`.
+  - `sessions=1`, `active_streams=0`, and `active_runs=0` throughout.
+  - No `traceback`, `error`, `exception`, or `fatal` markers appeared in the recent launchd stdout/stderr scan.
+- Final LaunchAgent state: `com.capy.webui` running, local health `ok`.
+
 ## Debug checklist
 
 1. Check local health before restarting.
