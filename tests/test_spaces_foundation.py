@@ -11270,6 +11270,94 @@ def test_active_space_context_redacts_unsafe_source_derived_metadata(monkeypatch
     assert "stealsecret" not in serialized
 
 
+def test_active_space_context_omits_recovery_disabled_widgets_and_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "active-context-recovery",
+            "name": "Recovery Context Lab",
+            "agent_instructions": "Keep safe widgets actionable.",
+        }
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "safe-widget", "kind": "markdown", "title": "Safe Widget"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-widget",
+            "kind": "html",
+            "title": "Broken Widget",
+            "renderer": "<script>bad()</script>",
+            "source": "api_key = 'SECRET_VALUE_DO_NOT_LEAK'",
+        },
+    )
+    broken_event = spaces.queue_widget_event(
+        created["space_id"],
+        "broken-widget",
+        "agent.prompt",
+        {"action": "repair", "renderer": "<script>bad()</script>"},
+        prompt="Repair SECRET_VALUE_DO_NOT_LEAK renderer",
+    )
+    spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "broken-widget",
+        reason="renderer crashed with SECRET_VALUE_DO_NOT_LEAK api_key",
+    )
+
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert "## Active Capy Space" in context
+    assert "id: active-context-recovery" in context
+    assert "safe-widget|Safe Widget|markdown" in context
+    assert "broken-widget" not in context
+    assert "Broken Widget" not in context
+    assert broken_event["event_id"] not in context
+    serialized = context.lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_active_space_context_uses_recovery_safe_stub_for_disabled_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "disabled-context-space",
+            "name": "Quarantined Lab",
+            "description": "Normal description should not steer repair.",
+            "agent_instructions": "Run hidden normal workflow before recovery.",
+        }
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "visible-widget", "kind": "markdown", "title": "Visible Widget"})
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "visible-widget",
+        "agent.prompt",
+        {"action": "normal-work"},
+        prompt="Continue ordinary work",
+    )
+    spaces.disable_space_for_recovery(
+        created["space_id"],
+        reason="renderer crashed with SECRET_VALUE_DO_NOT_LEAK api_key",
+    )
+
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert "## Active Capy Space" in context
+    assert "id: disabled-context-space" in context
+    assert "status: recovery-disabled" in context
+    assert "Use Capy recovery/admin APIs" in context
+    assert "Quarantined Lab" not in context
+    assert "Normal description" not in context
+    assert "Run hidden normal workflow" not in context
+    assert "visible-widget" not in context
+    assert queued["event_id"] not in context
+    serialized = context.lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_streaming_agent_prompt_includes_active_space_context(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

@@ -1486,6 +1486,16 @@ def build_agent_context(space_id: str | None) -> str:
 
     sid = validate_space_id(space_id)
     space = read_space(sid)
+    recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
+    if recovery.get("disabled"):
+        return "\n".join(
+            [
+                "## Active Capy Space",
+                f"id: {sid}",
+                "status: recovery-disabled",
+                "Use Capy recovery/admin APIs before normal mutations; compact active-space details are withheld until recovery re-enables this Space.",
+            ]
+        )
     lines = [
         "## Active Capy Space",
         f"id: {sid}",
@@ -1503,14 +1513,20 @@ def build_agent_context(space_id: str | None) -> str:
         lines.append(f"  {instructions}")
     lines.append("widgets (id|title|kind):")
     widgets = space.get("widgets") or []
+    disabled_widget_ids: set[str] = set()
     summaries: list[dict[str, Any]] = []
     if isinstance(widgets, list):
         for widget in widgets:
             if isinstance(widget, dict):
                 try:
-                    summaries.append(_widget_summary(widget))
+                    summary = _widget_summary(widget)
                 except ValueError:
                     continue
+                widget_recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+                if widget_recovery.get("disabled"):
+                    disabled_widget_ids.add(summary["id"])
+                    continue
+                summaries.append(summary)
     if summaries:
         for widget in summaries[:25]:
             lines.append(
@@ -1530,7 +1546,11 @@ def build_agent_context(space_id: str | None) -> str:
             lines.append(f"- {_active_context_value(item['key'], 80)}")
         if len(shared_data) > 25:
             lines.append(f"- … {len(shared_data) - 25} more data slot(s) omitted")
-    widget_events = list_widget_events(sid, limit=10)
+    widget_events = [
+        event
+        for event in list_widget_events(sid, limit=10)
+        if str(event.get("widget_id") or "") not in disabled_widget_ids
+    ]
     if widget_events:
         lines.append("queued widget events (event_id|widget_id|event_name|status):")
         for event in widget_events[:10]:
