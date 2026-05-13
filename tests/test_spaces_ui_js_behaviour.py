@@ -1322,6 +1322,26 @@ async function dispatchWindowMessage(data, opts) {
       source: 'SECRET_SOURCE',
       apiAuth: 'Bearer SECRET_VALUE_DO_NOT_LEAK',
     });
+  } else if (scenario === 'runtimeBenignNonCapyTypeWithMessageTypePrompt') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'form.submit',
+      messageType: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Refresh safely without SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>',
+      renderer: '<script>bad()</script>',
+      source: 'SECRET_SOURCE',
+      apiAuth: 'Bearer SECRET_VALUE_DO_NOT_LEAK',
+    });
   } else if (scenario === 'runtimeCamelCaseRuntimeTokenPrompt') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2930,6 +2950,34 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_accepts_camelcase_message_ty
     assert "renderer" not in combined.lower()
     assert "apiAuth" not in combined
     assert "apiauth" not in combined.lower()
+    assert "SECRET" not in combined
+
+
+def test_spaces_ui_sandbox_postmessage_accepts_benign_non_capy_type_with_message_type_alias(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeBenignNonCapyTypeWithMessageTypePrompt")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+    dialog_blob = json.dumps(out["dialogs"])
+    combined = out["rootHtml"] + " " + dialog_blob + " " + json.dumps(body)
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert body == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "agent.prompt",
+        "prompt": "Refresh safely without [REDACTED] or bad()",
+        "payload": {"source": "sandbox-postmessage", "message_type": "capy:agent:prompt"},
+    }
+    assert "Widget event queued" in out["rootHtml"]
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "Sandbox message blocked" not in out["rootHtml"]
+    assert "form.submit" not in combined
+    assert "<script" not in combined.lower()
+    assert "renderer" not in combined.lower()
+    assert "apiAuth" not in combined
+    assert "apiauth" not in combined.lower()
+    assert "SECRET_SOURCE" not in combined
     assert "SECRET" not in combined
 
 

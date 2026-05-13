@@ -1222,10 +1222,12 @@
     const hasType = Object.prototype.hasOwnProperty.call(data || {}, 'type');
     const hasMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'message_type');
     const hasCamelMessageType = Object.prototype.hasOwnProperty.call(data || {}, 'messageType');
-    const type = runtimeMessageTypeValue(data && data.type);
+    const rawType = String(data && data.type || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const typeLooksRuntime = /^capy:/i.test(rawType);
+    const type = typeLooksRuntime ? runtimeMessageTypeValue(rawType) : '';
     const messageType = runtimeMessageTypeValue(data && data.message_type);
     const camelMessageType = runtimeMessageTypeValue(data && data.messageType);
-    if ((hasType && !type) || (hasMessageType && !messageType) || (hasCamelMessageType && !camelMessageType)) return { type: '', blocked: true };
+    if ((hasType && typeLooksRuntime && !type) || (hasMessageType && !messageType) || (hasCamelMessageType && !camelMessageType)) return { type: '', blocked: true };
     const aliases = [type, messageType, camelMessageType].filter(Boolean);
     if (aliases.some(function(value){ return value.toLowerCase() !== aliases[0].toLowerCase(); })) return { type: '', blocked: true };
     const selected = aliases[0] || '';
