@@ -684,6 +684,12 @@
       '</div>';
   }
 
+  function renderCreatorPreviewBlockedResult(){
+    return '<div class="capy-spaces-card capy-spaces-danger-card" role="status"><h3>Creator preview blocked</h3>' +
+      '<div class="capy-spaces-muted">Preview could not be created safely; adjust the prompt and retry.</div>' +
+      '</div>';
+  }
+
   async function loadSpaceWidgets(spaceId){
     const root = document.getElementById('capySpacesRoot');
     if (!root) return;
@@ -1938,7 +1944,17 @@
       const targetSpaceId = safePathIdText(button.dataset.spaceId || (targetInput && targetInput.value ? String(targetInput.value) : ''));
       const payload = {action: 'space.creator.preview', prompt: prompt};
       if (targetSpaceId) payload.space_id = targetSpaceId;
-      const data = await postSpacesJson('api/spaces/tool', payload);
+      let data;
+      try {
+        data = await postSpacesJson('api/spaces/tool', payload);
+      } catch (previewErr) {
+        try {
+          await loadCapySpaces();
+        } catch (reloadErr) {}
+        const refreshedRoot = document.getElementById('capySpacesRoot');
+        if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorPreviewBlockedResult() + refreshedRoot.innerHTML;
+        return;
+      }
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderCreatorPreviewResult(data || {}) + refreshedRoot.innerHTML;
       return;

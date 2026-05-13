@@ -381,6 +381,18 @@ global.fetch = async function(path, opts = {}) {
       });
     }
     if (body.action === 'space.creator.preview') {
+      const previewCallCount = calls.filter(call => call.path === 'api/spaces/tool' && String(call.body || '').includes('space.creator.preview')).length;
+      if (scenario === 'creatorPreviewFailure' || (scenario === 'creatorPreviewAfterSuccessFailure' && previewCallCount > 1)) {
+        return response({
+          ok: false,
+          error: 'Creator preview rejected renderer source data api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          source: 'generated source body',
+          data: { api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          raw_prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+        }, 400);
+      }
       if (scenario === 'creatorPreviewUnsafeIds') {
         return response({
           ok: true,
@@ -2379,8 +2391,13 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
-  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds') {
+  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure') {
     await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('previewCreatorSpec', {});
+  } else if (scenario === 'creatorPreviewAfterSuccessFailure') {
+    await window.loadCapySpaces();
+    await click('previewCreatorSpec', {});
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
   } else if (scenario === 'creatorPreviewExistingSpace') {
@@ -5269,6 +5286,48 @@ def test_creator_preview_omits_unsafe_ids_and_commit_action(driver_path):
     assert "Remove widgets:" not in out["rootHtml"]
     assert "Approve revisioned commit" not in out["rootHtml"]
     assert "data-preview-id" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_failure_renders_safe_blocked_card_without_backend_error_or_prompt_leaks(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewFailure")
+
+    assert "Safe creator loop" in out["beforeHtml"]
+    assert "Creator preview blocked" in out["rootHtml"]
+    assert "Preview could not be created safely; adjust the prompt and retry." in out["rootHtml"]
+    assert "Creator preview ready" not in out["rootHtml"]
+    assert "Approve revisioned commit" not in out["rootHtml"]
+    assert "data-preview-id" not in out["rootHtml"]
+    assert any(call["path"] == "api/spaces/tool" and "space.creator.preview" in call["body"] for call in out["calls"])
+    assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
+    assert "Creator preview rejected" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "raw_prompt" not in out["rootHtml"]
+    assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_failure_clears_prior_approvable_preview(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewAfterSuccessFailure")
+
+    assert "Creator preview ready" in out["beforeHtml"]
+    assert "Approve revisioned commit" in out["beforeHtml"]
+    assert "data-preview-id=\"preview-safe-1\"" in out["beforeHtml"]
+    assert "Creator preview blocked" in out["rootHtml"]
+    assert "Preview could not be created safely; adjust the prompt and retry." in out["rootHtml"]
+    assert "Creator preview ready" not in out["rootHtml"]
+    assert "Approve revisioned commit" not in out["rootHtml"]
+    assert "data-preview-id" not in out["rootHtml"]
+    assert sum(1 for call in out["calls"] if call["path"] == "api/spaces/tool" and "space.creator.preview" in call["body"]) == 2
+    assert not any(call["path"] == "api/spaces/tool" and "space.creator.commit" in call["body"] for call in out["calls"])
+    assert "Creator preview rejected" not in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
