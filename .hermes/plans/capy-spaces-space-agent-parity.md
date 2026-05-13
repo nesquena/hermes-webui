@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-13 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: The safe creator-loop commit path now renders a fixed metadata-only blocked status when the shared confirmation dialog helper is unavailable after sandbox/visual-QA gates are checked, keeping the prior preview visible and refusing to send any `space.creator.commit` request. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: The safe recovery/admin panel now strict-redacts top-level current Space revision labels, preserving metadata-only recovery while preventing path-like or secret-looking revision IDs from appearing in the DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): redact recovery revision labels`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving a recovery snapshot with a hostile top-level `revision_event_id` renders `Revision: [REDACTED]` and omits path-like/API-auth/secret-looking marker text from `#capySpacesRecovery`.
+  - Hardened `renderRecoverySnapshot(...)` to reuse the strict Space revision label helper for recovery/admin Space cards instead of directly escaping and displaying backend-provided `revision_event_id` values.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related recovery panel regressions passed; Spaces UI behavior + demo parity suites, `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static recovery revision browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-revision-label-qa.png`.
 
 - `fix(spaces): block creator commits without confirm dialog`
   - Added RED/GREEN real-`static/spaces.js` coverage proving that a creator preview with both sandbox and visual-QA gates checked still fails closed when `showConfirmDialog` is unavailable: no commit POST is sent, the metadata-only preview remains visible, and a fixed safe `Creator commit blocked` card is rendered.

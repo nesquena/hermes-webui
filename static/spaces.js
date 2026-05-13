@@ -2877,11 +2877,12 @@
           '</div></div>';
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
       const recoveryRows = renderRecoveryRevisionRows(spaceId, s.revisions || []);
+      const revisionLabel = safeSpaceRevisionLabel(s.revision_event_id, 'none');
       return '<div class="capy-spaces-card"><h3>'+escapeHtml(name)+'</h3>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         spaceStatus +
         renderRecoverySpaceEventStatus(s || {}) +
-        '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceIdLabel)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
+        '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceIdLabel)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(revisionLabel)+'</div>' +
         '<div class="capy-spaces-actions">'+spaceAction+spaceRepairAction+spaceExportActions+'</div>' +
         widgetRows +
         '<div class="capy-spaces-card"><h4>Recovery rollback</h4><div class="capy-spaces-muted">Restore safe metadata snapshots without rendering generated widget bodies.</div><div class="capy-spaces-widget-list">'+recoveryRows+'</div></div>' +

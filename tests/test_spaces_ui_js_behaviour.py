@@ -593,7 +593,7 @@ global.fetch = async function(path, opts = {}) {
           name: 'Broken <Space>',
           description: 'Recover without <script>running</script>',
           widget_count: 2,
-          revision_event_id: 'rev-broken',
+          revision_event_id: scenario === 'recoveryUnsafeTopRevisionEventId' ? 'source/../api_key-SECRET_VALUE_DO_NOT_LEAK' : 'rev-broken',
           disabled: false,
           disabled_reason: '',
           queued_space_repair_count: 1,
@@ -2094,7 +2094,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId') {
+  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -4689,6 +4689,20 @@ def test_spaces_ui_recovery_panel_redacts_unsafe_space_id_and_omits_actions(driv
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_panel_redacts_unsafe_current_revision_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryUnsafeTopRevisionEventId")
+
+    recovery_html = out["recoveryHtml"]
+    assert "Broken &lt;Space&gt;" in recovery_html
+    assert "Space ID: broken" in recovery_html
+    assert "Revision: [REDACTED]" in recovery_html
+    assert "source/../api_key-SECRET_VALUE_DO_NOT_LEAK" not in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html
+    assert "api_key" not in recovery_html.lower()
+    assert "SECRET" not in recovery_html
 
 
 def test_spaces_ui_recovery_module_controls_use_shared_confirm_and_refresh(driver_path):
