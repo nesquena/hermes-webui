@@ -166,6 +166,21 @@ async function send(){
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      if(_agentCmd&&_agentCmd.category==='Plugin'){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _pluginOutput='(no output)';
+        try{
+          _pluginOutput=typeof executeAgentPluginCommand==='function'
+            ? await executeAgentPluginCommand(text,_agentCmd)
+            : 'Plugin command runtime unavailable in WebUI.';
+        }catch(e){
+          _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
+        }
+        S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
@@ -210,6 +225,7 @@ async function send(){
   startClarifyPolling(activeSid);
   _fetchYoloState(activeSid);  // sync YOLO pill with backend state
   S.activeStreamId = null;  // will be set after stream starts
+  if(typeof updateSendBtn==='function') updateSendBtn();
 
   // Set provisional title from user message immediately so session appears
   // in the sidebar right away with a meaningful name (server may refine later)
@@ -243,6 +259,7 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
@@ -259,6 +276,9 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    // setBusy(true) already ran with activeStreamId=null; refresh now that we
+    // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     if(S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
@@ -896,17 +916,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    function _resolveGoalMessage(d){
+      const key=String(d && d.message_key ? d.message_key : '').trim();
+      const args=Array.isArray(d && d.message_args) ? d.message_args : [];
+      const raw=String(d&&d.message||'').trim();
+      if(key && typeof t==='function'){
+        try{
+          const translated=String(t(key,...args));
+          if(translated && translated!==key)return translated;
+        }catch(_){}
+      }
+      return raw;
+    }
+
     source.addEventListener('goal',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
         const goalState=String(d.state||'').trim();
-        const goalEvaluatingMessage='Evaluating goal progress…';
+        const goalEvaluatingMessage=t('goal_evaluating_progress');
         if(goalState==='evaluating'){
           setComposerStatus(goalEvaluatingMessage);
           return;
         }
-        const msg=String(d.message||'').trim();
+        const msg=_resolveGoalMessage(d);
         if(!msg)return;
         _latestGoalStatus={message:msg,decision:d.decision||null,state:goalState||null};
         setComposerStatus(msg);
@@ -927,7 +960,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           model_provider:S.session&&S.session.model_provider||null,
           profile:S.activeProfile||'default',
         };
-        showToast('Continuing toward goal…',2200);
+        const toast=t('goal_continuing_toast');
+        const cmsg=_resolveGoalMessage(d);
+        showToast((toast&&cmsg&&cmsg!==toast)?cmsg.split('\n')[0]:toast,2200);
       }catch(_){}
     });
 
@@ -1152,13 +1187,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
-      showToast(message||'Context compressed');
+      showToast(message||'Context compressed', 8000);
     });
 
     source.addEventListener('metering',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        if(d.usage&&typeof _syncCtxIndicator==='function'){
+          S.lastUsage={...(S.lastUsage||{}),...d.usage};
+          _syncCtxIndicator(S.lastUsage);
+        }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
           if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
           return;

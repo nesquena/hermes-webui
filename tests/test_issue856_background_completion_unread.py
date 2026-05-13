@@ -186,8 +186,8 @@ def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar
     assert render_idx != -1, "_renderOneSession not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
 
-    assert "(isActive && S.busy)" in local_block
-    assert "INFLIGHT && INFLIGHT[s.session_id]" in local_block
+    assert "isActive && Boolean(S.busy)" in local_block
+    assert "INFLIGHT && INFLIGHT[s.session_id]" not in local_block
     assert "s.is_streaming || _isSessionLocallyStreaming(s)" in effective_block
     assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in render_block, (
         "the row spinner and polling completion transition must use the same "

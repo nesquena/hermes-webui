@@ -110,6 +110,7 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
 
     fake_session = FakeSession()
     fake_stream_id = "stream_issue1857_usage_overwrite"
+    fake_session.active_stream_id = fake_stream_id
     fake_queue = queue.Queue()
     fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
     fake_runtime_module.resolve_runtime_provider = mock.Mock(

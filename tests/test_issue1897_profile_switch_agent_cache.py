@@ -188,6 +188,7 @@ def test_same_session_profile_switch_rebuilds_agent_under_new_soul_home(tmp_path
 
     def run_turn(profile_name: str, stream_id: str, text: str):
         fake_session.profile = profile_name
+        fake_session.active_stream_id = stream_id
         streaming.STREAMS[stream_id] = queue.Queue()
         streaming._run_agent_streaming(
             session_id=fake_session.session_id,

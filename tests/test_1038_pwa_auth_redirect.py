@@ -112,3 +112,12 @@ class TestLoginJsSafeNextPath:
         assert "charAt(0) !== '/'" in src or "startsWith('/')" in src, (
             "_safeNextPath must reject non-path-absolute inputs (e.g. 'http://...')"
         )
+
+    def test_health_probe_sends_same_origin_credentials(self):
+        """Cloudflare Access protects /health with same-origin cookies before WebUI sees it."""
+        src = self._login_js()
+        assert "fetch('health', { method: 'GET', credentials: 'omit' })" not in src, (
+            "login.js must not omit credentials for the health probe because "
+            "deployment-level access proxies may require same-origin cookies"
+        )
+        assert "fetch('health', { method: 'GET', credentials: 'same-origin' })" in src

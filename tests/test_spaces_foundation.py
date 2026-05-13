@@ -9086,7 +9086,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert 'id="capyActiveSpaceLabel"' in index_html
     assert 'id="capyActiveSpaceClear"' in index_html
     assert 'data-panel="capy-spaces"' in index_html
-    assert "switchPanel('capy-spaces')" in index_html
+    assert "switchPanel('capy-spaces'" in index_html
+    assert "fromRailClick:true" in index_html
     assert "'capy-spaces': 'Capy Spaces'" in panels_js
     assert "'capy-spaces'" in panels_js
     assert "loadCapySpaces()" in panels_js

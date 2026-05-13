@@ -199,6 +199,8 @@ def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """
     if not parent or not child:
         return False
+    if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
     parent_source = str(parent.get('source') or '').strip().lower()
     child_source = str(child.get('source') or '').strip().lower()
     if parent_source and child_source and parent_source != child_source:
@@ -379,6 +381,7 @@ def read_importable_agent_session_rows(
             return []
 
         parent_expr = _optional_col('parent_session_id', session_cols)
+        session_source_expr = _optional_col('session_source', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
         user_id_expr = _optional_col('user_id', session_cols)
@@ -408,6 +411,7 @@ def read_importable_agent_session_rows(
             f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
+                   {session_source_expr},
                    {user_id_expr},
                    {chat_id_expr},
                    {chat_type_expr},
@@ -439,6 +443,166 @@ def read_importable_agent_session_rows(
 
 
 
+def _lineage_report_row(row: dict, role: str) -> dict:
+    updated_at = row.get('ended_at') if row.get('ended_at') is not None else row.get('started_at')
+    return {
+        'session_id': row.get('id'),
+        'role': role,
+        'title': row.get('title'),
+        'source': row.get('source'),
+        'started_at': row.get('started_at'),
+        'updated_at': updated_at,
+        'end_reason': row.get('end_reason'),
+        'active': row.get('ended_at') is None,
+        'archived': False,
+    }
+
+
+def _empty_lineage_report(session_id: str, *, found: bool = False) -> dict:
+    return {
+        'mutation': False,
+        'found': found,
+        'session_id': session_id,
+        'lineage_key': session_id,
+        'tip_session_id': session_id,
+        'total_segments': 0,
+        'materialized_segments': 0,
+        'segments': [],
+        'children': [],
+        'manual_review': False,
+    }
+
+
+def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops: int = 20) -> dict:
+    """Return a bounded, read-only lifecycle report for a session lineage.
+
+    This helper intentionally reports only facts that can be derived from
+    ``state.db.sessions`` without mutating WebUI JSON, archiving rows, or
+    deleting historical segments. It mirrors the sidebar continuation rules so
+    a future UI/PR can explain which rows are hidden compression/cli-close
+    segments and which child-session branches remain distinct.
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return _empty_lineage_report('')
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return _empty_lineage_report(sid)
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            required = {'id', 'parent_session_id', 'end_reason'}
+            if not required.issubset(session_cols):
+                return _empty_lineage_report(sid)
+
+            source_expr = _optional_col('source', session_cols)
+            session_source_expr = _optional_col('session_source', session_cols)
+            title_expr = _optional_col('title', session_cols)
+            started_expr = _optional_col('started_at', session_cols, '0')
+            ended_expr = _optional_col('ended_at', session_cols)
+            end_reason_expr = _optional_col('end_reason', session_cols)
+            parent_expr = _optional_col('parent_session_id', session_cols)
+
+            def fetch_one(row_id: str | None) -> dict | None:
+                if not row_id:
+                    return None
+                cur.execute(
+                    f"""
+                    SELECT s.id,
+                           {source_expr},
+                           {session_source_expr},
+                           {title_expr},
+                           {started_expr},
+                           {parent_expr},
+                           {ended_expr},
+                           {end_reason_expr}
+                    FROM sessions s
+                    WHERE s.id = ?
+                    """,
+                    (row_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+            target = fetch_one(sid)
+            if not target:
+                return _empty_lineage_report(sid)
+
+            segments = [target]
+            current = target
+            seen = {sid}
+            manual_review = False
+            for _hop in range(max(0, int(max_hops))):
+                parent_id = current.get('parent_session_id')
+                parent = fetch_one(parent_id)
+                if not parent or parent_id in seen:
+                    manual_review = bool(parent_id and parent_id in seen)
+                    break
+                if not _is_continuation_session(parent, current):
+                    break
+                segments.append(parent)
+                seen.add(parent_id)
+                current = parent
+            else:
+                manual_review = True
+
+            segment_ids = {row['id'] for row in segments}
+            child_rows: list[dict] = []
+            for parent in segments:
+                cur.execute(
+                    f"""
+                    SELECT s.id,
+                           {source_expr},
+                           {session_source_expr},
+                           {title_expr},
+                           {started_expr},
+                           {parent_expr},
+                           {ended_expr},
+                           {end_reason_expr}
+                    FROM sessions s
+                    WHERE s.parent_session_id = ?
+                    ORDER BY s.started_at DESC
+                    """,
+                    (parent['id'],),
+                )
+                for child_row in cur.fetchall():
+                    child = dict(child_row)
+                    if child['id'] in segment_ids:
+                        continue
+                    if _is_continuation_session(parent, child):
+                        # A continuation outside the selected path means the
+                        # lineage is branched or the caller selected an older
+                        # segment. Report manual review rather than proposing
+                        # destructive cleanup candidates.
+                        manual_review = True
+                        continue
+                    child_rows.append(child)
+    except Exception:
+        return _empty_lineage_report(sid)
+
+    root_id = segments[-1]['id'] if segments else sid
+    tip_id = segments[0]['id'] if segments else sid
+    return {
+        'mutation': False,
+        'found': True,
+        'session_id': sid,
+        'lineage_key': root_id,
+        'tip_session_id': tip_id,
+        'total_segments': len(segments),
+        'materialized_segments': len(segments),
+        'segments': [
+            _lineage_report_row(row, 'tip' if idx == 0 else 'hidden_segment')
+            for idx, row in enumerate(segments)
+        ],
+        'children': [_lineage_report_row(row, 'child_session') for row in child_rows],
+        'manual_review': manual_review,
+    }
+
+
 def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:
     """Return compression-lineage metadata for known WebUI sidebar sessions.
 
@@ -463,6 +627,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             session_cols = {row[1] for row in cur.fetchall()}
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
+            session_source_expr = _optional_col('session_source', session_cols)
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -496,9 +661,9 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT id, source, title, started_at, parent_session_id, ended_at, end_reason
-                        FROM sessions
-                        WHERE id IN ({placeholders})
+                        SELECT s.id, s.source, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason
+                        FROM sessions s
+                        WHERE s.id IN ({placeholders})
                         """,
                         chunk,
                     )

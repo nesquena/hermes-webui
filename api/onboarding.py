@@ -139,6 +139,15 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("deepseek", [])),
         "category": "specialized",
     },
+    "xiaomi": {
+        "label": "Xiaomi MiMo",
+        "env_var": "XIAOMI_API_KEY",
+        "default_model": "mimo-v2.5-pro",
+        "default_base_url": "https://api.xiaomimimo.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("xiaomi", [])),
+        "category": "specialized",
+    },
     "zai": {
         "label": "Z.AI / GLM (智谱)",
         "env_var": "GLM_API_KEY",

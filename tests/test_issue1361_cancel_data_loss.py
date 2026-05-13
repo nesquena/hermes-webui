@@ -95,6 +95,7 @@ def _make_session(session_id="cancel_sid_1361",
 
 def _setup_cancel_state(session_id, stream_id="stream_1361"):
     """Wire up STREAMS/CANCEL_FLAGS/AGENT_INSTANCES for cancel_stream()."""
+    models.SESSIONS[session_id].active_stream_id = stream_id
     config.STREAMS[stream_id] = queue.Queue()
     config.CANCEL_FLAGS[stream_id] = threading.Event()
     mock_agent = Mock()

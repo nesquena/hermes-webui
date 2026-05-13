@@ -9,6 +9,7 @@ Covers:
 - streaming.py: SessionDB init is placed before AIAgent construction
 """
 import ast
+import threading
 import pathlib
 import re
 import queue
@@ -212,6 +213,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
         fake_session = FakeSession()
         fake_stream_id = "stream-runtime-route"
+        fake_session.active_stream_id = fake_stream_id
         fake_queue = queue.Queue()
         fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
         fake_runtime_module.resolve_runtime_provider = resolve_runtime_provider
@@ -361,7 +363,10 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=object())
 
-        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
              mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai-codex", None)), \
              mock.patch("api.config.get_config", return_value={}), \
@@ -401,6 +406,136 @@ class TestRuntimeRouteInjection(unittest.TestCase):
             ),
             "interim_assistant event should carry the assistant commentary text"
         )
+
+    def test_clarify_callback_passes_configured_timeout_seconds(self):
+        """clarify prompt data should use clarify.timeout from config when present."""
+        import api.streaming as streaming
+
+        captured = {}
+        submit_payloads = []
+
+        class FakeEntry:
+            def __init__(self, value):
+                self.result = value
+                self.event = threading.Event()
+                self.event.set()
+
+        def fake_submit_pending(_sid, payload):
+            submit_payloads.append(payload)
+            return FakeEntry("selected")
+
+        class CapturingAgent:
+            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
+                         platform=None, quiet_mode=False, enabled_toolsets=None,
+                         fallback_model=None, session_id=None, session_db=None,
+                         stream_delta_callback=None, reasoning_callback=None,
+                         tool_progress_callback=None, clarify_callback=None, **kwargs):
+                self.clarify_callback = clarify_callback
+                self.session_id = session_id
+                captured["init_kwargs"] = {
+                    "clarify_callback": clarify_callback,
+                }
+
+            def run_conversation(self, **kwargs):
+                if self.clarify_callback:
+                    captured["clarify_result"] = self.clarify_callback(
+                        "Need user confirmation",
+                        ["first", "second"],
+                    )
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                captured["interrupted"] = True
+
+        class FakeSession:
+            session_id = "sess-clarify-timeout"
+            title = "clarify-timeout test"
+            workspace = "/tmp"
+            model = "gpt-5.4"
+            messages = []
+            personality = None
+            input_tokens = 0
+            output_tokens = 0
+            estimated_cost = None
+            tool_calls = []
+            active_stream_id = None
+            pending_user_message = None
+            pending_attachments = []
+            pending_started_at = None
+
+            def save(self, touch_updated_at=True, **_kwargs):
+                pass
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id,
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "pinned": False,
+                    "archived": False,
+                    "project_id": None,
+                    "profile": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "estimated_cost": None,
+                    "personality": None,
+                }
+
+            @property
+            def path(self):
+                return "/tmp/fake.json"
+
+        fake_stream_id = "stream-clarify-timeout"
+        fake_queue = queue.Queue()
+        fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
+            "provider": "openai-codex",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "rt-key",
+            "api_mode": "codex_responses",
+            "command": "codex",
+            "args": ["exec", "--json"],
+            "credential_pool": object(),
+        })
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_rt_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
+             mock.patch.object(streaming, "get_config", return_value={"clarify": {"timeout": 300}}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch("api.clarify.submit_pending", side_effect=fake_submit_pending), \
+             mock.patch.dict(sys.modules, {
+                "hermes_cli": fake_hermes_cli,
+                "hermes_cli.runtime_provider": fake_rt_module,
+                "hermes_state": fake_hermes_state,
+             }):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id="sess-clarify-timeout",
+                msg_text="please run task",
+                model="gpt-5.4",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        self.assertEqual(captured["clarify_result"], "selected")
+        self.assertEqual(len(submit_payloads), 1)
+        self.assertEqual(submit_payloads[0]["timeout_seconds"], 300)
 
 
 class TestSessionDBAST(unittest.TestCase):
@@ -713,7 +848,10 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=None)
 
-        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
              mock.patch.object(streaming, "_get_ai_agent", return_value=OlderAgent), \
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai", None)), \
              mock.patch("api.config.get_config", return_value={}), \

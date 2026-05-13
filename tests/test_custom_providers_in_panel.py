@@ -202,6 +202,38 @@ class TestCustomProvidersInGetProviders:
         finally:
             self._restore_cfg(old_cfg, old_mtime)
 
+    def test_custom_provider_parenthesized_port_uses_safe_provider_id(self, monkeypatch, tmp_path):
+        """Local setup names with ports must expose the same safe id used by routing."""
+        _install_fake_hermes_cli(monkeypatch)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("LOCAL_PORT_API_KEY", "sk-local-port-test-12345678")
+
+        old_cfg, old_mtime = self._setup_cfg([
+            {
+                "name": "Local (127.0.0.1:15721)",
+                "base_url": "http://127.0.0.1:15721/v1",
+                "api_key": "${LOCAL_PORT_API_KEY}",
+                "model": "deepseek-v4-flash",
+            },
+        ])
+
+        from api.providers import _get_provider_api_key, _provider_has_key, get_providers
+        try:
+            provider_id = "custom:local-127.0.0.1-15721"
+            result = get_providers()
+            provider_ids = {p["id"] for p in result["providers"]}
+            assert provider_id in provider_ids
+            assert "custom:Local (127.0.0.1:15721)" not in provider_ids
+            assert "custom:local-(127.0.0.1:15721)" not in provider_ids
+
+            local = [p for p in result["providers"] if p["id"] == provider_id][0]
+            assert local["display_name"] == "Local (127.0.0.1:15721)"
+            assert local["has_key"] is True
+            assert _provider_has_key(provider_id) is True
+            assert _get_provider_api_key(provider_id) == "sk-local-port-test-12345678"
+        finally:
+            self._restore_cfg(old_cfg, old_mtime)
+
     def test_custom_provider_no_name_skipped(self, monkeypatch, tmp_path):
         """Malformed custom provider without name should be silently skipped."""
         _install_fake_hermes_cli(monkeypatch)

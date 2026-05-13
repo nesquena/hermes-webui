@@ -69,7 +69,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // On page load, probe the server so we can distinguish "can't reach server"
   // (Tailscale off, wrong network) from "session expired / need to log in".
-  // Uses /health — a public endpoint, no auth required.
+  // Uses /health — public for WebUI auth, but deployment access proxies may
+  // require same-origin cookies before the request reaches WebUI.
   // If unreachable, retries every 3 s and auto-reloads once the server is back.
   (function checkConnectivity() {
     var retryTimer = null;
@@ -81,7 +82,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     function probe() {
-      fetch('health', { method: 'GET', credentials: 'omit' })
+      fetch('health', { method: 'GET', credentials: 'same-origin' })
         .then(function (r) {
           if (r.ok) {
             // Server is reachable — if we were in retry mode, reload so the

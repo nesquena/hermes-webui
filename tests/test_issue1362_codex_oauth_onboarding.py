@@ -554,6 +554,13 @@ def test_runtime_provider_reads_use_anthropic_env_lock():
 def test_anthropic_onboarding_setup_allows_linked_oauth_without_api_key(monkeypatch, tmp_path):
     import api.onboarding as onboarding
 
+    # apply_onboarding_setup() short-circuits when HERMES_WEBUI_SKIP_ONBOARDING
+    # is set in the environment (hosting providers like Agent37 use it to ship
+    # a pre-configured WebUI). Local test runs may also set it for the same
+    # reason. The test exercises the file-writing branch, so delete the var
+    # for the test's scope. monkeypatch.delenv is a no-op if the var is unset.
+    monkeypatch.delenv("HERMES_WEBUI_SKIP_ONBOARDING", raising=False)
+
     cfg_path = tmp_path / "config.yaml"
     home = tmp_path / "home"
     home.mkdir()
