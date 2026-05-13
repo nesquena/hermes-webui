@@ -107,6 +107,36 @@ def test_redact_value_list():
     assert result[1]["content"] == "safe text"
 
 
+def test_redact_text_skips_full_redactor_for_safe_text(monkeypatch):
+    """Large ordinary transcript text should not pay the full redactor pass."""
+    import api.helpers as helpers
+
+    calls = []
+    monkeypatch.setattr(helpers, "_redact_fn_cached", lambda text: calls.append(text) or text)
+
+    safe_text = "ordinary session transcript without credential markers\n" * 500
+    assert helpers._redact_text(safe_text, _enabled=True) == safe_text
+    assert calls == []
+
+
+def test_redact_text_still_runs_full_redactor_for_sensitive_markers(monkeypatch):
+    """The cheap prefilter must preserve the hard redaction boundary."""
+    import api.helpers as helpers
+
+    calls = []
+
+    def fake_redactor(text):
+        calls.append(text)
+        return text.replace(_FAKE_SK_KEY, "sk-Tes...cdef")
+
+    monkeypatch.setattr(helpers, "_redact_fn_cached", fake_redactor)
+
+    result = helpers._redact_text(f"token={_FAKE_SK_KEY}", _enabled=True)
+
+    assert _FAKE_SK_KEY not in result
+    assert calls == [f"token={_FAKE_SK_KEY}"]
+
+
 def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
     """_redact_text must tolerate older redact_sensitive_text(text) signatures."""
     fake_agent = types.ModuleType("agent")

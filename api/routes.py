@@ -1666,6 +1666,24 @@ def _is_messaging_session_record(session) -> bool:
     return _is_known_messaging_source(raw)
 
 
+def _messages_include_tool_metadata(messages) -> bool:
+    """Return true when returned messages can reconstruct their own tool cards."""
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if isinstance(msg.get("tool_calls"), list) and msg.get("tool_calls"):
+            return True
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "tool_use"
+            for part in content
+        ):
+            return True
+    return False
+
+
 def _is_messaging_session_id(sid: str) -> bool:
     """Detect messaging-backed sessions from WebUI metadata or Agent rows."""
     try:
@@ -3362,9 +3380,19 @@ def handle_get(handler, parsed) -> bool:
                             _persisted_cl = _fb_cl
                     except Exception:
                         pass
+            _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+            if (
+                load_messages
+                and msg_limit is not None
+                and _messages_include_tool_metadata(_truncated_msgs)
+            ):
+                # The browser ignores session-level tool_calls when the returned
+                # messages already carry per-message tool metadata. Avoid sending
+                # the full historical list with a small tail window.
+                _session_tool_calls = []
             raw = s.compact() | {
                 "messages": _truncated_msgs,
-                "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
+                "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
