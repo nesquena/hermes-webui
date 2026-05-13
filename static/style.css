@@ -3765,3 +3765,37 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .log-line-debug{color:var(--muted);opacity:.75;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
+/* Hermes local session-continuity controls: 세션 압축 / 이동 준비 / 세션 이동 */
+.session-continuity-outer{
+  width:100%;max-width:var(--composer-max-width, 860px);margin:0 auto 8px;padding:0 16px;
+  display:flex;justify-content:center;box-sizing:border-box;overflow:visible;
+}
+.session-continuity-actions{
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:0;flex-wrap:wrap;position:relative;
+}
+.session-continuity-btn{
+  border:1px solid var(--border2);border-radius:999px;background:color-mix(in srgb,var(--surface) 88%,transparent);
+  color:var(--muted);font:inherit;font-size:12px;font-weight:700;line-height:1.2;
+  padding:5px 10px;cursor:pointer;transition:background .15s,border-color .15s,color .15s,transform .15s;
+}
+.session-continuity-btn:hover,.session-continuity-btn[aria-expanded="true"]{background:var(--hover-bg);border-color:var(--accent);color:var(--text);transform:translateY(-1px);}
+.session-continuity-btn:disabled{opacity:.45;cursor:not-allowed;transform:none;}
+.session-continuity-btn--primary{border-color:color-mix(in srgb,var(--accent) 55%,var(--border2));color:var(--accent-text);}
+.session-continuity-menu-wrap{position:relative;display:inline-flex;}
+.session-continuity-menu{
+  position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);z-index:60;
+  min-width:150px;padding:6px;border:1px solid var(--border2);border-radius:12px;
+  background:var(--surface);box-shadow:var(--shadow-lg);
+}
+.session-continuity-menu-item{
+  width:100%;border:0;border-radius:9px;background:transparent;color:var(--text);
+  padding:7px 9px;text-align:left;font:inherit;font-size:12px;font-weight:700;cursor:pointer;
+}
+.session-continuity-menu-item:hover{background:var(--hover-bg);}
+@media(max-width:720px){
+  .session-continuity-outer{margin-bottom:7px;padding:0 10px;}
+  .session-continuity-actions{justify-content:center;padding:0;}
+  .session-continuity-btn{font-size:11px;padding:5px 8px;}
+  .session-continuity-menu{min-width:138px;}
+}

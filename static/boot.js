@@ -1605,3 +1605,258 @@ window.addEventListener('pageshow', async (event) => {
     } catch (_) {}
   }
 });
+
+// Hermes local session-continuity controls: 세션 압축 / 이동 준비 / 세션 이동
+(function(){
+  function _scEl(id){return document.getElementById(id);}
+  function _scToast(msg,ms,type){if(typeof showToast==='function')showToast(msg,ms||2200,type);}
+  function _scRoleLabel(role){return role==='user'?'User':role==='assistant'?'Assistant':role||'message';}
+  function _scContent(msg){
+    if(!msg)return '';
+    const raw=msg.content||msg.text||'';
+    if(Array.isArray(raw))return raw.map(p=>typeof p==='string'?p:(p&&(p.text||p.content)||'')).join(' ').trim();
+    return String(raw||'').trim();
+  }
+  function _scVisibleMessages(){
+    const items=Array.isArray(S&&S.messages)?S.messages:[];
+    return items.filter(m=>m&&m.role&&m.role!=='tool'&&_scContent(m));
+  }
+  function _scHash(text){
+    let h=2166136261;
+    for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619);}
+    return ('00000000'+(h>>>0).toString(16)).slice(-8);
+  }
+  async function _scCopy(text){
+    if(typeof _copyText==='function')return _copyText(text);
+    if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text);
+    const ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();
+  }
+  async function _scSendSlash(command){
+    if(S&&S.busy){_scToast('현재 응답이 진행 중입니다. 완료 후 다시 시도하세요.',2600,'warn');return;}
+    const msg=_scEl('msg');
+    if(!msg){_scToast('메시지 입력창을 찾지 못했습니다.',2600,'error');return;}
+    msg.value=command;
+    if(typeof autoResize==='function')autoResize();
+    if(typeof send==='function')await send();
+  }
+  function _scBoundedLine(raw, maxLen){
+    const text=String(raw||'').replace(/\s+/g,' ').trim();
+    if(text.length<=maxLen)return text;
+    return text.slice(0,Math.max(0,maxLen-1))+'…';
+  }
+  function _scVisibleOutline(messages, startIdx){
+    const maxPerMessage=320;
+    const maxTotal=42000;
+    const offset=Number.isFinite(startIdx)?Math.max(0,startIdx):0;
+    const lines=[];
+    let used=0;
+    let truncated=false;
+    for(let i=0;i<messages.length;i++){
+      const m=messages[i];
+      const line=`${String(offset+i+1).padStart(3,'0')}. ${_scRoleLabel(m.role)}: ${_scBoundedLine(_scContent(m),maxPerMessage)}`;
+      if(used+line.length+1>maxTotal){truncated=true;break;}
+      lines.push(line);
+      used+=line.length+1;
+    }
+    if(!lines.length)return '표시 가능한 대화 내용이 없습니다.';
+    if(truncated)lines.push(`[중단: 인계문 길이 보호를 위해 ${messages.length-lines.length}개 메시지 outline 생략]`);
+    return lines.join('\n');
+  }
+  function _scPriorHandoff(messages){
+    let best=null;
+    for(let i=0;i<messages.length;i++){
+      const text=_scContent(messages[i]);
+      if(!text||!text.includes('[이동 준비: 새 세션 이어가기 안내]'))continue;
+      const hashMatch=text.match(/(?:^|\n)packet_hash:\s*([^\n]+)/);
+      const sourceMatch=text.match(/(?:^|\n)source_session_id:\s*([^\n]+)/);
+      best={index:i,text,hash:hashMatch?hashMatch[1].trim():'unknown',source:sourceMatch?sourceMatch[1].trim():'unknown'};
+    }
+    return best;
+  }
+  function _scExtractSection(text, title){
+    const marker=`\n\n${title}:\n`;
+    const idx=String(text||'').indexOf(marker);
+    if(idx<0)return '';
+    const start=idx+marker.length;
+    const rest=String(text||'').slice(start);
+    const next=rest.search(/\n\n[^\n:]{1,80}:\n/);
+    return (next>=0?rest.slice(0,next):rest).trim();
+  }
+  function _scPriorDigest(prior){
+    if(!prior||!prior.text)return {text:'',truncated:false};
+    const text=String(prior.text||'');
+    const lines=text.split('\n');
+    const meta=[];
+    for(const line of lines){
+      if(line.startsWith('[이동 준비:')||/^(source_session_id|packet_scope|packet_hash|prior_packet_hash|handoff_chain|delta_visible_message_count|created_at|generation_method):/.test(line)){
+        meta.push(line);
+      }
+      if(meta.length>=12)break;
+    }
+    const recent=_scBoundedLine(_scExtractSection(text,'최근 요약'),3500);
+    const instruction=_scBoundedLine(_scExtractSection(text,'이어가기 지시'),900);
+    const parts=[];
+    if(meta.length)parts.push('이전 인계문 메타:\n'+meta.join('\n'));
+    if(recent)parts.push('이전 운영 요약:\n'+recent);
+    if(instruction)parts.push('이전 이어가기 지시:\n'+instruction);
+    const digest=parts.join('\n\n')||`이전 인계문 ${prior.hash||'unknown'} 감지됨. 원문 전문은 효율을 위해 재첨부하지 않음.`;
+    const maxLen=9000;
+    if(digest.length<=maxLen)return {text:digest,truncated:false};
+    return {text:digest.slice(0,maxLen-100)+'\n[중단: 이전 운영 요약 길이 보호로 일부 생략]',truncated:true};
+  }
+  function _scLatestByRole(messages, role){
+    for(let i=messages.length-1;i>=0;i--){
+      if(messages[i]&&messages[i].role===role){
+        const text=_scContent(messages[i]);
+        if(text)return text;
+      }
+    }
+    return '';
+  }
+  function _scEvidenceLines(messages, pattern, limit){
+    const lines=[];
+    for(const m of messages.slice().reverse()){
+      const text=_scContent(m);
+      if(!text||!pattern.test(text))continue;
+      lines.push(`- ${_scRoleLabel(m.role)}: ${_scBoundedLine(text,220)}`);
+      if(lines.length>=limit)break;
+    }
+    return lines.reverse().join('\n');
+  }
+  function _scOperationalChecklist(messages, summary, prior, deltaMessages, sid){
+    const latestUser=_scLatestByRole(messages,'user');
+    const latestAssistant=_scLatestByRole(messages,'assistant');
+    const verification=_scEvidenceLines(messages, /(PASS|검증|확인|console|served|active\/running|오류 없음|JS errors 없음|재시작 없음)/i, 3);
+    const caution=[
+      '- 전체 원문 이동이 아니라 운영 요약 + bounded delta handoff임.',
+      '- backend 최근 요약은 recent-50 제한 가능성이 있음.',
+      '- 필요하면 원본 세션/수정 파일/검증 로그를 다시 확인할 것.',
+    ].join('\n');
+    return [
+      `- 현재 목표: ${_scBoundedLine(latestUser||'확인 필요',320)}`,
+      `- 완료/변경: ${_scBoundedLine(summary||latestAssistant||'확인 필요',520)}`,
+      `- 검증 결과: ${verification||'확인 필요 — 새 세션에서 필요한 파일/상태를 재검증할 것.'}`,
+      `- 남은 작업: 최신 사용자 의도 기준으로 다음 안전 단계부터 진행. 불명확하면 한 번만 확인.`,
+      `- 주의/금지:\n${caution}`,
+      `- 참조: source_session_id=${sid}${prior?`; prior_packet_hash=${prior.hash}; prior_source_session_id=${prior.source}; delta_visible_message_count=${deltaMessages.length}`:''}`,
+    ].join('\n');
+  }
+  async function _scBuildPacket(kind){
+    const session=S&&S.session;
+    if(!session||!session.session_id)throw new Error('활성 세션이 없습니다.');
+    const sid=session.session_id;
+    const messages=_scVisibleMessages();
+    const created=new Date().toISOString();
+    const prior=_scPriorHandoff(messages);
+    const deltaStart=prior?prior.index+1:0;
+    const deltaMessages=messages.slice(deltaStart);
+    const outline=_scVisibleOutline(prior?deltaMessages:messages, deltaStart);
+    const priorDigest=prior?_scPriorDigest(prior):null;
+    let summary='';
+    let method=prior?'local_prior_handoff+delta_visible_outline':'local_all_visible_outline';
+    try{
+      if(typeof api==='function'){
+        const res=await api('/api/session/handoff-summary',{method:'POST',body:JSON.stringify({session_id:sid})});
+        if(res&&res.ok&&res.summary){summary=String(res.summary).trim();method=(res.fallback?'api_recent_summary_fallback':'api_recent_summary')+'+'+(prior?'prior_handoff+delta_visible_outline':'local_all_visible_outline');}
+      }
+    }catch(e){
+      summary='';
+    }
+    if(!summary){
+      const tail=messages.slice(-24).map(m=>`- ${_scRoleLabel(m.role)}: ${_scBoundedLine(_scContent(m),420)}`).join('\n');
+      summary=tail||'표시 가능한 대화 내용이 없습니다.';
+      method='local_recent_tail+'+(prior?'prior_handoff+delta_visible_outline':'local_all_visible_outline');
+    }
+    const terminalHint=kind==='terminal'?'새 Hermes CLI/터미널 세션에 이 인계문을 붙여넣고 이어서 진행해. 원본 WebUI 세션을 직접 수정한다고 가정하지 마.':null;
+    const scope=prior?'chained_handoff_plus_delta_visible_outline':'all_visible_messages_bounded_outline';
+    const meta=[
+      '[이동 준비: 새 세션 이어가기 안내]',
+      `source_session_id: ${sid}`,
+      kind==='move'&&S&&S.session&&S.session.session_id?`target_session_id: pending_new_session`:null,
+      `packet_scope: ${scope}`,
+      prior?'handoff_chain: true':null,
+      prior?`prior_packet_hash: ${prior.hash}`:null,
+      prior?`prior_source_session_id: ${prior.source}`:null,
+      prior?`delta_visible_message_count: ${deltaMessages.length}`:null,
+      prior&&priorDigest&&priorDigest.truncated?'prior_digest_truncated: true':null,
+      'packet_limit_note: backend_summary_may_cover_recent_50; continuity is preserved by prior operational digest plus local bounded delta outline when present',
+      'per_message_outline_chars: 320',
+      `message_count: ${messages.length}`,
+      `created_at: ${created}`,
+      `generation_method: ${method}`,
+    ].filter(Boolean);
+    const instructions=terminalHint||'위 인계문 기준으로 이어서 진행해. 오래된 요청을 재실행하지 말고 최신 사용자 의도부터 확인해.';
+    const checklist=_scOperationalChecklist(messages, summary, prior, deltaMessages, sid);
+    const inherited=priorDigest?`\n\n계승된 운영 요약:\n${priorDigest.text}`:'';
+    const outlineTitle=prior?'이번 세션 추가 visible 메시지 outline':'전체 visible 메시지 outline';
+    const body=`${meta.join('\n')}\n\n운영 상태 체크리스트:\n${checklist}${inherited}\n\n최근 요약:\n${summary}\n\n${outlineTitle}:\n${outline}\n\n이어가기 지시:\n${instructions}`;
+    const hash=_scHash(body);
+    return body.replace(`generation_method: ${method}`,`packet_hash: local:${hash}\ngeneration_method: ${method}`);
+  }
+  async function _scHandoff(){
+    try{
+      const packet=await _scBuildPacket('handoff');
+      await _scCopy(packet);
+      const msg=_scEl('msg');
+      if(msg){msg.value=packet;if(typeof autoResize==='function')autoResize();msg.focus();}
+      _scToast('이동 준비 인계문을 복사하고 입력창에 넣었습니다.',2600);
+    }catch(e){_scToast('이동 준비 실패: '+(e&&e.message||e),3200,'error');}
+  }
+  async function _scTerminal(){
+    try{
+      const packet=await _scBuildPacket('terminal');
+      await _scCopy(packet);
+      const msg=_scEl('msg');
+      if(msg){msg.value=packet;if(typeof autoResize==='function')autoResize();msg.focus();}
+      _scToast('터미널 이동 인계문을 복사했습니다. 터미널에서 새 Hermes 세션을 열고 붙여넣으세요.',3600);
+    }catch(e){_scToast('터미널 이동 준비 실패: '+(e&&e.message||e),3200,'error');}
+  }
+  async function _scMove(){
+    try{
+      if(S&&S.busy){_scToast('현재 응답이 진행 중입니다. 완료 후 다시 시도하세요.',2600,'warn');return;}
+      const packet=await _scBuildPacket('move');
+      if(typeof newSession!=='function'||typeof send!=='function')throw new Error('새 세션/전송 기능을 찾지 못했습니다.');
+      await _scCopy(packet);
+      await newSession();
+      if(typeof renderSessionList==='function')await renderSessionList();
+      const msg=_scEl('msg');
+      if(!msg)throw new Error('메시지 입력창을 찾지 못했습니다.');
+      msg.value=packet;
+      if(typeof autoResize==='function')autoResize();
+      await send();
+      _scToast('새 세션으로 인계문을 전달했습니다.',2600);
+    }catch(e){_scToast('세션 이동 실패: '+(e&&e.message||e),3200,'error');}
+  }
+  function _scSetHandoffMenu(open){
+    const h=_scEl('btnSessionHandoff'),menu=_scEl('sessionHandoffMenu');
+    if(!h||!menu)return;
+    const next=!!open;
+    menu.hidden=!next;
+    h.setAttribute('aria-expanded',next?'true':'false');
+  }
+  function _scToggleHandoffMenu(){
+    const menu=_scEl('sessionHandoffMenu');
+    _scSetHandoffMenu(menu?menu.hidden:true);
+  }
+  window._sessionContinuityHandoff=_scHandoff;
+  window._sessionContinuityTerminal=_scTerminal;
+  window._sessionContinuityMove=_scMove;
+  function _scBind(){
+    const c=_scEl('btnSessionCompress'),h=_scEl('btnSessionHandoff'),hg=_scEl('btnSessionHandoffGeneral'),ht=_scEl('btnSessionHandoffTerminal'),m=_scEl('btnSessionMove');
+    if(c&&!c.dataset.bound){c.dataset.bound='1';c.addEventListener('click',()=>_scSendSlash('/compress'));}
+    if(h&&!h.dataset.bound){h.dataset.bound='1';h.addEventListener('click',(ev)=>{ev.stopPropagation();_scToggleHandoffMenu();});}
+    if(hg&&!hg.dataset.bound){hg.dataset.bound='1';hg.addEventListener('click',async(ev)=>{ev.stopPropagation();_scSetHandoffMenu(false);await _scHandoff();});}
+    if(ht&&!ht.dataset.bound){ht.dataset.bound='1';ht.addEventListener('click',async(ev)=>{ev.stopPropagation();_scSetHandoffMenu(false);await _scTerminal();});}
+    if(m&&!m.dataset.bound){m.dataset.bound='1';m.addEventListener('click',_scMove);}
+    if(!window._sessionContinuityMenuCloseBound){
+      window._sessionContinuityMenuCloseBound=true;
+      document.addEventListener('click',(ev)=>{
+        const wrap=document.querySelector('.session-continuity-menu-wrap');
+        if(wrap&&!wrap.contains(ev.target))_scSetHandoffMenu(false);
+      });
+      document.addEventListener('keydown',(ev)=>{if(ev.key==='Escape')_scSetHandoffMenu(false);});
+    }
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_scBind);else _scBind();
+})();
+

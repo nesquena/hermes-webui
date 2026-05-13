@@ -469,6 +469,19 @@
       <div class="queue-pill-outer">
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
       </div>
+      <div class="session-continuity-outer">
+        <div class="session-continuity-actions" id="sessionContinuityActions" aria-label="세션 연속성 작업">
+          <button class="session-continuity-btn" id="btnSessionCompress" type="button" title="현재 세션 압축 (/compress)">세션 압축</button>
+          <div class="session-continuity-menu-wrap">
+            <button class="session-continuity-btn" id="btnSessionHandoff" type="button" title="웹/터미널로 이어갈 인계문 복사" aria-haspopup="true" aria-expanded="false" aria-controls="sessionHandoffMenu">이동 준비 ▾</button>
+            <div class="session-continuity-menu" id="sessionHandoffMenu" role="menu" aria-label="이동 준비 옵션" hidden>
+              <button class="session-continuity-menu-item" id="btnSessionHandoffGeneral" type="button" role="menuitem">인계문 복사</button>
+              <button class="session-continuity-menu-item" id="btnSessionHandoffTerminal" type="button" role="menuitem">터미널용 복사</button>
+            </div>
+          </div>
+          <button class="session-continuity-btn session-continuity-btn--primary" id="btnSessionMove" type="button" title="새 세션을 만들고 인계문 전달 (/move)">세션 이동</button>
+        </div>
+      </div>
       <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">
