@@ -159,6 +159,69 @@ def test_deferred_turn_is_materialized_when_agent_returns_assistant_only_delta()
     assert [m["content"] for m in merged[-2:]] == ["latest prompt", "current answer"]
 
 
+def test_duplicate_assistant_delta_is_not_persisted_twice():
+    """Provider/result merge replay must not duplicate the same assistant bubble."""
+    previous_display = [
+        {"role": "user", "content": "older prompt"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    previous_context = list(previous_display)
+    result_messages = previous_context + [
+        {"role": "user", "content": "latest prompt"},
+        {"role": "assistant", "content": "current answer"},
+        {"role": "assistant", "content": "current answer"},
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display=previous_display,
+        previous_context=previous_context,
+        result_messages=result_messages,
+        msg_text="latest prompt",
+    )
+
+    assert [m["role"] for m in merged] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [m["content"] for m in merged[-2:]] == ["latest prompt", "current answer"]
+    assert (
+        sum(
+            1
+            for m in merged
+            if m.get("role") == "assistant" and m.get("content") == "current answer"
+        )
+        == 1
+    )
+
+
+def test_same_assistant_text_across_different_turns_is_preserved():
+    previous_display = [
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": "same answer"},
+    ]
+    previous_context = list(previous_display)
+    result_messages = previous_context + [
+        {"role": "user", "content": "second prompt"},
+        {"role": "assistant", "content": "same answer"},
+    ]
+
+    merged = streaming._merge_display_messages_after_agent_result(
+        previous_display=previous_display,
+        previous_context=previous_context,
+        result_messages=result_messages,
+        msg_text="second prompt",
+    )
+
+    assert [m["content"] for m in merged] == [
+        "first prompt",
+        "same answer",
+        "second prompt",
+        "same answer",
+    ]
+
+
 def test_llm_title_generated_survives_save_and_load(_isolate_state):
     s = Session(
         session_id="generated_title",

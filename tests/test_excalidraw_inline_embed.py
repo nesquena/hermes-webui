@@ -22,14 +22,14 @@ def test_loadExcalidrawInline_function():
     """Verify loadExcalidrawInline lazy-load function exists."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert 'function loadExcalidrawInline()' in src, "Missing loadExcalidrawInline function"
+    assert 'function loadExcalidrawInline' in src, "Missing loadExcalidrawInline function"
 
 
 def test_excalidraw_json_validation():
     """Verify Excalidraw handler validates JSON format."""
     with open('static/ui.js') as f:
         src = f.read()
-    func = src[src.find('function loadExcalidrawInline()'):src.find('function loadExcalidrawInline()') + 2000]
+    func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'JSON.parse' in func, "Should parse JSON"
     assert 'excalidraw_invalid' in func, "Should handle invalid format"
     assert "data.type!=='excalidraw'" in func, "Should validate type field is 'excalidraw'"
@@ -39,7 +39,7 @@ def test_excalidraw_size_cap():
     """Verify Excalidraw inline rendering has a size cap."""
     with open('static/ui.js') as f:
         src = f.read()
-    func = src[src.find('function loadExcalidrawInline()'):src.find('function loadExcalidrawInline()') + 2000]
+    func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'EXCALIDRAW_MAX_SIZE' in func, "Should have EXCALIDRAW_MAX_SIZE constant"
     assert 'excalidraw_too_large' in func, "Should use excalidraw_too_large i18n for oversized files"
 
@@ -48,7 +48,7 @@ def test_excalidraw_error_handling():
     """Verify Excalidraw error handling."""
     with open('static/ui.js') as f:
         src = f.read()
-    func = src[src.find('function loadExcalidrawInline()'):src.find('function loadExcalidrawInline()') + 3500]
+    func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 3500]
     assert 'excalidraw_error' in func, "Should use excalidraw_error i18n on fetch failure"
 
 
@@ -114,17 +114,21 @@ def test_excalidraw_download_link():
     """Verify Excalidraw embed includes download link."""
     with open('static/ui.js') as f:
         src = f.read()
-    func = src[src.find('function loadExcalidrawInline()'):src.find('function loadExcalidrawInline()') + 2000]
+    func = src[src.find('function loadExcalidrawInline'):src.find('function loadExcalidrawInline') + 2000]
     assert 'excalidraw-open-link' in func, "Should include open/download link"
     assert 'excalidraw_download' in func, "Should use excalidraw_download i18n"
 
 
 def test_excalidraw_called_after_render():
-    """Verify loadExcalidrawInline is called after message rendering."""
+    """Verify loadExcalidrawInline is called by the consolidated post-render pass."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert src.count('loadExcalidrawInline()') >= 2, \
-        "loadExcalidrawInline should be called at least twice"
+    assert 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))' in src
+    idx = src.find('function postProcessRenderedMessages')
+    body = src[idx:idx + 500]
+    assert 'loadExcalidrawInline(container)' in body, (
+        "post-process should call loadExcalidrawInline once per render"
+    )
 
 
 def test_excalidraw_embed_wrap_structure():

@@ -68,6 +68,32 @@ def test_branch_creates_session_with_parent():
         "Branch handler should set parent_session_id to source session"
 
 
+def test_branch_marks_explicit_forks_as_fork_sessions():
+    """Explicit branches must not be mistaken for compression lineage rows."""
+    with open('api/routes.py') as f:
+        src = f.read()
+    branch_match = re.search(
+        r'parsed\.path == "/api/session/branch"(.*?)(?=\n    if parsed\.path|$)',
+        src, re.DOTALL
+    )
+    assert branch_match
+    block = branch_match.group(1)
+    assert 'session_source="fork"' in block, \
+        "Branch handler should mark explicit forks with session_source='fork'"
+
+
+def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
+    """Forks remain selectable rows even if their parent is not in the current list."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    fn = re.search(r'function _sessionLineageKey\(.*?\n\}', src, re.DOTALL)
+    assert fn, "Could not find _sessionLineageKey"
+    block = fn.group(0)
+    assert "if(s.session_source==='fork') return null;" in block, \
+        "Explicit fork sessions should not collapse via parent_session_id"
+    assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+
+
 def test_branch_keep_count_support():
     """Verify the branch endpoint supports keep_count parameter."""
     with open('api/routes.py') as f:

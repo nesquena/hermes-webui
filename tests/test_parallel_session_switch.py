@@ -59,15 +59,14 @@ class TestLoadDirParallelPrefetch:
         )
 
 
-# ── 2. sessions.js: loadSession idle path overlaps loadDir and highlightCode ─
+# ── 2. sessions.js: loadSession idle path avoids duplicate highlighting ─
 
 
 class TestLoadSessionIdleOverlap:
-    """The idle path in loadSession() must start loadDir() before running
-    highlightCode() so the network request is in-flight during the CPU-bound
-    Prism.js pass."""
+    """The idle path in loadSession() should rely on renderMessages() for the
+    post-render transcript pass instead of running another Prism.js pass."""
 
-    def test_idle_path_starts_loaddir_before_highlightcode(self):
+    def test_idle_path_does_not_repeat_highlight_after_render_messages(self):
         idle_marker = "S.busy=false"
         positions = []
         start = 0
@@ -81,25 +80,22 @@ class TestLoadSessionIdleOverlap:
         found = False
         for pos in positions:
             block = SESSIONS_JS[pos : pos + 600]
-            has_highlight = "highlightCode()" in block
             has_loaddir = "loadDir('.')" in block
-            if has_highlight and has_loaddir:
+            has_render = "renderMessages()" in block
+            if has_loaddir and has_render:
                 found = True
-                loaddir_idx = block.find("loadDir(")
-                highlight_idx = block.find("highlightCode()")
-                assert loaddir_idx < highlight_idx, (
-                    "In the idle path, loadDir() should be started before "
-                    "highlightCode() so the network request is dispatched first."
+                assert "highlightCode()" not in block, (
+                    "The idle path should rely on renderMessages()'s consolidated "
+                    "post-render pass instead of running a second highlight pass."
                 )
                 assert "await" in block and "_dirP" in block, (
-                    "loadDir() result should be stored and awaited after "
-                    "highlightCode() completes."
+                    "loadDir() result should still be stored and awaited."
                 )
                 break
 
         assert found, (
             "Could not find the idle path in loadSession that calls both "
-            "loadDir and highlightCode."
+            "renderMessages and loadDir."
         )
 
 
