@@ -1059,11 +1059,20 @@
               </div>
               <div class="settings-field">
                 <label for="settingsBotLogo" data-i18n="settings_label_bot_logo">Assistant Logo</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_logo">Optional image URL used for the favicon, header logo, and new-chat logo. Leave blank for the Hermes default.</div>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_logo">Optional image URL used for the header and new-chat logo. Must be 64×64 to 4096×4096. Leave blank for the Hermes default.</div>
                 <input type="url" id="settingsBotLogo" placeholder="https://example.com/logo.png" maxlength="4096" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
                 <div class="brand-logo-preview-row">
                   <span class="brand-logo-preview" id="settingsBotLogoPreview" aria-hidden="true"></span>
                   <button type="button" class="sm-btn secondary" id="settingsBotLogoClear" data-i18n="settings_bot_logo_clear">Use default logo</button>
+                </div>
+              </div>
+              <div class="settings-field">
+                <label for="settingsBotFavicon" data-i18n="settings_label_bot_favicon">Favicon</label>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_favicon">Optional image URL used only for browser tab and app icons. Must be 16×16 to 512×512. Leave blank for the Hermes default.</div>
+                <input type="url" id="settingsBotFavicon" placeholder="https://example.com/favicon.png" maxlength="4096" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                <div class="brand-logo-preview-row">
+                  <span class="brand-logo-preview" id="settingsBotFaviconPreview" aria-hidden="true"></span>
+                  <button type="button" class="sm-btn secondary" id="settingsBotFaviconClear" data-i18n="settings_bot_favicon_clear">Use default favicon</button>
                 </div>
               </div>
             </div>

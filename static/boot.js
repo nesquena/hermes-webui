@@ -1374,7 +1374,10 @@ const HERMES_DEFAULT_FAVICONS = {
   shortcut: 'static/favicon.ico',
   apple: 'static/apple-touch-icon.png',
 };
-const HERMES_LOGO_DIMENSIONS = { min: 16, max: 4096 };
+const HERMES_BRANDING_DIMENSIONS = {
+  logo: { min: 64, max: 4096 },
+  favicon: { min: 16, max: 512 },
+};
 
 function _isSafeLogoUrl(value){
   const raw=(value||'').trim();
@@ -1419,11 +1422,11 @@ function _renderHermesSmallLetterFallback(el){
   el.textContent=name.charAt(0).toUpperCase();
 }
 
-function _isLogoDimensionsAllowed(img){
+function _isLogoDimensionsAllowed(img, kind){
+  const limits=HERMES_BRANDING_DIMENSIONS[kind]||HERMES_BRANDING_DIMENSIONS.logo;
   const w=Number(img&&img.naturalWidth)||0;
   const h=Number(img&&img.naturalHeight)||0;
-  return w>=HERMES_LOGO_DIMENSIONS.min && h>=HERMES_LOGO_DIMENSIONS.min &&
-    w<=HERMES_LOGO_DIMENSIONS.max && h<=HERMES_LOGO_DIMENSIONS.max;
+  return w>=limits.min && h>=limits.min && w<=limits.max && h<=limits.max;
 }
 
 function _setBrandingFavicons(url){
@@ -1444,7 +1447,7 @@ function _setBrandingFavicons(url){
   }
 }
 
-function _setLogoTarget(el, url, fallbackFactory){
+function _setLogoTarget(el, url, fallbackFactory, kind='logo'){
   if(!el) return;
   el.classList.toggle('is-custom', !!url);
   if(!url){
@@ -1458,11 +1461,10 @@ function _setLogoTarget(el, url, fallbackFactory){
   img.decoding='async';
   img.loading='eager';
   img.onload=function(){
-    if(_isLogoDimensionsAllowed(img)) return;
+    if(_isLogoDimensionsAllowed(img, kind)) return;
     el.classList.remove('is-custom');
     if(window._botLogo===url){
       window._botLogo='';
-      _setBrandingFavicons('');
       const logoField=document.getElementById('settingsBotLogo');
       if(logoField&&logoField.value===url) logoField.value='';
     }
@@ -1475,7 +1477,7 @@ function _setLogoTarget(el, url, fallbackFactory){
   el.appendChild(img);
 }
 
-function validateBrandingLogoForSave(value){
+function validateBrandingImageForSave(value, kind='logo'){
   const url=_isSafeLogoUrl(value);
   if(!url) return Promise.resolve('');
   return new Promise((resolve)=>{
@@ -1489,7 +1491,7 @@ function validateBrandingLogoForSave(value){
     const timer=setTimeout(()=>finish(''),5000);
     img.onload=function(){
       clearTimeout(timer);
-      finish(_isLogoDimensionsAllowed(img)?url:'');
+      finish(_isLogoDimensionsAllowed(img, kind)?url:'');
     };
     img.onerror=function(){
       clearTimeout(timer);
@@ -1499,13 +1501,27 @@ function validateBrandingLogoForSave(value){
   });
 }
 
+function validateBrandingLogoForSave(value){
+  return validateBrandingImageForSave(value, 'logo');
+}
+
+function validateBrandingFaviconForSave(value){
+  return validateBrandingImageForSave(value, 'favicon');
+}
+
 function applyBrandingLogo(value){
   const url=_isSafeLogoUrl(value);
   window._botLogo=url;
+  _setLogoTarget(document.getElementById('appTitlebarLogo'), url, _renderHermesTitlebarLogoFallback, 'logo');
+  _setLogoTarget(document.getElementById('emptyStateLogo'), url, _renderHermesEmptyLogoFallback, 'logo');
+  _setLogoTarget(document.getElementById('settingsBotLogoPreview'), url, _renderHermesSmallLetterFallback, 'logo');
+}
+
+function applyBrandingFavicon(value){
+  const url=_isSafeLogoUrl(value);
+  window._botFavicon=url;
   _setBrandingFavicons(url);
-  _setLogoTarget(document.getElementById('appTitlebarLogo'), url, _renderHermesTitlebarLogoFallback);
-  _setLogoTarget(document.getElementById('emptyStateLogo'), url, _renderHermesEmptyLogoFallback);
-  _setLogoTarget(document.getElementById('settingsBotLogoPreview'), url, _renderHermesSmallLetterFallback);
+  _setLogoTarget(document.getElementById('settingsBotFaviconPreview'), url, _renderHermesSmallLetterFallback, 'favicon');
 }
 
 (async()=>{
@@ -1527,6 +1543,7 @@ function applyBrandingLogo(value){
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
     window._botLogo=s.bot_logo||'';
+    window._botFavicon=s.bot_favicon||'';
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
@@ -1549,6 +1566,7 @@ function applyBrandingLogo(value){
     }
     applyBotName();
     applyBrandingLogo(window._botLogo);
+    applyBrandingFavicon(window._botFavicon);
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -1566,6 +1584,7 @@ function applyBrandingLogo(value){
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
     window._botLogo='';
+    window._botFavicon='';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
@@ -1576,6 +1595,7 @@ function applyBrandingLogo(value){
     }
     applyBotName();
     applyBrandingLogo('');
+    applyBrandingFavicon('');
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)

@@ -1,10 +1,10 @@
-"""Custom logo settings persistence and static wiring tests."""
+"""Custom branding image settings persistence and static wiring tests."""
 import base64
 import json
 import struct
 import urllib.error
-import zlib
 import urllib.request
+import zlib
 from pathlib import Path
 
 from tests._pytest_port import BASE
@@ -16,7 +16,7 @@ PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 
-def png_data_url(width=16, height=16):
+def png_data_url(width=64, height=64):
     def chunk(kind, data):
         return (
             struct.pack(">I", len(data))
@@ -54,63 +54,99 @@ def post(path, body=None):
         return json.loads(e.read()), e.code
 
 
-def test_settings_default_bot_logo_empty():
+def clear_branding():
+    post("/api/settings", {"bot_logo": "", "bot_favicon": ""})
+
+
+def test_settings_default_branding_images_empty():
+    clear_branding()
     data, status = get("/api/settings")
     assert status == 200
     assert data.get("bot_logo", "") == ""
+    assert data.get("bot_favicon", "") == ""
 
 
-def test_settings_save_bot_logo_https_round_trips():
-    url = "https://example.com/logo.png"
+def test_settings_save_bot_logo_and_favicon_https_round_trip_independently():
+    logo = "https://example.com/logo.png"
+    favicon = "https://example.com/favicon.png"
     try:
-        data, status = post("/api/settings", {"bot_logo": url})
+        data, status = post("/api/settings", {"bot_logo": logo, "bot_favicon": favicon})
         assert status == 200
-        assert data["bot_logo"] == url
+        assert data["bot_logo"] == logo
+        assert data["bot_favicon"] == favicon
         data, _ = get("/api/settings")
-        assert data["bot_logo"] == url
+        assert data["bot_logo"] == logo
+        assert data["bot_favicon"] == favicon
     finally:
-        post("/api/settings", {"bot_logo": ""})
+        clear_branding()
 
 
-def test_settings_rejects_unsafe_bot_logo_scheme():
-    data, status = post("/api/settings", {"bot_logo": "javascript:alert(1)"})
+def test_settings_rejects_unsafe_branding_image_schemes():
+    data, status = post(
+        "/api/settings",
+        {"bot_logo": "javascript:alert(1)", "bot_favicon": "file:///etc/passwd"},
+    )
     assert status == 200
     assert data.get("bot_logo", "") == ""
-    data, status = post("/api/settings", {"bot_logo": "file:///etc/passwd"})
-    assert status == 200
-    assert data.get("bot_logo", "") == ""
+    assert data.get("bot_favicon", "") == ""
 
 
-def test_settings_allows_safe_base64_data_image():
-    data_url = png_data_url(16, 16)
+def test_settings_allows_safe_base64_logo_and_favicon_with_their_own_limits():
+    logo = png_data_url(64, 64)
+    favicon = png_data_url(16, 16)
     try:
-        data, status = post("/api/settings", {"bot_logo": data_url})
+        data, status = post("/api/settings", {"bot_logo": logo, "bot_favicon": favicon})
         assert status == 200
-        assert data["bot_logo"] == data_url
+        assert data["bot_logo"] == logo
+        assert data["bot_favicon"] == favicon
     finally:
-        post("/api/settings", {"bot_logo": ""})
+        clear_branding()
 
 
-def test_settings_rejects_too_small_or_large_data_image():
-    for data_url in (png_data_url(1, 16), png_data_url(16, 1), png_data_url(4097, 16), "data:image/png;base64,iVBORw0KGgo="):
-        data, status = post("/api/settings", {"bot_logo": data_url})
+def test_settings_rejects_images_that_only_fit_the_other_slot_or_are_malformed():
+    cases = [
+        ({"bot_logo": png_data_url(16, 16)}, "bot_logo"),  # favicon-sized, not logo-sized
+        ({"bot_favicon": png_data_url(64, 64)}, "bot_favicon"),  # valid favicon
+        ({"bot_favicon": png_data_url(513, 16)}, "bot_favicon"),
+        ({"bot_logo": png_data_url(4097, 64)}, "bot_logo"),
+        ({"bot_logo": "data:image/png;base64,iVBORw0KGgo="}, "bot_logo"),
+    ]
+    try:
+        # First prove the 64x64 case is accepted as favicon under favicon limits.
+        data, status = post("/api/settings", cases[1][0])
         assert status == 200
-        assert data.get("bot_logo", "") == ""
+        assert data["bot_favicon"] == cases[1][0]["bot_favicon"]
+        post("/api/settings", {"bot_favicon": ""})
+
+        for payload, key in cases[:1] + cases[2:]:
+            data, status = post("/api/settings", payload)
+            assert status == 200
+            assert data.get(key, "") == ""
+    finally:
+        clear_branding()
 
 
-def test_settings_backend_normalizes_bot_logo():
+def test_settings_backend_normalizes_logo_and_favicon_separately():
     assert '"bot_logo"' in CONFIG_PY
+    assert '"bot_favicon"' in CONFIG_PY
     assert "def _normalize_bot_logo" in CONFIG_PY
-    assert "_BOT_LOGO_MIN_DIMENSION = 16" in CONFIG_PY
+    assert "def _normalize_bot_favicon" in CONFIG_PY
+    assert "_BOT_LOGO_MIN_DIMENSION = 64" in CONFIG_PY
     assert "_BOT_LOGO_MAX_DIMENSION = 4096" in CONFIG_PY
+    assert "_BOT_FAVICON_MIN_DIMENSION = 16" in CONFIG_PY
+    assert "_BOT_FAVICON_MAX_DIMENSION = 512" in CONFIG_PY
     assert 'parsed.scheme in {"http", "https"}' in CONFIG_PY
-    assert '"file"' not in CONFIG_PY.split("def _normalize_bot_logo", 1)[1].split("def load_settings", 1)[0]
+    normalizer = CONFIG_PY.split("def _normalize_bot_image", 1)[1].split("def _normalize_bot_logo", 1)[0]
+    assert '"file"' not in normalizer
 
 
-def test_static_logo_controls_and_targets_exist():
+def test_static_logo_and_favicon_controls_and_targets_exist():
     assert 'id="settingsBotLogo"' in INDEX_HTML
     assert 'id="settingsBotLogoPreview"' in INDEX_HTML
     assert 'id="settingsBotLogoClear"' in INDEX_HTML
+    assert 'id="settingsBotFavicon"' in INDEX_HTML
+    assert 'id="settingsBotFaviconPreview"' in INDEX_HTML
+    assert 'id="settingsBotFaviconClear"' in INDEX_HTML
     assert 'id="faviconSvg"' in INDEX_HTML
     assert 'id="favicon32"' in INDEX_HTML
     assert 'id="faviconShortcut"' in INDEX_HTML
@@ -119,19 +155,24 @@ def test_static_logo_controls_and_targets_exist():
     assert 'id="emptyStateLogo"' in INDEX_HTML
 
 
-def test_boot_branding_logo_wiring_exists():
+def test_boot_branding_logo_and_favicon_wiring_exists():
     assert "function applyBrandingLogo" in BOOT_JS
-    assert "function _isSafeLogoUrl" in BOOT_JS
+    assert "function applyBrandingFavicon" in BOOT_JS
     assert "function validateBrandingLogoForSave" in BOOT_JS
-    assert "HERMES_LOGO_DIMENSIONS" in BOOT_JS
-    assert "faviconShortcut" in BOOT_JS
-    assert "appTitlebarLogo" in BOOT_JS
-    assert "emptyStateLogo" in BOOT_JS
+    assert "function validateBrandingFaviconForSave" in BOOT_JS
+    assert "HERMES_BRANDING_DIMENSIONS" in BOOT_JS
+    assert "_setBrandingFavicons(url)" in BOOT_JS
+    assert "applyBrandingLogo(window._botLogo)" in BOOT_JS
+    assert "applyBrandingFavicon(window._botFavicon)" in BOOT_JS
     assert "javascript:" not in BOOT_JS
 
 
-def test_panels_preferences_payload_load_and_save_bot_logo():
+def test_panels_preferences_payload_load_and_save_branding_images():
     assert "payload.bot_logo=botLogoField.value" in PANELS_JS
+    assert "payload.bot_favicon=botFaviconField.value" in PANELS_JS
     assert "botLogoField.value=settings.bot_logo||''" in PANELS_JS
+    assert "botFaviconField.value=settings.bot_favicon||''" in PANELS_JS
     assert "applyBrandingLogo((saved&&saved.bot_logo)||'')" in PANELS_JS
+    assert "applyBrandingFavicon((saved&&saved.bot_favicon)||'')" in PANELS_JS
     assert "body.bot_logo=(($('settingsBotLogo')||{}).value||'').trim()" in PANELS_JS
+    assert "body.bot_favicon=(($('settingsBotFavicon')||{}).value||'').trim()" in PANELS_JS

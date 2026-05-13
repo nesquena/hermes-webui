@@ -3906,7 +3906,10 @@ _SETTINGS_DEFAULTS = {
     ),  # display name for the assistant
     "bot_logo": os.getenv(
         "HERMES_WEBUI_BOT_LOGO", ""
-    ),  # optional custom logo/favicon image URL
+    ),  # optional custom assistant/header/new-chat logo image URL
+    "bot_favicon": os.getenv(
+        "HERMES_WEBUI_BOT_FAVICON", ""
+    ),  # optional custom browser favicon/app icon image URL
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
@@ -3985,8 +3988,10 @@ _BOT_LOGO_DATA_MIME_ALLOWLIST = {
     "image/vnd.microsoft.icon",
 }
 _BOT_LOGO_MAX_VALUE_LENGTH = 256_000
-_BOT_LOGO_MIN_DIMENSION = 16
+_BOT_LOGO_MIN_DIMENSION = 64
 _BOT_LOGO_MAX_DIMENSION = 4096
+_BOT_FAVICON_MIN_DIMENSION = 16
+_BOT_FAVICON_MAX_DIMENSION = 512
 
 
 def _read_bot_logo_data_url_dimensions(raw: str, mime: str) -> tuple[int, int] | None:
@@ -4059,18 +4064,19 @@ def _read_bot_logo_data_url_dimensions(raw: str, mime: str) -> tuple[int, int] |
     return None
 
 
-def _bot_logo_dimensions_allowed(dimensions: tuple[int, int] | None) -> bool:
+def _bot_image_dimensions_allowed(
+    dimensions: tuple[int, int] | None,
+    min_dimension: int,
+    max_dimension: int,
+) -> bool:
     if not dimensions:
         return False
     width, height = dimensions
-    return (
-        _BOT_LOGO_MIN_DIMENSION <= width <= _BOT_LOGO_MAX_DIMENSION
-        and _BOT_LOGO_MIN_DIMENSION <= height <= _BOT_LOGO_MAX_DIMENSION
-    )
+    return min_dimension <= width <= max_dimension and min_dimension <= height <= max_dimension
 
 
-def _normalize_bot_logo(value) -> str:
-    """Return a safe custom bot logo URL/data URL, or an empty fallback value."""
+def _normalize_bot_image(value, *, min_dimension: int, max_dimension: int) -> str:
+    """Return a safe custom branding image URL/data URL, or an empty fallback value."""
     raw = str(value or "").strip()
     if not raw:
         return ""
@@ -4084,9 +4090,28 @@ def _normalize_bot_logo(value) -> str:
         parts = header.split(";")
         mime = parts[0][5:] if parts and parts[0].startswith("data:") else ""
         if mime in _BOT_LOGO_DATA_MIME_ALLOWLIST and "base64" in parts[1:]:
-            if _bot_logo_dimensions_allowed(_read_bot_logo_data_url_dimensions(raw, mime)):
+            dimensions = _read_bot_logo_data_url_dimensions(raw, mime)
+            if _bot_image_dimensions_allowed(dimensions, min_dimension, max_dimension):
                 return raw
     return ""
+
+
+def _normalize_bot_logo(value) -> str:
+    """Return a safe custom assistant logo URL/data URL, or an empty fallback value."""
+    return _normalize_bot_image(
+        value,
+        min_dimension=_BOT_LOGO_MIN_DIMENSION,
+        max_dimension=_BOT_LOGO_MAX_DIMENSION,
+    )
+
+
+def _normalize_bot_favicon(value) -> str:
+    """Return a safe custom favicon URL/data URL, or an empty fallback value."""
+    return _normalize_bot_image(
+        value,
+        min_dimension=_BOT_FAVICON_MIN_DIMENSION,
+        max_dimension=_BOT_FAVICON_MAX_DIMENSION,
+    )
 
 
 def load_settings() -> dict:
@@ -4118,6 +4143,7 @@ def load_settings() -> dict:
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
     settings["bot_logo"] = _normalize_bot_logo(settings.get("bot_logo"))
+    settings["bot_favicon"] = _normalize_bot_favicon(settings.get("bot_favicon"))
     settings["default_model"] = get_effective_default_model()
     return settings
 
@@ -4191,6 +4217,8 @@ def save_settings(settings: dict) -> dict:
                 continue
             if k == "bot_logo":
                 v = _normalize_bot_logo(v)
+            if k == "bot_favicon":
+                v = _normalize_bot_favicon(v)
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)

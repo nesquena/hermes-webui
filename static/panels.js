@@ -5084,6 +5084,8 @@ function _preferencesPayloadFromUi(){
   if(botNameField) payload.bot_name=botNameField.value;
   const botLogoField=$('settingsBotLogo');
   if(botLogoField) payload.bot_logo=botLogoField.value;
+  const botFaviconField=$('settingsBotFavicon');
+  if(botFaviconField) payload.bot_favicon=botFaviconField.value;
   return payload;
 }
 
@@ -5129,7 +5131,17 @@ async function _autosavePreferencesSettings(payload){
       if(originalLogo&&originalLogo!==normalizedLogo){
         const logoField=$('settingsBotLogo');
         if(logoField) logoField.value='';
-        if(typeof showToast==='function') showToast('Logo must be a loadable image between 16×16 and 4096×4096 pixels.');
+        if(typeof showToast==='function') showToast('Assistant logo must be a loadable image between 64×64 and 4096×4096 pixels.');
+      }
+    }
+    if(payload&&payload.bot_favicon!==undefined&&typeof validateBrandingFaviconForSave==='function'){
+      const originalFavicon=payload.bot_favicon;
+      const normalizedFavicon=await validateBrandingFaviconForSave(originalFavicon);
+      payload={...payload,bot_favicon:normalizedFavicon};
+      if(originalFavicon&&originalFavicon!==normalizedFavicon){
+        const faviconField=$('settingsBotFavicon');
+        if(faviconField) faviconField.value='';
+        if(typeof showToast==='function') showToast('Favicon must be a loadable image between 16×16 and 512×512 pixels.');
       }
     }
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
@@ -5147,6 +5159,11 @@ async function _autosavePreferencesSettings(payload){
       applyBrandingLogo((saved&&saved.bot_logo)||'');
       const logoField=$('settingsBotLogo');
       if(logoField) logoField.value=(saved&&saved.bot_logo)||'';
+    }
+    if(payload&&payload.bot_favicon!==undefined && typeof applyBrandingFavicon==='function'){
+      applyBrandingFavicon((saved&&saved.bot_favicon)||'');
+      const faviconField=$('settingsBotFavicon');
+      if(faviconField) faviconField.value=(saved&&saved.bot_favicon)||'';
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -5421,7 +5438,25 @@ async function loadSettingsPanel(){
         _schedulePreferencesAutosave();
       },{once:false});
     }
+    const botFaviconField=$('settingsBotFavicon');
+    if(botFaviconField){
+      botFaviconField.value=settings.bot_favicon||'';
+      botFaviconField.addEventListener('input',()=>{
+        if(typeof applyBrandingFavicon==='function') applyBrandingFavicon(botFaviconField.value);
+        _schedulePreferencesAutosave();
+      },{once:false});
+      botFaviconField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const botFaviconClear=$('settingsBotFaviconClear');
+    if(botFaviconClear){
+      botFaviconClear.addEventListener('click',()=>{
+        if(botFaviconField) botFaviconField.value='';
+        if(typeof applyBrandingFavicon==='function') applyBrandingFavicon('');
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     if(typeof applyBrandingLogo==='function') applyBrandingLogo(settings.bot_logo||'');
+    if(typeof applyBrandingFavicon==='function') applyBrandingFavicon(settings.bot_favicon||'');
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -5979,8 +6014,10 @@ function _applySavedSettingsUi(saved, body, opts){
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._botName=body.bot_name||'Hermes';
   window._botLogo=(saved&&saved.bot_logo!==undefined)?saved.bot_logo:(body.bot_logo||'');
+  window._botFavicon=(saved&&saved.bot_favicon!==undefined)?saved.bot_favicon:(body.bot_favicon||'');
   if(typeof applyBotName==='function') applyBotName();
   if(typeof applyBrandingLogo==='function') applyBrandingLogo(window._botLogo);
+  if(typeof applyBrandingFavicon==='function') applyBrandingFavicon(window._botFavicon);
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
   if(typeof startGatewaySSE==='function'){
@@ -6093,13 +6130,23 @@ async function saveSettings(andClose){
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   body.bot_logo=(($('settingsBotLogo')||{}).value||'').trim();
+  body.bot_favicon=(($('settingsBotFavicon')||{}).value||'').trim();
   if(typeof validateBrandingLogoForSave==='function'){
     const originalLogo=body.bot_logo;
     body.bot_logo=await validateBrandingLogoForSave(body.bot_logo);
     if(originalLogo&&originalLogo!==body.bot_logo){
       const logoField=$('settingsBotLogo');
       if(logoField) logoField.value='';
-      if(typeof showToast==='function') showToast('Logo must be a loadable image between 16×16 and 4096×4096 pixels.');
+      if(typeof showToast==='function') showToast('Assistant logo must be a loadable image between 64×64 and 4096×4096 pixels.');
+    }
+  }
+  if(typeof validateBrandingFaviconForSave==='function'){
+    const originalFavicon=body.bot_favicon;
+    body.bot_favicon=await validateBrandingFaviconForSave(body.bot_favicon);
+    if(originalFavicon&&originalFavicon!==body.bot_favicon){
+      const faviconField=$('settingsBotFavicon');
+      if(faviconField) faviconField.value='';
+      if(typeof showToast==='function') showToast('Favicon must be a loadable image between 16×16 and 512×512 pixels.');
     }
   }
   // Password: only act if the field has content; blank = leave auth unchanged
