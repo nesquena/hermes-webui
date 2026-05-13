@@ -28,28 +28,49 @@ def _get_state_db_path():
 
 
 def get_active_sessions():
-    """Read active (non-ended) sessions from state.db."""
+    """Read active sessions from both WebUI (in-memory STREAMS) and state.db.
+
+    Returns a list of dicts with keys: id, title, source, parent_session_id.
+    """
+    results = []
+
+    # 1. WebUI active streams (in-memory)
+    try:
+        from api.config import STREAMS, STREAMS_LOCK, STREAM_LIVE_TOOL_CALLS
+        with STREAMS_LOCK:
+            active_stream_ids = set(STREAMS.keys())
+        for stream_id in active_stream_ids:
+            results.append({
+                "id": stream_id,
+                "title": None,
+                "source": "webui",
+                "parent_session_id": None,
+            })
+    except Exception:
+        pass
+
+    # 2. CLI/Telegram sessions from state.db (started in last hour, not ended)
     import sqlite3
     db_path = _get_state_db_path()
-    if not Path(db_path).exists():
-        return []
-    try:
-        conn = sqlite3.connect(db_path, timeout=1)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        # Only consider sessions started in the last hour as "active"
-        # (avoids showing stale sessions that were never properly closed)
-        cutoff = time.time() - 3600
-        rows = conn.execute(
-            "SELECT id, title, source, parent_session_id, started_at "
-            "FROM sessions WHERE ended_at IS NULL AND started_at > ? "
-            "ORDER BY started_at",
-            (cutoff,)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
+    if Path(db_path).exists():
+        try:
+            conn = sqlite3.connect(db_path, timeout=1)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            cutoff = time.time() - 3600
+            rows = conn.execute(
+                "SELECT id, title, source, parent_session_id, started_at "
+                "FROM sessions WHERE ended_at IS NULL AND started_at > ? "
+                "ORDER BY started_at",
+                (cutoff,)
+            ).fetchall()
+            conn.close()
+            for r in rows:
+                results.append(dict(r))
+        except Exception:
+            pass
+
+    return results
 
 
 def generate_init_events():
