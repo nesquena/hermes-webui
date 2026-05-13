@@ -203,17 +203,22 @@ def _load_key(filename: str) -> bytes:
     return key
 
 
+_PBKDF2_KEY_CACHE: bytes | None = None
+_SIGNING_KEY_CACHE: bytes | None = None
+
+
 def _pbkdf2_key() -> bytes:
-    """Salt for password hashing (PBKDF2). Persisted so password hashes remain
-    valid across restarts. Separate from _signing_key to avoid key reuse across
-    different cryptographic primitives."""
-    return _load_key('.pbkdf2_key')
+    global _PBKDF2_KEY_CACHE
+    if _PBKDF2_KEY_CACHE is None:
+        _PBKDF2_KEY_CACHE = _load_key('.pbkdf2_key')
+    return _PBKDF2_KEY_CACHE
 
 
 def _signing_key() -> bytes:
-    """HMAC key for session signing. Persisted so signed cookies remain
-    valid across restarts."""
-    return _load_key('.signing_key')
+    global _SIGNING_KEY_CACHE
+    if _SIGNING_KEY_CACHE is None:
+        _SIGNING_KEY_CACHE = _load_key('.signing_key')
+    return _SIGNING_KEY_CACHE
 
 
 def _hash_password(password, *, salt: bytes | None = None) -> str:
@@ -312,8 +317,8 @@ def verify_password(plain) -> bool:
             from api.config import save_settings
 
             save_settings({'_set_password': plain})
-            _invalidate_password_hash_cache()
-            get_password_hash()
+            # Cache invalidated inside save_settings(); the next call to
+            # get_password_hash() will re-read and warm the cache automatically.
             return True
     return False
 
