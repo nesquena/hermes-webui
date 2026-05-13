@@ -151,6 +151,23 @@ launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
   - No `traceback`, `error`, `exception`, or `fatal` markers appeared in the recent launchd stdout/stderr scan.
 - Final LaunchAgent state: `com.capy.webui` running, local health `ok`.
 
+### 2026-05-13 16:24 CDT — Capy Spaces product-home polish
+
+- Addressed the 13:29 polish findings on branch `feat/capy-spaces-foundation`:
+  - Resource links no longer render literal `open_in_new` text; they use a compact `↗` affordance with accessible link labels.
+  - Demo and panel buttons no longer expose literal Material icon names such as `newspaper`, `currency_bitcoin`, `smart_display`, or `arrow_forward`.
+  - Empty Spaces state now uses a denser two-column product grid with explicit `Create first Space`, `Run research walkthrough`, and `Run kanban walkthrough` actions.
+  - Welcome-card close button now has a rounded 36px hit area and more visual breathing room.
+  - Recovery wording now says `Safe recovery controls` and `Generated widget execution: disabled`, while retaining metadata-only quarantine behavior.
+- Verification:
+  - Focused UI/product-home/recovery tests: `4 passed`.
+  - Spaces UI behavior + foundation suites: `428 passed`.
+  - Full WebUI test suite: `5779 passed, 2 skipped, 3 xpassed, 8 subtests passed`.
+  - `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
+  - Local health returned `ok` with `active_streams=0` and `active_runs=0` after WebUI LaunchAgent restart.
+  - Browser console check had no warnings/errors after switching to Capy Spaces.
+  - Visual QA screenshot: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9646e732b6d042dea2c55df19c73cc1d.png`.
+
 ## Debug checklist
 
 1. Check local health before restarting.

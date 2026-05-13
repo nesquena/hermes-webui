@@ -150,25 +150,25 @@
       '<button type="button" class="capy-spaces-product-icon" data-capy-action="openSafeRecovery" data-space-id="'+escapeHtml(activeSpaceId || '')+'" aria-label="More">⋯</button>' +
       '</div>' +
       '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
-      '<div class="capy-spaces-product-card-grid">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
+      '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
       '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
       '<div class="capy-spaces-product-panels">' + renderSpaceAgentPanelPills(activeSpaceId) + '</div>' +
       '</section>';
   }
 
   function renderSpaceAgentResourceLink(label, href){
-    return '<a class="capy-spaces-resource-pill" href="'+escapeHtml(href)+'" target="_blank" rel="noopener noreferrer"><span>'+escapeHtml(label)+'</span><span aria-hidden="true">open_in_new</span></a>';
+    return '<a class="capy-spaces-resource-pill" href="'+escapeHtml(href)+'" target="_blank" rel="noopener noreferrer" aria-label="'+escapeHtml(label)+' opens in a new tab"><span>'+escapeHtml(label)+'</span><span class="capy-spaces-resource-external" aria-hidden="true">↗</span></a>';
   }
 
   function renderSpaceAgentDemoCards(){
     const demos = [
-      ['newspaper', 'Daily News', 'runDashboardWalkthrough'],
-      ['currency_bitcoin', 'Crypto Dashboard', 'runStockWalkthrough'],
-      ['gamepad', 'Retro Arcade', 'runSnakeWalkthrough'],
-      ['smart_display', 'Agent Zero Videos', 'runBrowserWalkthrough']
+      ['🗞', 'Daily News', 'runDashboardWalkthrough'],
+      ['₿', 'Crypto Dashboard', 'runStockWalkthrough'],
+      ['🎮', 'Retro Arcade', 'runSnakeWalkthrough'],
+      ['▣', 'Agent Zero Videos', 'runBrowserWalkthrough']
     ];
     return demos.map(function(demo){
-      return '<button type="button" class="capy-spaces-demo-pill" data-capy-action="'+escapeHtml(demo[2])+'"><span class="material-icons">'+escapeHtml(demo[0])+'</span><strong>'+escapeHtml(demo[1])+'</strong><span aria-hidden="true">arrow_forward</span></button>';
+      return '<button type="button" class="capy-spaces-demo-pill" data-capy-action="'+escapeHtml(demo[2])+'"><span class="capy-spaces-inline-icon" aria-hidden="true">'+escapeHtml(demo[0])+'</span><strong>'+escapeHtml(demo[1])+'</strong><span aria-hidden="true">→</span></button>';
     }).join('');
   }
 
@@ -183,17 +183,17 @@
       const active = activeSpaceId && activeSpaceId === spaceId;
       return '<article class="capy-spaces-product-space-card" data-space-id="'+escapeHtml(spaceId)+'">' +
         '<button type="button" class="capy-spaces-product-card-open" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open '+escapeHtml(name)+'"></button>' +
-        '<div class="capy-spaces-product-space-title"><strong>'+escapeHtml(name)+'</strong><span aria-hidden="true">flare</span></div>' +
+        '<div class="capy-spaces-product-space-title"><strong>'+escapeHtml(name)+'</strong><span aria-hidden="true">✦</span></div>' +
         (description ? '<p>'+escapeHtml(description)+'</p>' : '<p>Space Agent-style product canvas · safe metadata shell</p>') +
         '<div class="capy-spaces-product-tags"><span>'+escapeHtml(widgetLabel)+'</span><span>'+escapeHtml(active ? 'Active' : 'Ready')+'</span><span>metadata</span></div>' +
         '<div class="capy-spaces-product-space-meta">'+escapeHtml(formatProductRevisionDate(s && s.revision_event_id || 'none'))+'</div>' +
         '<div class="capy-spaces-product-space-actions">' +
-        '<button type="button" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open">arrow_forward</button>' +
-        '<button type="button" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'" aria-label="Edit">edit</button>' +
-        '<button type="button" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Delete">delete</button>' +
+        '<button type="button" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Open">→</button>' +
+        '<button type="button" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'" aria-label="Edit">✎</button>' +
+        '<button type="button" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'" aria-label="Delete">×</button>' +
         '</div>' +
         '</article>';
-    }).join('') : '<div class="capy-spaces-product-empty"><strong>No spaces yet</strong><span>Create a space to start the Space Agent-style canvas.</span></div>';
+    }).join('') : '<div class="capy-spaces-product-empty"><strong>No spaces yet</strong><span>Start with a demo or create your first Space; this canvas stays metadata-only until you approve generated widgets.</span><div class="capy-spaces-product-empty-actions"><button type="button" data-capy-action="newSpace">Create first Space</button><button type="button" data-capy-action="runResearchWalkthrough">Run research walkthrough</button><button type="button" data-capy-action="runKanbanWalkthrough">Run kanban walkthrough</button></div></div>';
     return createCard + cards;
   }
 
@@ -204,15 +204,15 @@
 
   function renderSpaceAgentPanelPills(activeSpaceId){
     const panels = [
-      ['smart_toy', 'Agent', 'chat'],
-      ['folder', 'Files', 'workspaces'],
-      ['memory', 'Local LLM', 'settings'],
-      ['history', 'Time Travel', 'tasks'],
-      ['person', 'User', 'memory']
+      ['🤖', 'Agent', 'chat'],
+      ['📁', 'Files', 'workspaces'],
+      ['🧠', 'Local LLM', 'settings'],
+      ['⏳', 'Time Travel', 'tasks'],
+      ['👤', 'User', 'memory']
     ];
     return panels.map(function(panel){
-      return '<button type="button" class="capy-spaces-panel-pill" data-capy-action="openSystemPanel" data-system-panel="'+escapeHtml(panel[2])+'"><span class="material-icons">'+escapeHtml(panel[0])+'</span>'+escapeHtml(panel[1])+'</button>';
-    }).join('') + (activeSpaceId ? '<button type="button" class="capy-spaces-panel-pill" data-capy-action="clearActiveSpace"><span class="material-icons">close</span>Clear active Space</button>' : '');
+      return '<button type="button" class="capy-spaces-panel-pill" data-capy-action="openSystemPanel" data-system-panel="'+escapeHtml(panel[2])+'"><span class="capy-spaces-inline-icon" aria-hidden="true">'+escapeHtml(panel[0])+'</span>'+escapeHtml(panel[1])+'</button>';
+    }).join('') + (activeSpaceId ? '<button type="button" class="capy-spaces-panel-pill" data-capy-action="clearActiveSpace"><span class="capy-spaces-inline-icon" aria-hidden="true">×</span>Clear active Space</button>' : '');
   }
 
   function renderCapySpacesControlPlane(spaces, demos, activeSpaceId){
@@ -2785,7 +2785,10 @@
   function renderRecoveryAdminGate(data){
     const gate = data && data.safe_admin && typeof data.safe_admin === 'object' && !Array.isArray(data.safe_admin) ? data.safe_admin : {};
     const summary = data && data.summary && typeof data.summary === 'object' && !Array.isArray(data.summary) ? data.summary : {};
-    const labels = Array.isArray(gate.gate_labels) ? gate.gate_labels.slice(0, 6).map(safeCreatorSummaryText).filter(Boolean) : [];
+    const labels = Array.isArray(gate.gate_labels) ? gate.gate_labels.slice(0, 6).map(function(label){
+      const safe = safeCreatorSummaryText(label);
+      return safe === 'generated widgets not rendered' ? 'generated widget execution disabled' : safe;
+    }).filter(Boolean) : [];
     const route = safeCreatorSummaryText(gate.recovery_route || '');
     const restoreRoutes = Array.isArray(gate.restore_routes) ? gate.restore_routes.slice(0, 4).map(safeCreatorSummaryText).filter(Boolean) : [];
     const summaryText = [
@@ -2798,8 +2801,8 @@
       recoveryCountLabel(summary.module_count, 'module'),
       recoveryCountLabel(summary.disabled_module_count, 'disabled module'),
     ].join(' · ');
-    const gateText = labels.length ? labels.join(' · ') : 'metadata-only recovery · generated widgets not rendered';
-    return '<div class="capy-spaces-card"><h4>Recovery hard gate</h4>' +
+    const gateText = labels.length ? labels.join(' · ') : 'metadata-only recovery · generated widget execution disabled';
+    return '<div class="capy-spaces-card"><h4>Safe recovery controls</h4>' +
       '<div class="capy-spaces-muted">'+escapeHtml(gateText)+'</div>' +
       '<div class="capy-spaces-muted">Recovery summary: '+escapeHtml(summaryText)+'</div>' +
       (route || restoreRoutes.length ? '<div class="capy-spaces-muted">Routes: '+escapeHtml([route].concat(restoreRoutes).filter(Boolean).join(' · '))+'</div>' : '') +
@@ -2889,7 +2892,7 @@
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
-      '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
+      '<div class="capy-spaces-muted">Generated widget execution: '+(data.generated_widgets_rendered ? 'enabled' : 'disabled')+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
       renderRecoveryAdminGate(data || {}) +
       renderRecoveryModules(data || {}) +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';

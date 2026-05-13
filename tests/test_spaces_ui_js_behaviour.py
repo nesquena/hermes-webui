@@ -106,6 +106,9 @@ global.document = {
 global.fetch = async function(path, opts = {}) {
   calls.push({ path, method: opts.method || 'GET', body: opts.body || '' });
   if (path === 'api/spaces') {
+    if (scenario === 'productHomeEmptyPolish') {
+      return response({ enabled: true, spaces: [] });
+    }
     if (String(scenario || '').startsWith('resetBigBang')) {
       return response({ enabled: true, spaces: [{ space_id: 'big-bang-onboarding', name: 'Big Bang Onboarding', widget_count: 4, revision_event_id: 'rev-reset-bigbang' }] });
     }
@@ -1339,6 +1342,8 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
+  } else if (scenario === 'productHomeEmptyPolish') {
+    await window.loadCapySpaces();
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -2656,8 +2661,9 @@ def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driv
 
     recovery_html = out["recoveryHtml"]
     assert "Safe recovery" in recovery_html
-    assert "Recovery hard gate" in recovery_html
-    assert "Generated widgets rendered: false" in recovery_html
+    assert "Safe recovery controls" in recovery_html
+    assert "Recovery hard gate" not in recovery_html
+    assert "Generated widget execution: disabled" in recovery_html
     assert "Restore revision" in recovery_html
     assert "Disable widget" in recovery_html
     assert "Ask Capy to repair" in recovery_html
@@ -3040,6 +3046,39 @@ def test_spaces_ui_redacts_unsafe_space_revision_event_ids_across_home_detail_an
     assert "Revision: [REDACTED]" in home_html
     assert "revision [REDACTED]" in detail_html
     assert "Revision: [REDACTED]" in detail_html
+
+
+def test_spaces_ui_product_home_empty_state_is_dense_actionable_and_safe(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeEmptyPolish")
+    html = out["rootHtml"]
+
+    assert "capy-spaces-product-home" in html
+    assert "capy-spaces-product-card-grid capy-spaces-product-card-grid-empty" in html
+    assert "capy-spaces-product-empty" in html
+    assert "No spaces yet" in html
+    assert "Start with a demo or create your first Space; this canvas stays metadata-only until you approve generated widgets." in html
+    assert "data-capy-action=\"newSpace\"" in html
+    assert "Run research walkthrough" in html
+    assert "Run kanban walkthrough" in html
+    assert "open_in_new" not in html
+    for material_label in ("newspaper", "currency_bitcoin", "gamepad", "smart_display", "arrow_forward", "smart_toy"):
+        assert material_label not in html
+    assert "↗" in html
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+
+
+def test_spaces_ui_product_home_close_button_and_icons_have_polished_css():
+    css = SPACES_CSS_PATH.read_text()
+
+    assert ".capy-spaces-product-close" in css
+    assert "height: 36px;" in css
+    assert "width: 36px;" in css
+    assert "align-items: center;" in css
+    assert "justify-content: center;" in css
+    assert ".capy-spaces-resource-external" in css
 
 
 def test_spaces_ui_widget_details_renders_opaque_metadata_only_sandbox_iframe(driver_path):
@@ -4650,9 +4689,10 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Preview: Broken current · 2 widgets · Widgets: bad-widget / Bad &lt;Widget&gt; / html, disabled-widget / Disabled Widget / markdown" in out["recoveryHtml"]
     assert "reason: [REDACTED]" in out["recoveryHtml"]
     assert "Disabled: render failed" in out["recoveryHtml"]
-    assert "Generated widgets rendered: false" in out["recoveryHtml"]
-    assert "Recovery hard gate" in out["recoveryHtml"]
-    assert "metadata-only recovery · generated widgets not rendered · rollback controls available · disable and repair controls available" in out["recoveryHtml"]
+    assert "Generated widget execution: disabled" in out["recoveryHtml"]
+    assert "Safe recovery controls" in out["recoveryHtml"]
+    assert "Recovery hard gate" not in out["recoveryHtml"]
+    assert "metadata-only recovery · generated widget execution disabled · rollback controls available · disable and repair controls available" in out["recoveryHtml"]
     assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 3 rollback points · 1 queued event · 3 modules · 1 disabled module" in out["recoveryHtml"]
     assert "Quarantined modules" in out["recoveryHtml"]
     assert "Safe Module" in out["recoveryHtml"]

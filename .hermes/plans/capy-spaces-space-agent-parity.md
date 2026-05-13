@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-13 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-13 16:24 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Widget event queueing now rejects recovery-disabled Spaces/widgets before any durable event write, so quarantined runtime shells cannot keep sending agent bridge work. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces product-home polish now removes literal Material icon labels, adds a denser empty-state action area, improves welcome-card close-button spacing, and softens recovery wording while preserving metadata-only safe recovery. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): polish product home empty state`
+  - Added RED/GREEN real-`static/spaces.js` coverage for an enabled but empty Capy Spaces product home, proving the empty-state grid is action-rich, avoids literal Material icon words, keeps resource links accessible, and does not render generated widget/source/API-auth/secret-looking content.
+  - Replaced literal `open_in_new`/Material icon labels with safe glyphs, added explicit first-Space/research/kanban empty-state actions, improved the welcome close-button hit area, and renamed the recovery hard-gate copy to `Safe recovery controls` / `Generated widget execution: disabled` for clearer safe-mode messaging.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`4 passed`); Spaces UI behavior + foundation suites passed (`428 passed`); full WebUI suite passed (`5779 passed, 2 skipped, 3 xpassed, 8 subtests passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, local `/health`, browser console, and visual QA passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9646e732b6d042dea2c55df19c73cc1d.png`.
 
 - `fix(spaces): block events for recovery-disabled targets`
   - Added RED/GREEN backend coverage proving `queue_widget_event(...)` rejects both widget-level and whole-Space recovery-disabled targets and does not persist `widget.event.queued` records for those attempts.

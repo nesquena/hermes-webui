@@ -435,14 +435,20 @@
 }
 
 .capy-spaces-product-close {
-  background: transparent;
-  border: 0;
+  align-items: center;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 999px;
   color: rgba(226,232,240,0.72);
   cursor: pointer;
+  display: inline-flex;
   font-size: 20px;
+  height: 36px;
+  justify-content: center;
   position: absolute;
-  right: 18px;
-  top: 14px;
+  right: 16px;
+  top: 16px;
+  width: 36px;
 }
 
 .capy-spaces-product-eyebrow,
@@ -488,6 +494,17 @@
   text-decoration: none;
 }
 
+.capy-spaces-resource-external {
+  align-items: center;
+  background: rgba(147, 197, 253, 0.12);
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 13px;
+  height: 22px;
+  justify-content: center;
+  min-width: 22px;
+}
+
 .capy-spaces-demo-strip,
 .capy-spaces-product-panels {
   display: flex;
@@ -501,11 +518,14 @@
   cursor: pointer;
 }
 
-.capy-spaces-demo-pill .material-icons,
-.capy-spaces-panel-pill .material-icons {
+.capy-spaces-demo-pill .capy-spaces-inline-icon,
+.capy-spaces-panel-pill .capy-spaces-inline-icon {
+  align-items: center;
   color: #93c5fd;
-  font-family: inherit;
-  font-size: 13px;
+  display: inline-flex;
+  font-size: 14px;
+  justify-content: center;
+  min-width: 16px;
 }
 
 .capy-spaces-agent-float {
@@ -581,6 +601,10 @@
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   margin: 0 auto;
   max-width: 900px;
+}
+
+.capy-spaces-product-card-grid-empty {
+  grid-template-columns: minmax(210px, 280px) minmax(280px, 1fr);
 }
 
 .capy-spaces-product-space-card {
@@ -678,6 +702,7 @@ button.capy-spaces-product-space-card { cursor: pointer; }
 }
 
 .capy-spaces-product-empty {
+  align-items: flex-start;
   background: rgba(15, 23, 42, 0.66);
   border: 1px dashed rgba(147, 197, 253, 0.32);
   border-radius: 22px;
@@ -687,6 +712,23 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   gap: 6px;
   min-height: 170px;
   padding: 18px;
+}
+
+.capy-spaces-product-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.capy-spaces-product-empty-actions button {
+  background: rgba(96, 165, 250, 0.14);
+  border: 1px solid rgba(147, 197, 253, 0.28);
+  border-radius: 999px;
+  color: #dbeafe;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 11px;
 }
 
 .capy-spaces-product-panels {
