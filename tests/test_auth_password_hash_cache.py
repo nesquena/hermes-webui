@@ -17,6 +17,7 @@ the cached result.
 import importlib
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -27,7 +28,6 @@ from pathlib import Path
 # sibling test files that need a fresh config import).  Deleting api.config
 # would change its module-level STATE_DIR global and leak into all
 # subsequently collected tests (breaking test_pytest_state_isolation.py).
-import tempfile
 _TEST_STATE = Path(tempfile.mkdtemp())
 os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
 
@@ -64,7 +64,6 @@ class TestPasswordHashCache(unittest.TestCase):
         h = auth.get_password_hash()
         self.assertIsNotNone(h)
         self.assertIsInstance(h, str)
-        assert h is not None  # narrow type for type checker
         self.assertGreater(len(h), 10)
 
     def test_cache_flag_set_after_first_call(self):

@@ -191,14 +191,14 @@ def _load_key(filename: str) -> bytes:
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-    except Exception:
+    except OSError:
         logger.debug("Failed to read key %s", filename)
     key = secrets.token_bytes(32)
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         key_file.write_bytes(key)
         key_file.chmod(0o600)
-    except Exception:
+    except OSError:
         logger.debug("Failed to persist key %s", filename)
     return key
 
@@ -293,7 +293,7 @@ def is_auth_enabled() -> bool:
     return get_password_hash() is not None
 
 
-def verify_password(plain) -> bool:
+def verify_password(plain: str) -> bool:
     """Verify a plaintext password against the stored hash.
 
     Supports transparent migration of password hashes that were computed
