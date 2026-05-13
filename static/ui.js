@@ -5049,11 +5049,13 @@ function renderMessages(options){
     if(isUser){
       currentAssistantTurn=null;
       const row=document.createElement('div');
-      row.className='msg-row';
+      row.className='msg-row'+(m._steer?' msg-row-steer':'');
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
-      row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      // Steer messages get a subtle prefix label to distinguish from normal turns
+      const steerPrefix=m._steer?`<span class="steer-badge">Steer</span>`:'';
+      row.innerHTML=`${filesHtml}${steerPrefix}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;

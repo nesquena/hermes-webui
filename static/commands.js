@@ -887,6 +887,11 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    // Show the steer message in the chat so the user can see what they sent.
+    // Marked with _steer so the renderer can style it differently from normal user bubbles.
+    S.messages.push({role:'user',content:msg,_ts:Date.now()/1000,_steer:true});
+    if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+    if(typeof scrollToBottom==='function') scrollToBottom();
     showToast(t('cmd_steer_delivered'),2500);
     return;
   }
