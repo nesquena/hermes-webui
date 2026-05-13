@@ -448,6 +448,12 @@ def _is_secure_context(handler=None) -> bool:
     1/true/yes → force Secure on; 0/false/no → force Secure off.
     When unset, fall back to heuristics: direct TLS socket (getpeercert)
     or X-Forwarded-Proto header from the request.
+
+    .. warning::
+       The ``X-Forwarded-Proto`` header is only trustworthy when a
+       reverse proxy (nginx, Cloudflare, etc.) is deployed in front
+       of the application.  Without a proxy, any client can forge the
+       header and cause the Secure flag to be set on plain HTTP.
     """
     env = os.getenv('HERMES_WEBUI_SECURE', '').strip().lower()
     if env in ('1', 'true', 'yes'):
