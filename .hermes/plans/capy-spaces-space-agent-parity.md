@@ -11,9 +11,14 @@ Research targets:
 
 Last updated: 2026-05-13 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: The safe recovery/admin panel now strict-redacts top-level current Space revision labels, preserving metadata-only recovery while preventing path-like or secret-looking revision IDs from appearing in the DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Widget event queueing now rejects recovery-disabled Spaces/widgets before any durable event write, so quarantined runtime shells cannot keep sending agent bridge work. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): block events for recovery-disabled targets`
+  - Added RED/GREEN backend coverage proving `queue_widget_event(...)` rejects both widget-level and whole-Space recovery-disabled targets and does not persist `widget.event.queued` records for those attempts.
+  - Hardened the shared widget-event queue path used by runtime/postMessage adapters and HTTP/tool routes to check trusted recovery quarantine state after selector validation and before local no-op or durable event handling.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); targeted widget-event/recovery regressions passed (`23 passed, 236 deselected`); full Spaces foundation plus UI/demo validation, syntax/compile/diff checks, spec/quality reviews, and `/tmp` backend recovery-event browser harness QA are recorded in the scheduled sprint report for this run.
 
 - `fix(spaces): redact recovery revision labels`
   - Added RED/GREEN real-`static/spaces.js` coverage proving a recovery snapshot with a hostile top-level `revision_event_id` renders `Revision: [REDACTED]` and omits path-like/API-auth/secret-looking marker text from `#capySpacesRecovery`.
