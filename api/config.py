@@ -3987,7 +3987,8 @@ _BOT_LOGO_DATA_MIME_ALLOWLIST = {
     "image/x-icon",
     "image/vnd.microsoft.icon",
 }
-_BOT_LOGO_MAX_VALUE_LENGTH = 256_000
+_BOT_LOGO_MAX_FILE_BYTES = 12 * 1024 * 1024
+_BOT_LOGO_MAX_VALUE_LENGTH = ((_BOT_LOGO_MAX_FILE_BYTES + 2) // 3) * 4 + 128
 _BOT_LOGO_MIN_DIMENSION = 64
 _BOT_LOGO_MAX_DIMENSION = 4096
 _BOT_FAVICON_MIN_DIMENSION = 16
@@ -3999,6 +4000,8 @@ def _read_bot_logo_data_url_dimensions(raw: str, mime: str) -> tuple[int, int] |
     try:
         _header, payload = raw.split(",", 1)
         data = base64.b64decode(payload, validate=True)
+        if len(data) > _BOT_LOGO_MAX_FILE_BYTES:
+            return None
     except Exception:
         return None
     try:

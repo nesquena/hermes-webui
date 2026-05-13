@@ -1378,12 +1378,53 @@ const HERMES_BRANDING_DIMENSIONS = {
   logo: { min: 64, max: 4096 },
   favicon: { min: 16, max: 512 },
 };
+const HERMES_BRANDING_MAX_FILE_BYTES = 12 * 1024 * 1024;
+const HERMES_BRANDING_MAX_VALUE_LENGTH = Math.ceil(HERMES_BRANDING_MAX_FILE_BYTES * 4 / 3) + 128;
+const HERMES_BRANDING_MAX_SIZE_LABEL = '12 MB';
+const HERMES_BRANDING_CACHE_KEY = 'hermes-branding-cache';
+
+function _loadCachedBranding(){
+  try{
+    const raw=localStorage.getItem(HERMES_BRANDING_CACHE_KEY);
+    const data=raw?JSON.parse(raw):null;
+    return data&&typeof data==='object'?data:{};
+  }catch(_){
+    return {};
+  }
+}
+
+function _cacheBrandingLogo(value){
+  try{
+    const data=_loadCachedBranding();
+    data.bot_logo=_isSafeLogoUrl(value)||'';
+    localStorage.setItem(HERMES_BRANDING_CACHE_KEY,JSON.stringify(data));
+  }catch(_){}
+}
+
+function _cacheBrandingFavicon(value){
+  try{
+    const data=_loadCachedBranding();
+    data.bot_favicon=_isSafeLogoUrl(value)||'';
+    localStorage.setItem(HERMES_BRANDING_CACHE_KEY,JSON.stringify(data));
+  }catch(_){}
+}
+
+function _brandingDataUrlByteLength(raw){
+  try{
+    const payload=String(raw||'').split(',',2)[1]||'';
+    const pad=(payload.match(/=+$/)||[''])[0].length;
+    return Math.floor(payload.length*3/4)-pad;
+  }catch(_){
+    return 0;
+  }
+}
 
 function _isSafeLogoUrl(value){
   const raw=(value||'').trim();
   if(!raw) return '';
-  if(raw.length>256000) return '';
+  if(raw.length>HERMES_BRANDING_MAX_VALUE_LENGTH) return '';
   if(raw.startsWith('data:image/')){
+    if(_brandingDataUrlByteLength(raw)>HERMES_BRANDING_MAX_FILE_BYTES) return '';
     const header=(raw.split(',',1)[0]||'').toLowerCase();
     const parts=header.split(';');
     const mime=(parts[0]||'').replace(/^data:/,'');
@@ -1422,11 +1463,20 @@ function _renderHermesSmallLetterFallback(el){
   el.textContent=name.charAt(0).toUpperCase();
 }
 
-function _isLogoDimensionsAllowed(img, kind){
+function _brandingDimensions(img){
+  return {width:Number(img&&img.naturalWidth)||0,height:Number(img&&img.naturalHeight)||0};
+}
+
+function _brandingDimensionIssue(width, height, kind){
   const limits=HERMES_BRANDING_DIMENSIONS[kind]||HERMES_BRANDING_DIMENSIONS.logo;
-  const w=Number(img&&img.naturalWidth)||0;
-  const h=Number(img&&img.naturalHeight)||0;
-  return w>=limits.min && h>=limits.min && w<=limits.max && h<=limits.max;
+  if(width<limits.min || height<limits.min) return {code:'too_small', limits, width, height};
+  if(width>limits.max || height>limits.max) return {code:'too_large_dimensions', limits, width, height};
+  return null;
+}
+
+function _isLogoDimensionsAllowed(img, kind){
+  const size=_brandingDimensions(img);
+  return !_brandingDimensionIssue(size.width, size.height, kind);
 }
 
 function _setBrandingFavicons(url){
@@ -1477,9 +1527,13 @@ function _setLogoTarget(el, url, fallbackFactory, kind='logo'){
   el.appendChild(img);
 }
 
-function validateBrandingImageForSave(value, kind='logo'){
-  const url=_isSafeLogoUrl(value);
-  if(!url) return Promise.resolve('');
+function validateBrandingImageDetailed(value, kind='logo'){
+  const raw=(value||'').trim();
+  if(!raw) return Promise.resolve({value:''});
+  if(raw.length>HERMES_BRANDING_MAX_VALUE_LENGTH) return Promise.resolve({value:'', error:{code:'too_large_file'}});
+  if(raw.startsWith('data:image/')&&_brandingDataUrlByteLength(raw)>HERMES_BRANDING_MAX_FILE_BYTES) return Promise.resolve({value:'', error:{code:'too_large_file'}});
+  const url=_isSafeLogoUrl(raw);
+  if(!url) return Promise.resolve({value:'', error:{code:'unsupported_type'}});
   return new Promise((resolve)=>{
     const img=new Image();
     let done=false;
@@ -1488,17 +1542,31 @@ function validateBrandingImageForSave(value, kind='logo'){
       done=true;
       resolve(result);
     };
-    const timer=setTimeout(()=>finish(''),5000);
+    const timer=setTimeout(()=>finish({value:'', error:{code:'load_timeout'}}),15000);
     img.onload=function(){
       clearTimeout(timer);
-      finish(_isLogoDimensionsAllowed(img, kind)?url:'');
+      const size=_brandingDimensions(img);
+      const issue=_brandingDimensionIssue(size.width, size.height, kind);
+      finish(issue?{value:'', error:issue}:{value:url});
     };
     img.onerror=function(){
       clearTimeout(timer);
-      finish('');
+      finish({value:'', error:{code:'decode_failed'}});
     };
     img.src=url;
   });
+}
+
+function validateBrandingImageForSave(value, kind='logo'){
+  return validateBrandingImageDetailed(value, kind).then((result)=>result.value||'');
+}
+
+function validateBrandingLogoDetailed(value){
+  return validateBrandingImageDetailed(value, 'logo');
+}
+
+function validateBrandingFaviconDetailed(value){
+  return validateBrandingImageDetailed(value, 'favicon');
 }
 
 function validateBrandingLogoForSave(value){
@@ -1512,6 +1580,7 @@ function validateBrandingFaviconForSave(value){
 function applyBrandingLogo(value){
   const url=_isSafeLogoUrl(value);
   window._botLogo=url;
+  if(document&&document.documentElement) document.documentElement.toggleAttribute('data-branding-logo-cached', !!url);
   _setLogoTarget(document.getElementById('appTitlebarLogo'), url, _renderHermesTitlebarLogoFallback, 'logo');
   _setLogoTarget(document.getElementById('emptyStateLogo'), url, _renderHermesEmptyLogoFallback, 'logo');
   _setLogoTarget(document.getElementById('settingsBotLogoPreview'), url, _renderHermesSmallLetterFallback, 'logo');
@@ -1524,12 +1593,21 @@ function applyBrandingFavicon(value){
   _setLogoTarget(document.getElementById('settingsBotFaviconPreview'), url, _renderHermesSmallLetterFallback, 'favicon');
 }
 
+
+try{
+  const _cachedBranding=_loadCachedBranding();
+  if(_cachedBranding.bot_logo) applyBrandingLogo(_cachedBranding.bot_logo);
+  if(_cachedBranding.bot_favicon) applyBrandingFavicon(_cachedBranding.bot_favicon);
+}catch(_){}
 (async()=>{
   // Load send key preference
   let _bootSettings={};
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showTps=!!s.show_tps;
@@ -1545,9 +1623,6 @@ function applyBrandingFavicon(value){
     window._botLogo=s.bot_logo||'';
     window._botFavicon=s.bot_favicon||'';
     if(s.default_model) window._defaultModel=s.default_model;
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
-    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
@@ -1567,6 +1642,8 @@ function applyBrandingFavicon(value){
     applyBotName();
     applyBrandingLogo(window._botLogo);
     applyBrandingFavicon(window._botFavicon);
+    _cacheBrandingLogo(window._botLogo);
+    _cacheBrandingFavicon(window._botFavicon);
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){

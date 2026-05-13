@@ -309,8 +309,9 @@
   .system-health-foot{font-size:11px;color:var(--muted);line-height:1.45;opacity:.82;}
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-icon.brand-logo--small{width:18px;height:18px;justify-content:center;overflow:hidden;border-radius:5px;}
-  .brand-logo img,.empty-logo img,.brand-logo-preview img{width:100%;height:100%;object-fit:contain;display:block;border-radius:inherit;}
-  .brand-logo.is-custom{background:transparent;border-color:var(--border2);box-shadow:none;color:inherit;}
+  .brand-logo img,.empty-logo img{width:100%;height:100%;object-fit:contain;display:block;border-radius:inherit;}
+  .brand-logo.is-custom{background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border-color:var(--accent-bg);box-shadow:0 4px 20px var(--accent-bg);color:var(--accent-text);}
+  .app-titlebar-icon.brand-logo.is-custom{box-shadow:0 2px 10px var(--accent-bg);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
   .app-titlebar-sub[hidden]{display:none;}
@@ -3774,6 +3775,18 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
 
-  .settings-branding-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;align-items:start;}
-  .brand-logo-preview-row{display:flex;align-items:center;gap:8px;margin-top:8px;}
-  .brand-logo-preview{width:32px;height:32px;border-radius:9px;background:linear-gradient(145deg,var(--accent-hover),var(--accent));display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:800;overflow:hidden;border:1px solid var(--border2);flex-shrink:0;}
+  .settings-branding-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start;}
+  .brand-file-control{display:flex;align-items:center;min-width:0;width:100%;height:38px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;overflow:hidden;}
+  .brand-file-actions{display:grid;grid-template-columns:minmax(92px,.8fr) minmax(160px,1.2fr);gap:8px;margin-top:8px;}
+  .brand-file-action{min-height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:7px;background:rgba(255,255,255,.03);color:var(--accent);font-size:12px;font-weight:650;cursor:pointer;white-space:nowrap;}
+  .brand-file-action:hover{background:var(--hover-bg);}
+  .brand-file-name{flex:1;min-width:0;padding:0 10px;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .brand-file-name.is-empty{color:var(--muted);}
+  .brand-file-clear{width:38px;height:100%;border:0;border-left:1px solid var(--border2);background:transparent;color:var(--muted);font-size:22px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+  .brand-file-clear:hover{background:rgba(233,69,96,.12);color:var(--error);}
+
+
+html[data-branding-logo-cached] #appTitlebarLogo:not(.is-custom) > svg,
+html[data-branding-logo-cached] #emptyStateLogo:not(.is-custom) > svg {
+  opacity: 0;
+}

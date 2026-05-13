@@ -228,6 +228,7 @@ function cancelEditMode(){
 async function openFile(path){
   if(!S.session)return;
   const ext=fileExt(path);
+  if(typeof window._consumeBrandingWorkspacePick==='function' && window._consumeBrandingWorkspacePick(path, ext)) return;
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){

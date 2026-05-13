@@ -17,6 +17,7 @@
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
+<script>(function(){try{var raw=localStorage.getItem('hermes-branding-cache'),d=raw&&JSON.parse(raw),v=d&&d.bot_logo;if(typeof v==='string'&&(v.indexOf('data:image/')===0||/^https?:\/\//i.test(v)))document.documentElement.setAttribute('data-branding-logo-cached','');}catch(e){}})()</script>
 <!-- theme-color: surfaces the active theme's background to native chrome (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --bg-1 / :root.dark --bg-1. -->
 <meta name="theme-color" content="#FEFCF7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0D0D1A" media="(prefers-color-scheme: dark)">
@@ -1058,21 +1059,31 @@
                 <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
               </div>
               <div class="settings-field">
-                <label for="settingsBotLogo" data-i18n="settings_label_bot_logo">Assistant Logo</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_logo">Optional image URL used for the header and new-chat logo. Must be 64×64 to 4096×4096. Leave blank for the Hermes default.</div>
-                <input type="url" id="settingsBotLogo" placeholder="https://example.com/logo.png" maxlength="4096" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-                <div class="brand-logo-preview-row">
-                  <span class="brand-logo-preview" id="settingsBotLogoPreview" aria-hidden="true"></span>
-                  <button type="button" class="sm-btn secondary" id="settingsBotLogoClear" data-i18n="settings_bot_logo_clear">Use default logo</button>
+                <label for="settingsBotLogoUpload" data-i18n="settings_label_bot_logo">Assistant Logo</label>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_logo">Use PNG, JPG, WebP, GIF, or ICO. Must be 64×64 to 4096×4096 and up to 12 MB. Clear it for the Hermes default.</div>
+                <input type="hidden" id="settingsBotLogo">
+                <input type="file" id="settingsBotLogoFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
+                <div class="brand-file-control" data-branding-kind="logo">
+                  <span class="brand-file-name" id="settingsBotLogoFileName" data-i18n="settings_branding_no_file">No file selected</span>
+                  <button type="button" class="brand-file-clear" id="settingsBotLogoClear" aria-label="Clear assistant logo" title="Clear assistant logo">×</button>
+                </div>
+                <div class="brand-file-actions">
+                  <button type="button" class="brand-file-action" id="settingsBotLogoUpload" data-i18n="settings_branding_upload">Upload file</button>
+                  <button type="button" class="brand-file-action" id="settingsBotLogoWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
                 </div>
               </div>
               <div class="settings-field">
-                <label for="settingsBotFavicon" data-i18n="settings_label_bot_favicon">Favicon</label>
-                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_favicon">Optional image URL used only for browser tab and app icons. Must be 16×16 to 512×512. Leave blank for the Hermes default.</div>
-                <input type="url" id="settingsBotFavicon" placeholder="https://example.com/favicon.png" maxlength="4096" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-                <div class="brand-logo-preview-row">
-                  <span class="brand-logo-preview" id="settingsBotFaviconPreview" aria-hidden="true"></span>
-                  <button type="button" class="sm-btn secondary" id="settingsBotFaviconClear" data-i18n="settings_bot_favicon_clear">Use default favicon</button>
+                <label for="settingsBotFaviconUpload" data-i18n="settings_label_bot_favicon">Favicon</label>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_favicon">Use PNG, JPG, WebP, GIF, or ICO. Must be 16×16 to 512×512 and up to 12 MB. Clear it for the Hermes default.</div>
+                <input type="hidden" id="settingsBotFavicon">
+                <input type="file" id="settingsBotFaviconFile" accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico" hidden>
+                <div class="brand-file-control" data-branding-kind="favicon">
+                  <span class="brand-file-name" id="settingsBotFaviconFileName" data-i18n="settings_branding_no_file">No file selected</span>
+                  <button type="button" class="brand-file-clear" id="settingsBotFaviconClear" aria-label="Clear favicon" title="Clear favicon">×</button>
+                </div>
+                <div class="brand-file-actions">
+                  <button type="button" class="brand-file-action" id="settingsBotFaviconUpload" data-i18n="settings_branding_upload">Upload file</button>
+                  <button type="button" class="brand-file-action" id="settingsBotFaviconWorkspace" data-i18n="settings_branding_workspace">Upload from workspace</button>
                 </div>
               </div>
             </div>
@@ -1245,7 +1256,7 @@
     </div>
   </div>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>

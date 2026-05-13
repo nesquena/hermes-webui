@@ -4333,6 +4333,10 @@ async function switchToWorkspace(path,name){
     S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
+    if(_brandingWorkspacePickKind){
+      if(typeof openWorkspacePanel==='function') openWorkspacePanel('browse');
+      if(typeof _brandingWorkspacePickToast==='function') _brandingWorkspacePickToast(_brandingWorkspacePickKind);
+    }
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }
@@ -5083,9 +5087,9 @@ function _preferencesPayloadFromUi(){
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
   const botLogoField=$('settingsBotLogo');
-  if(botLogoField) payload.bot_logo=botLogoField.value;
+  if(botLogoField&&_brandingDirty.has('logo')) payload.bot_logo=botLogoField.value;
   const botFaviconField=$('settingsBotFavicon');
-  if(botFaviconField) payload.bot_favicon=botFaviconField.value;
+  if(botFaviconField&&_brandingDirty.has('favicon')) payload.bot_favicon=botFaviconField.value;
   return payload;
 }
 
@@ -5113,6 +5117,215 @@ function _rememberPreferencesSaved(payload){
   if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
 }
 
+
+const BRANDING_FILE_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.ico']);
+const BRANDING_MIME_TYPES = new Set(['image/png','image/jpeg','image/webp','image/gif','image/x-icon','image/vnd.microsoft.icon']);
+const BRANDING_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,image/x-icon,image/vnd.microsoft.icon,.ico';
+const BRANDING_MAX_FILE_BYTES = 12 * 1024 * 1024;
+const BRANDING_ALLOWED_COPY = 'PNG, JPG, WebP, GIF, or ICO';
+let _brandingWorkspacePickKind = '';
+const _brandingDirty = new Set();
+
+function _brandingSlot(kind){
+  const cap=kind==='favicon'?'Favicon':'Logo';
+  return {
+    kind,
+    field:$(`settingsBot${cap}`),
+    file:$(`settingsBot${cap}File`),
+    name:$(`settingsBot${cap}FileName`),
+    upload:$(`settingsBot${cap}Upload`),
+    workspace:$(`settingsBot${cap}Workspace`),
+    clear:$(`settingsBot${cap}Clear`),
+    apply:kind==='favicon'?window.applyBrandingFavicon:window.applyBrandingLogo,
+    validate:kind==='favicon'?window.validateBrandingFaviconForSave:window.validateBrandingLogoForSave,
+    validateDetailed:kind==='favicon'?window.validateBrandingFaviconDetailed:window.validateBrandingLogoDetailed,
+    emptyLabel:kind==='favicon'?'Default favicon':'Default logo',
+    invalidLabel:kind==='favicon'
+      ? 'Favicon must be a PNG, JPG, WebP, GIF, or ICO image between 16×16 and 512×512 pixels, up to 12 MB.'
+      : 'Assistant logo must be a PNG, JPG, WebP, GIF, or ICO image between 64×64 and 4096×4096 pixels, up to 12 MB.',
+  };
+}
+
+function _brandingUploadErrorMessage(kind, error){
+  const slot=_brandingSlot(kind);
+  const subject=kind==='favicon'?'Favicon':'Assistant logo';
+  const limits=error&&error.limits;
+  const size=(error&&error.width&&error.height)?` (${error.width}×${error.height})`:'';
+  if(error&&error.code==='unsupported_type') return `${subject} must be a ${BRANDING_ALLOWED_COPY} image.`;
+  if(error&&error.code==='too_large_file') return `${subject} is larger than 12 MB.`;
+  if(error&&error.code==='too_small') return `${subject} image is smaller than ${limits.min}×${limits.min} pixels${size}.`;
+  if(error&&error.code==='too_large_dimensions') return `${subject} image is larger than ${limits.max}×${limits.max} pixels${size}.`;
+  if(error&&error.code==='decode_failed') return `${subject} could not be read as a valid ${BRANDING_ALLOWED_COPY} image.`;
+  if(error&&error.code==='load_timeout') return `${subject} could not be validated within 15 seconds. Try a smaller image up to 12 MB.`;
+  return slot.invalidLabel;
+}
+
+async function _validateBrandingForUi(kind, dataUrl){
+  const slot=_brandingSlot(kind);
+  if(typeof slot.validateDetailed==='function') return await slot.validateDetailed(dataUrl);
+  const value=typeof slot.validate==='function' ? await slot.validate(dataUrl) : dataUrl;
+  return value ? {value} : {value:'', error:{code:'invalid'}};
+}
+
+function _setBrandingFileName(kind, label, isEmpty=false){
+  const slot=_brandingSlot(kind);
+  if(!slot.name) return;
+  const text=label || slot.emptyLabel;
+  slot.name.textContent=text;
+  slot.name.title=text;
+  slot.name.classList.toggle('is-empty', !!isEmpty);
+}
+
+function _displayNameForBrandingValue(value, fallback){
+  if(!value) return fallback;
+  if(/^data:image\//i.test(value)) return fallback || 'Custom image';
+  try{
+    const u=new URL(value);
+    const last=(u.pathname||'').split('/').filter(Boolean).pop();
+    return last || 'Custom image';
+  }catch(_){
+    return fallback || 'Custom image';
+  }
+}
+
+function _readBlobAsDataUrl(blob){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve(String(reader.result||''));
+    reader.onerror=()=>reject(reader.error||new Error('Unable to read image'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function _setBrandingImageFromDataUrl(kind, dataUrl, label){
+  const slot=_brandingSlot(kind);
+  if(!slot.field) return false;
+  const result=await _validateBrandingForUi(kind, dataUrl);
+  const normalized=result&&result.value;
+  if(!normalized){
+    if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, result&&result.error));
+    return false;
+  }
+  slot.field.value=normalized;
+  slot.field.dataset.filename=label||'';
+  _brandingDirty.add(kind);
+  _setBrandingFileName(kind, label||'Custom image');
+  if(typeof slot.apply==='function') slot.apply(normalized);
+  _schedulePreferencesAutosave();
+  return true;
+}
+
+async function _handleBrandingUpload(kind, file){
+  if(!file) return;
+  const ext='.'+String(file.name||'').split('.').pop().toLowerCase();
+  const mime=String(file.type||'').toLowerCase();
+  if(!BRANDING_MIME_TYPES.has(mime) && !BRANDING_FILE_EXTS.has(ext)){
+    if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, {code:'unsupported_type'}));
+    return;
+  }
+  if(Number(file.size)>BRANDING_MAX_FILE_BYTES){
+    if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, {code:'too_large_file'}));
+    return;
+  }
+  const dataUrl=await _readBlobAsDataUrl(file);
+  await _setBrandingImageFromDataUrl(kind, dataUrl, file.name||'Uploaded image');
+}
+
+function _clearBrandingImage(kind){
+  const slot=_brandingSlot(kind);
+  if(slot.field){
+    slot.field.value='';
+    delete slot.field.dataset.filename;
+  }
+  if(slot.file) slot.file.value='';
+  _brandingDirty.add(kind);
+  _setBrandingFileName(kind, slot.emptyLabel, true);
+  if(typeof slot.apply==='function') slot.apply('');
+  if(kind==='favicon'&&typeof _cacheBrandingFavicon==='function') _cacheBrandingFavicon('');
+  if(kind!=='favicon'&&typeof _cacheBrandingLogo==='function') _cacheBrandingLogo('');
+  _schedulePreferencesAutosave();
+}
+
+function _brandingWorkspacePickToast(kind){
+  if(typeof showToast==='function') showToast(`Click an image in the workspace to use it as the ${kind==='favicon'?'favicon':'assistant logo'}. Press Escape to cancel.`);
+}
+
+function _cancelBrandingWorkspacePick(){
+  if(!_brandingWorkspacePickKind) return false;
+  _brandingWorkspacePickKind='';
+  if(typeof showToast==='function') showToast('Workspace branding pick canceled.');
+  return true;
+}
+
+document.addEventListener('keydown',(ev)=>{
+  if(ev.key==='Escape'&&_cancelBrandingWorkspacePick()) ev.stopPropagation();
+});
+
+async function _startBrandingWorkspacePick(kind){
+  _brandingWorkspacePickKind=kind;
+  if(!S.session){
+    const defaultWs=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(defaultWs&&typeof switchToWorkspace==='function'){
+      await switchToWorkspace(defaultWs, typeof getWorkspaceFriendlyName==='function'?getWorkspaceFriendlyName(defaultWs):defaultWs);
+      return;
+    }else{
+      if(typeof showToast==='function') showToast('Choose or add a workspace, then pick an image for branding.');
+      if(typeof switchPanel==='function') switchPanel('workspaces');
+      if(typeof loadWorkspacesPanel==='function') loadWorkspacesPanel();
+      return;
+    }
+  }
+  _brandingWorkspacePickToast(kind);
+  if(typeof openWorkspacePanel==='function') openWorkspacePanel('browse');
+}
+
+window._consumeBrandingWorkspacePick=function(path, ext){
+  const kind=_brandingWorkspacePickKind;
+  if(!kind) return false;
+  if(!BRANDING_FILE_EXTS.has(ext)){
+    _brandingWorkspacePickKind='';
+    if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, {code:'unsupported_type'}));
+    return true;
+  }
+  _brandingWorkspacePickKind='';
+  (async()=>{
+    try{
+      const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+      const res=await fetch(url,{credentials:'same-origin'});
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const contentLength=Number(res.headers&&res.headers.get&&res.headers.get('content-length')||0);
+      if(contentLength>BRANDING_MAX_FILE_BYTES){
+        if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, {code:'too_large_file'}));
+        return;
+      }
+      const blob=await res.blob();
+      if(Number(blob.size)>BRANDING_MAX_FILE_BYTES){
+        if(typeof showToast==='function') showToast(_brandingUploadErrorMessage(kind, {code:'too_large_file'}));
+        return;
+      }
+      const dataUrl=await _readBlobAsDataUrl(blob);
+      await _setBrandingImageFromDataUrl(kind, dataUrl, path.split('/').pop()||path);
+    }catch(e){
+      if(typeof showToast==='function') showToast('Unable to load workspace image: '+(e.message||String(e)));
+    }
+  })();
+  return true;
+};
+
+function _wireBrandingFileControl(kind, value){
+  const slot=_brandingSlot(kind);
+  if(!slot.field) return;
+  slot.field.value=value||'';
+  _setBrandingFileName(kind, value ? _displayNameForBrandingValue(value, 'Custom image') : slot.emptyLabel, !value);
+  if(slot.file){
+    slot.file.setAttribute('accept', BRANDING_ACCEPT);
+    slot.file.addEventListener('change',()=>_handleBrandingUpload(kind, slot.file.files&&slot.file.files[0]),{once:false});
+  }
+  if(slot.upload) slot.upload.addEventListener('click',()=>slot.file&&slot.file.click(),{once:false});
+  if(slot.workspace) slot.workspace.addEventListener('click',()=>_startBrandingWorkspacePick(kind),{once:false});
+  if(slot.clear) slot.clear.addEventListener('click',()=>_clearBrandingImage(kind),{once:false});
+}
+
 function _schedulePreferencesAutosave(){
   const payload=_preferencesPayloadFromUi();
   _rememberPreferencesSaved(payload);
@@ -5126,22 +5339,28 @@ async function _autosavePreferencesSettings(payload){
   try{
     if(payload&&payload.bot_logo!==undefined&&typeof validateBrandingLogoForSave==='function'){
       const originalLogo=payload.bot_logo;
-      const normalizedLogo=await validateBrandingLogoForSave(originalLogo);
+      const logoResult=typeof validateBrandingLogoDetailed==='function' ? await validateBrandingLogoDetailed(originalLogo) : {value:await validateBrandingLogoForSave(originalLogo)};
+      const normalizedLogo=logoResult&&logoResult.value||'';
       payload={...payload,bot_logo:normalizedLogo};
       if(originalLogo&&originalLogo!==normalizedLogo){
+        _brandingDirty.delete('logo');
         const logoField=$('settingsBotLogo');
         if(logoField) logoField.value='';
-        if(typeof showToast==='function') showToast('Assistant logo must be a loadable image between 64×64 and 4096×4096 pixels.');
+        _setBrandingFileName('logo','Default logo',true);
+        if(typeof showToast==='function') showToast(_brandingUploadErrorMessage('logo', logoResult&&logoResult.error||{code:'invalid'}));
       }
     }
     if(payload&&payload.bot_favicon!==undefined&&typeof validateBrandingFaviconForSave==='function'){
       const originalFavicon=payload.bot_favicon;
-      const normalizedFavicon=await validateBrandingFaviconForSave(originalFavicon);
+      const faviconResult=typeof validateBrandingFaviconDetailed==='function' ? await validateBrandingFaviconDetailed(originalFavicon) : {value:await validateBrandingFaviconForSave(originalFavicon)};
+      const normalizedFavicon=faviconResult&&faviconResult.value||'';
       payload={...payload,bot_favicon:normalizedFavicon};
       if(originalFavicon&&originalFavicon!==normalizedFavicon){
+        _brandingDirty.delete('favicon');
         const faviconField=$('settingsBotFavicon');
         if(faviconField) faviconField.value='';
-        if(typeof showToast==='function') showToast('Favicon must be a loadable image between 16×16 and 512×512 pixels.');
+        _setBrandingFileName('favicon','Default favicon',true);
+        if(typeof showToast==='function') showToast(_brandingUploadErrorMessage('favicon', faviconResult&&faviconResult.error||{code:'invalid'}));
       }
     }
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
@@ -5156,14 +5375,22 @@ async function _autosavePreferencesSettings(payload){
       if(typeof renderMessages==='function') renderMessages();
     }
     if(payload&&payload.bot_logo!==undefined && typeof applyBrandingLogo==='function'){
-      applyBrandingLogo((saved&&saved.bot_logo)||'');
+      _brandingDirty.delete('logo');
+      const savedLogo=(saved&&saved.bot_logo)||'';
+      applyBrandingLogo(savedLogo);
+      if(typeof _cacheBrandingLogo==='function') _cacheBrandingLogo(savedLogo);
       const logoField=$('settingsBotLogo');
-      if(logoField) logoField.value=(saved&&saved.bot_logo)||'';
+      if(logoField) logoField.value=savedLogo;
+      _setBrandingFileName('logo', savedLogo ? _displayNameForBrandingValue(savedLogo, (logoField&&logoField.dataset&&logoField.dataset.filename)||'Custom image') : 'Default logo', !savedLogo);
     }
     if(payload&&payload.bot_favicon!==undefined && typeof applyBrandingFavicon==='function'){
-      applyBrandingFavicon((saved&&saved.bot_favicon)||'');
+      _brandingDirty.delete('favicon');
+      const savedFavicon=(saved&&saved.bot_favicon)||'';
+      applyBrandingFavicon(savedFavicon);
+      if(typeof _cacheBrandingFavicon==='function') _cacheBrandingFavicon(savedFavicon);
       const faviconField=$('settingsBotFavicon');
-      if(faviconField) faviconField.value=(saved&&saved.bot_favicon)||'';
+      if(faviconField) faviconField.value=savedFavicon;
+      _setBrandingFileName('favicon', savedFavicon ? _displayNameForBrandingValue(savedFavicon, (faviconField&&faviconField.dataset&&faviconField.dataset.filename)||'Custom image') : 'Default favicon', !savedFavicon);
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -5421,40 +5648,8 @@ async function loadSettingsPanel(){
         botNameTimer=setTimeout(_schedulePreferencesAutosave,500);
       },{once:false});
     }
-    const botLogoField=$('settingsBotLogo');
-    if(botLogoField){
-      botLogoField.value=settings.bot_logo||'';
-      botLogoField.addEventListener('input',()=>{
-        if(typeof applyBrandingLogo==='function') applyBrandingLogo(botLogoField.value);
-        _schedulePreferencesAutosave();
-      },{once:false});
-      botLogoField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    const botLogoClear=$('settingsBotLogoClear');
-    if(botLogoClear){
-      botLogoClear.addEventListener('click',()=>{
-        if(botLogoField) botLogoField.value='';
-        if(typeof applyBrandingLogo==='function') applyBrandingLogo('');
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
-    const botFaviconField=$('settingsBotFavicon');
-    if(botFaviconField){
-      botFaviconField.value=settings.bot_favicon||'';
-      botFaviconField.addEventListener('input',()=>{
-        if(typeof applyBrandingFavicon==='function') applyBrandingFavicon(botFaviconField.value);
-        _schedulePreferencesAutosave();
-      },{once:false});
-      botFaviconField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
-    }
-    const botFaviconClear=$('settingsBotFaviconClear');
-    if(botFaviconClear){
-      botFaviconClear.addEventListener('click',()=>{
-        if(botFaviconField) botFaviconField.value='';
-        if(typeof applyBrandingFavicon==='function') applyBrandingFavicon('');
-        _schedulePreferencesAutosave();
-      },{once:false});
-    }
+    _wireBrandingFileControl('logo', settings.bot_logo||'');
+    _wireBrandingFileControl('favicon', settings.bot_favicon||'');
     if(typeof applyBrandingLogo==='function') applyBrandingLogo(settings.bot_logo||'');
     if(typeof applyBrandingFavicon==='function') applyBrandingFavicon(settings.bot_favicon||'');
     // Password field: always blank (we don't send hash back)
@@ -6129,24 +6324,28 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
-  body.bot_logo=(($('settingsBotLogo')||{}).value||'').trim();
-  body.bot_favicon=(($('settingsBotFavicon')||{}).value||'').trim();
-  if(typeof validateBrandingLogoForSave==='function'){
+  const botLogoField=$('settingsBotLogo');
+  if(botLogoField&&_brandingDirty.has('logo')) body.bot_logo=(botLogoField.value||'').trim();
+  const botFaviconField=$('settingsBotFavicon');
+  if(botFaviconField&&_brandingDirty.has('favicon')) body.bot_favicon=(botFaviconField.value||'').trim();
+  if(body.bot_logo!==undefined&&typeof validateBrandingLogoForSave==='function'){
     const originalLogo=body.bot_logo;
-    body.bot_logo=await validateBrandingLogoForSave(body.bot_logo);
+    const logoResult=typeof validateBrandingLogoDetailed==='function' ? await validateBrandingLogoDetailed(body.bot_logo) : {value:await validateBrandingLogoForSave(body.bot_logo)};
+    body.bot_logo=logoResult&&logoResult.value||'';
     if(originalLogo&&originalLogo!==body.bot_logo){
       const logoField=$('settingsBotLogo');
       if(logoField) logoField.value='';
-      if(typeof showToast==='function') showToast('Assistant logo must be a loadable image between 64×64 and 4096×4096 pixels.');
+      if(typeof showToast==='function') showToast(_brandingUploadErrorMessage('logo', logoResult&&logoResult.error||{code:'invalid'}));
     }
   }
-  if(typeof validateBrandingFaviconForSave==='function'){
+  if(body.bot_favicon!==undefined&&typeof validateBrandingFaviconForSave==='function'){
     const originalFavicon=body.bot_favicon;
-    body.bot_favicon=await validateBrandingFaviconForSave(body.bot_favicon);
+    const faviconResult=typeof validateBrandingFaviconDetailed==='function' ? await validateBrandingFaviconDetailed(body.bot_favicon) : {value:await validateBrandingFaviconForSave(body.bot_favicon)};
+    body.bot_favicon=faviconResult&&faviconResult.value||'';
     if(originalFavicon&&originalFavicon!==body.bot_favicon){
       const faviconField=$('settingsBotFavicon');
       if(faviconField) faviconField.value='';
-      if(typeof showToast==='function') showToast('Favicon must be a loadable image between 16×16 and 512×512 pixels.');
+      if(typeof showToast==='function') showToast(_brandingUploadErrorMessage('favicon', faviconResult&&faviconResult.error||{code:'invalid'}));
     }
   }
   // Password: only act if the field has content; blank = leave auth unchanged
@@ -6162,6 +6361,8 @@ async function saveSettings(andClose){
         }
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      if(body.bot_logo!==undefined) _brandingDirty.delete('logo');
+      if(body.bot_favicon!==undefined) _brandingDirty.delete('favicon');
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _settingsDirty=false;
       _resetSettingsPanelState();
@@ -6181,6 +6382,8 @@ async function saveSettings(andClose){
       }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    if(body.bot_logo!==undefined) _brandingDirty.delete('logo');
+    if(body.bot_favicon!==undefined) _brandingDirty.delete('favicon');
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();
