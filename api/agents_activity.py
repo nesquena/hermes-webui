@@ -34,7 +34,8 @@ def get_active_sessions():
     if not Path(db_path).exists():
         return []
     try:
-        conn = sqlite3.connect(db_path, timeout=2)
+        conn = sqlite3.connect(db_path, timeout=1)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT session_id, project, parent_session_id, started_at "
@@ -77,9 +78,10 @@ def generate_init_events():
     agent_ids, folder_names, session_map = _build_agent_list(sessions)
 
     # If no active sessions, show a demo agent so the panel isn't empty
+    # Use high ID (9999) to avoid conflicts with real agents in stream_activity
     if not agent_ids:
-        agent_ids = [1]
-        folder_names = {1: "Neo"}
+        agent_ids = [9999]
+        folder_names = {9999: "Neo"}
 
     yield _sse_data({
         "type": "existingAgents",
@@ -103,6 +105,16 @@ def stream_activity(write_fn):
     """
     known_sessions = {}  # session_id -> agent_id
     next_id = [1]
+    demo_active = [True]  # tracks whether demo agent 9999 is showing
+
+    # Seed known_sessions from current state so we don't re-emit existingAgents
+    sessions = get_active_sessions()
+    for s in sessions:
+        if not s.get("parent_session_id"):
+            known_sessions[s["session_id"]] = next_id[0]
+            next_id[0] += 1
+    if known_sessions:
+        demo_active[0] = False
 
     def _poll():
         sessions = get_active_sessions()
@@ -113,16 +125,18 @@ def stream_activity(write_fn):
             sid = s["session_id"]
             current_ids.add(sid)
             if sid not in known_sessions:
-                # New session appeared
+                # New session appeared — remove demo if active
+                if demo_active[0]:
+                    events.append({"type": "agentClosed", "id": 9999})
+                    demo_active[0] = False
+
                 aid = next_id[0]
                 next_id[0] += 1
                 known_sessions[sid] = aid
                 name = s.get("project") or "Neo"
-                # Top-level agents get agentCreated
                 if not s.get("parent_session_id"):
                     events.append({"type": "agentCreated", "id": aid, "folderName": name})
                 else:
-                    # Subagent — find parent's agent_id
                     parent_sid = s["parent_session_id"]
                     parent_aid = known_sessions.get(parent_sid)
                     if parent_aid:
@@ -139,14 +153,12 @@ def stream_activity(write_fn):
             aid = known_sessions.pop(sid)
             events.append({"type": "agentClosed", "id": aid})
 
-        return events
+        # If all real agents gone, bring back demo
+        if not known_sessions and not demo_active[0]:
+            events.append({"type": "agentCreated", "id": 9999, "folderName": "Neo"})
+            demo_active[0] = True
 
-    # Initial snapshot to seed known_sessions
-    sessions = get_active_sessions()
-    for s in sessions:
-        if not s.get("parent_session_id"):
-            known_sessions[s["session_id"]] = next_id[0]
-            next_id[0] += 1
+        return events
 
     # Poll loop
     while True:
