@@ -265,7 +265,15 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if parsed.path != "/api/csp-report" and not check_auth(self, parsed): return
+            # Stage-346 Opus SHOULD-FIX defense-in-depth: scope the CSP-report
+            # auth carve-out to POST only. The endpoint is intentionally
+            # unauthenticated (browsers omit cookies on CSP reports), but the
+            # carve-out should not extend to PATCH/DELETE on that path even
+            # though they currently fail through CSRF/routing fallthrough.
+            _is_csp_report_post = (
+                parsed.path == "/api/csp-report" and self.command == "POST"
+            )
+            if not _is_csp_report_post and not check_auth(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

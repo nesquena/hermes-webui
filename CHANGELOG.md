@@ -28,6 +28,10 @@
 
 - **PR #2170** by @franksong2702 — `/api/session?messages=0&resolve_model=0` metadata loads no longer pay the `_lookup_cli_session_metadata()` Agent/CLI scan for native WebUI sessions. New `_needs_cli_session_metadata()` predicate keeps the Agent metadata merge path for imported CLI sessions, messaging-backed sessions, read-only sessions, and external-agent sessions, but skips it for ordinary WebUI-native sessions. Profiling on real production state showed this was the remaining hot path after PR #2166 removed the duplicate browser post-render work.
 
+### Stage-346 maintainer fixes
+
+- **`server.py` CSP-report auth carve-out scoped to POST only** — Opus SHOULD-FIX from stage-346 review on PR #2160. The original carve-out (`parsed.path != "/api/csp-report" and not check_auth`) bypassed auth for all write methods on the endpoint, not just the POST that browsers actually use for CSP violation reports. PATCH/DELETE to that path currently fall through to a 403 (CSRF check) or 404 (routing), so the broad bypass was harmless — but defense-in-depth says scope the carve-out to its actual use. New check: `parsed.path == "/api/csp-report" and self.command == "POST"`. ~6 LOC. CSP report regression suite (6 tests) still passes.
+
 ## [v0.51.52] — 2026-05-12 — Release AB (stage-345 — 2-PR low-risk batch — stream-ownership guard + Refresh-usage button on provider quota card)
 
 ### Fixed
