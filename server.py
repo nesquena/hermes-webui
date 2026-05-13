@@ -210,8 +210,10 @@ class Handler(BaseHTTPRequestHandler):
         "img-src 'self' data: blob:; "
         "font-src 'self' data:; "
         "media-src 'self' data: blob:; "
-        "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
+        "connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; "
+        "report-uri /api/csp-report; report-to csp-endpoint"
     )
+    _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
     def csp_report_only_policy(cls) -> str:
@@ -219,6 +221,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy())
+        self.send_header("Report-To", self._CSP_REPORT_TO)
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -262,7 +265,15 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            # Stage-346 Opus SHOULD-FIX defense-in-depth: scope the CSP-report
+            # auth carve-out to POST only. The endpoint is intentionally
+            # unauthenticated (browsers omit cookies on CSP reports), but the
+            # carve-out should not extend to PATCH/DELETE on that path even
+            # though they currently fail through CSRF/routing fallthrough.
+            _is_csp_report_post = (
+                parsed.path == "/api/csp-report" and self.command == "POST"
+            )
+            if not _is_csp_report_post and not check_auth(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

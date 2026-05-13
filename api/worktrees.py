@@ -201,6 +201,102 @@ def worktree_status_for_session(session) -> dict:
     return status
 
 
+def remove_worktree_for_session(session, *, force: bool = False) -> dict:
+    """Remove a session's git worktree from disk.
+
+    Returns status dict with keys: ok, removed_path, warnings.
+    Raises ValueError for terminal blockers (locked by stream/terminal,
+    dirty with force=False).
+    """
+    raw_path = getattr(session, "worktree_path", None)
+    if not raw_path:
+        raise ValueError("Session is not worktree-backed")
+
+    worktree_path = _resolve_path(raw_path)
+    if worktree_path is None:
+        raise ValueError("Session is not worktree-backed")
+
+    # Read current status before removal
+    status = worktree_status_for_session(session)
+
+    if not status["exists"]:
+        return {
+            "ok": True,
+            "removed_path": str(worktree_path),
+            "warnings": ["Worktree directory no longer exists on disk."],
+        }
+
+    warnings = []
+
+    # Guard: locked by stream
+    if status["locked_by_stream"]:
+        raise ValueError("Worktree is locked by an active streaming session")
+
+    # Guard: locked by terminal
+    if status["locked_by_terminal"]:
+        raise ValueError("Worktree is locked by an active terminal session")
+
+    # Guard: local changes and unpushed commits without explicit force.
+    if status["dirty"] and not force:
+        raise ValueError(
+            "Worktree has uncommitted changes. Use force=true to override."
+        )
+    if status["untracked_count"] > 0:
+        if force:
+            warnings.append(
+                f"{status['untracked_count']} untracked file(s) will be removed."
+            )
+        else:
+            raise ValueError(
+                f"Worktree has {status['untracked_count']} untracked file(s). "
+                "Use force=true to override."
+            )
+    ahead = int((status.get("ahead_behind") or {}).get("ahead") or 0)
+    if ahead > 0:
+        if force:
+            warnings.append(f"{ahead} unpushed commit(s) will be removed.")
+        else:
+            raise ValueError(
+                f"Worktree has {ahead} unpushed commit(s). "
+                "Use force=true to override."
+            )
+
+    # Remove the worktree — must run from the repo root, not the worktree dir
+    repo_root = getattr(session, "worktree_repo_root", None)
+    if not repo_root:
+        raise ValueError("Session missing worktree_repo_root")
+    try:
+        remove_args = ["worktree", "remove"]
+        if force:
+            remove_args.append("--force")
+        remove_args.append(str(worktree_path))
+        result = _run_git(remove_args, str(repo_root), timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"Failed to remove worktree: {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().split("\n")[-1]
+        raise ValueError(
+            f"git worktree remove failed: {stderr or result.stdout.strip()}"
+        )
+
+    # Prune in case the worktree dir was already gone
+    try:
+        _run_git(
+            ["worktree", "prune"],
+            str(repo_root),
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "removed_path": str(worktree_path),
+        "warnings": warnings or None,
+    }
+
+
 def find_git_repo_root(workspace: str | Path) -> Path:
     """Return the enclosing git repo root for *workspace*.
 

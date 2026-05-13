@@ -68,3 +68,15 @@ def test_worktree_archive_delete_api_responses_are_explicit():
     assert '"worktree_retained": True' in src
     assert '{"ok": True, **worktree_retained}' in src
     assert '{"ok": True, "session": s.compact(), **_worktree_retained_payload(s)}' in src
+
+
+def test_remove_worktree_ui_does_not_force_unsafe_status_by_default():
+    src = read("static/sessions.js")
+    i18n = read("static/i18n.js")
+    assert "async function removeWorktree(session)" in src
+    assert "status.dirty||status.untracked_count>0||(status.ahead_behind&&status.ahead_behind.ahead>0)" in src
+    assert "session_worktree_remove_unsafe_blocked" in src
+    assert "session_worktree_remove_unsafe_blocked" in i18n
+    assert "Resolve local changes or unpushed commits before removing this worktree." in i18n
+    assert "JSON.stringify({session_id:session.session_id, force:false})" in src
+    assert "const force=(status.dirty||status.untracked_count>0)" not in src

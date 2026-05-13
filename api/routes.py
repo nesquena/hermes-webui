@@ -63,6 +63,12 @@ _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
 }
 _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
+_CSP_REPORT_LOGGER = logging.getLogger("csp_report")
+_CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
+_CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
+_CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
+_CSP_REPORT_RATE_LIMIT_MAX = 100
+_CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -953,6 +959,32 @@ def _clear_stale_stream_state(session) -> bool:
             pass
     return True
 
+
+def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
+    """Clear stale persisted stream fields before /api/sessions serializes rows."""
+    changed = False
+    for row in session_rows:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("session_id")
+        if not sid or not row.get("active_stream_id"):
+            continue
+        if row.get("is_streaming") is True:
+            continue
+        try:
+            session = get_session(sid, metadata_only=True)
+        except Exception:
+            logger.debug(
+                "Failed to load session %s while reconciling stale stream state",
+                sid,
+                exc_info=True,
+            )
+            continue
+        if session is None:
+            continue
+        changed = _clear_stale_stream_state(session) or changed
+    return changed
+
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
 
@@ -1055,6 +1087,69 @@ def _check_csrf(handler) -> bool:
         if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
             return True
     return False
+
+
+def _client_ip_for_rate_limit(handler) -> str:
+    try:
+        address = getattr(handler, "client_address", None)
+        if address:
+            return str(address[0])
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    key = _client_ip_for_rate_limit(handler)
+    cutoff = now - _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS
+    with _CSP_REPORT_RATE_LIMIT_LOCK:
+        timestamps = [ts for ts in _CSP_REPORT_RATE_LIMIT.get(key, []) if ts >= cutoff]
+        if len(timestamps) >= _CSP_REPORT_RATE_LIMIT_MAX:
+            _CSP_REPORT_RATE_LIMIT[key] = timestamps
+            return True
+        timestamps.append(now)
+        _CSP_REPORT_RATE_LIMIT[key] = timestamps
+    return False
+
+
+def _send_no_content(handler, status: int = 204) -> bool:
+    handler.send_response(status)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+    return True
+
+
+def _read_csp_report_payload(handler):
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+    except Exception:
+        length = 0
+    if length > _CSP_REPORT_MAX_BODY_BYTES:
+        try:
+            handler.rfile.read(_CSP_REPORT_MAX_BODY_BYTES)
+        except Exception:
+            pass
+        return {"discarded": "body_too_large", "bytes": length}
+    raw = handler.rfile.read(length) if length else b"{}"
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {"invalid": True, "bytes": len(raw)}
+
+
+def _handle_csp_report(handler) -> bool:
+    """Collect browser CSP report-only violations without requiring auth."""
+    if _csp_report_rate_limited(handler):
+        _CSP_REPORT_LOGGER.warning(
+            "Dropped CSP report from %s: rate limit exceeded",
+            _client_ip_for_rate_limit(handler),
+        )
+        return _send_no_content(handler)
+
+    payload = _read_csp_report_payload(handler)
+    _CSP_REPORT_LOGGER.info("CSP report from %s: %s", _client_ip_for_rate_limit(handler), payload)
+    return _send_no_content(handler)
 
 
 def _normalize_provider_id(value: str | None) -> str:
@@ -1428,6 +1523,18 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
     except Exception:
         return {}
     return {}
+
+
+def _needs_cli_session_metadata(session) -> bool:
+    """Return true when /api/session should pay for Agent/CLI metadata lookup."""
+    if not session:
+        return False
+    is_cli = (
+        bool(session.get("is_cli_session"))
+        if isinstance(session, dict)
+        else bool(getattr(session, "is_cli_session", False))
+    )
+    return is_cli or _is_messaging_session_record(session)
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
@@ -3066,6 +3173,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
 
+
     if parsed.path == "/api/session/worktree/status":
         query = parse_qs(parsed.query)
         sid = query.get("session_id", [""])[0]
@@ -3125,7 +3233,7 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid)
+            cli_meta = _lookup_cli_session_metadata(sid) if _needs_cli_session_metadata(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             if is_messaging_session:
@@ -3385,6 +3493,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
+            diag.stage("reconcile_stale_stream_state")
+            if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+                diag.stage("all_sessions_after_stale_stream_reconcile")
+                webui_sessions = all_sessions(diag=diag)
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
@@ -3872,6 +3984,14 @@ def handle_get(handler, parsed) -> bool:
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
+    if parsed.path == "/api/csp-report":
+        if diag:
+            diag.stage("csp_report")
+        try:
+            return _handle_csp_report(handler)
+        finally:
+            if diag:
+                diag.finish()
     # CSRF: reject cross-origin browser requests
     if diag:
         diag.stage("csrf")
@@ -4272,6 +4392,28 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
+    if parsed.path == "/api/session/worktree/remove":
+        sid = body.get("session_id", "")
+        if not sid or not isinstance(sid, str) or not sid.strip():
+            return bad(handler, "session_id must be a non-empty string", status=400)
+        sid = sid.strip()
+        if not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+            return bad(handler, "Invalid session_id", 400)
+        try:
+            s = get_session(sid, metadata_only=True)
+        except KeyError:
+            return bad(handler, "Session not found", status=404)
+        force = bool(body.get("force", False))
+        try:
+            from api.worktrees import remove_worktree_for_session
+
+            result = remove_worktree_for_session(s, force=force)
+            return j(handler, result)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("failed to remove worktree for session %s", sid)
+            return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/delete":
         sid = body.get("session_id", "")

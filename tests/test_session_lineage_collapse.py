@@ -532,3 +532,30 @@ def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
     locale_count = i18n.count("session_meta_messages:")
     for key in required:
         assert i18n.count(key) >= locale_count, f"{key} missing from one or more locale blocks"
+
+def test_session_meta_segments_softened_label_no_literal_segment_in_english():
+    """Regression: the sidebar badge for compressed/lineage rows must not visibly
+    say 'X segments' by default — the technical internal term should be replaced
+    with softer user-facing copy (#2155).
+
+    This verifies the English base locale's session_meta_segments key so that
+    t() fallback for untranslated locales also produces softened copy.
+    """
+    import re
+    i18n_text = (REPO_ROOT / 'static' / 'i18n.js').read_text(encoding='utf-8')
+    # Locate the English base-locale block (first occurrence, before any _lang guard).
+    first_lang = i18n_text.index('_lang: \'en\'')
+    second_lang = i18n_text.index('_lang:', first_lang + 1)
+    english_slice = i18n_text[first_lang:second_lang]
+    assert 'session_meta_segments:' in english_slice, 'session_meta_segments missing from English locale'
+    # Capture only the arrow-function value (not the key name which also contains 'segment').
+    match = re.search(
+        r"session_meta_segments:\s*(\(\w+\)\s*=>\s*[^,]+)",
+        english_slice,
+    )
+    assert match, 'session_meta_segments value not found in English locale'
+    rendered = match.group(1)
+    assert 'segment' not in rendered, (
+        f"session_meta_segments English value still contains the technical word 'segment': {rendered}. "
+        "Expected softened copy like 'prior turn(s)' instead. See #2155."
+    )

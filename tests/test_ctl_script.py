@@ -75,6 +75,17 @@ def wait_for_pid_file(pid_file: Path, timeout: float = 3.0) -> int:
     raise AssertionError(f"PID file was not written: {pid_file}")
 
 
+def wait_for_file_text(path: Path, timeout: float = 3.0) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.exists():
+            text = path.read_text(encoding="utf-8")
+            if text:
+                return text
+        time.sleep(0.05)
+    raise AssertionError(f"File was not written: {path}")
+
+
 def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -110,7 +121,7 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
     try:
         assert pid > 1
         assert log_file.exists()
-        fake_output = fake_log.read_text(encoding="utf-8")
+        fake_output = wait_for_file_text(fake_log)
         assert "bootstrap.py --no-browser --foreground" in fake_output
         assert "host=0.0.0.0 port=18991" in fake_output
         assert str(hermes_home / "webui") in fake_output
@@ -154,7 +165,7 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
     try:
-        fake_output = fake_log.read_text(encoding="utf-8")
+        fake_output = wait_for_file_text(fake_log)
         assert "fake-python args:" in fake_output
         assert "host=0.0.0.0 port=18888" in fake_output
     finally:

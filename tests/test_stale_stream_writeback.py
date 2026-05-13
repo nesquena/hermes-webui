@@ -87,3 +87,29 @@ def test_success_path_checks_stream_ownership_before_persisting_result():
     assert compression_pos != -1
     assert guard_pos < result_merge_pos
     assert guard_pos < compression_pos
+
+
+def test_self_heal_retry_success_checks_stream_ownership_before_writeback():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    start = src.index("logger.info('[webui] self-heal (except path): retrying stream")
+    end = src.index("logger.info('[webui] self-heal (except path): retry succeeded')", start)
+    block = src[start:end]
+    guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
+
+    assert guard in block
+    assert block.index(guard) < block.index("_result_messages = _heal_result.get('messages') or _previous_context_messages")
+    assert block.index(guard) < block.index("s.save()")
+
+
+def test_outer_exception_path_checks_stream_ownership_before_error_writeback():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    outer_error_payload = src.index("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
+    start = src.index("# Persist the error so it survives page reload.", outer_error_payload)
+    end = src.index("put('apperror', _error_payload)", start)
+    block = src[start:end]
+    guard = "if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
+
+    assert guard in block
+    assert block.index(guard) < block.index("_materialize_pending_user_turn_before_error(s)")
+    assert block.index(guard) < block.index("s.active_stream_id = None")
+    assert block.index(guard) < block.index("s.messages.append(_error_message)")

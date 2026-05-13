@@ -430,6 +430,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `Delete this conversation? The worktree at ${path} will remain on disk.`,
     session_deleted: 'Conversation deleted',
     session_deleted_worktree: 'Conversation deleted. Worktree remains on disk.',
+    session_worktree_remove: 'Remove worktree',
+    session_worktree_remove_desc: (path) => `Delete the git worktree at ${path} from disk`,
+    session_worktree_remove_confirm: (path) => `Remove git worktree from disk?\n\nPath: ${path}\n\nThis will delete the entire worktree directory. Session data remains in WebUI.`,
+    session_worktree_remove_not_exists: (path) => `The worktree at ${path} no longer exists on disk.`,
+    session_worktree_remove_confirm_label: 'Remove',
+    session_worktree_removed: 'Worktree removed.',
+    session_worktree_remove_failed: 'Failed to remove worktree: ',
+    session_worktree_remove_status_failed: 'Failed to read worktree status: ',
+    session_worktree_remove_locked_by_stream: 'Cannot remove — an active streaming session is using this worktree.',
+    session_worktree_remove_locked_by_terminal: 'Cannot remove — an active terminal session is using this worktree.',
+    session_worktree_remove_unsafe_blocked: 'Resolve local changes or unpushed commits before removing this worktree.',
+    session_worktree_remove_dirty_warning: 'WARNING: This worktree has uncommitted changes which will be lost.',
+    session_worktree_remove_untracked_warning: (count) => `${count} untracked file(s) will be permanently deleted.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} unpushed commit(s) will be lost.`,
     session_select_mode: 'Select',
     session_select_mode_desc: 'Select conversations to batch manage',
     session_select_all: 'Select all',
@@ -686,7 +700,10 @@ const LOCALES = {
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
-    session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 's'}`,
+    // Softened label: avoids exposing the technical internal term
+    // 'segment' in the default visible badge. User-facing copy remains
+    // translatable for locales that prefer a different wording. (#2155)
+    session_meta_segments: (n) => `${n} prior turn${n === 1 ? '' : 's'}`,
     session_lineage_segment_untitled: 'Untitled segment',
     session_lineage_segment_open: 'Open lineage segment',
     new_profile: 'New profile',
@@ -1538,6 +1555,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `Eliminare questa conversazione? Il worktree in ${path} rimarrà su disco.`,
     session_deleted: 'Conversazione eliminata',
     session_deleted_worktree: 'Conversazione eliminata. Il worktree rimane su disco.',
+    session_worktree_remove: 'Rimuovi worktree',
+    session_worktree_remove_desc: (path) => `Elimina il git worktree in ${path} dal disco`,
+    session_worktree_remove_confirm: (path) => `Rimuovere il git worktree dal disco?\n\nPercorso: ${path}\n\nVerrà eliminata l'intera directory del worktree. I dati della sessione restano in WebUI.`,
+    session_worktree_remove_not_exists: (path) => `Il worktree in ${path} non esiste più sul disco.`,
+    session_worktree_remove_confirm_label: 'Rimuovi',
+    session_worktree_removed: 'Worktree rimosso.',
+    session_worktree_remove_failed: 'Rimozione worktree fallita: ',
+    session_worktree_remove_status_failed: 'Lettura stato worktree fallita: ',
+    session_worktree_remove_locked_by_stream: 'Impossibile rimuovere — una sessione di streaming attiva sta usando questo worktree.',
+    session_worktree_remove_locked_by_terminal: 'Impossibile rimuovere — una sessione terminale attiva sta usando questo worktree.',
+    session_worktree_remove_unsafe_blocked: 'Risolvi le modifiche locali o i commit non inviati prima di rimuovere questo worktree.',
+    session_worktree_remove_dirty_warning: 'ATTENZIONE: Questo worktree ha modifiche non committate che andranno perse.',
+    session_worktree_remove_untracked_warning: (count) => `${count} file non tracciati verranno eliminati definitivamente.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} commit non inviati andranno persi.`,
     session_select_mode: 'Seleziona',
     session_select_mode_desc: 'Seleziona conversazioni per gestione in blocco',
     session_select_all: 'Seleziona tutto',
@@ -2641,6 +2672,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `この会話を削除しますか? ${path} の worktree はディスク上に残ります。`,
     session_deleted: '会話を削除しました',
     session_deleted_worktree: '会話を削除しました。Worktree はディスク上に残ります。',
+    session_worktree_remove: 'ワークツリーを削除',
+    session_worktree_remove_desc: (path) => `${path} のgitワークツリーをディスクから削除します`,
+    session_worktree_remove_confirm: (path) => `gitワークツリーをディスクから削除しますか？\n\nパス: ${path}\n\nワークツリーディレクトリ全体が削除されます。セッションデータはWebUIに残ります。`,
+    session_worktree_remove_not_exists: (path) => `${path} のワークツリーはディスク上に存在しません。`,
+    session_worktree_remove_confirm_label: '削除',
+    session_worktree_removed: 'ワークツリーを削除しました。',
+    session_worktree_remove_failed: 'ワークツリーの削除に失敗: ',
+    session_worktree_remove_status_failed: 'ワークツリー状態の読み取りに失敗: ',
+    session_worktree_remove_locked_by_stream: '削除できません — アクティブなストリーミングセッションがこのワークツリーを使用中です。',
+    session_worktree_remove_locked_by_terminal: '削除できません — アクティブな端末セッションがこのワークツリーを使用中です。',
+    session_worktree_remove_unsafe_blocked: 'このワークツリーを削除する前に、ローカル変更または未プッシュのコミットを解消してください。',
+    session_worktree_remove_dirty_warning: '警告: このワークツリーにはコミットされていない変更があり、失われます。',
+    session_worktree_remove_untracked_warning: (count) => `${count}件の追跡されていないファイルが完全に削除されます。`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead}件の未プッシュコミットが失われます。`,
     session_select_mode: '選択',
     session_select_mode_desc: '会話を選択して一括管理',
     session_select_all: 'すべて選択',
@@ -2865,11 +2910,11 @@ const LOCALES = {
     logs_no_mtime: '未書き込み',
     logs_truncated_hint: '大きなログファイルの末尾を表示しています。メモリ使用量を抑えるため、古いデータは省略されました。',
     logs_copied: 'ログをコピーしました',
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '重大度',
+    logs_severity_all: 'すべて',
+    logs_severity_errors: 'エラー',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '表示中（フィルター有効）',
 
     // Insights
     insights_title: '使用状況分析',
@@ -3778,11 +3823,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Уровень',
+    logs_severity_all: 'Все',
+    logs_severity_errors: 'Ошибки',
+    logs_severity_warnings: 'Предупреждения+',
+    logs_filter_active: 'показано (фильтр активен)',
     new_conversation: 'Новая беседа',
     filter_conversations: 'Фильтр бесед...',
     session_time_unknown: 'Неизвестно',
@@ -4187,6 +4232,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `Delete this conversation? The worktree at ${path} will remain on disk.`,
     session_deleted: 'Conversation deleted',
     session_deleted_worktree: 'Conversation deleted. Worktree remains on disk.',
+    session_worktree_remove: 'Remove worktree',
+    session_worktree_remove_desc: (path) => `Delete the git worktree at ${path} from disk`,
+    session_worktree_remove_confirm: (path) => `Remove git worktree from disk?\n\nPath: ${path}\n\nThis will delete the entire worktree directory. Session data remains in WebUI.`,
+    session_worktree_remove_not_exists: (path) => `The worktree at ${path} no longer exists on disk.`,
+    session_worktree_remove_confirm_label: 'Remove',
+    session_worktree_removed: 'Worktree removed.',
+    session_worktree_remove_failed: 'Failed to remove worktree: ',
+    session_worktree_remove_status_failed: 'Failed to read worktree status: ',
+    session_worktree_remove_locked_by_stream: 'Cannot remove — an active streaming session is using this worktree.',
+    session_worktree_remove_locked_by_terminal: 'Cannot remove — an active terminal session is using this worktree.',
+    session_worktree_remove_unsafe_blocked: 'Resolve local changes or unpushed commits before removing this worktree.',
+    session_worktree_remove_dirty_warning: 'WARNING: This worktree has uncommitted changes which will be lost.',
+    session_worktree_remove_untracked_warning: (count) => `${count} untracked file(s) will be permanently deleted.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} unpushed commit(s) will be lost.`,
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
@@ -4820,11 +4879,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Severidad',
+    logs_severity_all: 'Todo',
+    logs_severity_errors: 'Errores',
+    logs_severity_warnings: 'Advertencias+',
+    logs_filter_active: 'mostrados (filtro activo)',
     new_conversation: 'Nueva conversación',
     filter_conversations: 'Filtrar conversaciones...',
     session_time_unknown: 'Desconocido',
@@ -5217,6 +5276,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `¿Eliminar esta conversación? El worktree en ${path} permanecerá en disco.`,
     session_deleted: 'Conversación eliminada',
     session_deleted_worktree: 'Conversación eliminada. El worktree permanece en disco.',
+    session_worktree_remove: 'Eliminar worktree',
+    session_worktree_remove_desc: (path) => `Eliminar el git worktree en ${path} del disco`,
+    session_worktree_remove_confirm: (path) => `¿Eliminar el git worktree del disco?\n\nRuta: ${path}\n\nSe eliminará todo el directorio del worktree. Los datos de la sesión permanecen en WebUI.`,
+    session_worktree_remove_not_exists: (path) => `El worktree en ${path} ya no existe en el disco.`,
+    session_worktree_remove_confirm_label: 'Eliminar',
+    session_worktree_removed: 'Worktree eliminado.',
+    session_worktree_remove_failed: 'Error al eliminar worktree: ',
+    session_worktree_remove_status_failed: 'Error al leer el estado del worktree: ',
+    session_worktree_remove_locked_by_stream: 'No se puede eliminar — una sesión de streaming activa está usando este worktree.',
+    session_worktree_remove_locked_by_terminal: 'No se puede eliminar — una sesión de terminal activa está usando este worktree.',
+    session_worktree_remove_unsafe_blocked: 'Resuelve los cambios locales o los commits no enviados antes de eliminar este worktree.',
+    session_worktree_remove_dirty_warning: 'ADVERTENCIA: Este worktree tiene cambios no confirmados que se perderán.',
+    session_worktree_remove_untracked_warning: (count) => `${count} archivo(s) no rastreados se eliminarán permanentemente.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} commit(s) no enviados se perderán.`,
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
@@ -5845,11 +5918,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Schweregrad',
+    logs_severity_all: 'Alle',
+    logs_severity_errors: 'Fehler',
+    logs_severity_warnings: 'Warnungen+',
+    logs_filter_active: 'angezeigt (Filter aktiv)',
     new_conversation: 'Neuer Chat',
     filter_conversations: 'Chats filtern...',
     scheduled_jobs: 'Geplante Aufgaben',
@@ -5987,6 +6060,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `Diese Konversation löschen? Der Worktree unter ${path} bleibt auf der Festplatte.`,
     session_deleted: 'Konversation gelöscht',
     session_deleted_worktree: 'Konversation gelöscht. Der Worktree bleibt auf der Festplatte.',
+    session_worktree_remove: 'Worktree entfernen',
+    session_worktree_remove_desc: (path) => `Git-Worktree unter ${path} von der Festplatte löschen`,
+    session_worktree_remove_confirm: (path) => `Git-Worktree von der Festplatte entfernen?\n\nPfad: ${path}\n\nDas gesamte Worktree-Verzeichnis wird gelöscht. Sitzungsdaten bleiben in WebUI.`,
+    session_worktree_remove_not_exists: (path) => `Der Worktree unter ${path} existiert nicht mehr auf der Festplatte.`,
+    session_worktree_remove_confirm_label: 'Entfernen',
+    session_worktree_removed: 'Worktree entfernt.',
+    session_worktree_remove_failed: 'Fehler beim Entfernen des Worktree: ',
+    session_worktree_remove_status_failed: 'Fehler beim Lesen des Worktree-Status: ',
+    session_worktree_remove_locked_by_stream: 'Entfernen nicht möglich — eine aktive Streaming-Sitzung verwendet diesen Worktree.',
+    session_worktree_remove_locked_by_terminal: 'Entfernen nicht möglich — eine aktive Terminal-Sitzung verwendet diesen Worktree.',
+    session_worktree_remove_unsafe_blocked: 'Löse lokale Änderungen oder nicht gepushte Commits, bevor du diesen Worktree entfernst.',
+    session_worktree_remove_dirty_warning: 'WARNUNG: Dieser Worktree hat nicht festgeschriebene Änderungen, die verloren gehen.',
+    session_worktree_remove_untracked_warning: (count) => `${count} nicht verfolgte Datei(en) werden dauerhaft gelöscht.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} nicht gepushte Commit(s) gehen verloren.`,
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
@@ -6903,11 +6990,11 @@ const LOCALES = {
     logs_no_mtime: '尚未写入',
     logs_truncated_hint: '此处显示的是日志文件的末尾内容。为节省内存，已省略较早的数据。',
     logs_copied: '日志已复制',
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '严重性',
+    logs_severity_all: '全部',
+    logs_severity_errors: '错误',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '已显示（筛选器已启用）',
     new_conversation: '新建对话',
     filter_conversations: '筛选对话…',
     session_time_unknown: '未知',
@@ -7298,6 +7385,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `删除此会话？位于 ${path} 的 worktree 将保留在磁盘上。`,
     session_deleted: '会话已删除',
     session_deleted_worktree: '会话已删除。Worktree 仍保留在磁盘上。',
+    session_worktree_remove: '删除 worktree',
+    session_worktree_remove_desc: (path) => `删除位于 ${path} 的 git worktree`,
+    session_worktree_remove_confirm: (path) => `确定从磁盘删除 git worktree？\n\n路径：${path}\n\n整个 worktree 目录将被删除，WebUI 中的会话数据保留。`,
+    session_worktree_remove_not_exists: (path) => `位于 ${path} 的 worktree 在磁盘上已不存在。`,
+    session_worktree_remove_confirm_label: '删除',
+    session_worktree_removed: 'Worktree 已删除。',
+    session_worktree_remove_failed: '删除 worktree 失败：',
+    session_worktree_remove_status_failed: '读取 worktree 状态失败：',
+    session_worktree_remove_locked_by_stream: '无法删除 — 存在活跃的流式会话正在使用此 worktree。',
+    session_worktree_remove_locked_by_terminal: '无法删除 — 存在活跃的终端会话正在使用此 worktree。',
+    session_worktree_remove_unsafe_blocked: '请先处理本地更改或未推送提交，再删除此 worktree。',
+    session_worktree_remove_dirty_warning: '⚠️ 此 worktree 有未提交的更改，将被永久删除。',
+    session_worktree_remove_untracked_warning: (count) => `${count} 个未追踪文件将被永久删除。`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} 个未推送的提交将丢失。`,
     session_duplicate: '复制会话',
     session_duplicate_desc: '用相同工作区和模型创建副本',
     session_duplicate_failed: '复制失败：',
@@ -7743,6 +7844,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `刪除此對話？位於 ${path} 的 worktree 將保留在磁碟上。`,
     session_deleted: '對話已刪除',
     session_deleted_worktree: '對話已刪除。Worktree 仍保留在磁碟上。',
+    session_worktree_remove: '刪除 worktree',
+    session_worktree_remove_desc: (path) => `刪除位於 ${path} 的 git worktree`,
+    session_worktree_remove_confirm: (path) => `確定從磁碟刪除 git worktree？\n\n路徑：${path}\n\n整個 worktree 目錄將被刪除，WebUI 中的工作階段資料保留。`,
+    session_worktree_remove_not_exists: (path) => `位於 ${path} 的 worktree 在磁碟上已不存在。`,
+    session_worktree_remove_confirm_label: '刪除',
+    session_worktree_removed: 'Worktree 已刪除。',
+    session_worktree_remove_failed: '刪除 worktree 失敗：',
+    session_worktree_remove_status_failed: '讀取 worktree 狀態失敗：',
+    session_worktree_remove_locked_by_stream: '無法刪除 — 存在活躍的串流工作階段正在使用此 worktree。',
+    session_worktree_remove_locked_by_terminal: '無法刪除 — 存在活躍的終端機工作階段正在使用此 worktree。',
+    session_worktree_remove_unsafe_blocked: '請先處理本機變更或未推送提交，再刪除此 worktree。',
+    session_worktree_remove_dirty_warning: '⚠️ 此 worktree 有未提交的變更，將被永久刪除。',
+    session_worktree_remove_untracked_warning: (count) => `${count} 個未追蹤檔案將被永久刪除。`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} 個未推送的提交將丟失。`,
     session_select_mode: '選取',
     session_select_mode_desc: '選取會話以批次管理',
     session_select_all: '全選',
@@ -7933,6 +8048,11 @@ const LOCALES = {
     kanban_dispatch_auto_blocked: '自動封鎖',
     kanban_dispatch_timed_out: '逾時',
     kanban_dispatch_crashed: '崩潰',
+    logs_severity: '嚴重性',
+    logs_severity_all: '全部',
+    logs_severity_errors: '錯誤',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '已顯示（篩選器已啟用）',
     new_conversation: '新對話',
     filter_conversations: '篩選對話',
     scheduled_jobs: '排程任務',
@@ -8945,6 +9065,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `Excluir esta conversa? O worktree em ${path} permanecerá no disco.`,
     session_deleted: 'Conversa excluída',
     session_deleted_worktree: 'Conversa excluída. O worktree permanece no disco.',
+    session_worktree_remove: 'Remover worktree',
+    session_worktree_remove_desc: (path) => `Excluir o git worktree em ${path} do disco`,
+    session_worktree_remove_confirm: (path) => `Remover git worktree do disco?\n\nCaminho: ${path}\n\nTodo o diretório do worktree será excluído. Dados da sessão permanecem no WebUI.`,
+    session_worktree_remove_not_exists: (path) => `O worktree em ${path} não existe mais no disco.`,
+    session_worktree_remove_confirm_label: 'Remover',
+    session_worktree_removed: 'Worktree removido.',
+    session_worktree_remove_failed: 'Falha ao remover worktree: ',
+    session_worktree_remove_status_failed: 'Falha ao ler o status do worktree: ',
+    session_worktree_remove_locked_by_stream: 'Não é possível remover — uma sessão de streaming ativa está usando este worktree.',
+    session_worktree_remove_locked_by_terminal: 'Não é possível remover — uma sessão de terminal ativa está usando este worktree.',
+    session_worktree_remove_unsafe_blocked: 'Resolva alterações locais ou commits não enviados antes de remover este worktree.',
+    session_worktree_remove_dirty_warning: 'AVISO: Este worktree tem alterações não confirmadas que serão perdidas.',
+    session_worktree_remove_untracked_warning: (count) => `${count} arquivo(s) não rastreados serão excluídos permanentemente.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} commit(s) não enviados serão perdidos.`,
     session_batch_delete_worktree_confirm: 'Excluir {0} conversas? {1} conversa(s) com worktree manterão seus diretórios de worktree no disco.',
     session_batch_archive_worktree_confirm: 'Arquivar {0} conversas? {1} conversa(s) com worktree manterão seus diretórios de worktree no disco.',
     session_batch_delete_confirm: 'Excluir {0} conversas?',
@@ -9138,11 +9272,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Severidade',
+    logs_severity_all: 'Todos',
+    logs_severity_errors: 'Erros',
+    logs_severity_warnings: 'Avisos+',
+    logs_filter_active: 'exibidos (filtro ativo)',
     new_conversation: 'Nova conversa',
     filter_conversations: 'Filtrar conversas...',
     session_time_unknown: 'Desconhecido',
@@ -9947,6 +10081,20 @@ const LOCALES = {
     session_delete_worktree_confirm: (path) => `이 대화를 삭제하시겠습니까? ${path}의 worktree는 디스크에 남아 있습니다.`,
     session_deleted: '대화가 삭제되었습니다',
     session_deleted_worktree: '대화가 삭제되었습니다. Worktree는 디스크에 남아 있습니다.',
+    session_worktree_remove: '워크트리 삭제',
+    session_worktree_remove_desc: (path) => `${path}의 git worktree를 디스크에서 삭제합니다`,
+    session_worktree_remove_confirm: (path) => `git worktree를 디스크에서 삭제하시겠습니까?\n\n경로: ${path}\n\n전체 worktree 디렉토리가 삭제됩니다. 세션 데이터는 WebUI에 보존됩니다.`,
+    session_worktree_remove_not_exists: (path) => `${path}의 worktree가 디스크에 더 이상 존재하지 않습니다.`,
+    session_worktree_remove_confirm_label: '삭제',
+    session_worktree_removed: '워크트리가 삭제되었습니다.',
+    session_worktree_remove_failed: '워크트리 삭제 실패: ',
+    session_worktree_remove_status_failed: '워크트리 상태 읽기 실패: ',
+    session_worktree_remove_locked_by_stream: '삭제할 수 없습니다 — 활성 스트리밍 세션이 이 worktree를 사용 중입니다.',
+    session_worktree_remove_locked_by_terminal: '삭제할 수 없습니다 — 활성 터미널 세션이 이 worktree를 사용 중입니다.',
+    session_worktree_remove_unsafe_blocked: '이 worktree를 삭제하기 전에 로컬 변경 사항이나 푸시되지 않은 커밋을 정리하세요.',
+    session_worktree_remove_dirty_warning: '경고: 이 worktree에는 커밋되지 않은 변경 사항이 있으며 손실됩니다.',
+    session_worktree_remove_untracked_warning: (count) => `${count}개의 추적되지 않은 파일이 영구적으로 삭제됩니다.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead}개의 푸시되지 않은 커밋이 손실됩니다.`,
     session_select_mode: '선택',
     session_select_mode_desc: '일괄 관리할 대화를 선택하세요',
     session_select_all: '전체 선택',
@@ -10144,11 +10292,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '심각도',
+    logs_severity_all: '전체',
+    logs_severity_errors: '오류',
+    logs_severity_warnings: '경고+',
+    logs_filter_active: '표시됨(필터 활성)',
     new_conversation: '새 대화',
     filter_conversations: '대화 필터…',
     session_time_unknown: 'Unknown',
@@ -10973,6 +11121,20 @@ const LOCALES = {
     session_delete_worktree_desc: 'Supprimez uniquement la conversation WebUI ; garder l\'arbre de travail sur le disque',
     session_deleted: 'Conversation supprimée',
     session_deleted_worktree: 'Conversation supprimée. Worktree reste sur le disque.',
+    session_worktree_remove: 'Supprimer le worktree',
+    session_worktree_remove_desc: (path) => `Supprimer le git worktree à ${path} du disque`,
+    session_worktree_remove_confirm: (path) => `Supprimer le git worktree du disque ?\n\nChemin : ${path}\n\nTout le répertoire worktree sera supprimé. Les données de session restent dans WebUI.`,
+    session_worktree_remove_not_exists: (path) => `Le worktree à ${path} n'existe plus sur le disque.`,
+    session_worktree_remove_confirm_label: 'Supprimer',
+    session_worktree_removed: 'Worktree supprimé.',
+    session_worktree_remove_failed: 'Échec de la suppression du worktree : ',
+    session_worktree_remove_status_failed: 'Échec de la lecture du statut du worktree : ',
+    session_worktree_remove_locked_by_stream: 'Impossible de supprimer — une session de streaming active utilise ce worktree.',
+    session_worktree_remove_locked_by_terminal: 'Impossible de supprimer — une session de terminal active utilise ce worktree.',
+    session_worktree_remove_unsafe_blocked: 'Résolvez les modifications locales ou les commits non poussés avant de supprimer ce worktree.',
+    session_worktree_remove_dirty_warning: 'ATTENTION : Ce worktree a des modifications non validées qui seront perdues.',
+    session_worktree_remove_untracked_warning: (count) => `${count} fichier(s) non suivi(s) seront définitivement supprimés.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} commit(s) non poussé(s) seront perdus.`,
     session_select_mode: 'Sélectionner',
     session_select_mode_desc: 'Sélectionnez les conversations à gérer par lots',
     session_select_all: 'Tout sélectionner',
