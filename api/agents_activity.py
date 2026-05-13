@@ -78,6 +78,11 @@ def generate_init_events():
             folder_names[next_id] = s.get("project") or "Neo"
             next_id += 1
 
+    # If no active sessions, show a demo agent so the panel isn't empty
+    if not agent_ids:
+        agent_ids = [1]
+        folder_names = {1: "Neo"}
+
     yield _sse_data({
         "type": "existingAgents",
         "agents": agent_ids,
