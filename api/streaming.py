@@ -789,7 +789,7 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     candidate = re.sub(r'\s+', ' ', str(derived[:64] or '')).strip()
     if not current or not candidate:
         return False
-    return current == candidate or candidate.startswith(current)
+    return current == candidate
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:

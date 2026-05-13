@@ -56,6 +56,48 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 // (e.g. queue drain + user click) can both pass the S.busy check because
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
+const _sessionTitleProvisionalBySid = new Map();
+
+function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
+  const title=String(titleText||'').replace(/\s+/g,' ').trim();
+  if(!title||title==='Untitled'||title==='New Chat')return true;
+  const provisional=String(provisionalText||'').replace(/\s+/g,' ').trim().slice(0,64);
+  return !!provisional&&title===provisional;
+}
+
+function _firstUserMessageTitleCandidate(){
+  const first=(S.messages||[]).find(m=>m&&m.role==='user'&&m.content);
+  return first?String(first.content||'').trim().slice(0,64):'';
+}
+
+function applySessionTitleUpdate(sid, titleText, options={}){
+  const newTitle=String(titleText||'').trim();
+  if(!sid||!newTitle)return false;
+  const row=(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions))
+    ? _allSessions.find(s=>s&&s.session_id===sid)
+    : null;
+  const currentTitle=S.session&&S.session.session_id===sid
+    ? S.session.title
+    : row&&row.title;
+  if(!options.force){
+    const expected=String(options.expectedCurrent||'').trim();
+    const remembered=_sessionTitleProvisionalBySid.get(sid)||'';
+    const provisionalCandidates=[options.provisionalText,remembered,_firstUserMessageTitleCandidate()];
+    const allowed=(expected&&String(currentTitle||'').trim()===expected)
+      || String(currentTitle||'').trim()===newTitle
+      || provisionalCandidates.some(p=>_sessionTitleLooksDefaultOrProvisional(currentTitle, p));
+    if(!allowed)return false;
+  }
+  if(S.session&&S.session.session_id===sid){
+    S.session.title=newTitle;
+    if(typeof syncTopbar==='function') syncTopbar();
+  }
+  if(row) row.title=newTitle;
+  if(options.rememberProvisional) _sessionTitleProvisionalBySid.set(sid,newTitle);
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  else if(typeof renderSessionList==='function') renderSessionList();
+  return true;
+}
 
 async function send(){
   // Reject concurrent invocations early — before any await yields control.
@@ -249,21 +291,16 @@ async function send(){
   if(typeof updateSendBtn==='function') updateSendBtn();
 
   // Set provisional title from user message immediately so session appears
-  // in the sidebar right away with a meaningful name (server may refine later)
+  // in the sidebar right away with a meaningful name. /api/chat/start persists
+  // the server-side provisional title and may refine this optimistic text.
   if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
     const provisionalTitle=displayText.slice(0,64);
-    S.session.title=provisionalTitle;
-    syncTopbar();
-    // Persist it in the background; keep the optimistic sidebar cache as the
-    // immediate source of truth until /api/chat/start saves pending state.
-    api('/api/session/rename',{method:'POST',body:JSON.stringify({
-      session_id:activeSid, title:provisionalTitle
-    })}).catch(()=>{});  // fire-and-forget, server refines on done
+    applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Second optimistic pass: carry the provisional title into the cached row
       // without re-fetching /api/sessions before pending state exists server-side.
       upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
-    }else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    }
   } else if(typeof upsertActiveSessionForLocalTurn==='function'){
     upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
   } else {
@@ -280,6 +317,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
+    if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
@@ -909,18 +948,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
-      const newTitle=String(d.title||'').trim();
-      if(!newTitle) return;
-      if(S.session&&S.session.session_id===activeSid){
-        S.session.title=newTitle;
-        syncTopbar();
-      }
-      if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)){
-        const row=_allSessions.find(s=>s&&s.session_id===activeSid);
-        if(row) row.title=newTitle;
-      }
-      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-      else if(typeof renderSessionList==='function') renderSessionList();
+      applySessionTitleUpdate(activeSid, d.title);
     });
 
     source.addEventListener('title_status',e=>{

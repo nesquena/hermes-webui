@@ -6912,6 +6912,17 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     s.messages.append(user_msg)
 
 
+def _is_default_or_empty_session_title(title) -> bool:
+    return str(title or "").strip() in ("", "Untitled", "New Chat")
+
+
+def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        return fallback
+    return title_from([{"role": "user", "content": text}], fallback) or fallback
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -6939,6 +6950,11 @@ def _prepare_chat_start_session_for_stream(
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
+    current_title = getattr(s, "title", None)
+    if _is_default_or_empty_session_title(current_title):
+        provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
+        if provisional_title and not _is_default_or_empty_session_title(provisional_title):
+            s.title = provisional_title
     if get_webui_session_save_mode() == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
@@ -7046,6 +7062,7 @@ def _start_chat_stream_for_session(
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
         "turn_id": journal_event.get("turn_id"),
+        "title": s.title,
     }
     if normalized_model:
         response["effective_model"] = model
