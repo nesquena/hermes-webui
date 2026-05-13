@@ -600,7 +600,7 @@
 
   function safeSpaceRevisionLabel(value, fallback){
     const raw = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
-    const emptyLabel = fallback || 'none';
+    const emptyLabel = fallback === undefined ? 'none' : fallback;
     if (!raw || raw === 'none') return emptyLabel;
     return safeRevisionEventIdText(raw) || '[REDACTED]';
   }
@@ -672,7 +672,7 @@
     const space = data && data.space && typeof data.space === 'object' && !Array.isArray(data.space) ? data.space : {};
     const spaceName = safeCreatorSummaryText(space.name || space.space_id || 'Committed Space') || 'Committed Space';
     const spaceId = safeCreatorIdText(space.space_id || '');
-    const rev = safeCreatorSummaryText(space.revision_event_id || data && data.revision_event && data.revision_event.event_id || '');
+    const rev = safeSpaceRevisionLabel(space.revision_event_id || data && data.revision_event && data.revision_event.event_id || '', '');
     const stage = safeCreatorSummaryText(data && data.stage || 'revisioned-commit') || 'revisioned-commit';
     const stored = data && data.stored === true ? 'true' : 'false';
     const executed = data && data.executed === true ? 'true' : 'false';

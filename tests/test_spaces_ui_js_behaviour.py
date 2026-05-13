@@ -521,6 +521,9 @@ global.fetch = async function(path, opts = {}) {
         }, 400);
       }
       const existingSpaceCommit = scenario === 'creatorCommitExistingSpaceReceipt';
+      const unsafeRevisionCommit = scenario === 'creatorCommitUnsafeRevisionEventId';
+      const noRevisionCommit = scenario === 'creatorCommitNoRevisionEventId';
+      const safeCreatorCommitRevision = 'abcdef0123456789abcdef0123456789';
       return response({
         ok: true,
         action: 'space.creator.commit',
@@ -531,7 +534,7 @@ global.fetch = async function(path, opts = {}) {
           space_id: existingSpaceCommit ? 'existing-creator-lab' : (scenario === 'creatorCommitUnsafeSpaceId' ? 'creator/../lab' : 'creator-lab'),
           name: existingSpaceCommit ? 'Existing Creator Lab Revised' : 'Creator Lab <Safe>',
           widget_count: 1,
-          revision_event_id: 'rev-creator-commit',
+          revision_event_id: noRevisionCommit ? '' : (unsafeRevisionCommit ? 'rev/../escape' : safeCreatorCommitRevision),
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK'
         },
@@ -556,7 +559,7 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         } : undefined,
-        revision_event: { event_id: 'rev-creator-commit', event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+        revision_event: noRevisionCommit ? undefined : { event_id: safeCreatorCommitRevision, event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
       });
     }
   }
@@ -2445,7 +2448,7 @@ async function dispatchWindowMessage(data, opts) {
     makeElement('capyCreatorGateVisualQa_preview-existing-safe-1').checked = true;
     beforeHtml = root.innerHTML;
     await click('commitCreatorSpec', { previewId: 'preview-existing-safe-1' });
-  } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId' || scenario === 'creatorCommitStaleFailure') {
+  } else if (scenario === 'creatorCommitConfirmed' || scenario === 'creatorCommitUnsafeSpaceId' || scenario === 'creatorCommitUnsafeRevisionEventId' || scenario === 'creatorCommitNoRevisionEventId' || scenario === 'creatorCommitStaleFailure') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
     await click('previewCreatorSpec', {});
@@ -5574,7 +5577,7 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "stored: true" in out["rootHtml"]
     assert "executed: false" in out["rootHtml"]
     assert "revisioned-commit" in out["rootHtml"]
-    assert "rev-creator-commit" in out["rootHtml"]
+    assert "abcdef0123456789abcdef0123456789" in out["rootHtml"]
     assert "Open committed Space" in out["rootHtml"]
     assert "Manage committed widgets" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="creator-lab"' in out["rootHtml"]
@@ -5631,6 +5634,38 @@ def test_creator_commit_omits_followup_actions_for_unsafe_space_id(driver_path):
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_redacts_unsafe_revision_event_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitUnsafeRevisionEventId")
+
+    assert "Creator commit saved" in out["rootHtml"]
+    assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
+    assert "Revision: [REDACTED]" in out["rootHtml"]
+    assert "rev/../escape" not in out["rootHtml"]
+    assert "../" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+
+
+def test_creator_commit_omits_missing_revision_event_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorCommitNoRevisionEventId")
+
+    commit_html = out["rootHtml"].split('<section class="capy-spaces-product-home"', 1)[0]
+    assert "Creator commit saved" in commit_html
+    assert "Creator Lab &lt;Safe&gt;" in commit_html
+    assert "stored: true" in commit_html
+    assert "executed: false" in commit_html
+    assert "Revision: none" not in commit_html
+    assert "Revision: [REDACTED]" not in commit_html
+    assert "Open committed Space" in commit_html
+    assert "Manage committed widgets" in commit_html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in commit_html
+    assert "<script>" not in commit_html
+    assert "renderer" not in commit_html
+    assert "api_key" not in commit_html.lower()
 
 
 def test_creator_commit_stale_failure_renders_safe_blocked_status(driver_path):
