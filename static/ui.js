@@ -3933,13 +3933,46 @@ function _hideUpdateSummaryPanel(){
   if(text) text.textContent='';
   if(links){links.replaceChildren();links.style.display='none';}
 }
-function _renderUpdateSummaryPanel(summary,data){
+function _renderUpdateSummaryPanel(payload,data){
   const panel=$('updateSummaryPanel');
   const text=$('updateSummaryText');
   const links=$('updateSummaryDiffLinks');
   if(!panel||!text) return;
   panel.style.display='block';
-  text.textContent=summary||'No summary available.';
+  const sections=Array.isArray(payload&&payload.summary_sections)?payload.summary_sections:null;
+  text.replaceChildren();
+  if(sections&&sections.length){
+    const wrap=document.createElement('div');
+    wrap.id='updateSummarySections';
+    wrap.style.display='grid';
+    wrap.style.gap='8px';
+    sections.forEach((section)=>{
+      const block=document.createElement('section');
+      const title=document.createElement('div');
+      title.style.fontWeight='650';
+      title.style.marginBottom='3px';
+      title.textContent=section.title||'Summary';
+      block.appendChild(title);
+      const ul=document.createElement('ul');
+      ul.style.margin='0';
+      ul.style.paddingLeft='18px';
+      (Array.isArray(section.items)?section.items:[]).forEach((item)=>{
+        const li=document.createElement('li');
+        li.textContent=String(item||'').trim();
+        if(li.textContent) ul.appendChild(li);
+      });
+      if(!ul.children.length){
+        const li=document.createElement('li');
+        li.textContent='No summary details available.';
+        ul.appendChild(li);
+      }
+      block.appendChild(ul);
+      wrap.appendChild(block);
+    });
+    text.appendChild(wrap);
+  }else{
+    text.textContent=(payload&&payload.summary)||payload||'No summary available.';
+  }
   const targets=_updateWhatsNewTargets(data||window._updateData||{});
   if(links){
     links.replaceChildren();
@@ -3953,13 +3986,18 @@ function _renderUpdateSummaryPanel(summary,data){
 }
 async function showWhatsNewSummary(){
   const data=window._updateData||{};
-  _renderUpdateSummaryPanel('Writing a simple summary…',data);
+  _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data);
   try{
     const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:data})});
-    _renderUpdateSummaryPanel(res&&res.summary,data);
+    _renderUpdateSummaryPanel(res,data);
   }catch(e){
     console.warn('[updates] summary failed',e);
-    _renderUpdateSummaryPanel('Could not generate the summary right now. The regular diff comparison is still available below.',data);
+    _renderUpdateSummaryPanel({
+      summary_sections:[
+        {title:"What you'll notice",items:['Could not generate the summary right now.']},
+        {title:'Worth knowing',items:['The regular diff comparison is still available below for exact details.']},
+      ],
+    },data);
   }
 }
 function _renderUpdateWhatsNewLinks(data){
@@ -3985,7 +4023,7 @@ function _renderUpdateWhatsNewLinks(data){
     btn.style.border='0';
     btn.style.padding='0';
     btn.style.cursor='pointer';
-    btn.textContent='What changed? Read simple summary';
+    btn.textContent='Generate summary of changes';
     btn.onclick=()=>showWhatsNewSummary();
     container.appendChild(btn);
     return;

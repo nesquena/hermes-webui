@@ -762,6 +762,8 @@ class TestWhatsNewSummaryToggle:
         assert "api('/api/updates/summary'" in src
         assert 'updateSummaryDiffLinks' in src
         assert 'Regular diff comparison' in src
+        assert 'updateSummarySections' in src
+        assert 'Generate summary of changes' in src
         assert '_renderUpdateWhatsNewLinks(data,{mode' in src
         assert 'window._whatsNewSummaryEnabled' in src
 
@@ -774,6 +776,53 @@ class TestWhatsNewSummaryToggle:
         assert 'human-readable' in updates
         assert 'avoid technical jargon' in updates
         assert 'regular diff comparison' in updates
+        assert 'Return only bullets' in updates
+        assert 'def _format_update_summary_sections' in updates
+
+    def test_update_summary_formats_llm_text_into_stable_sections(self):
+        from api.updates import summarize_update_payload
+
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+            'agent': {'behind': 1, 'current_sha': 'aaa', 'latest_sha': 'bbb', 'compare_url': 'https://example.test/agent'},
+        }
+        result = summarize_update_payload(
+            payload,
+            llm_callback=lambda _system, _prompt: 'The settings panel is easier to understand. Update prompts are clearer.',
+            use_cache=False,
+        )
+        assert result['summary_sections'][0]['title'] == "What you'll notice"
+        assert result['summary_sections'][1]['title'] == 'Worth knowing'
+        assert result['summary_sections'][0]['items']
+        assert result['summary_sections'][1]['items'] == [
+            'The regular diff comparison is still available below for exact details.'
+        ]
+        assert 'What you\'ll notice' in result['summary']
+        assert '- The settings panel is easier to understand.' in result['summary']
+
+    def test_update_summary_cache_reuses_same_update_summary(self):
+        import api.updates as upd
+
+        upd._summary_cache.clear()
+        calls = []
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+        }
+
+        def fake_llm(_system, _prompt):
+            calls.append(True)
+            return f'- Stable cached summary #{len(calls)}'
+
+        first = upd.summarize_update_payload(payload, llm_callback=fake_llm)
+        second = upd.summarize_update_payload(payload, llm_callback=fake_llm)
+        changed = upd.summarize_update_payload(
+            {'webui': {'behind': 3, 'current_sha': 'abc', 'latest_sha': 'xyz', 'compare_url': 'https://example.test/webui2'}},
+            llm_callback=fake_llm,
+        )
+        assert len(calls) == 2
+        assert second['summary'] == first['summary']
+        assert second['cached'] is True
+        assert changed['summary'] != first['summary']
 
 
 # ── Regression: force button reset on retry ──────────────────────────────────
