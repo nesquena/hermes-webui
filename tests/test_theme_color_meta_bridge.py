@@ -9,6 +9,8 @@ Covers:
   (covering both prism-loaded and prism-absent paths) and from `_applySkin()`.
 - The helper reads `getComputedStyle(html).getPropertyValue('--bg')`, which means
   every skin (Default, Sienna, Sisyphus, Charizard, etc.) reaches the meta tag.
+- Both the pre-paint script and boot sync update all theme-color tags and remove
+  stale media attributes so OS light/dark preference cannot override the user theme.
 
 This bridge is the source of truth that native WKWebView wrappers
 (hermes-webui/hermes-swift-mac) read instead of pixel-sampling the page —
@@ -43,17 +45,20 @@ class TestIndexHtmlMetaTags:
         # Must be on a meta tag (not some other element)
         assert '<meta name="theme-color" id="hermes-theme-color"' in src
 
-    def test_inline_pre_paint_script_seeds_meta(self):
-        """An inline script in <head> seeds the runtime meta tag from localStorage
+    def test_inline_pre_paint_script_seeds_all_theme_color_metas(self):
+        """An inline script in <head> seeds all theme-color tags from localStorage
         before any external JS loads. This prevents a single-frame flash of the
-        OS-default theme-color when the user has explicitly chosen the opposite.
+        OS-default theme-color when the user has explicitly chosen the opposite,
+        and prevents media-query fallbacks from overriding the runtime tag.
         """
         src = INDEX.read_text(encoding="utf-8")
-        assert "hermes-theme-color" in src
+        assert "hermes-theme" in src
         # The seeder must read from the same localStorage key the theme bootstrap uses.
         assert "localStorage.getItem('hermes-theme')" in src
-        # And must call setAttribute('content', ...) on the meta tag.
+        # It must update every theme-color tag and neutralize stale light/dark media hints.
+        assert "querySelectorAll('meta[name=\"theme-color\"]')" in src
         assert "setAttribute('content'" in src or 'setAttribute("content"' in src
+        assert "removeAttribute('media')" in src
 
 
 class TestBootJsThemeColorSync:
@@ -70,13 +75,17 @@ class TestBootJsThemeColorSync:
         # The helper reads getComputedStyle on documentElement and extracts --bg.
         assert "getComputedStyle(document.documentElement).getPropertyValue('--bg')" in src
 
-    def test_sync_helper_targets_known_meta_id(self):
-        """The helper must target the same id declared in index.html. Drift here
-        is the most common way a one-line frontend change silently breaks the
-        Swift app's theme-color reader.
+    def test_sync_helper_updates_all_theme_color_tags(self):
+        """The helper must update the canonical id tag and the static fallback tags.
+        Desktop/native chrome can prefer a matching media tag over the id tag; if
+        stale media variants remain light while the app is dark, the title bar goes beige.
+        Civilization trembles, but mostly the window looks wrong.
         """
         src = BOOT.read_text(encoding="utf-8")
         assert "getElementById('hermes-theme-color')" in src
+        assert "querySelectorAll('meta[name=\"theme-color\"]')" in src
+        assert "setAttribute('content',bg)" in src
+        assert "removeAttribute('media')" in src
 
     def test_set_resolved_theme_calls_sync_in_both_branches(self):
         """_setResolvedTheme has two exit paths:

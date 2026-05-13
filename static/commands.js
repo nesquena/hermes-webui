@@ -18,6 +18,7 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
+  {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
@@ -77,6 +78,18 @@ function getMatchingCommands(prefix){
     if(!skill.name.startsWith(q)||seen.has(skill.name))continue;
     matches.push(skill);
     seen.add(skill.name);
+  }
+  // Include agent/plugin commands from /api/commands metadata
+  for(const cmd of (_agentCommandCache||[])){
+    const name=String(cmd&&cmd.name||'').toLowerCase();
+    if(!name.startsWith(q)||seen.has(name))continue;
+    if(cmd.cli_only)continue;
+    matches.push({
+      name,
+      desc:String(cmd&&cmd.description||'').trim()||'Agent command',
+      source:cmd.category==='Plugin'?'plugin':'agent',
+    });
+    seen.add(name);
   }
   return matches;
 }
@@ -190,9 +203,10 @@ function _getSlashSubArgOptions(spec){
   return Promise.resolve([]);
 }
 
+let _agentCommandCacheReady=false;
 async function loadAgentCommandMetadata(force=false){
-  if(_agentCommandCache&&!force) return _agentCommandCache;
-  if(_agentCommandCachePromise&&!force) return _agentCommandCachePromise;
+  if(_agentCommandCacheReady&&!force)return _agentCommandCache||[];
+  if(_agentCommandCachePromise&&!force)return _agentCommandCachePromise;
   _agentCommandCachePromise=(async()=>{
     try{
       const data=await api('/api/commands');
@@ -200,6 +214,7 @@ async function loadAgentCommandMetadata(force=false){
     }catch(_){
       _agentCommandCache=[];
     }finally{
+      _agentCommandCacheReady=true;
       _agentCommandCachePromise=null;
     }
     return _agentCommandCache;
@@ -226,6 +241,16 @@ function cliOnlyCommandResponse(cmdName, meta){
     extra='\n\nBrowser tools in WebUI must be configured server-side with the agent/browser environment. Once configured, ask the model to use browser tools directly; `/browser` itself only works in `hermes chat`.';
   }
   return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
+}
+
+async function executeAgentPluginCommand(text,_meta){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  const data=await api('/api/commands/exec',{
+    method:'POST',
+    body:JSON.stringify({command})
+  });
+  return String(data&&data.output||'(no output)');
 }
 
 function _parseSlashAutocomplete(text){
@@ -357,6 +382,131 @@ async function cmdNew(){
   showToast(t('new_session'));
 }
 
+function _manualCompressionVisibleMessages(){
+  return (S.messages||[]).filter(m=>{
+    if(!m||!m.role||m.role==='tool') return false;
+    if(m.role==='assistant'){
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      if(hasTc||hasTu|| (typeof _messageHasReasoningPayload==='function' && _messageHasReasoningPayload(m))) return true;
+    }
+    return typeof msgContent==='function' ? !!msgContent(m) || !!m.attachments?.length : !!m.content || !!m.attachments?.length;
+  });
+}
+
+function _manualCompressionSleep(ms){
+  return new Promise(resolve=>setTimeout(resolve, ms));
+}
+
+async function _pollManualCompressionResult(sid){
+  let delay=700;
+  while(true){
+    const data=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
+    if(data&&data.status==='done') return data;
+    if(data&&data.status==='error'){
+      const err=new Error(data.error||'Compression failed');
+      err.status=data.error_status||400;
+      throw err;
+    }
+    if(data&&data.status==='idle') throw new Error('Compression job is no longer available');
+    await _manualCompressionSleep(delay);
+    delay=Math.min(2000, delay+300);
+  }
+}
+
+async function _applyManualCompressionResult(data, focusTopic, visibleCount, commandText){
+  if(data&&data.session){
+    const currentSid=S.session&&S.session.session_id;
+    if(data.session.session_id&&data.session.session_id!==currentSid){
+      await loadSession(data.session.session_id);
+    }else{
+      S.session=data.session;
+      S.messages=data.session.messages||[];
+      S.toolCalls=data.session.tool_calls||[];
+      clearLiveToolCards();
+      localStorage.setItem('hermes-webui-session',S.session.session_id);
+      if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+      syncTopbar();
+      renderMessages();
+      await renderSessionList();
+      updateQueueBadge(S.session.session_id);
+    }
+  }
+  const summary=data&&data.summary;
+  if(typeof setCompressionUi==='function'&&S.session){
+    const referenceMsg=(S.messages||[]).find(m=>typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m));
+    const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';
+    const summaryRef=summary&&typeof summary.reference_message==='string' ? String(summary.reference_message||'').trim() : '';
+    // Prefer the persisted compaction handoff when it already exists in session state.
+    // The short summary fallback is only for environments where that message is unavailable.
+    const referenceText=messageRef || summaryRef;
+    const effectiveFocus=(data&&data.focus_topic)||focusTopic||'';
+    setCompressionUi({
+      sessionId:S.session.session_id,
+      phase:'done',
+      focusTopic:effectiveFocus,
+      commandText:effectiveFocus?`/compress ${effectiveFocus}`:(commandText||'/compress'),
+      beforeCount:visibleCount,
+      summary:summary||null,
+      referenceText,
+      anchorVisibleIdx: data?.session?.compression_anchor_visible_idx,
+      anchorMessageKey: data?.session?.compression_anchor_message_key||null,
+    });
+  }
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  renderMessages();
+  if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+}
+
+async function resumeManualCompressionForSession(sid){
+  if(!sid) return;
+  try{
+    const status=await api(`/api/session/compress/status?session_id=${encodeURIComponent(sid)}`);
+    if(!status||status.status!=='running') return;
+    const visibleMessages=_manualCompressionVisibleMessages();
+    const visibleCount=visibleMessages.length;
+    const anchorMessageKey=_compressionAnchorMessageKey(visibleMessages[visibleMessages.length-1]||null);
+    if(typeof setBusy==='function') setBusy(true);
+    if(typeof setComposerStatus==='function') setComposerStatus(t('compressing'));
+    if(typeof setCompressionUi==='function'){
+      setCompressionUi({
+        sessionId:sid,
+        phase:'running',
+        focusTopic:status.focus_topic||'',
+        commandText:status.focus_topic?`/compress ${status.focus_topic}`:'/compress',
+        beforeCount:visibleCount,
+        anchorVisibleIdx:Math.max(0, visibleCount-1),
+        anchorMessageKey,
+      });
+    }
+    renderMessages();
+    const done=await _pollManualCompressionResult(sid);
+    if(!S.session||S.session.session_id!==sid) return;
+    await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress');
+  }catch(e){
+    if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
+      const visibleMessages=_manualCompressionVisibleMessages();
+      setCompressionUi({
+        sessionId:sid,
+        phase:'error',
+        focusTopic:'',
+        commandText:'/compress',
+        beforeCount:visibleMessages.length,
+        errorText:`Compression failed: ${e.message}`,
+        anchorVisibleIdx:Math.max(0, visibleMessages.length-1),
+        anchorMessageKey:null,
+      });
+      renderMessages();
+    }
+  }finally{
+    if(S.session&&S.session.session_id===sid){
+      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      if(typeof setBusy==='function') setBusy(false);
+      if(typeof setComposerStatus==='function') setComposerStatus('');
+    }
+  }
+}
+
 async function _runManualCompression(focusTopic){
   if(!S.session){showToast(t('no_active_session'));return;}
   let visibleCount=0;
@@ -385,15 +535,7 @@ async function _runManualCompression(focusTopic){
     if(typeof setBusy==='function') setBusy(true);
     const body={session_id:sid};
     if(focusTopic) body.focus_topic=focusTopic;
-    const visibleMessages=(S.messages||[]).filter(m=>{
-      if(!m||!m.role||m.role==='tool') return false;
-      if(m.role==='assistant'){
-        const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-        if(hasTc||hasTu|| (typeof _messageHasReasoningPayload==='function' && _messageHasReasoningPayload(m))) return true;
-      }
-      return typeof msgContent==='function' ? !!msgContent(m) || !!m.attachments?.length : !!m.content || !!m.attachments?.length;
-    });
+    const visibleMessages=_manualCompressionVisibleMessages();
     visibleCount=visibleMessages.length;
     const anchorVisibleIdx=Math.max(0, visibleCount - 1);
     const anchorMessageKey=_compressionAnchorMessageKey(visibleMessages[visibleMessages.length-1]||null);
@@ -411,48 +553,14 @@ async function _runManualCompression(focusTopic){
     }
     if(typeof setComposerStatus==='function') setComposerStatus(t('compressing'));
     renderMessages();
-    const data=await api('/api/session/compress',{method:'POST',body:JSON.stringify(body)});
-    if(data&&data.session){
-      const currentSid=S.session&&S.session.session_id;
-      if(data.session.session_id&&data.session.session_id!==currentSid){
-        await loadSession(data.session.session_id);
-      }else{
-        S.session=data.session;
-        S.messages=data.session.messages||[];
-        S.toolCalls=data.session.tool_calls||[];
-        clearLiveToolCards();
-        localStorage.setItem('hermes-webui-session',S.session.session_id);
-        if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
-        syncTopbar();
-        renderMessages();
-        await renderSessionList();
-        updateQueueBadge(S.session.session_id);
-      }
+    const started=await api('/api/session/compress/start',{method:'POST',body:JSON.stringify(body)});
+    if(started&&started.status==='error'){
+      const err=new Error(started.error||'Compression failed');
+      err.status=started.error_status||400;
+      throw err;
     }
-    const summary=data&&data.summary;
-    if(typeof setCompressionUi==='function'&&S.session){
-      const referenceMsg=(S.messages||[]).find(m=>typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m));
-      const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';
-      const summaryRef=summary&&typeof summary.reference_message==='string' ? String(summary.reference_message||'').trim() : '';
-      // Prefer the persisted compaction handoff when it already exists in session state.
-      // The short summary fallback is only for environments where that message is unavailable.
-      const referenceText=messageRef || summaryRef;
-      const effectiveFocus=(data&&data.focus_topic)||focusTopic||'';
-      setCompressionUi({
-        sessionId:S.session.session_id,
-        phase:'done',
-        focusTopic:effectiveFocus,
-        commandText:effectiveFocus?`/compress ${effectiveFocus}`:'/compress',
-        beforeCount:visibleCount,
-        summary:summary||null,
-        referenceText,
-        anchorVisibleIdx: data?.session?.compression_anchor_visible_idx,
-        anchorMessageKey: data?.session?.compression_anchor_message_key||null,
-      });
-    }
-    if(typeof setComposerStatus==='function') setComposerStatus('');
-    renderMessages();
-    if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+    const data=(started&&started.status==='done')?started:await _pollManualCompressionResult(sid);
+    await _applyManualCompressionResult(data, focusTopic, visibleCount, commandText);
   }catch(e){
     if(typeof setCompressionUi==='function'){
       const currentSid=S.session&&S.session.session_id;
@@ -623,6 +731,63 @@ async function cmdStop(){
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
   if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
+}
+
+async function cmdGoal(args){
+  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
+      session_id:activeSid,
+      args:args||'',
+      workspace:S.session.workspace,
+      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
+      model_provider:S.session.model_provider||null,
+      profile:S.activeProfile||S.session.profile||'default',
+    })});
+    const msg = (() => {
+      const raw = String((r && r.message) || '').trim();
+      const key = String((r && r.message_key) || '').trim();
+      const args = Array.isArray(r && r.message_args) ? r.message_args : [];
+      if (raw.includes('\n')) return raw;
+      if (key && typeof t === 'function') {
+        const translated = String(t(key, ...args));
+        if (translated && translated !== key) return translated;
+      }
+      return raw;
+    })();
+    if(msg){
+      S.messages.push({role:'assistant',content:msg,_ts:Date.now()/1000,_goalStatus:true,_transient:true});
+      renderMessages({preserveScroll:true});
+      showToast(msg.split('\n')[0],2600);
+    }
+    if(!r||!r.stream_id)return;
+    S.toolCalls=[];
+    if(typeof clearLiveToolCards==='function')clearLiveToolCards();
+    appendThinking();setBusy(true);
+    setComposerStatus(t('goal_working_toward'));
+    S.activeStreamId=r.stream_id;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id=r.stream_id;
+      if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;
+      if(r.effective_model)S.session.model=r.effective_model;
+      if(r.effective_model_provider)S.session.model_provider=r.effective_model_provider;
+    }
+    INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[],toolCalls:[]};
+    if(typeof markInflight==='function')markInflight(activeSid,r.stream_id);
+    if(typeof saveInflightState==='function')saveInflightState(activeSid,{streamId:r.stream_id,messages:INFLIGHT[activeSid].messages,uploaded:[],toolCalls:[]});
+    startApprovalPolling(activeSid);
+    startClarifyPolling(activeSid);
+    if(typeof _fetchYoloState==='function')_fetchYoloState(activeSid);
+    attachLiveStream(activeSid,r.stream_id,[]);
+    if(typeof renderSessionList==='function')void renderSessionList();
+  }catch(e){
+    const err=String((e&&e.message)||e||'Goal command failed');
+    S.messages.push({role:'assistant',content:`**Goal command failed:** ${err}`,_ts:Date.now()/1000,_error:true});
+    renderMessages({preserveScroll:true});
+    showToast(err,3000);
+  }
 }
 
 // ── Busy-input mode commands ──────────────────────────────────────────────
@@ -1047,6 +1212,10 @@ function refreshSlashCommandDropdown(){
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
   loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  // Also preload agent/plugin command metadata for autocomplete
+  if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
+    loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
+  }
 }
 
 // ── Autocomplete dropdown ───────────────────────────────────────────────────

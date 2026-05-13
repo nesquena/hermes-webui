@@ -21,6 +21,23 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _extract_js_function_body(src: str, name: str) -> str:
+    start = src.find(f"function {name}(")
+    assert start >= 0, f"function {name} not found"
+    brace = src.find("{", start)
+    assert brace >= 0, f"function {name} body not found"
+    depth = 1
+    i = brace + 1
+    while depth > 0 and i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"function {name} body did not close"
+    return src[start:i]
+
+
 # ── Bug 1: workspace panel header collapse priority ──────────────────────────
 
 
@@ -157,9 +174,7 @@ class TestProjectDotPlacement:
         of the title and timestamp), not to the title span (which truncates
         with ellipsis and would clip the dot off long titles)."""
         # Find _renderOneSession body
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         # Must append dot to titleRow
         assert "titleRow.appendChild(dot)" in body, (
             "Project dot must be appended to titleRow as a flex sibling, "
@@ -175,8 +190,7 @@ class TestProjectDotPlacement:
         """The dot is appended AFTER title.appendChild and BEFORE ts append
         — that ordering puts the dot between the title and the timestamp
         in the flex row."""
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         title_pos = body.find("titleRow.appendChild(title);")
         dot_pos = body.find("titleRow.appendChild(dot);")
         ts_pos = body.find("titleRow.appendChild(ts);")

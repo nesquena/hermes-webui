@@ -16,7 +16,14 @@ def test_workspace_display_prefix_helper_strips_leading_metadata_only():
     assert end != -1, "user fenced block renderer not found after prefix stripper"
     helper = src[start:end]
 
-    assert r"^\s*\[Workspace:[^\]]+\]\s*" in helper
+    # v1 sentinel regex must be present (matches `[Workspace::v1: <escaped path>]`).
+    assert r"^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*" in helper
+    # Legacy regex must ALSO be present as a fallback for transcripts saved
+    # before the v1 migration (per Opus advisor on stage-322 — without this,
+    # pre-upgrade sessions render the literal `[Workspace: /path]` prefix in
+    # user bubbles after upgrade). Mirrors the Python `include_legacy=True`
+    # branch in api/streaming.py:_strip_workspace_prefix().
+    assert r"\[Workspace:[^\]]+\]" in helper
     assert ".trim()" in helper
 
 

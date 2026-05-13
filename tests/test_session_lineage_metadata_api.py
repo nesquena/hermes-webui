@@ -32,6 +32,7 @@ def _ensure_state_db(path):
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT,
+            session_source TEXT,
             title TEXT,
             model TEXT,
             started_at REAL NOT NULL,
@@ -45,14 +46,14 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui'):
+def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, source, sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, sid, started_at or time.time(), parent, ended_at, end_reason),
     )
     conn.commit()
 
@@ -95,6 +96,40 @@ def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
         assert rows["lineage_api_tip"].get("_lineage_root_id") == "lineage_api_root"
         assert rows["lineage_api_tip"].get("_compression_segment_count") == 2
         assert "_lineage_root_id" not in rows["lineage_api_root"]
+    finally:
+        conn.close()
+
+
+def test_all_sessions_keeps_explicit_forks_out_of_state_db_lineage_metadata(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_root", title="Visible root", updated_at=t0)
+        _save_webui_session("lineage_api_fork", title="Explicit fork", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_api_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_fork",
+            parent="lineage_api_root",
+            started_at=t0 + 6,
+            session_source="fork",
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        fork = rows["lineage_api_fork"]
+        assert fork.get("parent_session_id") == "lineage_api_root"
+        assert fork.get("relationship_type") == "child_session"
+        assert fork.get("parent_title") == "lineage_api_root"
+        assert fork.get("_parent_lineage_root_id") == "lineage_api_root"
+        assert "_lineage_root_id" not in fork
+        assert "_compression_segment_count" not in fork
     finally:
         conn.close()
 

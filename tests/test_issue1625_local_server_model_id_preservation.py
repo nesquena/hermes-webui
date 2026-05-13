@@ -22,9 +22,12 @@ from api import config as cfg_mod
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _patch_cfg(monkeypatch, **model_overrides):
+def _patch_cfg(monkeypatch, custom_providers=None, **model_overrides):
     """Patch api.config.cfg to a synthetic config dict for the duration of a test."""
-    fake_cfg = {"model": dict(model_overrides), "custom_providers": []}
+    fake_cfg = {
+        "model": dict(model_overrides),
+        "custom_providers": list(custom_providers or []),
+    }
     monkeypatch.setattr(cfg_mod, "cfg", fake_cfg)
 
 
@@ -74,6 +77,41 @@ def test_lmstudio_with_openai_prefix_preserved(monkeypatch):
     assert model == "openai/gpt-oss-120b", (
         "openai/gpt-oss-120b on LM Studio must preserve the full id (#1625)"
     )
+
+
+@pytest.mark.parametrize("provider_name", [
+    "ollama",
+    "lmstudio",
+    "lm-studio",
+    "vllm",
+    "tabby",
+])
+def test_named_custom_local_server_provider_preserves_full_model_id_on_lan_host(
+    provider_name,
+    monkeypatch,
+):
+    """#1830: custom:<local-server> slugs must keep local-server no-strip semantics.
+
+    Non-loopback hostnames like ollama.lan do not trigger the base_url local
+    heuristic, so the provider-id check must recognize custom:<slug> directly.
+    """
+    _patch_cfg(
+        monkeypatch,
+        provider=provider_name,
+        base_url="http://lan-host:1234/v1",
+        default="qwen/qwen3.6-27b",
+        custom_providers=[
+            {
+                "name": provider_name,
+                "base_url": "http://lan-host:1234/v1",
+                "api_key": "local-key",
+            },
+        ],
+    )
+    model, provider, base_url = cfg_mod.resolve_model_provider("qwen/qwen3.6-27b")
+    assert model == "qwen/qwen3.6-27b"
+    assert provider == f"custom:{provider_name}"
+    assert base_url == "http://lan-host:1234/v1"
 
 
 # ── Loopback / private-IP heuristic ───────────────────────────────────────

@@ -10,15 +10,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
+import subprocess
+import sys
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
@@ -31,9 +37,321 @@ from api.config import (
 
 logger = logging.getLogger(__name__)
 
+
+def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
+    """Return True when *provider_id* refers to a named custom provider."""
+    pid = str(provider_id or "").strip().lower()
+    raw_name = str(name or "").strip().lower()
+    if not pid or not raw_name:
+        return False
+    slug = _custom_provider_slug_from_name(raw_name)
+    candidates = {raw_name, f"custom:{raw_name}"}
+    if slug:
+        candidates.add(slug)
+    return pid in candidates
+
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
+_ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
+
+# Upper bound on simultaneous profile-isolated quota probe subprocesses.
+# Each probe runs a Python child for up to 35 s; capping concurrency prevents
+# resource exhaustion when the UI polls all providers rapidly. The limit is
+# deliberately low (2) since _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS is
+# already 35 s and probe I/O is lightweight HTTP calls.
+_MAX_CONCURRENT_ACCOUNT_USAGE_PROBES = 2
+
+# Parent-death-signal setup: on Linux, arrange for the quota-probe child to
+# receive SIGTERM when the WebUI parent dies (e.g. systemctl restart, OOM kill).
+# This prevents probe children from becoming orphaned zombies that continue
+# calling the provider API indefinitely after the WebUI process is gone.
+# We use prctl(PR_SET_DEATHSIG, SIGTERM) which is standard on modern Linux
+# kernels and available via ctypes (no external C extension needed).
+# If prctl is unavailable (non-Linux, or Linux without prctl support), the
+# probe child exits normally when its parent (WebUI) terminates -- on macOS/
+# Windows this is handled by OS-level process tree cleanup.
+# Portable parent-death-signal bootstrap.  On Linux this arranges for the
+# probe child to receive SIGTERM when the WebUI parent dies (systemctl
+# restart, OOM kill, etc.), preventing orphaned zombie probes from continuing
+# to call the provider API indefinitely.  Non-Linux platforms (macOS, Windows)
+# rely on OS-level process-tree cleanup instead; this variable is then unused.
+# prctl(PR_SET_DEATHSIG, SIGTERM) is available via ctypes without any C
+# extension — the same technique used throughout the Hermes codebase.
+_ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
+    # fmt: off
+    # Lines are written as string literals so this block passes
+    # `python3 -m py_compile` cleanly and is safe to include verbatim
+    # inside the single argument string passed to `python -c ...`.
+    'import sys\n'
+    'try:\n'
+    '    import ctypes, signal\n'
+    '    libc = ctypes.CDLL(None)\n'
+    '    libc.prctl(1, signal.SIGTERM)   # PR_SET_DEATHSIG=1, SIGTERM=15\n'
+    'except Exception:\n'
+    '    pass\n'
+    # fmt: on
+)
+
+
+# Module-level cap on concurrent quota-probe subprocesses.
+# Lazily created so this module compiles even when threading isn't ready.
+_account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
+
+
+def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
+    global _account_usage_probe_semaphore
+    if _account_usage_probe_semaphore is None:
+        _account_usage_probe_semaphore = threading.BoundedSemaphore(
+            _MAX_CONCURRENT_ACCOUNT_USAGE_PROBES
+        )
+    return _account_usage_probe_semaphore
+
+
+# ── preexec_fn: parent-death signal for the probe subprocess ─────────────────
+# On POSIX/Linux, arrange for the child to receive SIGTERM when the WebUI
+# parent dies (systemctl restart, OOM kill, etc.).  The parent's bootstrap
+# code (_ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP) also covers the grandchild
+# fork inside the child, but this preexec_fn handles the direct child-process
+# case.  Returns None on non-POSIX or when prctl is unavailable so that
+# subprocess.run() works on Windows/macOS without changes.
+def _account_usage_preexec_fn() -> None:
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG=1, SIGTERM=15
+    except Exception:
+        pass
+
+
+_ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
+import base64
+import json
+import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from urllib import request as urllib_request
+
+from agent.account_usage import fetch_account_usage
+
+
+_CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def _iso(value):
+    if value in (None, ""):
+        return None
+    if hasattr(value, "isoformat"):
+        text = value.isoformat()
+        return text.replace("+00:00", "Z")
+    text = str(value).strip()
+    return text or None
+
+
+def _snapshot_payload(snapshot):
+    if snapshot is None:
+        return None
+    windows = []
+    for window in getattr(snapshot, "windows", ()) or ():
+        windows.append({
+            "label": str(getattr(window, "label", "") or ""),
+            "used_percent": getattr(window, "used_percent", None),
+            "reset_at": _iso(getattr(window, "reset_at", None)),
+            "detail": getattr(window, "detail", None),
+        })
+    return {
+        "provider": str(getattr(snapshot, "provider", "") or ""),
+        "source": str(getattr(snapshot, "source", "") or ""),
+        "title": str(getattr(snapshot, "title", "") or ""),
+        "plan": getattr(snapshot, "plan", None),
+        "windows": windows,
+        "details": list(getattr(snapshot, "details", ()) or ()),
+        "available": bool(getattr(snapshot, "available", bool(windows))),
+        "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
+        "fetched_at": _iso(getattr(snapshot, "fetched_at", None)),
+    }
+
+
+def _snapshot_available(snapshot):
+    if snapshot is None:
+        return False
+    try:
+        return bool(getattr(snapshot, "available", False))
+    except Exception:
+        return False
+
+
+def _number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        number = float(text)
+        return int(number) if number.is_integer() else number
+    except Exception:
+        return None
+
+
+def _parse_dt(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _title_case_slug(value):
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    return cleaned.replace("_", " ").replace("-", " ").title()
+
+
+def _resolve_codex_usage_url(base_url):
+    normalized = str(base_url or "").strip().rstrip("/") or _CODEX_DEFAULT_BASE_URL
+    if normalized.endswith("/codex"):
+        normalized = normalized[: -len("/codex")]
+    if "/backend-api" in normalized:
+        return normalized + "/wham/usage"
+    return normalized + "/api/codex/usage"
+
+
+def _jwt_claims(token):
+    if not isinstance(token, str) or token.count(".") != 2:
+        return {}
+    payload = token.split(".")[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
+    except Exception:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _codex_usage_headers(access_token):
+    headers = {
+        "Authorization": "Bearer " + access_token,
+        "Accept": "application/json",
+        "User-Agent": "codex_cli_rs/0.0.0 (Hermes WebUI)",
+        "originator": "codex_cli_rs",
+    }
+    auth_claim = _jwt_claims(access_token).get("https://api.openai.com/auth")
+    account_id = None
+    if isinstance(auth_claim, dict):
+        account_id = auth_claim.get("chatgpt_account_id")
+    if isinstance(account_id, str) and account_id.strip():
+        headers["ChatGPT-Account-ID"] = account_id.strip()
+    return headers
+
+
+def _entry_value(entry, *names):
+    for name in names:
+        try:
+            value = getattr(entry, name)
+        except Exception:
+            value = None
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _codex_snapshot_from_usage_payload(payload):
+    if not isinstance(payload, dict):
+        payload = {}
+    rate_limit = payload.get("rate_limit")
+    if not isinstance(rate_limit, dict):
+        rate_limit = {}
+    windows = []
+    for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+        window = rate_limit.get(key)
+        if not isinstance(window, dict):
+            continue
+        used = _number(window.get("used_percent"))
+        if used is None:
+            continue
+        windows.append(SimpleNamespace(
+            label=label,
+            used_percent=float(used),
+            reset_at=_parse_dt(window.get("reset_at")),
+            detail=None,
+        ))
+
+    details = []
+    credits = payload.get("credits")
+    if isinstance(credits, dict) and credits.get("has_credits"):
+        balance = _number(credits.get("balance"))
+        if balance is not None:
+            details.append("Credits balance: $" + format(float(balance), ".2f"))
+        elif credits.get("unlimited"):
+            details.append("Credits balance: unlimited")
+
+    return SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api",
+        title="Account limits",
+        plan=_title_case_slug(payload.get("plan_type")),
+        windows=tuple(windows),
+        details=tuple(details),
+        available=bool(windows or details),
+        unavailable_reason=None,
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+
+def _fetch_codex_account_usage_from_pool():
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool("openai-codex")
+        entry = pool.select() if pool is not None else None
+        if entry is None:
+            return None
+        access_token = _entry_value(entry, "runtime_api_key", "access_token")
+        if not access_token:
+            return None
+        base_url = _entry_value(entry, "runtime_base_url", "base_url") or _CODEX_DEFAULT_BASE_URL
+        request = urllib_request.Request(
+            _resolve_codex_usage_url(base_url),
+            headers=_codex_usage_headers(access_token),
+        )
+        with urllib_request.urlopen(request, timeout=15.0) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        return _codex_snapshot_from_usage_payload(payload)
+    except Exception:
+        return None
+
+
+provider = sys.argv[1]
+api_key = sys.argv[2] or None
+try:
+    snapshot = fetch_account_usage(provider, api_key=api_key)
+except Exception:
+    snapshot = None
+if str(provider or "").strip().lower() == "openai-codex" and not _snapshot_available(snapshot):
+    fallback_snapshot = _fetch_codex_account_usage_from_pool()
+    if _snapshot_available(fallback_snapshot) or snapshot is None:
+        snapshot = fallback_snapshot
+print(json.dumps(_snapshot_payload(snapshot)))
+"""
 
 # SECTION: Provider ↔ env var mapping
 
@@ -53,6 +371,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "minimax-cn": "MINIMAX_CN_API_KEY",
     "mistralai": "MISTRAL_API_KEY",
     "x-ai": "XAI_API_KEY",
+    "xiaomi": "XIAOMI_API_KEY",
     "opencode-zen": "OPENCODE_ZEN_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
     # NOTE: bare "ollama" (local) deliberately omitted — local Ollama is keyless
@@ -273,8 +592,7 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
-                cp_name = (cp.get("name") or "").strip().lower().replace(" ", "-")
-                if f"custom:{cp_name}" == provider_id or cp.get("name", "").strip().lower() == provider_id:
+                if _custom_provider_name_matches(provider_id, cp.get("name")):
                     if str(cp.get("api_key") or "").strip():
                         return True
     return False
@@ -318,8 +636,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            cp_name = str(cp.get("name") or "").strip().lower().replace(" ", "-")
-            if f"custom:{cp_name}" == provider_id or str(cp.get("name", "")).strip().lower() == provider_id:
+            if _custom_provider_name_matches(provider_id, cp.get("name")):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return os.getenv(cp_key[2:-1], "").strip() or None
@@ -420,19 +737,133 @@ def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, ap
     return fetch_account_usage(provider, base_url=base_url, api_key=api_key)
 
 
-def _fetch_account_usage_with_profile_context(provider: str) -> Any:
-    try:
-        from api.profiles import cron_profile_context_for_home
-    except ImportError:
-        cron_profile_context_for_home = None
+def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None) -> dict[str, str]:
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(Path(home))
 
+    # Profile .env values should affect only the child quota probe, not the
+    # WebUI process-global environment. This is especially important for
+    # Anthropic account usage, where the agent resolver reads OAuth/API tokens
+    # from environment variables.
+    for key, value in _load_env_file(Path(home) / ".env").items():
+        if value:
+            env[key] = value
+
+    env_var = _PROVIDER_ENV_VAR.get((provider or "").strip().lower())
+    if env_var and api_key:
+        env[env_var] = api_key
+
+    try:
+        from api.config import _AGENT_DIR
+    except Exception:
+        _AGENT_DIR = None
+    pythonpath_parts: list[str] = []
+    if _AGENT_DIR:
+        pythonpath_parts.append(str(_AGENT_DIR))
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    if pythonpath_parts:
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    return env
+
+
+def _account_usage_payload_to_snapshot(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    windows = tuple(
+        SimpleNamespace(
+            label=window.get("label"),
+            used_percent=window.get("used_percent"),
+            reset_at=window.get("reset_at"),
+            detail=window.get("detail"),
+        )
+        for window in (payload.get("windows") or ())
+        if isinstance(window, dict)
+    )
+    return SimpleNamespace(
+        provider=payload.get("provider"),
+        source=payload.get("source"),
+        title=payload.get("title"),
+        plan=payload.get("plan"),
+        windows=windows,
+        details=tuple(payload.get("details") or ()),
+        available=bool(payload.get("available")),
+        unavailable_reason=payload.get("unavailable_reason"),
+        fetched_at=payload.get("fetched_at"),
+    )
+
+
+def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
+    try:
+        from api.config import PYTHON_EXE
+    except Exception:
+        PYTHON_EXE = sys.executable or "python3"
+
+    try:
+        # On POSIX (Linux/macOS), wire parent-death signal so the child dies
+        # cleanly if the WebUI parent terminates.  preexec_fn is not safe on
+        # Windows, where OS-level process-tree cleanup handles child orphans.
+        kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "timeout": _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS,
+            "check": False,
+        }
+        if hasattr(os, "fork"):  # POSIX
+            kwargs["preexec_fn"] = _account_usage_preexec_fn
+
+        proc = subprocess.run(
+            [
+                PYTHON_EXE, "-c",
+                _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP + _ACCOUNT_USAGE_SUBPROCESS_CODE,
+                provider,
+                api_key or "",
+            ],
+            env=_account_usage_subprocess_env(home, provider, api_key),
+            **kwargs,
+        )
+    except subprocess.TimeoutExpired:
+        logger.debug("Account usage probe for %s timed out", provider)
+        return None
+    except Exception:
+        logger.debug("Account usage probe for %s failed to launch", provider, exc_info=True)
+        return None
+
+    if proc.returncode != 0:
+        logger.debug("Account usage probe for %s exited with status %s", provider, proc.returncode)
+        return None
+    try:
+        payload = json.loads((proc.stdout or "").strip() or "null")
+    except json.JSONDecodeError:
+        logger.debug("Account usage probe for %s returned invalid JSON", provider)
+        return None
+    return _account_usage_payload_to_snapshot(payload)
+
+
+def _fetch_account_usage_with_profile_context(provider: str) -> Any:
+    """Fetch account usage for a provider within the active profile context.
+
+    Concurrency is capped by the module-level BoundedSemaphore so that rapid
+    UI polls (e.g. Settings page refresh) cannot exhaust file-descriptors or
+    memory by spawning more than _MAX_CONCURRENT_ACCOUNT_USAGE_PROBES probe
+    subprocesses simultaneously.  Each probe runs up to 35 s.
+
+    A warm worker-pool (reuse of persistent subprocess handles) is a natural
+    follow-up if this first slice proves insufficient in production.
+    """
     home = _get_hermes_home()
     api_key = _get_provider_api_key(provider)
+    sem = _get_account_usage_probe_semaphore()
     try:
-        if cron_profile_context_for_home is None:
-            return _agent_fetch_account_usage(provider, api_key=api_key)
-        with cron_profile_context_for_home(home):
-            return _agent_fetch_account_usage(provider, api_key=api_key)
+        with sem:
+            return _agent_fetch_account_usage_for_home(
+                provider,
+                home,
+                api_key=api_key,
+            )
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
         return None
@@ -742,6 +1173,18 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(live_ids)
             except Exception:
                 logger.debug("Failed to load Nous Portal models from hermes_cli")
+        # LM Studio: fetch live locally-loaded models so the providers card
+        # matches what's actually available on the user's server (#WebUI).
+        if pid == "lmstudio":
+            try:
+                from hermes_cli.models import provider_model_ids as _pmi
+
+                lm_live = _pmi("lmstudio") or []
+                if lm_live:
+                    models = [{"id": mid, "label": mid} for mid in lm_live]
+                    models_total = len(models)
+            except Exception:
+                logger.debug("Failed to load LM Studio models from hermes_cli")
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict):
             provider_cfg = providers_cfg.get(pid, {})
@@ -785,7 +1228,13 @@ def get_providers() -> dict[str, Any]:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = f"custom:{cp_name}"
+            cp_id = _custom_provider_slug_from_name(cp_name)
+            if not cp_id:
+                logger.warning(
+                    "Custom provider entry %r produced empty slug; skipping",
+                    cp_name,
+                )
+                continue
             # Collect models from `models` list or `model` single
             cp_models = []
             if isinstance(cp.get("models"), list):
@@ -958,8 +1407,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        cp_name = (cp.get("name") or "").strip().lower().replace(" ", "-")
-                        if f"custom:{cp_name}" == provider_id or cp.get("name", "").strip().lower() == provider_id:
+                        if _custom_provider_name_matches(provider_id, cp.get("name")):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True

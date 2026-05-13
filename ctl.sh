@@ -39,9 +39,9 @@ _load_repo_dotenv_preserving_env() {
     key="${key#export }"
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    # Bash 3.2 (macOS system bash) does not support [[ -v name ]].
-    # Use indirect expansion with +x to detect whether the variable is set.
-    if [[ ${!key+x} ]]; then
+    # Bash 3.2 (macOS system bash) does not support the bash 4.2
+    # variable-existence test form. Use indirect expansion with +x instead.
+    if [[ -n "${!key+x}" ]]; then
       value="${!key}"
       preserved+=("${key}=${value}")
     fi
@@ -53,9 +53,11 @@ _load_repo_dotenv_preserving_env() {
   set +a
 
   local assignment
-  for assignment in "${preserved[@]}"; do
-    export "${assignment}"
-  done
+  if [[ ${#preserved[@]} -gt 0 ]]; then
+    for assignment in "${preserved[@]}"; do
+      export "${assignment}"
+    done
+  fi
 }
 
 _find_python() {
@@ -217,11 +219,7 @@ start_cmd() {
   : >> "${LOG_FILE}"
   (
     cd "${REPO_ROOT}"
-    if (( ${#CTL_BOOTSTRAP_ARGS[@]} )); then
-      exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" "${CTL_BOOTSTRAP_ARGS[@]}"
-    else
-      exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}"
-    fi
+    exec "${python_exe}" "${REPO_ROOT}/bootstrap.py" --no-browser --foreground --host "${CTL_HOST}" "${CTL_PORT}" ${CTL_BOOTSTRAP_ARGS[@]+"${CTL_BOOTSTRAP_ARGS[@]}"}
   ) >> "${LOG_FILE}" 2>&1 &
   pid=$!
 

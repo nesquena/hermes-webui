@@ -68,7 +68,7 @@ self.addEventListener('activate', (event) => {
 // - API calls (/api/*, /stream) → always network (never cache)
 // - Login assets → always network (never cache stale auth code)
 // - Page navigations → network-first so auth redirects/cookies are honored
-// - Shell assets → cache-first with network fallback
+// - Shell assets → network-first with cache fallback
 // - Everything else → network-only
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
@@ -131,7 +131,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Only explicit shell assets use cache-first. Everything else should hit the
+  // Only explicit shell assets are cached. Everything else should hit the
   // network so stale one-off files (especially auth/login scripts) do not get
   // trapped in CacheStorage until a manual cache clear.
   const scopePath = new URL(self.registration.scope).pathname;
@@ -141,21 +141,22 @@ self.addEventListener('fetch', (event) => {
   const shellPath = './' + relPath.replace(/^\/+/, '') + url.search;
   if (!SHELL_ASSETS.includes(shellPath)) return;
 
-  // Shell assets: cache-first
+  // Shell assets: network-first with cache fallback. This keeps offline support
+  // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
+  // has not changed yet (e.g. before a guarded restart updates the ?v token).
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache successful GET responses for shell assets
-        if (
-          event.request.method === 'GET' &&
-          response.status === 200
-        ) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    })
+    fetch(event.request).then((response) => {
+      if (
+        event.request.method === 'GET' &&
+        response.status === 200
+      ) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => caches.match(event.request).then((cached) => cached || new Response('Offline', {
+      status: 503,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    })))
   );
 });

@@ -95,6 +95,7 @@ def _make_session(session_id="cancel_sid_1361",
 
 def _setup_cancel_state(session_id, stream_id="stream_1361"):
     """Wire up STREAMS/CANCEL_FLAGS/AGENT_INSTANCES for cancel_stream()."""
+    models.SESSIONS[session_id].active_stream_id = stream_id
     config.STREAMS[stream_id] = queue.Queue()
     config.CANCEL_FLAGS[stream_id] = threading.Event()
     mock_agent = Mock()
@@ -364,6 +365,40 @@ def test_stream_error_pending_materialization_does_not_duplicate_eager_checkpoin
 
     assert appended is False
     assert [m.get("role") for m in s.messages].count("user") == 1
+
+
+def test_stale_stream_cleanup_materializes_pending_turn_before_clearing_state():
+    """A zombie/stale stream repair must preserve the pending user prompt.
+
+    If the process dies after chat_start saved pending_user_message but before the
+    agent merges the user turn, /api/session stale cleanup must not clear that
+    pending field without first appending a durable user message.
+    """
+    from api.routes import _clear_stale_stream_state
+
+    sid = "test_pending_error_d3_stale"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please make the GUI fully usable",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    s.pending_started_at = 1778187755.0
+    s.pending_attachments = [{"name": "visible-state.png"}]
+    # No matching STREAMS entry: this simulates a dead worker/server restart.
+
+    cleared = _clear_stale_stream_state(s)
+
+    assert cleared is True
+    assert s.active_stream_id is None
+    assert s.pending_user_message is None
+    assert s.messages[-1]["role"] == "user"
+    assert s.messages[-1]["content"] == "please make the GUI fully usable"
+    assert s.messages[-1]["timestamp"] == 1778187755
+    assert s.messages[-1]["attachments"] == [{"name": "visible-state.png"}]
+
+    reloaded = models.get_session(sid, metadata_only=False)
+    assert reloaded.messages[-1]["role"] == "user"
+    assert reloaded.messages[-1]["content"] == "please make the GUI fully usable"
 
 
 # ── Structural guard: pin call sites of the materialize helper at error branches ──

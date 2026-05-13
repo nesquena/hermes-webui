@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
-
+import sys
+import types
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
+
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
@@ -23,6 +26,33 @@ class _FakeGatewayStatus:
     def get_running_pid(self, cleanup_stale=False):
         assert cleanup_stale is False
         return self._running_pid
+
+
+class _PathSensitiveGatewayStatus:
+    _RUNTIME_STATUS_FILE = "gateway_state.json"
+
+    def __init__(self, root_home: pathlib.Path):
+        self.root_home = root_home
+        self.runtime_pid_path = None
+        self.running_pid_path = None
+
+    def read_runtime_status(self, pid_path=None):
+        self.runtime_pid_path = pathlib.Path(pid_path) if pid_path is not None else None
+        if self.runtime_pid_path:
+            base = self.runtime_pid_path.parent
+        else:
+            base = self.root_home / "profiles" / "troubleshooting"
+        path = base / self._RUNTIME_STATUS_FILE
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def get_running_pid(self, pid_path=None, cleanup_stale=False):
+        assert cleanup_stale is False
+        self.running_pid_path = pathlib.Path(pid_path) if pid_path is not None else None
+        if self.running_pid_path == self.root_home / "gateway.pid":
+            return 98765
+        return None
 
 
 def _runtime_status(**overrides):
@@ -43,6 +73,32 @@ def _runtime_status(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_agent_health_uses_root_gateway_state_when_hermes_home_is_profile(monkeypatch, tmp_path):
+    from api import agent_health
+
+    root_home = tmp_path / "root-home"
+    profile_home = root_home / "profiles" / "troubleshooting"
+    profile_home.mkdir(parents=True)
+    (root_home / "gateway.pid").write_text(json.dumps({"pid": 98765}), encoding="utf-8")
+    (root_home / "gateway_state.json").write_text(json.dumps(_runtime_status()), encoding="utf-8")
+    fake_gateway_status = _PathSensitiveGatewayStatus(root_home)
+
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_constants",
+        types.SimpleNamespace(get_default_hermes_root=lambda: root_home),
+    )
+    monkeypatch.setattr(agent_health, "_gateway_status_module", lambda: fake_gateway_status)
+
+    payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["state"] == "alive"
+    assert fake_gateway_status.runtime_pid_path == root_home / "gateway.pid"
+    assert fake_gateway_status.running_pid_path == root_home / "gateway.pid"
 
 
 def test_agent_health_payload_alive_uses_safe_runtime_details(monkeypatch):

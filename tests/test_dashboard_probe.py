@@ -111,6 +111,11 @@ def test_dashboard_target_validation_allows_only_loopback_base_urls():
 def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch):
     from api import dashboard_probe
 
+    # This test verifies the default auto-probe sequence. Other tests exercise
+    # .env/bootstrap behavior and may leave HERMES_WEBUI_HOST at 0.0.0.0 in the
+    # process env; make the default precondition explicit here.
+    monkeypatch.delenv("HERMES_WEBUI_HOST", raising=False)
+
     attempts = []
 
     def fake_probe(host, port, timeout=0.5, scheme="http"):

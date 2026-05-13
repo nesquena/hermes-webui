@@ -170,3 +170,35 @@ def test_new_i18n_keys_present_in_all_locales():
             f"key {key!r} missing in some locales (expected {n_locales}, "
             f"got {I18N_JS.count(key)})"
         )
+
+
+# ── #1841 regression: exact non-English translations must be present ─────
+
+
+def test_workspace_show_hidden_files_translations_are_not_english_fallback():
+    """Each non-English locale must carry its own translated string for
+    workspace_show_hidden_files — not silently fall back to the English
+    "Show hidden files".  Pin the exact expected translations so a
+    regression that replaces any of them with the English fallback is
+    caught immediately.
+    """
+    expected = {
+        "es": "Mostrar archivos ocultos",
+        "ru": "Показывать скрытые файлы",
+        "zh": "显示隐藏文件",
+        "zh-Hant": "顯示隱藏檔案",
+        "pt": "Mostrar arquivos ocultos",
+        "ja": "隠しファイルを表示",
+        "ko": "숨김 파일 표시",
+    }
+    for locale, translation in expected.items():
+        # Build a source-level needle: the locale block assigns the
+        # translated value on a line like
+        #   workspace_show_hidden_files: 'Mostrar archivos ocultos',
+        # Matching the full assignment avoids false positives from
+        # unrelated strings that happen to contain the same words.
+        needle = f"workspace_show_hidden_files: '{translation}'"
+        assert needle in I18N_JS, (
+            f"locale {locale!r}: expected translation needle {needle!r} "
+            f"not found in i18n.js — likely fell back to English"
+        )

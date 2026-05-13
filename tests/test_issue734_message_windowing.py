@@ -24,7 +24,7 @@ def test_load_earlier_expands_local_window_before_server_pagination_and_preserve
 
 
 def test_windowed_render_keeps_streaming_and_tool_activity_anchored_to_rendered_messages():
-    assert "_scrollAfterMessageRender(preserveScroll);" in UI_JS
+    assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in UI_JS
     assert "const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);" in UI_JS
     assert "if(aIdx<assistantIdxs[0]) continue;" in UI_JS
     assert "const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);" in UI_JS

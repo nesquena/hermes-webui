@@ -44,13 +44,20 @@ api/_version.py
 .DS_Store
 Thumbs.db
 
-# Local reference clones — never committed (except tracked design/UI-UX reference pages)
+# Local reference clones/artifacts — never committed by default.
+# Markdown docs at docs/*.md are intentionally trackable for contributor docs.
 docs/*
+!docs/*.md
 !docs/ui-ux/
 !docs/ui-ux/**
-!docs/docker.md
-!docs/supervisor.md
-!docs/troubleshooting.md
+!docs/rfcs/
+!docs/rfcs/**
+
+# Local-only AI assistant context — never committed even under docs/.
+docs/AGENTS.md
+docs/CLAUDE.md
+docs/.cursorrules
+docs/.windsurfrules
 
 # Local-only PR review harness: rendering drivers, sample bank, fixtures.
 # Used by Claude during deep reviews; never shared in the repo.
@@ -58,6 +65,9 @@ docs/*
 graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
+
+.venv/
+
 # CocoIndex caches
 /.cocoindex_code/
 /.cocoindex-secondbrain/

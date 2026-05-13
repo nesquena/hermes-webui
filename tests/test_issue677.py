@@ -40,7 +40,7 @@ class TestScrollPinningFix:
             "unconditional scrollToBottom() overrides user scroll position (#677)"
         )
         # scrollIfPinned must be called through the renderMessages scroll policy (stream path)
-        assert "_scrollAfterMessageRender(preserveScroll);" in rm_body
+        assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in rm_body
         assert "scrollIfPinned()" in helper_body, (
             "renderMessages() must call scrollIfPinned() during streaming (#677)"
         )
@@ -112,13 +112,14 @@ class TestScrollPinningFix:
             "style.css must define .scroll-to-bottom-btn styles (#677)"
         )
 
-    def test_scroll_to_bottom_button_is_sticky(self):
-        """Scroll-to-bottom button must use position:sticky so it stays visible (#677)."""
+    def test_scroll_to_bottom_button_is_overlayed(self):
+        """Scroll-to-bottom button stays visible as an overlay outside transcript layout (#677)."""
         btn_css_pos = STYLE_CSS.find(".scroll-to-bottom-btn")
         assert btn_css_pos != -1
         btn_css = STYLE_CSS[btn_css_pos:btn_css_pos + 300]
-        assert "sticky" in btn_css, (
-            ".scroll-to-bottom-btn must use position:sticky to stay at bottom of viewport (#677)"
+        assert "position:absolute" in btn_css, (
+            ".scroll-to-bottom-btn must be an overlay so it stays visible without "
+            "participating in transcript scroll layout (#677)"
         )
 
     def test_scroll_listener_hides_button_when_pinned(self):
