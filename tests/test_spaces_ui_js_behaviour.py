@@ -546,7 +546,7 @@ global.fetch = async function(path, opts = {}) {
         widget_count: 3,
         disabled_space_count: 1,
         disabled_widget_count: 1,
-        rollback_point_count: 2,
+        rollback_point_count: 3,
         queued_event_count: 1,
         module_count: 3,
         disabled_module_count: 1,
@@ -572,6 +572,7 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           revisions: [
             { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, timeline_state: 'current', is_current_revision: true, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+            { event_id: 'rev-return-present', event_type: 'space.updated', space_id: 'broken', created_at: 1710000150, timeline_state: 'future', is_return_to_present_candidate: true, details: { fields: ['widgets'], note: 'return safely to present', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Broken present checkpoint', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], widgets_to_add: [], widgets_to_remove: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
             { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' }, restore_preview: { name: 'Broken safe checkpoint', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget', 'raw-html-widget', 'script-widget', 'api_auth_widget', 'source-widget', 'secret-widget'], widgets_to_add: ['added-widget'], widgets_to_remove: ['removed-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
           ],
           widgets: [
@@ -2581,6 +2582,22 @@ def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driv
     assert "generated code" not in recovery_html.lower()
 
 
+def test_spaces_ui_recovery_history_labels_return_to_present_candidate_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceCanvasRecovery")
+
+    recovery_html = out["recoveryHtml"]
+    assert "Return-to-present candidate" in recovery_html
+    assert "timeline: future" in recovery_html
+    assert 'data-event-id="rev-return-present">Return to present</button>' in recovery_html
+    assert 'data-event-id="rev-return-present">Restore revision</button>' not in recovery_html
+    assert "Broken present checkpoint" in recovery_html
+    assert "Bad &lt;Widget&gt;" in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html.lower()
+    assert "api_key" not in recovery_html.lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in recovery_html
+
+
 def test_spaces_ui_canvas_docked_input_previews_existing_space_creator_spec(driver_path):
     out = _run_spaces_scenario(driver_path, "canvasCreatorPreview")
     post = next(
@@ -4481,7 +4498,7 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Generated widgets rendered: false" in out["recoveryHtml"]
     assert "Recovery hard gate" in out["recoveryHtml"]
     assert "metadata-only recovery · generated widgets not rendered · rollback controls available · disable and repair controls available" in out["recoveryHtml"]
-    assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 2 rollback points · 1 queued event · 3 modules · 1 disabled module" in out["recoveryHtml"]
+    assert "Recovery summary: 2 spaces · 3 widgets · 1 disabled space · 1 disabled widget · 3 rollback points · 1 queued event · 3 modules · 1 disabled module" in out["recoveryHtml"]
     assert "Quarantined modules" in out["recoveryHtml"]
     assert "Safe Module" in out["recoveryHtml"]
     assert "Metadata-only module descriptor" in out["recoveryHtml"]

@@ -2639,7 +2639,8 @@
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const currentRevision = isCurrentRevision(rev);
       const timelineLabel = formatRevisionTimelineLabel(rev);
-      const restoreButton = !currentRevision && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
+      const restoreLabel = isReturnToPresentRevision(rev) ? 'Return to present' : 'Restore revision';
+      const restoreButton = !currentRevision && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
       const widgetRestoreButtons = currentRevision ? '' : renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +

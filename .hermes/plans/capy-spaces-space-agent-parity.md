@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-11 on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-12 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Sandbox runtime `postMessage` handling now accepts the Space-Agent-style camelCase `runtimeToken` alias only when it matches the visible sandbox session, rejects conflicting `runtime_token`/`runtimeToken` aliases fail-closed before approval or event queueing, and continues to omit hostile renderer/API-auth/secret-looking fixture values from DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Safe recovery rollback rows now mirror the Space detail revision timeline by labeling `is_return_to_present_candidate` future revisions with a `Return to present` action while ordinary rollback points keep `Restore revision`, and the recovery panel remains metadata-only with generated renderer/API-auth/secret-looking fixture values omitted from DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): label recovery return to present`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving safe recovery rollback rows label future `is_return_to_present_candidate` revisions as `Return to present` instead of generic `Restore revision`, while past rollback points keep the ordinary restore label.
+  - Hardened `renderRecoveryRevisionRows(...)` to reuse the existing return-to-present helper already used by Space detail revision history, preserving current-revision action suppression, metadata-only restore previews/diffs, and generated renderer/API-auth/secret-looking DOM omissions.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); Spaces UI behavior + demo parity suites passed (`167 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static recovery return-to-present harness browser leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-return-present-qa.png`.
 
 - `fix(spaces): accept runtimeToken sandbox alias`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `messageType` + `runtimeToken` + `spaceId`/`widgetId` sandbox prompts queue the same metadata-only `agent.prompt` event through the existing approval gate.
