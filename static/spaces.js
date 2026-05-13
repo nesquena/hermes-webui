@@ -198,7 +198,7 @@
   }
 
   function formatProductRevisionDate(value){
-    const safe = safeDisplayMetadataText(value, 'none') || 'none';
+    const safe = safeSpaceRevisionLabel(value, 'none');
     return safe === 'none' ? 'No revision yet' : 'Revision '+safe;
   }
 
@@ -232,7 +232,7 @@
       return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
         '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
-        '<div class="capy-spaces-muted">'+escapeHtml(widgetLabel)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+escapeHtml(activeLabel)+'</div></div>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(widgetLabel)+' · Revision: '+escapeHtml(safeSpaceRevisionLabel(s.revision_event_id, 'none'))+escapeHtml(activeLabel)+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
         activeAction +
@@ -598,6 +598,13 @@
     return /^[a-f0-9]{32}$/.test(text) ? text : '';
   }
 
+  function safeSpaceRevisionLabel(value, fallback){
+    const raw = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    const emptyLabel = fallback || 'none';
+    if (!raw || raw === 'none') return emptyLabel;
+    return safeRevisionEventIdText(raw) || '[REDACTED]';
+  }
+
   function safeDisplayMetadataText(value, fallback){
     const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
     if (!text) return fallback || '';
@@ -750,7 +757,7 @@
       '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
       '<h3>'+escapeHtml(name)+'</h3>' +
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(safeSpaceRevisionLabel(space.revision_event_id, 'none'))+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderSharedDataSlots(spaceId, space.shared_data || []) +
@@ -761,7 +768,7 @@
     const spaceId = safePathIdText(space && space.space_id ? space.space_id : '') || '';
     const rawName = space && space.name ? space.name : spaceId || 'Untitled Space';
     const name = safeDisplayMetadataText(rawName, spaceId || 'Untitled Space') || spaceId || 'Untitled Space';
-    const revision = safeDisplayMetadataText(space && space.revision_event_id ? space.revision_event_id : '', 'none') || 'none';
+    const revision = safeSpaceRevisionLabel(space && space.revision_event_id ? space.revision_event_id : '', 'none');
     const widgetCount = Array.isArray(widgets) ? widgets.length : 0;
     const widgetCards = renderSpaceAgentCanvasWidgets(spaceId, widgets || []);
     return '<section class="capy-spaces-canvas-shell" aria-label="Current Space canvas">' +

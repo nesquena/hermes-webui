@@ -112,6 +112,9 @@ global.fetch = async function(path, opts = {}) {
     if (scenario === 'canvasCreatorPreviewDataSpace') {
       return response({ enabled: true, spaces: [{ space_id: 'data-lab', name: 'Daily Data Dashboard', widget_count: 1, revision_event_id: 'rev-data-lab' }] });
     }
+    if (scenario === 'spaceUnsafeRevisionEventIdDisplay') {
+      return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev/../escape' }] });
+    }
     return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
   }
   if (path === 'api/spaces/demo/runs') {
@@ -912,7 +915,7 @@ global.fetch = async function(path, opts = {}) {
       space_id: 'lab',
       name: 'Lab <Detail>',
       description: 'Unsafe <detail>',
-      revision_event_id: 'rev1',
+      revision_event_id: scenario === 'spaceUnsafeRevisionEventIdDisplay' ? 'rev/../escape' : 'rev1',
       widgets: [
         { id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' },
         { id: 'browser-card', kind: 'browser-surface', title: 'Browser card', layout: { x: 8, y: 11, w: 7, h: 5, minimized: false }, source: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
@@ -1332,6 +1335,10 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadSpaceWidgets('lab');
     beforeHtml = root.innerHTML;
     await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'spaceUnsafeRevisionEventIdDisplay') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await window.openSpaceDetail('lab');
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -3014,6 +3021,25 @@ def test_spaces_ui_view_widget_details_redacts_unsafe_revision_event_id(driver_p
     assert "SECRET" not in html
     assert "renderer" not in html.lower()
     assert "<script>" not in html
+
+
+def test_spaces_ui_redacts_unsafe_space_revision_event_ids_across_home_detail_and_canvas(driver_path):
+    out = _run_spaces_scenario(driver_path, "spaceUnsafeRevisionEventIdDisplay")
+    home_html = out["beforeHtml"]
+    detail_html = out["rootHtml"]
+
+    assert "capy-spaces-product-home" in home_html
+    assert "Control plane / debug tools" in home_html
+    assert "capy-spaces-canvas-shell" in detail_html
+    assert "Space ID: lab" in detail_html
+    for html in (home_html, detail_html):
+        assert "rev/../escape" not in html
+        assert "../" not in html
+        assert "Revision [REDACTED]" in html or "Revision: [REDACTED]" in html or "revision [REDACTED]" in html
+    assert "Revision [REDACTED]" in home_html
+    assert "Revision: [REDACTED]" in home_html
+    assert "revision [REDACTED]" in detail_html
+    assert "Revision: [REDACTED]" in detail_html
 
 
 def test_spaces_ui_widget_details_renders_opaque_metadata_only_sandbox_iframe(driver_path):
