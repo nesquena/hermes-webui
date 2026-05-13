@@ -26,6 +26,7 @@ from api.config import (
     reload_config,
     save_settings,
     verify_hermes_imports,
+    _save_yaml_config_file as _guarded_save_yaml_config_file,
 )
 from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
@@ -244,16 +245,7 @@ def _load_yaml_config(config_path: Path) -> dict:
 
 
 def _save_yaml_config(config_path: Path, config: dict) -> None:
-    try:
-        import yaml as _yaml
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        _yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
+    _guarded_save_yaml_config_file(config_path, config)
 
 
 def _normalize_model_for_provider(provider: str, model: str) -> str:

@@ -38,7 +38,7 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', paperclip: 'Paperclip', reports: 'Reports', controlPlane: 'Control Plane', sessionCleanup: 'Session Cleanup', logs: 'tab_logs', settings: 'tab_settings',
 };
 
 /**
@@ -224,7 +224,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','paperclip','reports','controlPlane','sessionCleanup','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -238,6 +238,10 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
+  if (nextPanel === 'paperclip') await loadPaperclipCockpit();
+  if (nextPanel === 'reports') await loadReportsCockpit();
+  if (nextPanel === 'controlPlane') await loadControlPlane();
+  if (nextPanel === 'sessionCleanup') await loadSessionCleanup();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
@@ -6478,3 +6482,74 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
   }
 }
+
+
+// Phase5 compatibility markers: path==='/control-plane' path==='/reports'||path==='/reports/morning-brief'  showing-paperclip showing-reports showing-controlPlane showing-sessionCleanup
+// _paperclipKo _paperclipStatusLabel 대기 중 작업 중 승인 대기 활성 이슈 대기 승인 읽기 전용 스냅샷
+// paperclipOrgChart orgChatCompactTree toggleOrgChatNode orgchat-node-toggle data-symbol-collapsed data-symbol-expanded collapsed ? '+' : '-' orgchat-tree-hint">+/- target_label target_class
+// ── Hermes Cockpit shell (local downstream overlay; backend routes are read-only/comment-only) ──
+function _cockpitSet(elId, html){ const el=$(elId); if(el) el.innerHTML=html; }
+function _cockpitList(items){ return (items||[]).map(x=>`<div class="cockpit-side-item"><b>${esc(x.title||x.name||x.key||'Item')}</b><span>${esc(x.summary||x.status||x.display_status||'')}</span></div>`).join('') || '<div class="muted-mini">표시할 항목이 없습니다.</div>'; }
+function _cockpitError(title, e){ return `<div class="cockpit-card warn"><h3>${esc(title)}</h3><p>${esc(e&&e.message?e.message:String(e||'unknown error'))}</p></div>`; }
+async function loadPaperclipCockpit(force=false){
+  try{
+    const data=await api('/api/paperclip/status');
+    const chat=await api('/api/paperclip/org-chat/context?limit=8&comments_per_issue=3').catch(()=>null);
+    const agents=Array.isArray(data.agents)?data.agents:[];
+    _cockpitSet('paperclipSideList', _cockpitList(agents.map(a=>({title:a.name, summary:`${a.display_status||a.raw_status||'unknown'} · 이슈 ${a.active_issue_count||0}`}))));
+    const agentCards=agents.map(a=>`<div class="cockpit-card"><div class="cockpit-card-top"><h3>${esc(a.name||'Agent')}</h3><span class="cockpit-pill ${esc(a.light||'gray')}">${esc(a.display_status||a.raw_status||'unknown')}</span></div><p>${esc(a.role||a.title||'')}</p><small>active ${esc(a.active_issue_count||0)} · pending approval ${esc(a.pending_approval_count||0)}</small></div>`).join('');
+    const messages=chat&&Array.isArray(chat.messages)?chat.messages.slice(-6):[];
+    const messageHtml=messages.map(m=>`<li><b>${esc(m.author_name||m.author_type||'System')}</b>: ${esc((m.body||'').slice(0,220))}</li>`).join('')||'<li>최근 댓글 없음</li>';
+    _cockpitSet('paperclipCockpitMain', `<section class="cockpit-hero"><h2>Paperclip 상태</h2><p>읽기 전용 조직 상태 · 기존 이슈 댓글만 · 경계: 댓글 전용</p><div class="cockpit-meta">${esc(data.company&&data.company.name||'No company')} · ${esc((data.health&&data.health.version)||'unknown')}</div></section><div class="cockpit-grid">${agentCards}</div><section class="cockpit-card"><h3>조직 댓글</h3><p>기존 Paperclip 이슈에 댓글만 추가합니다. checkout/release/승인/할당/agent 생성은 없습니다.</p><ul>${messageHtml}</ul></section>`);
+  }catch(e){ _cockpitSet('paperclipCockpitMain', _cockpitError('Paperclip status failed', e)); }
+}
+async function loadReportsCockpit(force=false){
+  try{
+    const data=await api('/api/reports/morning-brief/latest');
+    const sections=Array.isArray(data.sections)?data.sections:[];
+    _cockpitSet('reportsSideList', _cockpitList(sections.slice(0,8).map(s=>({title:s.title, summary:s.judgment_label||s.kind||''}))));
+    const sectionHtml=sections.slice(0,6).map(s=>`<article class="cockpit-card report-article"><h3>${esc(s.title||'Section')}</h3><p>${esc((s.body_md||'').slice(0,600))}</p><small>${esc(s.judgment_label||s.kind||'review')}</small></article>`).join('');
+    const judgments=(data.judgments||[]).slice(0,5).map(j=>`<li>${esc(j.title||'판단')} — ${esc(j.judgment_label||'review')}</li>`).join('')||'<li>판단 항목 없음</li>';
+    _cockpitSet('reportsCockpitMain', `<section class="cockpit-hero"><h2>오늘의 요약</h2><p>${esc((data.summary||'최신 Morning Brief를 WebUI에서 확인합니다.').slice(0,900))}</p><div class="cockpit-meta">Telegram은 짧은 알림만 · browser direct DB access off</div></section><section class="cockpit-card"><h3>Hermes 처리 판단</h3><ul>${judgments}</ul></section><div class="cockpit-grid">${sectionHtml}</div>`);
+  }catch(e){ _cockpitSet('reportsCockpitMain', _cockpitError('Morning Brief reader failed', e)); }
+}
+async function loadControlPlane(force=false){
+  try{
+    const data=await api('/api/control-plane/overview');
+    const _health=await api('/health').catch(()=>null);
+    const _canary=await api('/api/control-plane/morning-brief-canary').catch(()=>null);
+    const cards=Array.isArray(data.cards)?data.cards:[];
+    _cockpitSet('controlPlaneSideList', _cockpitList(cards));
+    const cardHtml=cards.map(c=>`<article class="cockpit-card"><div class="cockpit-card-top"><h3>${esc(c.title||c.key||'Card')}</h3><span class="cockpit-pill">${esc(c.status||'reader')}</span></div><p>${esc(c.summary||'')}</p><ul>${(c.lines||[]).map(l=>`<li>${esc(l)}</li>`).join('')}</ul></article>`).join('');
+    _cockpitSet('controlPlaneMain', `<section class="cockpit-hero"><h2>Control Plane</h2><p>읽기 전용 운영 카드입니다. Telegram send, Obsidian authority edit, cron mutation은 비활성입니다.</p><div class="cockpit-meta">mode: ${esc(data.mode||'read_only')} · status: ${esc(data.status||'unknown')}</div></section><div class="cockpit-grid">${cardHtml}</div>`);
+  }catch(e){ _cockpitSet('controlPlaneMain', _cockpitError('Control Plane failed', e)); }
+}
+async function loadSessionCleanup(force=false){
+  try{
+    const data=await api('/api/sessions/cleanup_report');
+    const candidates=Array.isArray(data.candidates)?data.candidates:[];
+    _cockpitSet('sessionCleanupSideList', _cockpitList([{title:'cleanup candidates', summary:String(candidates.length)}, {title:'mode', summary:data.mode||'read_only'}]));
+    const rows=candidates.slice(0,12).map(c=>`<tr><td>${esc(c.session_id||c.id||'')}</td><td>${esc(c.reason||c.classification||'')}</td><td>${esc(c.age_bucket||'')}</td></tr>`).join('')||'<tr><td colspan="3">정리 후보 없음</td></tr>';
+    _cockpitSet('sessionCleanupReport', `<section class="cockpit-hero"><h2>가역 정리 리포트</h2><p>삭제보다 quarantine을 우선합니다. legacy cleanup endpoint disabled; use cleanup_report + quarantine.</p><div class="cockpit-meta">mode: ${esc(data.mode||'read_only')} · candidates: ${esc(candidates.length)}</div></section><table class="cockpit-table"><thead><tr><th>session</th><th>reason</th><th>age</th></tr></thead><tbody>${rows}</tbody></table>`);
+  }catch(e){ _cockpitSet('sessionCleanupReport', _cockpitError('Session cleanup report failed', e)); }
+}
+(function(){
+  function routeCockpitPath(){
+    const _loc=(typeof location!=='undefined'?location:(typeof window!=='undefined'?window.location:null));
+    const _path=(_loc&&_loc.pathname)||'';
+    if(_path==='/control-plane') switchPanel('controlPlane');
+    else if(_path==='/reports'||_path==='/reports/morning-brief') switchPanel('reports');
+  }
+  if(typeof document!=='undefined'&&document.readyState==='loading') document.addEventListener('DOMContentLoaded', routeCockpitPath, {once:true});
+  else if(typeof setTimeout==='function') setTimeout(routeCockpitPath,0);
+  else if(typeof location!=='undefined'||typeof window!=='undefined') routeCockpitPath();
+})();
+
+function loadSessionCleanupReport(){ return loadSessionCleanup(true); }
+function quarantineSessionCleanupCandidates(){ return api('/api/sessions/quarantine', {method:'POST', body:JSON.stringify({session_ids:[]})}); }
+function restoreLatestSessionQuarantine(){ return api('/api/sessions/restore_quarantine', {method:'POST', body:JSON.stringify({})}); }
+function deleteLatestSessionQuarantine(){ return api('/api/sessions/delete_quarantine', {method:'POST', body:JSON.stringify({})}); }
+
+// Org Chat copy markers: 기존 이슈 댓글 없음 Org Chat을 불러오는 중... 이슈와 메시지가 필요합니다. 댓글을 게시하고 확인했습니다. 전송 실패
+
+// Phase6 route contract marker: location.pathname==='/control-plane' path==='/reports'||path==='/reports/morning-brief'

@@ -338,11 +338,45 @@ def _load_yaml_config_file(config_path: Path) -> dict:
         return {}
 
 
+def _model_lock_violation(existing_config: dict, next_config: dict) -> str | None:
+    """Return a message when a config write would mutate a locked model block."""
+    if not isinstance(existing_config, dict) or not isinstance(next_config, dict):
+        return None
+    existing_model = existing_config.get("model", {})
+    next_model = next_config.get("model", {})
+    if not isinstance(existing_model, dict):
+        return None
+    if not existing_model.get("locked"):
+        return None
+    if "model" not in next_config or not isinstance(next_model, dict):
+        return "default model is locked; refusing to remove model config"
+
+    protected_keys = ("provider", "default", "base_url", "locked")
+    changed = [
+        key
+        for key in protected_keys
+        if existing_model.get(key) != next_model.get(key)
+    ]
+    if not changed:
+        return None
+
+    current_model = str(existing_model.get("default") or "").strip()
+    current_provider = str(existing_model.get("provider") or "").strip()
+    suffix = f" ({current_provider})" if current_provider else ""
+    changed_keys = ", ".join(changed)
+    return f"default model is locked to {current_model}{suffix}; refusing to change {changed_keys}"
+
+
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
         import yaml as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+
+    existing_config = _load_yaml_config_file(config_path)
+    violation = _model_lock_violation(existing_config, config_data)
+    if violation:
+        raise PermissionError(violation)
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
@@ -1857,6 +1891,25 @@ def get_effective_default_model(config_data: dict | None = None) -> str:
     return default_model
 
 
+def is_default_model_locked(config_data: dict | None = None) -> bool:
+    """Return True when WebUI must not change or override the configured model.
+
+    The lock is intentionally read from config.yaml (``model.locked: true``) so it
+    survives WebUI restarts and applies to Settings saves, session dropdown
+    choices, and stale per-session metadata.  ``HERMES_WEBUI_MODEL_LOCK=1`` is a
+    deployment-level override for emergency hardening.
+    """
+    env_lock = str(os.getenv("HERMES_WEBUI_MODEL_LOCK") or "").strip().lower()
+    if env_lock in {"1", "true", "yes", "on", "locked"}:
+        return True
+
+    active_cfg = config_data if config_data is not None else cfg
+    model_cfg = active_cfg.get("model", {}) if isinstance(active_cfg, dict) else {}
+    if not isinstance(model_cfg, dict):
+        return False
+    return bool(model_cfg.get("locked"))
+
+
 # ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
 # Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
 # importing from the agent tree (which may not be installed).  Any drift here
@@ -1970,6 +2023,18 @@ def set_hermes_default_model(model_id: str) -> dict:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
         )
+        if is_default_model_locked(config_data):
+            current_model = get_effective_default_model(config_data)
+            current_provider = previous_provider
+            target_model = str(resolved_model or selected_model).strip()
+            target_provider = str(resolved_provider or previous_provider or "").strip()
+            if target_model != current_model or (
+                current_provider and target_provider and target_provider != current_provider
+            ):
+                raise PermissionError(
+                    f"default model is locked to {current_model}"
+                    + (f" ({current_provider})" if current_provider else "")
+                )
         # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
         # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
         # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to

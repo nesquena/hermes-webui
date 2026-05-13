@@ -96,6 +96,10 @@
     <button class="rail-btn nav-tab has-tooltip" data-panel="profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip hermes-cockpit-nav" data-panel="paperclip" onclick="switchPanel('paperclip',{fromRailClick:true})" data-tooltip="Paperclip" aria-label="Paperclip">P</button>
+    <button class="rail-btn nav-tab has-tooltip hermes-cockpit-nav" data-panel="reports" onclick="switchPanel('reports',{fromRailClick:true})" data-tooltip="Reports" aria-label="Reports">R</button>
+    <button class="rail-btn nav-tab has-tooltip hermes-cockpit-nav" data-panel="controlPlane" onclick="switchPanel('controlPlane',{fromRailClick:true})" data-tooltip="Control Plane" data-i18n-title="tab_control_plane" aria-label="Control Plane">C</button>
+    <button class="rail-btn nav-tab has-tooltip hermes-cockpit-nav" data-panel="sessionCleanup" onclick="switchPanel('sessionCleanup',{fromRailClick:true})" data-tooltip="Session cleanup" aria-label="Session cleanup">S</button>
     <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard" aria-label="Hermes Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs" aria-label="Logs"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
     <div class="rail-spacer"></div>
@@ -113,6 +117,10 @@
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="todos" data-label="Todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="insights" data-label="Insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="paperclip" data-label="Paperclip" onclick="switchPanel('paperclip',{fromRailClick:true})" data-tooltip="Paperclip">P</button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="reports" data-label="Reports" onclick="switchPanel('reports',{fromRailClick:true})" data-tooltip="Reports">R</button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="controlPlane" data-label="Control" onclick="switchPanel('controlPlane',{fromRailClick:true})" data-tooltip="Control Plane" data-i18n-title="tab_control_plane">C</button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="sessionCleanup" data-label="Cleanup" onclick="switchPanel('sessionCleanup',{fromRailClick:true})" data-tooltip="Session cleanup">S</button>
       <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="logs" data-label="Logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
       <!-- Settings button mirrored here for mobile (rail is desktop-only via @media >=768px). Keep in sync with rail entry. -->
@@ -213,6 +221,27 @@
           <option value="365">365 days</option>
         </select>
       </div>
+    </div>
+    <!-- Hermes cockpit panels -->
+    <div class="panel-view" id="panelPaperclip">
+      <div class="panel-head"><span>Paperclip</span><div class="panel-head-actions"><button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadPaperclipCockpit(true)" data-tooltip="새로고침" aria-label="새로고침">↻</button></div></div>
+      <div class="cockpit-side-note">읽기 전용 조직 상태 · 댓글 전용 Org Chat</div>
+      <div class="cockpit-side-list" id="paperclipSideList"><div class="muted-mini">Loading...</div></div><div id="paperclipAgentList" hidden></div><div id="orgChatOrgTree" hidden></div><div id="orgChatSideOrgTree" hidden></div><div id="org-chat-boundary-copy" hidden>조직 댓글 · 기존 Paperclip 이슈에 댓글만 추가합니다. · 기존 이슈 댓글만 · 이슈 선택 · 댓글 작성 · 경계: 댓글 전용</div>
+    </div>
+    <div class="panel-view" id="panelReports">
+      <div class="panel-head"><span>Reports</span><div class="panel-head-actions"><button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadReportsCockpit(true)" data-tooltip="새로고침" aria-label="새로고침">↻</button></div></div>
+      <div class="cockpit-side-note">Morning Brief reader · Telegram은 짧은 알림만</div>
+      <div class="cockpit-side-list" id="reportsSideList"><div class="muted-mini">Loading...</div></div>
+    </div>
+    <div class="panel-view" id="panelControlPlane">
+      <div class="panel-head"><span>Control Plane</span><div class="panel-head-actions"><button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadControlPlane(true)" data-tooltip="새로고침" aria-label="새로고침">↻</button></div></div>
+      <div class="cockpit-side-note">읽기 전용 운영 카드 · mutation off</div>
+      <div class="cockpit-side-list" id="controlPlaneSideList"><div class="muted-mini">Loading...</div></div>
+    </div>
+    <div class="panel-view" id="panelSessionCleanup">
+      <div class="panel-head"><span>Session Cleanup</span><div class="panel-head-actions"><button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadSessionCleanup(true)" data-tooltip="새로고침" aria-label="새로고침">↻</button></div></div>
+      <div class="cockpit-side-note">가역 quarantine 우선 · legacy cleanup disabled</div>
+      <div class="cockpit-side-list" id="sessionCleanupSideList"><div class="muted-mini">Loading...</div></div>
     </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">
@@ -797,6 +826,22 @@
           <div class="logs-output" id="logsOutput"><div class="logs-empty" data-i18n="logs_empty">No log lines yet.</div></div>
         </div>
       </div>
+    </div>
+    <div id="mainPaperclip" class="main-view cockpit-main">
+      <div class="main-view-header"><div class="main-view-title">Paperclip 조직</div><div class="main-view-actions"><button class="btn secondary" onclick="loadPaperclipCockpit(true)">새로고침</button></div></div>
+      <div class="main-view-body"><div class="main-view-content" id="paperclipCockpitMain"><div class="main-view-empty-title">읽기 전용 실시간 스냅샷</div><div class="main-view-empty-sub">Paperclip 상태를 불러옵니다.</div></div></div>
+    </div>
+    <div id="mainReports" class="main-view cockpit-main">
+      <div class="main-view-header"><div class="main-view-title">Reports / Morning Brief · WebUI 보고서 리더</div><div class="main-view-actions"><button class="btn secondary" onclick="loadReportsCockpit(true)">새로고침</button></div></div>
+      <div class="main-view-body"><div class="main-view-content" id="reportsCockpitMain"><div class="main-view-empty-title">오늘의 요약</div><div class="main-view-empty-sub">Morning Brief reader를 불러옵니다. 핵심 이슈 · 보류 / 출처 약함</div></div></div>
+    </div>
+    <div id="mainControlPlane" class="main-view cockpit-main">
+      <div class="main-view-header"><div class="main-view-title">Control Plane</div><div class="main-view-actions"><button class="btn secondary" onclick="loadControlPlane(true)">새로고침</button></div></div>
+      <div class="main-view-body"><div class="main-view-content" id="controlPlaneMain"><div class="main-view-empty-title">읽기 전용 운영 카드</div><div class="main-view-empty-sub">write/send/cron mutation은 꺼져 있습니다.</div></div></div>
+    </div>
+    <div id="mainSessionCleanup" class="main-view cockpit-main">
+      <div class="main-view-header"><div class="main-view-title">Session Cleanup</div><div class="main-view-actions"><button class="btn secondary" onclick="loadSessionCleanup(true)">새로고침</button></div></div>
+      <div class="main-view-body"><div class="main-view-content" id="sessionCleanupReport"><div class="main-view-empty-title">가역 정리 리포트</div><div class="main-view-empty-sub">Read-only scan · Quarantine selected · Restore latest quarantine · Delete quarantine only · state.db is not modified · 삭제 대신 quarantine 후보를 검토합니다.</div></div></div>
     </div>
     <div id="mainSettings" class="main-view">
       <div class="settings-main">

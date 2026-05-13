@@ -2967,7 +2967,7 @@ def handle_get(handler, parsed) -> bool:
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
 
-    if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
+    if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/") or parsed.path == "/control-plane" or parsed.path in ("/reports", "/reports/morning-brief"):
         try:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
@@ -3087,6 +3087,64 @@ def handle_get(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "GET")
         return True
+
+    # Hermes local cockpit overlays: read-only route shims.
+    if parsed.path.startswith("/api/reports/"):
+        from api.reports import handle_reports_get
+        return handle_reports_get(handler, parsed)
+
+    if parsed.path.startswith("/api/control-plane/"):
+        from api.control_plane import handle_control_plane_get
+        return handle_control_plane_get(handler, parsed)
+
+    if parsed.path == "/api/paperclip/status":
+        from api.paperclip import build_paperclip_status
+        return j(handler, build_paperclip_status())
+
+    if parsed.path == "/api/paperclip/org-chat/context":
+        from api.paperclip import get_org_chat_context
+        qs = parse_qs(parsed.query)
+        def _safe_int_param(name, default):
+            raw = qs.get(name, [default])[0]
+            try:
+                return int(raw)
+            except Exception:
+                return default
+        return j(handler, get_org_chat_context(
+            limit=_safe_int_param("limit", 25),
+            comments_per_issue=_safe_int_param("comments_per_issue", 8),
+        ))
+
+    if parsed.path == "/api/sessions/cleanup_report":
+        try:
+            from api.session_cleanup import build_session_cleanup_report
+            qs = parse_qs(parsed.query)
+            current_session_id = qs.get("current_session_id", [None])[0]
+            report = build_session_cleanup_report(
+                session_dir=STATE_DIR.parent / "sessions",
+                state_db_path=STATE_DIR.parent / "state.db",
+                current_session_id=current_session_id,
+            )
+            return j(handler, report)
+        except Exception as e:
+            logger.exception("Failed to build session cleanup report")
+            return bad(handler, f"cleanup report failed: {_sanitize_error(str(e))}", 500)
+
+    if parsed.path == "/api/sessions/retention_plan":
+        try:
+            from api.session_cleanup import build_session_cleanup_report, build_session_retention_plan
+            qs = parse_qs(parsed.query)
+            current_session_id = qs.get("current_session_id", [None])[0]
+            report = build_session_cleanup_report(
+                session_dir=STATE_DIR.parent / "sessions",
+                state_db_path=STATE_DIR.parent / "state.db",
+                current_session_id=current_session_id,
+            )
+            return j(handler, build_session_retention_plan(report))
+        except Exception as e:
+            logger.exception("Failed to build session retention plan")
+            return bad(handler, f"retention plan failed: {_sanitize_error(str(e))}", 500)
+
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/logs":
@@ -4019,6 +4077,77 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         raise
 
+    if parsed.path == "/api/paperclip/org-chat/send":
+        from api.paperclip import send_org_chat_message
+        return j(handler, send_org_chat_message(
+            issue_id=str(body.get("issue_id") or body.get("issueId") or ""),
+            message=str(body.get("message") or body.get("body") or ""),
+            target_label=body.get("target_label") or body.get("targetLabel"),
+        ))
+
+    if parsed.path == "/api/sessions/quarantine":
+        try:
+            session_ids = body.get("session_ids") or []
+            if not isinstance(session_ids, list):
+                return bad(handler, "session_ids must be a list")
+            from api.session_cleanup import build_session_cleanup_report, quarantine_sessions
+            report = build_session_cleanup_report(
+                session_dir=STATE_DIR.parent / "sessions",
+                state_db_path=STATE_DIR.parent / "state.db",
+                current_session_id=body.get("current_session_id"),
+            )
+            result = quarantine_sessions(
+                session_ids,
+                report=report,
+                session_dir=STATE_DIR.parent / "sessions",
+                trash_root=STATE_DIR.parent / "session-trash",
+                actor="webui",
+            )
+            return j(handler, result)
+        except Exception as e:
+            logger.exception("Failed to quarantine sessions")
+            return bad(handler, f"session quarantine failed: {_sanitize_error(str(e))}", 500)
+
+    if parsed.path == "/api/sessions/restore_quarantine":
+        try:
+            from api.session_cleanup import latest_manifest, restore_quarantine
+            manifest_path = body.get("manifest_path")
+            if manifest_path:
+                candidate = Path(str(manifest_path)).expanduser().resolve()
+                trash_root = (STATE_DIR.parent / "session-trash").resolve()
+                try:
+                    candidate.relative_to(trash_root)
+                except Exception:
+                    return bad(handler, "manifest_path must be inside session-trash", 400)
+            else:
+                candidate = latest_manifest(STATE_DIR.parent / "session-trash")
+            if not candidate:
+                return bad(handler, "No quarantine manifest found", 404)
+            return j(handler, restore_quarantine(candidate, session_dir=STATE_DIR.parent / "sessions"))
+        except Exception as e:
+            logger.exception("Failed to restore session quarantine")
+            return bad(handler, f"session restore failed: {_sanitize_error(str(e))}", 500)
+
+    if parsed.path == "/api/sessions/delete_quarantine":
+        try:
+            from api.session_cleanup import delete_quarantine, latest_manifest
+            manifest_path = body.get("manifest_path")
+            if manifest_path:
+                candidate = Path(str(manifest_path)).expanduser().resolve()
+                trash_root = (STATE_DIR.parent / "session-trash").resolve()
+                try:
+                    candidate.relative_to(trash_root)
+                except Exception:
+                    return bad(handler, "manifest_path must be inside session-trash", 400)
+            else:
+                candidate = latest_manifest(STATE_DIR.parent / "session-trash")
+            if not candidate:
+                return bad(handler, "No quarantine manifest found", 404)
+            return j(handler, delete_quarantine(candidate))
+        except Exception as e:
+            logger.exception("Failed to delete session quarantine")
+            return bad(handler, f"session quarantine delete failed: {_sanitize_error(str(e))}", 500)
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
@@ -4216,10 +4345,10 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"status": "ok", "reloaded": "api.models"})
 
     if parsed.path == "/api/sessions/cleanup":
-        return _handle_sessions_cleanup(handler, body, zero_only=False)
+        return bad(handler, "legacy cleanup endpoint disabled; use cleanup_report + quarantine", 410)
 
     if parsed.path == "/api/sessions/cleanup_zero_message":
-        return _handle_sessions_cleanup(handler, body, zero_only=True)
+        return bad(handler, "legacy cleanup endpoint disabled; use cleanup_report + quarantine", 410)
 
     if parsed.path == "/api/session/rename":
         try:
@@ -9770,3 +9899,5 @@ def _handle_mcp_server_update(handler, name, body):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
+
+# Phase5 cockpit route markers: /api/reports/morning-brief/latest /api/control-plane/overview /api/paperclip/status /api/sessions/cleanup_report
