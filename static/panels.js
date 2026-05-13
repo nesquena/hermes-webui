@@ -5122,6 +5122,16 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
+    if(payload&&payload.bot_logo!==undefined&&typeof validateBrandingLogoForSave==='function'){
+      const originalLogo=payload.bot_logo;
+      const normalizedLogo=await validateBrandingLogoForSave(originalLogo);
+      payload={...payload,bot_logo:normalizedLogo};
+      if(originalLogo&&originalLogo!==normalizedLogo){
+        const logoField=$('settingsBotLogo');
+        if(logoField) logoField.value='';
+        if(typeof showToast==='function') showToast('Logo must be a loadable image between 16×16 and 4096×4096 pixels.');
+      }
+    }
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.simplified_tool_calling!==undefined){
       window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
@@ -6083,6 +6093,15 @@ async function saveSettings(andClose){
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   body.bot_logo=(($('settingsBotLogo')||{}).value||'').trim();
+  if(typeof validateBrandingLogoForSave==='function'){
+    const originalLogo=body.bot_logo;
+    body.bot_logo=await validateBrandingLogoForSave(body.bot_logo);
+    if(originalLogo&&originalLogo!==body.bot_logo){
+      const logoField=$('settingsBotLogo');
+      if(logoField) logoField.value='';
+      if(typeof showToast==='function') showToast('Logo must be a loadable image between 16×16 and 4096×4096 pixels.');
+    }
+  }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{

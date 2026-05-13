@@ -1374,6 +1374,7 @@ const HERMES_DEFAULT_FAVICONS = {
   shortcut: 'static/favicon.ico',
   apple: 'static/apple-touch-icon.png',
 };
+const HERMES_LOGO_DIMENSIONS = { min: 16, max: 4096 };
 
 function _isSafeLogoUrl(value){
   const raw=(value||'').trim();
@@ -1418,29 +1419,14 @@ function _renderHermesSmallLetterFallback(el){
   el.textContent=name.charAt(0).toUpperCase();
 }
 
-function _setLogoTarget(el, url, fallbackFactory){
-  if(!el) return;
-  el.classList.toggle('is-custom', !!url);
-  if(!url){
-    if(fallbackFactory) fallbackFactory(el);
-    return;
-  }
-  el.innerHTML='';
-  const img=document.createElement('img');
-  img.src=url;
-  img.alt='';
-  img.decoding='async';
-  img.loading='eager';
-  img.onerror=function(){
-    el.classList.remove('is-custom');
-    if(fallbackFactory) fallbackFactory(el);
-  };
-  el.appendChild(img);
+function _isLogoDimensionsAllowed(img){
+  const w=Number(img&&img.naturalWidth)||0;
+  const h=Number(img&&img.naturalHeight)||0;
+  return w>=HERMES_LOGO_DIMENSIONS.min && h>=HERMES_LOGO_DIMENSIONS.min &&
+    w<=HERMES_LOGO_DIMENSIONS.max && h<=HERMES_LOGO_DIMENSIONS.max;
 }
 
-function applyBrandingLogo(value){
-  const url=_isSafeLogoUrl(value);
-  window._botLogo=url;
+function _setBrandingFavicons(url){
   const favSvg=document.getElementById('faviconSvg');
   const fav32=document.getElementById('favicon32');
   const favShortcut=document.getElementById('faviconShortcut');
@@ -1456,6 +1442,67 @@ function applyBrandingLogo(value){
     if(favShortcut) favShortcut.setAttribute('href',HERMES_DEFAULT_FAVICONS.shortcut);
     if(apple) apple.setAttribute('href',HERMES_DEFAULT_FAVICONS.apple);
   }
+}
+
+function _setLogoTarget(el, url, fallbackFactory){
+  if(!el) return;
+  el.classList.toggle('is-custom', !!url);
+  if(!url){
+    if(fallbackFactory) fallbackFactory(el);
+    return;
+  }
+  el.innerHTML='';
+  const img=document.createElement('img');
+  img.src=url;
+  img.alt='';
+  img.decoding='async';
+  img.loading='eager';
+  img.onload=function(){
+    if(_isLogoDimensionsAllowed(img)) return;
+    el.classList.remove('is-custom');
+    if(window._botLogo===url){
+      window._botLogo='';
+      _setBrandingFavicons('');
+      const logoField=document.getElementById('settingsBotLogo');
+      if(logoField&&logoField.value===url) logoField.value='';
+    }
+    if(fallbackFactory) fallbackFactory(el);
+  };
+  img.onerror=function(){
+    el.classList.remove('is-custom');
+    if(fallbackFactory) fallbackFactory(el);
+  };
+  el.appendChild(img);
+}
+
+function validateBrandingLogoForSave(value){
+  const url=_isSafeLogoUrl(value);
+  if(!url) return Promise.resolve('');
+  return new Promise((resolve)=>{
+    const img=new Image();
+    let done=false;
+    const finish=(result)=>{
+      if(done) return;
+      done=true;
+      resolve(result);
+    };
+    const timer=setTimeout(()=>finish(''),5000);
+    img.onload=function(){
+      clearTimeout(timer);
+      finish(_isLogoDimensionsAllowed(img)?url:'');
+    };
+    img.onerror=function(){
+      clearTimeout(timer);
+      finish('');
+    };
+    img.src=url;
+  });
+}
+
+function applyBrandingLogo(value){
+  const url=_isSafeLogoUrl(value);
+  window._botLogo=url;
+  _setBrandingFavicons(url);
   _setLogoTarget(document.getElementById('appTitlebarLogo'), url, _renderHermesTitlebarLogoFallback);
   _setLogoTarget(document.getElementById('emptyStateLogo'), url, _renderHermesEmptyLogoFallback);
   _setLogoTarget(document.getElementById('settingsBotLogoPreview'), url, _renderHermesSmallLetterFallback);

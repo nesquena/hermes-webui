@@ -9,6 +9,7 @@ Discovery order for all paths:
   4. Fail loudly with a human-readable fix-it message if required modules are missing
 """
 
+import base64
 import collections
 import copy
 import json
@@ -3983,6 +3984,89 @@ _BOT_LOGO_DATA_MIME_ALLOWLIST = {
     "image/x-icon",
     "image/vnd.microsoft.icon",
 }
+_BOT_LOGO_MAX_VALUE_LENGTH = 256_000
+_BOT_LOGO_MIN_DIMENSION = 16
+_BOT_LOGO_MAX_DIMENSION = 4096
+
+
+def _read_bot_logo_data_url_dimensions(raw: str, mime: str) -> tuple[int, int] | None:
+    """Best-effort image dimension sniffing for data URLs, without decoding pixels."""
+    try:
+        _header, payload = raw.split(",", 1)
+        data = base64.b64decode(payload, validate=True)
+    except Exception:
+        return None
+    try:
+        if mime == "image/png":
+            if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+                return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+            return None
+        if mime == "image/gif":
+            if data[:6] in {b"GIF87a", b"GIF89a"} and len(data) >= 10:
+                return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+            return None
+        if mime in {"image/x-icon", "image/vnd.microsoft.icon"}:
+            if len(data) >= 8 and data[:4] in {b"\x00\x00\x01\x00", b"\x00\x00\x02\x00"}:
+                width = data[6] or 256
+                height = data[7] or 256
+                return width, height
+            return None
+        if mime == "image/jpeg":
+            if not data.startswith(b"\xff\xd8"):
+                return None
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                i += 2
+                if marker in {0xD8, 0xD9}:
+                    continue
+                if i + 2 > len(data):
+                    return None
+                segment_len = int.from_bytes(data[i : i + 2], "big")
+                if segment_len < 2 or i + segment_len > len(data):
+                    return None
+                if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}:
+                    if segment_len >= 7:
+                        return int.from_bytes(data[i + 3 : i + 5], "big"), int.from_bytes(data[i + 5 : i + 7], "big")
+                    return None
+                i += segment_len
+            return None
+        if mime == "image/webp":
+            if len(data) < 30 or not data.startswith(b"RIFF") or data[8:12] != b"WEBP":
+                return None
+            chunk = data[12:16]
+            if chunk == b"VP8X" and len(data) >= 30:
+                width = 1 + int.from_bytes(data[24:27], "little")
+                height = 1 + int.from_bytes(data[27:30], "little")
+                return width, height
+            if chunk == b"VP8 " and len(data) >= 30:
+                # Lossy WebP stores 14-bit dimensions after the 0x9d012a sync code.
+                sync = data.find(b"\x9d\x01\x2a", 20, 32)
+                if sync >= 0 and sync + 7 <= len(data):
+                    width_raw = int.from_bytes(data[sync + 3 : sync + 5], "little")
+                    height_raw = int.from_bytes(data[sync + 5 : sync + 7], "little")
+                    return width_raw & 0x3FFF, height_raw & 0x3FFF
+            if chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+                bits = int.from_bytes(data[21:25], "little")
+                width = 1 + (bits & 0x3FFF)
+                height = 1 + ((bits >> 14) & 0x3FFF)
+                return width, height
+    except Exception:
+        return None
+    return None
+
+
+def _bot_logo_dimensions_allowed(dimensions: tuple[int, int] | None) -> bool:
+    if not dimensions:
+        return False
+    width, height = dimensions
+    return (
+        _BOT_LOGO_MIN_DIMENSION <= width <= _BOT_LOGO_MAX_DIMENSION
+        and _BOT_LOGO_MIN_DIMENSION <= height <= _BOT_LOGO_MAX_DIMENSION
+    )
 
 
 def _normalize_bot_logo(value) -> str:
@@ -3990,7 +4074,7 @@ def _normalize_bot_logo(value) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    if len(raw) > 256_000:
+    if len(raw) > _BOT_LOGO_MAX_VALUE_LENGTH:
         return ""
     parsed = urlparse(raw)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
@@ -4000,7 +4084,8 @@ def _normalize_bot_logo(value) -> str:
         parts = header.split(";")
         mime = parts[0][5:] if parts and parts[0].startswith("data:") else ""
         if mime in _BOT_LOGO_DATA_MIME_ALLOWLIST and "base64" in parts[1:]:
-            return raw
+            if _bot_logo_dimensions_allowed(_read_bot_logo_data_url_dimensions(raw, mime)):
+                return raw
     return ""
 
 
