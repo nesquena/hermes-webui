@@ -223,6 +223,62 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+
+// ── Desktop sidebar collapse toggle ────────────────────────────────────────
+// Two discoverability paths into the same state:
+//   (1) Click the already-active rail icon → collapse / expand the sidebar.
+//   (2) Cmd/Ctrl+B keyboard shortcut (VS Code convention).
+// Mobile is unaffected: the sidebar is an overlay there, and every collapse
+// code path is gated on `_isDesktopWidth()` (min-width:641px).
+// State is persisted via localStorage and survives reloads + bfcache.
+const _SIDEBAR_COLLAPSED_KEY='hermes-webui-sidebar-collapsed';
+
+function _isDesktopWidth(){
+  try{return window.matchMedia('(min-width:641px)').matches;}catch(_){return true;}
+}
+
+function _isSidebarCollapsed(){
+  return document.querySelector('.layout')?.classList.contains('sidebar-collapsed')||false;
+}
+
+function _syncSidebarAria(){
+  // Mirror the open/collapsed state on the active rail button via aria-expanded
+  // so screen readers announce the toggle. Open=true, collapsed=false.
+  const active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
+  if(active)active.setAttribute('aria-expanded',!_isSidebarCollapsed());
+}
+
+function toggleSidebar(forceState){
+  if(!_isDesktopWidth())return; // mobile uses an overlay; never collapse there
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const next=typeof forceState==='boolean'?forceState:!_isSidebarCollapsed();
+  layout.classList.toggle('sidebar-collapsed',next);
+  // Clear the flash-prevention root-level marker once JS owns the state.
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  try{localStorage.setItem(_SIDEBAR_COLLAPSED_KEY,next?'1':'0');}catch(_){}
+  _syncSidebarAria();
+}
+
+function expandSidebar(){
+  if(_isSidebarCollapsed())toggleSidebar(false);
+}
+
+// Boot-time restore. The inline flash-prevention script in index.html already
+// set data-sidebar-collapsed='1' on <html> before the stylesheet so the page
+// renders collapsed without paint flash. This IIFE promotes that pre-paint
+// state into the .layout class system where both JS and CSS can read it.
+(function _restoreSidebarState(){
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  if(!_isDesktopWidth())return;
+  try{
+    if(localStorage.getItem(_SIDEBAR_COLLAPSED_KEY)==='1'){
+      const layout=document.querySelector('.layout');
+      if(layout)layout.classList.add('sidebar-collapsed');
+    }
+  }catch(_){}
+  _syncSidebarAria();
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
@@ -1075,6 +1131,18 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
+  // Skip when typing in an input/textarea/contenteditable so text-edit
+  // shortcuts (e.g. bold in some embedded editors) are never stolen.
+  if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&(e.key==='b'||e.key==='B')){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(!isText&&typeof toggleSidebar==='function'&&_isDesktopWidth()){
+      e.preventDefault();
+      toggleSidebar();
+      return;
+    }
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
@@ -1685,4 +1753,14 @@ window.addEventListener('pageshow', async (event) => {
   }
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
+  // Re-sync sidebar collapse state from localStorage. bfcache restored the
+  // frozen DOM but another tab may have toggled the sidebar in the meantime.
+  if (typeof _isSidebarCollapsed === 'function' && typeof toggleSidebar === 'function') {
+    try {
+      const _want = localStorage.getItem('hermes-webui-sidebar-collapsed') === '1';
+      const _have = _isSidebarCollapsed();
+      if (_want !== _have) toggleSidebar(_want);
+      if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
+    } catch (_) {}
+  }
 });

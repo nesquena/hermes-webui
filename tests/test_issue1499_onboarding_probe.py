@@ -154,9 +154,21 @@ class TestIssue1499OnboardingProbe:
         assert r["ok"] is False
         assert r["error"] == "invalid_url"
 
-    def test_dns_resolution_failure(self):
-        """Unresolvable hostname → error='dns'."""
+    def test_dns_resolution_failure(self, monkeypatch):
+        """Unresolvable hostname → error='dns'.
+
+        Mocked at `socket.getaddrinfo` so this test is hermetic — no real DNS
+        lookup leaves the test process. The reserved `.invalid` TLD (RFC2606)
+        is still used as the hostname so anyone reading the test sees the
+        intent; the failure is forced via `socket.gaierror` from the mock.
+        """
+        import socket
         from api.onboarding import probe_provider_endpoint
+
+        def _raise_gaierror(*_args, **_kwargs):
+            raise socket.gaierror(-2, "Name or service not known")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror)
         r = probe_provider_endpoint(
             "lmstudio",
             "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",

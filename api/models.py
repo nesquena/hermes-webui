@@ -329,11 +329,16 @@ class Session:
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
+                 compression_anchor_summary=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                 parent_session_id: str=None,
+                worktree_path=None,
+                worktree_branch=None,
+                worktree_repo_root=None,
+                worktree_created_at=None,
                 enabled_toolsets=None,
                 composer_draft=None,
                 **kwargs):
@@ -361,6 +366,7 @@ class Session:
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self.compression_anchor_summary = compression_anchor_summary
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -368,6 +374,10 @@ class Session:
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
         self.parent_session_id = parent_session_id
+        self.worktree_path = str(Path(worktree_path).expanduser().resolve()) if worktree_path else None
+        self.worktree_branch = str(worktree_branch) if worktree_branch else None
+        self.worktree_repo_root = str(Path(worktree_repo_root).expanduser().resolve()) if worktree_repo_root else None
+        self.worktree_created_at = worktree_created_at
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.raw_source = kwargs.get('raw_source')
@@ -411,9 +421,11 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'compression_anchor_summary',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
+            'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
             'enabled_toolsets', 'composer_draft',
         ]
@@ -572,6 +584,7 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'compression_anchor_summary': self.compression_anchor_summary,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -580,6 +593,12 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            **({
+                'worktree_path': self.worktree_path,
+                'worktree_branch': self.worktree_branch,
+                'worktree_repo_root': self.worktree_repo_root,
+                'worktree_created_at': self.worktree_created_at,
+            } if self.worktree_path else {}),
             'user_message_count': sum(
                 1 for message in self.messages if _message_role(message) == 'user'
             ) if isinstance(self.messages, list) else 0,
@@ -892,7 +911,7 @@ def get_session(sid, metadata_only=False):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -907,7 +926,9 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
 
     Crash-safety: if the process exits between session creation and first
     message, the session is lost.  Since it had no messages, there is
-    nothing to lose.
+    nothing to lose.  Worktree-backed sessions are the exception: they are
+    saved immediately because creating the session also creates real
+    filesystem state that must remain discoverable after restart.
 
     *profile* — when supplied by the caller (e.g. from the request body sent
     by the active browser tab), it is used directly so that concurrent clients
@@ -923,18 +944,26 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         except ImportError:
             profile = None
     effective_model = model or get_effective_default_model()
+    wt = worktree_info if isinstance(worktree_info, dict) else None
+    workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
-        workspace=workspace or get_last_workspace(),
+        workspace=workspace_path or get_last_workspace(),
         model=effective_model,
         model_provider=model_provider,
         profile=profile,
         project_id=project_id,
+        worktree_path=wt.get('path') if wt else None,
+        worktree_branch=wt.get('branch') if wt else None,
+        worktree_repo_root=wt.get('repo_root') if wt else None,
+        worktree_created_at=wt.get('created_at') if wt else None,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
+    if wt:
+        s.save()
     return s
 
 def _hide_from_default_sidebar(session: dict) -> bool:
@@ -1038,6 +1067,7 @@ def all_sessions(diag=None):
                 and s.get('message_count', 0) == 0
                 and not s.get('active_stream_id')
                 and not s.get('has_pending_user_message')
+                and not s.get('worktree_path')
             )]
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
@@ -1073,6 +1103,7 @@ def all_sessions(diag=None):
         and len(s.messages) == 0
         and not s.active_stream_id
         and not s.pending_user_message
+        and not getattr(s, 'worktree_path', None)
     )]
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
@@ -1662,7 +1693,9 @@ def get_cli_session_messages(sid) -> list:
 
     Preserve tool-call/result and reasoning metadata from the agent state.db so
     CLI-origin transcripts render with the same tool cards as WebUI-native
-    sessions. Returns empty list on any error.
+    sessions. When the requested session is the tip of a compression/CLI-close
+    continuation chain, return the stitched full transcript across all segments
+    in chronological order. Returns empty list on any error.
     """
     import os
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
@@ -1701,12 +1734,56 @@ def get_cli_session_messages(sid) -> list:
                 'codex_message_items',
             ]
             selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {str(row['name']) for row in cur.fetchall()}
+            session_chain = [str(sid)]
+            if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                cur.execute(
+                    """
+                    SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                    FROM sessions
+                    WHERE id = ?
+                    """,
+                    (sid,),
+                )
+                rows_by_id = {}
+                row = cur.fetchone()
+                if row:
+                    rows_by_id[str(row['id'])] = dict(row)
+                    current_id = str(row['id'])
+                    seen = {current_id}
+                    for _ in range(20):
+                        current = rows_by_id.get(current_id)
+                        parent_id = current.get('parent_session_id') if current else None
+                        if not parent_id or parent_id in seen:
+                            break
+                        cur.execute(
+                            """
+                            SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                            FROM sessions
+                            WHERE id = ?
+                            """,
+                            (parent_id,),
+                        )
+                        parent_row = cur.fetchone()
+                        if not parent_row:
+                            break
+                        parent_dict = dict(parent_row)
+                        rows_by_id[str(parent_row['id'])] = parent_dict
+                        if not _is_continuation_session(parent_dict, current):
+                            break
+                        session_chain.insert(0, str(parent_row['id']))
+                        current_id = str(parent_row['id'])
+                        seen.add(current_id)
+
+            placeholders = ', '.join('?' for _ in session_chain)
             cur.execute(f"""
-                SELECT {', '.join(selected)}
+                SELECT {', '.join(selected)}, session_id
                 FROM messages
-                WHERE session_id = ?
-                ORDER BY timestamp ASC
-            """, (sid,))
+                WHERE session_id IN ({placeholders})
+                ORDER BY timestamp ASC, id ASC
+            """, session_chain)
             msgs = []
             for row in cur.fetchall():
                 msg = {

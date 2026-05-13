@@ -156,10 +156,11 @@ Python stdlib ThreadingHTTPServer (from http.server). Each HTTP request runs in 
 thread. The Handler class subclasses BaseHTTPRequestHandler with two methods:
 
     do_GET    Routes: /, /health, /api/session, /api/sessions, /api/list,
-                      /api/chat/stream, /api/file, /api/approval/pending
+                      /api/chat/stream, /api/file, /api/approval/pending,
+                      /api/session/worktree/status
     do_POST   Routes: /api/upload, /api/session/new, /api/session/update,
                       /api/session/delete, /api/chat/start, /api/chat,
-                      /api/approval/respond
+                      /api/approval/respond, /api/session/worktree/remove
 
 Routing is a flat if/elif chain inside each method. No routing framework.
 

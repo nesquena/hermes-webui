@@ -152,6 +152,177 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
 
+
+# ── Disable AWS IMDS probing for the pytest session ────────────────────────
+# Background: when hermes-agent's bedrock_adapter / botocore credential chain
+# runs during test execution (e.g. provider catalog enumeration triggered by
+# api/config.py imports), botocore probes the EC2 Instance Metadata Service at
+# 169.254.169.254 looking for an instance role. On VPS hosts where IMDS is
+# reachable but rate-limited (HTTP 429) or non-responsive, this dominates wall
+# time and turns a 161s test run into 600+s.
+#
+# Tests have no legitimate reason to call IMDS — the bedrock-related tests use
+# explicit mocks or env-var creds. Setting AWS_EC2_METADATA_DISABLED before
+# anything imports botocore is the supported way to silence the probe (matches
+# the guard the hermes_cli/doctor.py command already uses in its parallel-probe
+# block).
+#
+# Setting this here instead of in a fixture so it lands BEFORE any test-file
+# imports trigger botocore initialisation.
+os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
+
+# ── Hermetic network isolation ─────────────────────────────────────────────
+# Tests must not reach the public internet. Outbound to Anthropic / OpenAI /
+# Amazon / OpenRouter / etc. is forbidden by default. The test suite already
+# mocks every legitimate outbound (probe_provider_endpoint, get_available_models,
+# urlopen calls inside api/config.py), so a real outbound socket is either a
+# missing mock, a leaked credential triggering an SDK init, or an unintended
+# regression like the one PR #1970 introduced where a new code path bypassed
+# an existing mock and tried to hit the real LM Studio host.
+#
+# This module-level monkey-patch wraps socket.create_connection so any
+# non-loopback / non-RFC1918 / non-link-local / non-TEST-NET destination
+# raises OSError("hermes test network isolation").  Tests that deliberately
+# attempt outbound (only test_dns_resolution_failure today) opt back in
+# explicitly via the `allow_outbound_network` fixture below.
+#
+# Allowed destinations (silent pass-through):
+#   - 127.0.0.0/8     loopback
+#   - ::1             IPv6 loopback
+#   - 192.168.0.0/16  RFC1918 private
+#   - 10.0.0.0/8      RFC1918 private
+#   - 172.16.0.0/12   RFC1918 private (16-31)
+#   - 169.254.0.0/16  link-local (covers IMDS — already separately blocked
+#                     by AWS_EC2_METADATA_DISABLED, but allowed at the socket
+#                     layer because IMDS-using tests mock the response)
+#   - 203.0.113.0/24  RFC5737 TEST-NET-3 (used as documentation IPs in tests)
+#   - hostnames `localhost`, `*.local`, `*.test`, `*.example`, `*.example.com`
+#     `*.example.net`, `*.example.org`, `*.invalid` (RFC2606/6761 reserved)
+#
+# A test that opts in via the `allow_outbound_network` fixture sees the real
+# socket.create_connection.
+import socket as _hermes_test_socket
+_REAL_CREATE_CONNECTION = _hermes_test_socket.create_connection
+_REAL_SOCKET_CONNECT = _hermes_test_socket.socket.connect
+
+
+def _hermes_addr_is_local(host: str) -> bool:
+    """Return True for loopback / RFC1918 / link-local / reserved-TLD hosts."""
+    if not isinstance(host, str):
+        return False
+    h = host.strip().lower()
+    if not h:
+        return False
+    # IPv6 loopback / link-local
+    # IPv6 unique-local: fc00::/7 — any address starting with fc?? or fd?? (?? = hex pair).
+    # Loose "startswith('fc')" / "startswith('fd')" would also match the hostnames
+    # "food.example.com" or "fdsa.test", so require the second char to be a hex
+    # digit followed by either a colon or another hex digit (canonical IPv6 syntax).
+    import re as _re
+    if h in ('::1', '0:0:0:0:0:0:0:1') or h.startswith('fe80:') or _re.match(r'^f[cd][0-9a-f]{0,2}:', h):
+        return True
+    # Hostname allow-list (RFC2606/6761 reserved TLDs + localhost)
+    if h == 'localhost' or h.endswith('.localhost'):
+        return True
+    if h.endswith('.local') or h.endswith('.test') or h.endswith('.invalid'):
+        return True
+    if h == 'example.com' or h.endswith('.example.com'):
+        return True
+    if h == 'example.net' or h.endswith('.example.net'):
+        return True
+    if h == 'example.org' or h.endswith('.example.org'):
+        return True
+    if h.endswith('.example'):
+        return True
+    # IPv4 — parse octets if it looks like a dotted quad
+    if h[0].isdigit() and h.count('.') == 3:
+        try:
+            o1, o2, o3, o4 = [int(p) for p in h.split('.')]
+        except ValueError:
+            return False
+        if o1 == 127:                          # loopback
+            return True
+        if o1 == 10:                           # RFC1918 10.0.0.0/8
+            return True
+        if o1 == 192 and o2 == 168:            # RFC1918 192.168.0.0/16
+            return True
+        if o1 == 172 and 16 <= o2 <= 31:       # RFC1918 172.16.0.0/12
+            return True
+        if o1 == 169 and o2 == 254:            # link-local 169.254.0.0/16
+            return True
+        if o1 == 203 and o2 == 0 and o3 == 113:  # RFC5737 TEST-NET-3
+            return True
+    return False
+
+
+def _hermes_blocked_create_connection(address, *a, **kw):
+    try:
+        host = address[0]
+    except (TypeError, IndexError):
+        host = ""
+    if _hermes_addr_is_local(host):
+        return _REAL_CREATE_CONNECTION(address, *a, **kw)
+    raise OSError(
+        f"hermes test network isolation: outbound socket to {address!r} is blocked. "
+        f"Tests should mock urllib.request.urlopen / requests / socket.create_connection. "
+        f"If a test genuinely needs real outbound, request the allow_outbound_network fixture."
+    )
+
+
+def _hermes_blocked_socket_connect(self, address):
+    try:
+        host = address[0]
+    except (TypeError, IndexError):
+        host = ""
+    if _hermes_addr_is_local(host):
+        return _REAL_SOCKET_CONNECT(self, address)
+    raise OSError(
+        f"hermes test network isolation: socket.connect to {address!r} is blocked."
+    )
+
+
+_hermes_test_socket.create_connection = _hermes_blocked_create_connection
+_hermes_test_socket.socket.connect = _hermes_blocked_socket_connect
+
+
+@pytest.fixture
+def allow_outbound_network(monkeypatch):
+    """Opt-in to real outbound network for the duration of one test.
+
+    Swaps `socket.create_connection` and `socket.socket.connect` back to the
+    real (unwrapped) implementations for this test only, then monkeypatch
+    teardown restores the wrapped versions. Direct swap is more reliable
+    than a module-global toggle on CI runners where wrapper-closure
+    lookup semantics can surprise.
+
+    Use sparingly. Today zero tests in the repo call this — the previous
+    test_dns_resolution_failure case was rewritten to mock socket.getaddrinfo
+    instead, which is fully hermetic.
+    """
+    monkeypatch.setattr(_hermes_test_socket, "create_connection", _REAL_CREATE_CONNECTION)
+    monkeypatch.setattr(_hermes_test_socket.socket, "connect", _REAL_SOCKET_CONNECT)
+    yield
+
+
+
+
+# ── Environment isolation for tests ────────────────────────────────────────
+# HERMES_WEBUI_SKIP_ONBOARDING is set by hosting providers (e.g. Agent37) and
+# by some isolated test harnesses to short-circuit the onboarding wizard.
+# When it leaks into the pytest environment, tests that exercise the wizard
+# code paths (apply_onboarding_setup, etc.) fail because the function returns
+# early without writing config files.
+#
+# This autouse fixture removes the variable for the test session. Tests that
+# specifically need to validate the SKIP_ONBOARDING short-circuit can opt back
+# in with `monkeypatch.setenv("HERMES_WEBUI_SKIP_ONBOARDING", "1")`.
+@pytest.fixture(autouse=True, scope="session")
+def _strip_skip_onboarding_env():
+    prior = os.environ.pop("HERMES_WEBUI_SKIP_ONBOARDING", None)
+    yield
+    if prior is not None:
+        os.environ["HERMES_WEBUI_SKIP_ONBOARDING"] = prior
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip agent-dependent tests when hermes-agent is not available.
 
@@ -286,14 +457,54 @@ def test_server():
     # os.environ already set at module level above; no-op here.
 
     env = os.environ.copy()
-    # Strip real provider keys so test subprocess never inherits production credentials.
-    # The test server uses a mock/isolated config — no real API calls are made.
+    # Strip ANY real credential env var so the test subprocess never inherits
+    # production creds. The test server uses a mock/isolated config — no real
+    # API calls are made, no real OAuth flow runs, no real cloud SDK should
+    # ever be initialised with usable credentials.
+    #
+    # Without this strip, a stray credential left in the runner's env was
+    # observed making outbound TLS to a real provider during test runs.
+    # See investigation notes in pytest-pitfalls SKILL §B.3.
+    _CRED_ENV_PREFIXES = (
+        # LLM providers
+        'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'OPENAI_BASE_URL',
+        'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+        'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS',
+        'DEEPSEEK_API_KEY', 'XIAOMI_API_KEY',
+        'XAI_API_KEY', 'MISTRAL_API_KEY', 'OLLAMA_API_KEY',
+        'GROQ_API_KEY', 'TOGETHER_API_KEY', 'PERPLEXITY_API_KEY',
+        'CEREBRAS_API_KEY', 'COHERE_API_KEY', 'FIREWORKS_API_KEY',
+        'NOUS_API_KEY', 'NOVITA_API_KEY', 'TENCENT_API_KEY',
+        'BIGMODEL_API_KEY', 'GLM_API_KEY', 'STEPFUN_API_KEY',
+        'MINIMAX_API_KEY', 'LM_API_KEY', 'LMSTUDIO_API_KEY',
+        'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT',
+        # AWS — must be stripped or botocore probes IMDS / picks up real creds
+        'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+        'AWS_PROFILE', 'AWS_BEARER_TOKEN_BEDROCK',
+        # Memory providers, telemetry, dashboards
+        'MEM0_API_KEY', 'HONCHO_API_KEY', 'SUPERMEMORY_API_KEY',
+        # Messaging / gateway
+        'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN', 'SLACK_BOT_TOKEN',
+        'SIGNAL_API_TOKEN', 'WHATSAPP_API_TOKEN',
+        # Browser / image-gen / search
+        'FIRECRAWL_API_KEY', 'FAL_KEY', 'TAVILY_API_KEY',
+        'SERPER_API_KEY', 'BRAVE_API_KEY',
+        # Github tokens (PR/issue tools shouldn't be exercised in tests)
+        'GH_TOKEN', 'GITHUB_TOKEN',
+    )
     for _k in list(env):
-        if any(_k.startswith(p) for p in (
-            'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
-            'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY',
-        )):
+        if any(_k.startswith(p) for p in _CRED_ENV_PREFIXES):
             del env[_k]
+    # Belt-and-suspenders: keep IMDS disabled in the spawn env too (we set it
+    # at module level above for the pytest process, but make it explicit here
+    # so it's never accidentally cleared by an env.update later).
+    env["AWS_EC2_METADATA_DISABLED"] = "true"
+    # Activate the same network-isolation block in the test_server subprocess
+    # that conftest.py installs in the pytest process. server.py reads this
+    # env var at import time and installs an identical socket-block guard.
+    # Without this, the subprocess can make outbound requests that the
+    # pytest-side block can't see.
+    env["HERMES_WEBUI_TEST_NETWORK_BLOCK"] = "1"
     env.update({
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",

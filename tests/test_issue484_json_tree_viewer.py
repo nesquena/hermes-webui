@@ -20,7 +20,7 @@ class TestTreeRenderer:
     def test_initTreeViews_function_exists(self):
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        assert "function initTreeViews()" in content
+        assert "function initTreeViews" in content
 
     def test_buildTreeDOM_function_exists(self):
         with open("static/ui.js", "r", encoding="utf-8") as f:
@@ -30,8 +30,10 @@ class TestTreeRenderer:
     def test_initTreeViews_called_in_post_render(self):
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        count = content.count("initTreeViews()")
-        assert count >= 2, f"initTreeViews() called {count} times, expected >= 2"
+        assert "requestAnimationFrame(()=>postProcessRenderedMessages(inner))" in content
+        start = content.find("function postProcessRenderedMessages")
+        body = content[start:start + 500]
+        assert "initTreeViews(container)" in body
 
     def test_tree_handles_all_value_types(self):
         """_buildTreeDOM should handle null, boolean, number, string, array, object."""

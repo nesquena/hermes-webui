@@ -5,14 +5,15 @@ Wraps hermes_cli.profiles to provide profile switching for the web UI.
 The web UI maintains a process-level "active profile" that determines which
 HERMES_HOME directory is used for config, skills, memory, cron, and API keys.
 Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
-cached paths in hermes-agent modules (skills_tool, cron/jobs) that snapshot
-HERMES_HOME at import time.
+cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
+cron/jobs) that snapshot HERMES_HOME at import time.
 """
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import threading
 from pathlib import Path
 
@@ -36,6 +37,22 @@ _loaded_profile_env_keys: set[str] = set()
 # reads its own profile from the hermes_profile cookie instead of the
 # process-global _active_profile.
 _tls = threading.local()
+
+_SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
+
+
+def patch_skill_home_modules(home: Path) -> None:
+    """Patch imported skill modules that cache HERMES_HOME at import time."""
+    for module_name in _SKILL_HOME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        try:
+            module.HERMES_HOME = home
+            module.SKILLS_DIR = home / "skills"
+        except AttributeError:
+            logger.debug("Failed to patch %s module", module_name)
+
 
 def _unwrap_profile_home_to_base(home: Path) -> Path:
     """Return the base Hermes home when *home* is already a named profile dir."""
@@ -611,13 +628,7 @@ def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)
 
-    # Patch skills_tool module-level cache (snapshots HERMES_HOME at import)
-    try:
-        import tools.skills_tool as _sk
-        _sk.HERMES_HOME = home
-        _sk.SKILLS_DIR = home / 'skills'
-    except (ImportError, AttributeError):
-        logger.debug("Failed to patch skills_tool module")
+    patch_skill_home_modules(home)
 
     # Patch cron/jobs module-level cache
     try:

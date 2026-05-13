@@ -177,6 +177,32 @@ class TestLiveModelsCustomProviderFallback:
     """When provider='custom' and provider_model_ids() returns [],
     /api/models/live must fall back to custom_providers entries from config.yaml."""
 
+    @staticmethod
+    def _install_provider_model_ids(monkeypatch, fn):
+        import types
+
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.__path__ = []
+        models = types.ModuleType("hermes_cli.models")
+        models.provider_model_ids = fn
+        monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
+
+    @staticmethod
+    def _call_live_models(monkeypatch, cfg, provider):
+        import api.config as c
+        import api.routes as r
+
+        r._clear_live_models_cache()
+        monkeypatch.setattr(c, "get_config", lambda: cfg)
+        monkeypatch.setattr(c, "_resolve_provider_alias", lambda p: p)
+        monkeypatch.setattr(r, "j", lambda _handler, payload, **_kw: payload)
+        TestLiveModelsCustomProviderFallback._install_provider_model_ids(monkeypatch, lambda _p: [])
+
+        parsed = mock.MagicMock()
+        parsed.query = f"provider={provider}"
+        return r._handle_live_models(object(), parsed)
+
     def test_custom_fallback_code_present(self):
         src = read("api/routes.py")
         m = re.search(
@@ -240,6 +266,110 @@ class TestLiveModelsCustomProviderFallback:
             f"custom_providers model 'my-byok-model' must appear in live response; "
             f"got {model_ids}"
         )
+
+    def test_named_custom_fallback_returns_only_matching_provider_models(self, monkeypatch):
+        """custom:<slug> must not leak sibling custom_providers models."""
+        cfg = {
+            "model": {"provider": "custom:infini-ai"},
+            "custom_providers": [
+                {
+                    "name": "rightcode-codex",
+                    "model": "gpt-5.5",
+                    "models": {"gpt-5.5-mini": {}},
+                    "base_url": "https://right.codes/codex/v1",
+                },
+                {
+                    "name": "infini-ai",
+                    "model": "glm-5.1",
+                    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+                },
+                {
+                    "name": "xiaomi-mimo",
+                    "models": ["mimo-v2.5-pro"],
+                    "base_url": "https://mimo.example.com/v1",
+                },
+            ],
+        }
+
+        resp = self._call_live_models(monkeypatch, cfg, "custom:rightcode-codex")
+
+        assert resp["provider"] == "custom:rightcode-codex"
+        assert [m["id"] for m in resp["models"]] == ["gpt-5.5", "gpt-5.5-mini"]
+
+    def test_bare_custom_fallback_ignores_named_custom_provider_models(self, monkeypatch):
+        """Bare custom only represents unnamed custom entries, not named siblings."""
+        cfg = {
+            "model": {"provider": "custom"},
+            "custom_providers": [
+                {"name": "rightcode-codex", "model": "gpt-5.5"},
+                {"name": "infini-ai", "model": "glm-5.1"},
+                {"model": "unnamed-byok-model"},
+            ],
+        }
+
+        resp = self._call_live_models(monkeypatch, cfg, "custom")
+
+        assert resp["provider"] == "custom"
+        assert [m["id"] for m in resp["models"]] == ["unnamed-byok-model"]
+
+    def test_named_custom_live_fetch_uses_matching_entry_endpoint(self, monkeypatch):
+        """custom:<slug> live fetch must use that entry, not the active model config."""
+        import json
+        import urllib.request
+
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "right-live-model"}]}).encode("utf-8")
+
+        def fake_urlopen(req, timeout=None):
+            requests.append(
+                {
+                    "url": req.full_url,
+                    "authorization": req.headers.get("Authorization"),
+                    "timeout": timeout,
+                }
+            )
+            return Response()
+
+        cfg = {
+            "model": {
+                "provider": "custom:infini-ai",
+                "base_url": "https://infini.example.com/v1",
+                "api_key": "infini-key",
+            },
+            "custom_providers": [
+                {
+                    "name": "rightcode-codex",
+                    "base_url": "https://right.codes/codex/v1",
+                    "api_key": "right-key",
+                },
+                {
+                    "name": "infini-ai",
+                    "base_url": "https://infini.example.com/v1",
+                    "api_key": "infini-key",
+                },
+            ],
+        }
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        resp = self._call_live_models(monkeypatch, cfg, "custom:rightcode-codex")
+
+        assert requests == [
+            {
+                "url": "https://right.codes/codex/v1/models",
+                "authorization": "Bearer right-key",
+                "timeout": 8,
+            }
+        ]
+        assert [m["id"] for m in resp["models"]] == ["right-live-model"]
 
 
 # ── Regression: known-good providers still work ───────────────────────────────

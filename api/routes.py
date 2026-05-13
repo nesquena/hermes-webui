@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import io
 import json
 import logging
 import os
@@ -26,7 +27,9 @@ from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
     is_cli_session_row_visible,
+    read_session_lineage_report,
 )
+from api.compression_anchor import visible_messages_for_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,9 @@ _CLIENT_DISCONNECT_ERRORS = (
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
+_MANUAL_COMPRESSION_JOBS: dict[str, dict] = {}
+_MANUAL_COMPRESSION_JOBS_LOCK = threading.Lock()
+_MANUAL_COMPRESSION_JOB_TTL_SECONDS = 10 * 60
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
@@ -57,6 +63,12 @@ _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
 }
 _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
+_CSP_REPORT_LOGGER = logging.getLogger("csp_report")
+_CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
+_CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
+_CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
+_CSP_REPORT_RATE_LIMIT_MAX = 100
+_CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -142,6 +154,34 @@ def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
     except Exception:
         pass
     return [p for p in dirs if p.exists()]
+
+
+def _worktree_retained_payload(session) -> dict:
+    """Return explicit no-cleanup metadata for worktree-backed session actions."""
+    worktree_path = getattr(session, "worktree_path", None) if session else None
+    if not worktree_path:
+        return {}
+    payload = {
+        "worktree_retained": True,
+        "worktree_path": worktree_path,
+    }
+    worktree_branch = getattr(session, "worktree_branch", None)
+    worktree_repo_root = getattr(session, "worktree_repo_root", None)
+    if worktree_branch:
+        payload["worktree_branch"] = worktree_branch
+    if worktree_repo_root:
+        payload["worktree_repo_root"] = worktree_repo_root
+    return payload
+
+
+def _worktree_retained_payload_for_session_id(sid: str) -> dict:
+    try:
+        return _worktree_retained_payload(get_session(sid, metadata_only=True))
+    except KeyError:
+        return {}
+    except Exception:
+        logger.debug("Failed to read worktree metadata for deleted session %s", sid)
+        return {}
 
 
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
@@ -458,14 +498,19 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
 
 
 def _cron_job_for_api(job: dict) -> dict:
-    """Return a cron job payload with the #617 optional profile field present.
+    """Return a cron job payload with optional UI settings normalized.
 
     Legacy jobs intentionally persist without ``profile`` so they keep the
     scheduler's server-default behavior. The API still returns ``profile: None``
     so the UI can label that state explicitly instead of guessing.
+
+    ``toast_notifications`` is a WebUI preference for completion toasts. Legacy
+    jobs default to enabled so existing behavior is preserved unless a job is
+    explicitly muted.
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
+    payload["toast_notifications"] = payload.get("toast_notifications") is not False
     return payload
 
 
@@ -920,6 +965,32 @@ def _clear_stale_stream_state(session) -> bool:
             pass
     return True
 
+
+def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
+    """Clear stale persisted stream fields before /api/sessions serializes rows."""
+    changed = False
+    for row in session_rows:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("session_id")
+        if not sid or not row.get("active_stream_id"):
+            continue
+        if row.get("is_streaming") is True:
+            continue
+        try:
+            session = get_session(sid, metadata_only=True)
+        except Exception:
+            logger.debug(
+                "Failed to load session %s while reconciling stale stream state",
+                sid,
+                exc_info=True,
+            )
+            continue
+        if session is None:
+            continue
+        changed = _clear_stale_stream_state(session) or changed
+    return changed
+
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
 
@@ -1022,6 +1093,69 @@ def _check_csrf(handler) -> bool:
         if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
             return True
     return False
+
+
+def _client_ip_for_rate_limit(handler) -> str:
+    try:
+        address = getattr(handler, "client_address", None)
+        if address:
+            return str(address[0])
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    key = _client_ip_for_rate_limit(handler)
+    cutoff = now - _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS
+    with _CSP_REPORT_RATE_LIMIT_LOCK:
+        timestamps = [ts for ts in _CSP_REPORT_RATE_LIMIT.get(key, []) if ts >= cutoff]
+        if len(timestamps) >= _CSP_REPORT_RATE_LIMIT_MAX:
+            _CSP_REPORT_RATE_LIMIT[key] = timestamps
+            return True
+        timestamps.append(now)
+        _CSP_REPORT_RATE_LIMIT[key] = timestamps
+    return False
+
+
+def _send_no_content(handler, status: int = 204) -> bool:
+    handler.send_response(status)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+    return True
+
+
+def _read_csp_report_payload(handler):
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+    except Exception:
+        length = 0
+    if length > _CSP_REPORT_MAX_BODY_BYTES:
+        try:
+            handler.rfile.read(_CSP_REPORT_MAX_BODY_BYTES)
+        except Exception:
+            pass
+        return {"discarded": "body_too_large", "bytes": length}
+    raw = handler.rfile.read(length) if length else b"{}"
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {"invalid": True, "bytes": len(raw)}
+
+
+def _handle_csp_report(handler) -> bool:
+    """Collect browser CSP report-only violations without requiring auth."""
+    if _csp_report_rate_limited(handler):
+        _CSP_REPORT_LOGGER.warning(
+            "Dropped CSP report from %s: rate limit exceeded",
+            _client_ip_for_rate_limit(handler),
+        )
+        return _send_no_content(handler)
+
+    payload = _read_csp_report_payload(handler)
+    _CSP_REPORT_LOGGER.info("CSP report from %s: %s", _client_ip_for_rate_limit(handler), payload)
+    return _send_no_content(handler)
 
 
 def _normalize_provider_id(value: str | None) -> str:
@@ -1395,6 +1529,18 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
     except Exception:
         return {}
     return {}
+
+
+def _needs_cli_session_metadata(session) -> bool:
+    """Return true when /api/session should pay for Agent/CLI metadata lookup."""
+    if not session:
+        return False
+    is_cli = (
+        bool(session.get("is_cli_session"))
+        if isinstance(session, dict)
+        else bool(getattr(session, "is_cli_session", False))
+    )
+    return is_cli or _is_messaging_session_record(session)
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
@@ -1895,6 +2041,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Invalid password",
         "conn_failed": "Connection failed",
     },
+    "fr": {
+        "lang": "fr-FR",
+        "title": "Se connecter",
+        "subtitle": "Entrez votre mot de passe pour continuer",
+        "placeholder": "Mot de passe",
+        "btn": "Se connecter",
+        "invalid_pw": "Mot de passe invalide",
+        "conn_failed": "\u00c9chec de la connexion",
+    },
     "es": {
         "lang": "es-ES",
         "title": "Iniciar sesi\u00f3n",
@@ -1943,6 +2098,15 @@ _LOGIN_LOCALE = {
     # Strings mirror static/i18n.js login_* keys for the corresponding locale.
     # See issue #1442. When adding a new locale to LOCALES in i18n.js, also add
     # the matching entry here — tests/test_login_locale_parity.py enforces this.
+    "it": {
+        "lang": "it-IT",
+        "title": "Accedi",
+        "subtitle": "Inserisci la password per continuare",
+        "placeholder": "Password",
+        "btn": "Accedi",
+        "invalid_pw": "Password non valida",
+        "conn_failed": "Connessione fallita",
+    },
     "ja": {
         "lang": "ja-JP",
         "title": "\u30b5\u30a4\u30f3\u30a4\u30f3",
@@ -2534,6 +2698,39 @@ def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
         STREAMS_LOCK.release()
 
 
+def _run_lifecycle_health() -> dict:
+    """Return active worker-run state independent of SSE stream presence."""
+    # Import the module rather than relying only on imported scalar aliases so
+    # LAST_RUN_FINISHED_AT stays fresh after unregister_active_run() updates it.
+    from api import config as _live_config
+
+    now = time.time()
+    with _live_config.ACTIVE_RUNS_LOCK:
+        runs = []
+        for stream_id, raw in (_live_config.ACTIVE_RUNS or {}).items():
+            item = dict(raw or {})
+            started_at = item.get("started_at")
+            try:
+                age = max(0.0, now - float(started_at))
+            except Exception:
+                age = 0.0
+            item.setdefault("stream_id", stream_id)
+            item["age_seconds"] = round(age, 1)
+            runs.append(item)
+        last_finished = _live_config.LAST_RUN_FINISHED_AT
+    runs.sort(key=lambda item: float(item.get("started_at") or 0.0))
+    payload = {
+        "active_runs": len(runs),
+        "runs": runs,
+        "last_run_finished_at": last_finished,
+    }
+    if runs:
+        payload["oldest_run_age_seconds"] = runs[0].get("age_seconds", 0.0)
+    elif last_finished:
+        payload["idle_seconds_since_last_run"] = round(max(0.0, now - float(last_finished)), 1)
+    return payload
+
+
 def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
     """Run cheap probes that exercise the state paths used by the UI shell.
 
@@ -2614,13 +2811,21 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
 def _handle_health(handler, parsed):
     deep = parse_qs(parsed.query or "").get("deep", [""])[0].lower() in {"1", "true", "yes", "on"}
     stream_check = _streams_lock_health()
+    run_check = _run_lifecycle_health()
     payload = {
         "status": "ok" if stream_check.get("status") == "ok" else "degraded",
         "sessions": len(SESSIONS),
         "active_streams": int(stream_check.get("active_streams") or 0),
+        "active_runs": int(run_check.get("active_runs") or 0),
+        "runs": run_check.get("runs", []),
+        "last_run_finished_at": run_check.get("last_run_finished_at"),
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
         "accept_loop": _accept_loop_health(handler),
     }
+    if "oldest_run_age_seconds" in run_check:
+        payload["oldest_run_age_seconds"] = run_check["oldest_run_age_seconds"]
+    if "idle_seconds_since_last_run" in run_check:
+        payload["idle_seconds_since_last_run"] = run_check["idle_seconds_since_last_run"]
     if deep:
         if stream_check.get("status") != "ok":
             payload["checks"] = {"streams_lock": stream_check}
@@ -2974,6 +3179,30 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
 
+
+    if parsed.path == "/api/session/worktree/status":
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "session_id is required", status=400)
+        try:
+            s = get_session(sid, metadata_only=True)
+        except KeyError:
+            return bad(handler, "Session not found", status=404)
+        try:
+            from api.worktrees import worktree_status_for_session
+
+            return j(handler, {"status": worktree_status_for_session(s)})
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("failed to read worktree status for session %s", sid)
+            return bad(handler, _sanitize_error(exc), status=500)
+
+    if parsed.path == "/api/session/compress/status":
+        query = parse_qs(parsed.query)
+        return _handle_session_compress_status(handler, query.get("session_id", [""])[0])
+
     if parsed.path == "/api/session":
         import time as _time
         _t0 = _time.monotonic()
@@ -3010,7 +3239,7 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid)
+            cli_meta = _lookup_cli_session_metadata(sid) if _needs_cli_session_metadata(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             if is_messaging_session:
@@ -3034,8 +3263,36 @@ def handle_get(handler, parsed) -> bool:
                     # longer visible conversation than the single state.db
                     # segment for this messaging session id. Prefer the longer
                     # sidecar so repaired WebUI history is not hidden behind the
-                    # canonical per-segment transcript.
-                    _all_msgs = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
+                    # canonical per-segment transcript. When both sources carry
+                    # different slices of the same stitched conversation, merge
+                    # them chronologically and dedupe exact repeats.
+                    if sidecar_messages and sidecar_messages != cli_messages:
+                        merged_messages = []
+                        seen_message_keys = set()
+                        for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
+                            float(m.get("timestamp") or 0),
+                            str(m.get("role") or ""),
+                            str(m.get("content") or ""),
+                        )):
+                            message_identity = msg.get("id") or msg.get("message_id")
+                            if message_identity:
+                                key = ("message_id", str(message_identity))
+                            else:
+                                key = (
+                                    "legacy",
+                                    str(msg.get("role") or ""),
+                                    str(msg.get("content") or ""),
+                                    str(msg.get("timestamp") or ""),
+                                    str(msg.get("tool_call_id") or ""),
+                                    str(msg.get("tool_name") or msg.get("name") or ""),
+                                )
+                            if key in seen_message_keys:
+                                continue
+                            seen_message_keys.add(key)
+                            merged_messages.append(msg)
+                        _all_msgs = merged_messages
+                    else:
+                        _all_msgs = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
                 else:
                     _all_msgs = s.messages
             else:
@@ -3190,6 +3447,19 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/lineage/report":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "session_id required", 400)
+        report = read_session_lineage_report(_active_state_db_path(), sid)
+        if not report.get("found"):
+            return bad(handler, "Session not found", 404)
+        return j(handler, report)
+
+    if parsed.path == "/api/session/recovery/audit":
+        from api.session_recovery import audit_session_recovery
+        return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
+
     if parsed.path == "/api/session/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -3229,6 +3499,10 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
+            diag.stage("reconcile_stale_stream_state")
+            if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+                diag.stage("all_sessions_after_stale_stream_reconcile")
+                webui_sessions = all_sessions(diag=diag)
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
@@ -3716,6 +3990,14 @@ def handle_get(handler, parsed) -> bool:
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger)
+    if parsed.path == "/api/csp-report":
+        if diag:
+            diag.stage("csp_report")
+        try:
+            return _handle_csp_report(handler)
+        finally:
+            if diag:
+                diag.finish()
     # CSRF: reject cross-origin browser requests
     if diag:
         diag.stage("csrf")
@@ -3743,6 +4025,11 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         raise
 
+    if parsed.path == "/api/session/recovery/repair-safe":
+        from api.session_recovery import repair_safe_session_recovery
+        result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
+        return j(handler, result, status=200 if result.get("clean") else 409)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
@@ -3765,8 +4052,26 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/new":
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
-        except ValueError as e:
+        except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        worktree_info = None
+        worktree_requested = (
+            body.get("worktree") is True
+            or str(body.get("worktree")).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if worktree_requested:
+            try:
+                from api.worktrees import create_worktree_for_workspace
+                base_workspace = workspace
+                if not base_workspace:
+                    base_workspace = str(resolve_trusted_workspace(get_last_workspace()))
+                worktree_info = create_worktree_for_workspace(base_workspace)
+                workspace = worktree_info["path"]
+            except (TypeError, ValueError) as e:
+                return bad(handler, str(e), status=400)
+            except Exception as e:
+                logger.exception("failed to create worktree-backed session")
+                return bad(handler, f"Failed to create worktree: {e}", status=500)
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -3779,6 +4084,7 @@ def handle_post(handler, parsed) -> bool:
             model_provider=model_provider,
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
+            worktree_info=worktree_info,
         )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -4146,6 +4452,28 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
+    if parsed.path == "/api/session/worktree/remove":
+        sid = body.get("session_id", "")
+        if not sid or not isinstance(sid, str) or not sid.strip():
+            return bad(handler, "session_id must be a non-empty string", status=400)
+        sid = sid.strip()
+        if not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+            return bad(handler, "Invalid session_id", 400)
+        try:
+            s = get_session(sid, metadata_only=True)
+        except KeyError:
+            return bad(handler, "Session not found", status=404)
+        force = bool(body.get("force", False))
+        try:
+            from api.worktrees import remove_worktree_for_session
+
+            result = remove_worktree_for_session(s, force=force)
+            return j(handler, result)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("failed to remove worktree for session %s", sid)
+            return bad(handler, _sanitize_error(exc), status=500)
 
     if parsed.path == "/api/session/delete":
         sid = body.get("session_id", "")
@@ -4157,6 +4485,7 @@ def handle_post(handler, parsed) -> bool:
         if cli_meta_for_delete.get("read_only"):
             return bad(handler, "Read-only imported sessions cannot be deleted from WebUI", 400)
         is_messaging_session = _is_messaging_session_id(sid)
+        worktree_retained = _worktree_retained_payload_for_session_id(sid)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
@@ -4174,6 +4503,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Invalid session_id", 400)
         try:
             p.unlink(missing_ok=True)
+            p.with_suffix('.json.bak').unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session file %s", p)
         # Prune the per-session agent lock so deleted sessions don't leak
@@ -4194,7 +4524,7 @@ def handle_post(handler, parsed) -> bool:
                 delete_cli_session(sid)
             except Exception:
                 logger.debug("Failed to delete CLI session %s", sid)
-        return j(handler, {"ok": True})
+        return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
         try:
@@ -4292,6 +4622,7 @@ def handle_post(handler, parsed) -> bool:
             title=branch_title,
             messages=forked_messages,
             parent_session_id=source.session_id,
+            session_source="fork",
         )
         with LOCK:
             SESSIONS[branch.session_id] = branch
@@ -4308,6 +4639,9 @@ def handle_post(handler, parsed) -> bool:
             "title": branch_title,
             "parent_session_id": source.session_id,
         })
+
+    if parsed.path == "/api/session/compress/start":
+        return _handle_session_compress_start(handler, body)
 
     if parsed.path == "/api/session/compress":
         return _handle_session_compress(handler, body)
@@ -4488,6 +4822,22 @@ def handle_post(handler, parsed) -> bool:
     # ── Clarify (POST) ──
     if parsed.path == "/api/clarify/respond":
         return _handle_clarify_respond(handler, body)
+
+    # ── Commands (POST) ──
+    if parsed.path == "/api/commands/exec":
+        from api.commands import execute_plugin_command
+
+        command = str(body.get("command", "") or "").strip()
+        if not command:
+            return bad(handler, "command is required")
+        try:
+            return j(handler, {"output": execute_plugin_command(command)})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Plugin command not found", 404)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
@@ -4814,7 +5164,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
     if parsed.path == "/api/session/move":
@@ -5557,6 +5907,8 @@ def _handle_media(handler, parsed):
     - Only image MIME types are served inline; all others force download
     - SVG always served as attachment (XSS risk)
     - No path traversal: resolved path must stay within an allowed root
+    - Additional roots can be added via MEDIA_ALLOWED_ROOTS env var
+      (os.pathsep-separated list of absolute paths; ":" on POSIX, ";" on Windows)
     """
     import os as _os
     from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -5600,6 +5952,21 @@ def _handle_media(handler, parsed):
             allowed_roots.append(ws)
     except Exception:
         pass
+
+    # Also allow additional roots from MEDIA_ALLOWED_ROOTS env var
+    # (os.pathsep-separated list; ":" on POSIX, ";" on Windows).
+    extra_roots = _os.environ.get("MEDIA_ALLOWED_ROOTS", "").strip()
+    if extra_roots:
+        for root in extra_roots.split(_os.pathsep):
+            root = root.strip()
+            if root:
+                try:
+                    rp = Path(root).resolve()
+                    if rp.is_dir():
+                        allowed_roots.append(rp)
+                except Exception:
+                    pass
+
     within_allowed = any(
         _os.path.commonpath([str(target), str(root)]) == str(root)
         for root in allowed_roots
@@ -5959,27 +6326,85 @@ def _handle_live_models(handler, parsed):
             ids = []
 
         if not ids:
+            custom_provider_entry = None
+
+            def _custom_provider_entries_for_request():
+                if not (provider == "custom" or provider.startswith("custom:")):
+                    return []
+                try:
+                    from api.config import _custom_provider_slug_from_name
+                    _cp_entries = cfg.get("custom_providers", [])
+                    if not isinstance(_cp_entries, list):
+                        return []
+                    _matches = []
+                    for _cp in _cp_entries:
+                        if not isinstance(_cp, dict):
+                            continue
+                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                        if provider.startswith("custom:"):
+                            if _slug == provider:
+                                _matches.append(_cp)
+                        elif provider == "custom" and not _slug:
+                            _matches.append(_cp)
+                    return _matches
+                except Exception:
+                    return []
+
+            def _custom_provider_model_ids(_cp):
+                _ids = []
+
+                def _append(_mid):
+                    _mid = str(_mid or "").strip()
+                    if _mid and _mid not in _ids:
+                        _ids.append(_mid)
+
+                _append(_cp.get("model", ""))
+                _models = _cp.get("models")
+                if isinstance(_models, dict):
+                    for _mid in _models:
+                        if isinstance(_mid, str):
+                            _append(_mid)
+                elif isinstance(_models, list):
+                    for _item in _models:
+                        if isinstance(_item, str):
+                            _append(_item)
+                        elif isinstance(_item, dict):
+                            _append(_item.get("id") or _item.get("model") or _item.get("name"))
+                return _ids
+
+            def _custom_provider_api_key(_cp):
+                _raw = _cp.get("api_key")
+                if _raw is not None:
+                    _key = str(_raw).strip()
+                    if _key.startswith("${") and _key.endswith("}") and len(_key) > 3:
+                        _key = os.getenv(_key[2:-1], "").strip()
+                    if _key:
+                        return _key
+                _env = str(_cp.get("key_env") or "").strip()
+                return os.getenv(_env, "").strip() if _env else ""
+
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
             # the live-model enrichment step can add any models that weren't
             # already in the static list (issue #1619).
             if provider == "custom" or provider.startswith("custom:"):
-                try:
-                    _cp_entries = cfg.get("custom_providers", [])
-                    if isinstance(_cp_entries, list):
-                        ids = [
-                            _cp.get("model", "")
-                            for _cp in _cp_entries
-                            if isinstance(_cp, dict) and _cp.get("model", "")
-                        ]
-                except Exception:
-                    pass
+                for _cp in _custom_provider_entries_for_request():
+                    if custom_provider_entry is None:
+                        custom_provider_entry = _cp
+                    ids.extend(_custom_provider_model_ids(_cp))
             
             # If still no ids, try fetching from base_url directly (OpenAI-compat endpoint)
             if not ids and (provider == "custom" or provider.startswith("custom:")):
-                _base_url = cfg.get("model", {}).get("base_url")
-                _api_key = cfg.get("model", {}).get("api_key")
+                _base_url = None
+                _api_key = None
+                if custom_provider_entry:
+                    _base_url = custom_provider_entry.get("base_url")
+                    _api_key = _custom_provider_api_key(custom_provider_entry)
+                else:
+                    _model_cfg = cfg.get("model", {})
+                    _base_url = _model_cfg.get("base_url")
+                    _api_key = _model_cfg.get("api_key")
                 if _base_url and _api_key:
                     try:
                         import urllib.request
@@ -6280,6 +6705,7 @@ def _handle_cron_recent(handler, parsed):
                         "name": job.get("name", "Unknown"),
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
+                        "toast_notifications": job.get("toast_notifications") is not False,
                     }
                 )
         return j(handler, {"completions": completions, "since": since})
@@ -6609,6 +7035,26 @@ def _start_chat_stream_for_session(
             model_provider=model_provider,
             stream_id=stream_id,
         )
+    diag.stage("turn_journal_submitted") if diag else None
+    journal_event = {}
+    try:
+        from api.turn_journal import append_turn_journal_event
+        journal_event = append_turn_journal_event(
+            s.session_id,
+            {
+                "event": "submitted",
+                "stream_id": stream_id,
+                "role": "user",
+                "content": msg,
+                "attachments": attachments,
+                "workspace": workspace,
+                "model": model,
+                "model_provider": model_provider,
+                "created_at": s.pending_started_at,
+            },
+        )
+    except Exception:
+        logger.warning("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
@@ -6630,6 +7076,7 @@ def _start_chat_stream_for_session(
         "stream_id": stream_id,
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
+        "turn_id": journal_event.get("turn_id"),
     }
     if normalized_model:
         response["effective_model"] = model
@@ -6800,7 +7247,7 @@ def _handle_chat_start(handler, body, diag=None):
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         diag.stage("resolve_workspace") if diag else None
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -6831,6 +7278,24 @@ def _handle_chat_start(handler, body, diag=None):
         if diag:
             diag.finish()
 
+
+
+def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
+    """Recover stale implicit session workspaces without hiding explicit errors."""
+    explicit = requested_workspace not in (None, "")
+    candidate = requested_workspace if explicit else getattr(s, "workspace", None)
+    try:
+        return str(resolve_trusted_workspace(candidate))
+    except ValueError:
+        if explicit:
+            raise
+    fallback = str(resolve_trusted_workspace(get_last_workspace()))
+    s.workspace = fallback
+    try:
+        s.save()
+    except Exception:
+        pass
+    return fallback
 
 
 def _normalize_chat_attachments(raw_attachments):
@@ -7038,6 +7503,7 @@ def _handle_cron_create(handler, body):
         from cron.jobs import create_job, update_job
 
         profile = _normalize_cron_profile_value(body.get("profile"))
+        toast_notifications = body.get("toast_notifications") is not False
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
@@ -7046,8 +7512,13 @@ def _handle_cron_create(handler, body):
             skills=body.get("skills") or [],
             model=body.get("model") or None,
         )
+        post_create_updates = {}
         if profile is not None:
-            job = update_job(job["id"], {"profile": profile}) or job
+            post_create_updates["profile"] = profile
+        if not toast_notifications:
+            post_create_updates["toast_notifications"] = False
+        if post_create_updates:
+            job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=400)
@@ -7496,52 +7967,184 @@ def _handle_clarify_respond(handler, body):
     return j(handler, {"ok": True, "response": response})
 
 
-def _handle_session_compress(handler, body):
-    def _visible_messages_for_anchor(messages):
-        out = []
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            role = m.get("role")
-            if not role or role == "tool":
-                continue
-            content = m.get("content", "")
-            has_attachments = bool(m.get("attachments"))
-            if role == "assistant":
-                tool_calls = m.get("tool_calls")
-                has_tool_calls = isinstance(tool_calls, list) and len(tool_calls) > 0
-                has_tool_use = False
-                has_reasoning = bool(m.get("reasoning"))
-                if isinstance(content, list):
-                    for p in content:
-                        if not isinstance(p, dict):
-                            continue
-                        if p.get("type") == "tool_use":
-                            has_tool_use = True
-                        if p.get("type") in {"thinking", "reasoning"}:
-                            has_reasoning = True
-                    text = "\n".join(
-                        str(p.get("text") or p.get("content") or "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    ).strip()
-                else:
-                    text = str(content or "").strip()
-                if text or has_attachments or has_tool_calls or has_tool_use or has_reasoning:
-                    out.append(m)
-                continue
-            if isinstance(content, list):
-                text = "\n".join(
-                    str(p.get("text") or p.get("content") or "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                ).strip()
-            else:
-                text = str(content or "").strip()
-            if text or has_attachments:
-                out.append(m)
-        return out
+class _ManualCompressionMemoryHandler:
+    def __init__(self):
+        self.wfile = io.BytesIO()
+        self.status = None
+        self.sent_headers = {}
 
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def payload(self):
+        raw = self.wfile.getvalue().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+def _manual_compression_cleanup_locked(now=None):
+    now = time.time() if now is None else now
+    for sid, job in list(_MANUAL_COMPRESSION_JOBS.items()):
+        if job.get("status") == "running":
+            continue
+        updated_at = float(job.get("updated_at") or job.get("started_at") or now)
+        if now - updated_at > _MANUAL_COMPRESSION_JOB_TTL_SECONDS:
+            _MANUAL_COMPRESSION_JOBS.pop(sid, None)
+
+
+def _manual_compression_status_payload(job):
+    status = job.get("status") or "running"
+    payload = {
+        "ok": status not in {"error", "cancelled"},
+        "status": status,
+        "session_id": job.get("session_id"),
+        "focus_topic": job.get("focus_topic"),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    if status == "done":
+        result = job.get("result")
+        if isinstance(result, dict):
+            payload.update(result)
+        payload["status"] = "done"
+        payload["ok"] = True
+    elif status == "error":
+        payload["ok"] = False
+        payload["error"] = job.get("error") or "Compression failed"
+        payload["error_status"] = int(job.get("error_status") or 400)
+    elif status == "cancelled":
+        payload["ok"] = False
+        payload["error"] = job.get("error") or "Compression cancelled"
+        payload["error_status"] = int(job.get("error_status") or 409)
+    return payload
+
+
+def _run_manual_compression_job(sid, body):
+    memory_handler = _ManualCompressionMemoryHandler()
+    try:
+        _handle_session_compress(memory_handler, body)
+        status = int(memory_handler.status or 500)
+        payload = memory_handler.payload()
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if not job:
+                return
+            now = time.time()
+            if status >= 400 or not isinstance(payload, dict) or payload.get("error"):
+                job.update(
+                    {
+                        "status": "error",
+                        "error": str((payload or {}).get("error") or "Compression failed"),
+                        "error_status": status,
+                        "updated_at": now,
+                    }
+                )
+            else:
+                job.update(
+                    {
+                        "status": "done",
+                        "result": payload,
+                        "updated_at": now,
+                    }
+                )
+    except Exception as exc:
+        logger.warning("Manual compression worker failed for session %s: %s", sid, exc)
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if job:
+                job.update(
+                    {
+                        "status": "error",
+                        "error": f"Compression failed: {_sanitize_error(exc)}",
+                        "error_status": 500,
+                        "updated_at": time.time(),
+                    }
+                )
+
+
+def _handle_session_compress_start(handler, body):
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if getattr(s, "active_stream_id", None):
+        return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
+
+    focus_topic = str(body.get("focus_topic") or body.get("topic") or "").strip()[:500] or None
+    job_body = {"session_id": sid}
+    if focus_topic:
+        job_body["focus_topic"] = focus_topic
+
+    now = time.time()
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked(now)
+        existing = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if existing:
+            existing_payload = _manual_compression_status_payload(existing)
+            if existing_payload.get("status") == "running":
+                return j(handler, existing_payload)
+            # Stage-344 Opus SHOULD-FIX (#2128): always start fresh on re-invoke.
+            # The prior implementation short-circuited and returned a stale `done`
+            # payload for the full 10-minute TTL window when /compress/start was
+            # re-invoked, so a user closing the tab mid-compress and re-running
+            # /compress on a fresh open would get the previous result back rather
+            # than a new compression. Drop the entry and fall through to the
+            # fresh-worker path below.
+            _MANUAL_COMPRESSION_JOBS.pop(sid, None)
+        job = {
+            "session_id": sid,
+            "focus_topic": focus_topic,
+            "status": "running",
+            "started_at": now,
+            "updated_at": now,
+        }
+        _MANUAL_COMPRESSION_JOBS[sid] = job
+
+    worker = threading.Thread(
+        target=_run_manual_compression_job,
+        args=(sid, job_body),
+        name=f"manual-compress-{sid[:8]}",
+        daemon=True,
+    )
+    worker.start()
+
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        return j(handler, _manual_compression_status_payload(_MANUAL_COMPRESSION_JOBS.get(sid, job)))
+
+
+def _handle_session_compress_status(handler, sid):
+    sid = str(sid or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked()
+        job = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if not job:
+            return j(handler, {"ok": True, "status": "idle", "session_id": sid})
+        payload = _manual_compression_status_payload(job)
+        # Stage-344 Opus SHOULD-FIX (#2128): do not pop the job on first
+        # read of a `done` payload. The session may be open in multiple
+        # tabs, and the first tab's poll would otherwise leave the second
+        # tab with `idle` and a "Compression job is no longer available"
+        # toast. Let the 10-minute TTL handle eviction so all open tabs
+        # see the same terminal payload.
+        return j(handler, payload)
+
+
+def _handle_session_compress(handler, body):
     def _anchor_message_key(m):
         if not isinstance(m, dict):
             return None
@@ -7564,6 +8167,38 @@ def _handle_session_compress(handler, body):
         if not norm and not attach_count and not ts:
             return None
         return {"role": role, "ts": ts, "text": norm, "attachments": attach_count}
+
+    def _compression_summary_from_messages(messages):
+        text = None
+        for m in reversed(messages or []):
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "").lower()
+            if role != "assistant":
+                continue
+            if not isinstance(m.get("content"), str):
+                continue
+            content = str(m.get("content") or "").strip()
+            if not content:
+                continue
+            norm = re.sub(r"\s+", " ", content).strip()
+            if (
+                "context compaction" in norm.lower()
+                or "context compression" in norm.lower()
+            ):
+                return norm
+        return None
+
+    def _compact_summary_text(raw_text):
+        if not isinstance(raw_text, str):
+            return None
+        txt = raw_text.strip()
+        if not txt:
+            return None
+        txt = re.sub(r"\s+", " ", txt)
+        if len(txt) > 320:
+            txt = f"{txt[:314]}…"
+        return txt
 
     try:
         require(body, "session_id")
@@ -7707,6 +8342,12 @@ def _handle_session_compress(handler, body):
         # Lock contract: hold for the in-memory mutation only, never across
         # network I/O.
         original_messages = list(messages)
+        original_stream_state = (
+            getattr(s, "active_stream_id", None),
+            getattr(s, "pending_user_message", None),
+            copy.deepcopy(getattr(s, "pending_attachments", None)),
+            getattr(s, "pending_started_at", None),
+        )
         approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
         agent = _run_agent.AIAgent(
@@ -7738,6 +8379,14 @@ def _handle_session_compress(handler, body):
         with _cfg._get_session_agent_lock(sid):
             # Re-read messages to detect concurrent edits during the LLM call.
             # If the history changed, the compression result is stale — abort.
+            current_stream_state = (
+                getattr(s, "active_stream_id", None),
+                getattr(s, "pending_user_message", None),
+                copy.deepcopy(getattr(s, "pending_attachments", None)),
+                getattr(s, "pending_started_at", None),
+            )
+            if current_stream_state != original_stream_state:
+                return bad(handler, "Session stream state changed during compression; please retry.", 409)
             if _sanitize_messages_for_api(s.messages) != original_messages:
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
@@ -7748,9 +8397,15 @@ def _handle_session_compress(handler, body):
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
-            visible_after = _visible_messages_for_anchor(compressed)
+            visible_after = visible_messages_for_anchor(compressed, auto_compression=False)
             s.compression_anchor_visible_idx = max(0, len(visible_after) - 1) if visible_after else None
             s.compression_anchor_message_key = _anchor_message_key(visible_after[-1]) if visible_after else None
+            summary_text = None
+            if isinstance(summary, dict):
+                summary_text = summary.get("reference_message") or summary.get("token_line") or summary.get("headline")
+            s.compression_anchor_summary = _compact_summary_text(
+                summary_text or _compression_summary_from_messages(compressed) or ""
+            )
             s.save()
 
         session_payload = redact_session_data(
@@ -8773,7 +9428,10 @@ def _handle_session_import(handler, body):
     if not isinstance(messages, list):
         return bad(handler, 'JSON must contain a "messages" array')
     title = body.get("title", "Imported session")
-    workspace = body.get("workspace", str(DEFAULT_WORKSPACE))
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace", str(DEFAULT_WORKSPACE))))
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
     model = body.get("model", DEFAULT_MODEL)
     s = Session(
         title=title,

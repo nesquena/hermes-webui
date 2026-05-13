@@ -239,9 +239,22 @@ if [ "A${whoami}" == "Aroot" ]; then
   fi
 
   chown -R "${WANTED_UID}:${WANTED_GID}" "$itdir" || error_exit "Failed to set owner of $itdir"
-  save_env /tmp/hermeswebui_root_env.txt
-  chown "${WANTED_UID}:${WANTED_GID}" /tmp/hermeswebui_root_env.txt || error_exit "Failed to set owner of /tmp/hermeswebui_root_env.txt"
-  chmod 600 /tmp/hermeswebui_root_env.txt || error_exit "Failed to secure /tmp/hermeswebui_root_env.txt"
+  # Issue #2010 — Railway / user-namespaced runtimes: in-container UID 0 may map
+  # to a host UID outside the writable subuid range, so /tmp writes fail despite
+  # id -u == 0. Probe writability and fall back through $itdir → /app.
+  ENV_FILE="/tmp/hermeswebui_root_env.txt"
+  if ! ( : > "$ENV_FILE" ) 2>/dev/null; then
+    ENV_FILE="${itdir:-/tmp/hermeswebui_init}/hermeswebui_root_env.txt"
+    mkdir -p "$(dirname "$ENV_FILE")" 2>/dev/null
+    if ! ( : > "$ENV_FILE" ) 2>/dev/null; then
+      ENV_FILE="/app/.hermeswebui_root_env"
+    fi
+    echo "  !! /tmp not writable by root — falling back to $ENV_FILE (user-namespaced runtime?)"
+  fi
+  save_env "$ENV_FILE"
+  chown "${WANTED_UID}:${WANTED_GID}" "$ENV_FILE" || error_exit "Failed to set owner of $ENV_FILE"
+  chmod 600 "$ENV_FILE" || error_exit "Failed to secure $ENV_FILE"
+  export _HW_ROOT_ENV_PATH="$ENV_FILE"
 
   # restart the script as hermeswebui set with the correct UID/GID this time
   echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
@@ -260,7 +273,7 @@ if [ "$WANTED_UID" != "$new_uid" ]; then error_exit "hermeswebui MUST be running
 echo ""; echo "== Running as hermeswebui"
 
 # Load environment variables one by one if they do not exist from the root init phase
-tmp_root_env=/tmp/hermeswebui_root_env.txt
+tmp_root_env="${_HW_ROOT_ENV_PATH:-/tmp/hermeswebui_root_env.txt}"
 if [ -f $tmp_root_env ]; then
   echo "-- Loading not already set environment variables from $tmp_root_env"
   load_env $tmp_root_env true

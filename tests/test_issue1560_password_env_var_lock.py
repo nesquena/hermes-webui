@@ -104,10 +104,10 @@ def test_panels_js_hides_disable_auth_button_when_env_locked():
         'Disable Auth button must be hidden in the env-locked code path'
 
 
-# ── i18n: keys present in all 9 locales (static/i18n.js) ──────────────────
+# ── i18n: keys present in all 10 locales (static/i18n.js) ──────────────────
 
 
-LOCALES = ['en', 'ja', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'pt', 'ko']
+LOCALES = ['en', 'it', 'ja', 'ru', 'es', 'de', 'zh', 'zh-Hant', 'pt', 'ko']
 
 
 def _split_locales(i18n_src):

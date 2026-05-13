@@ -20,24 +20,52 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from api.config import (
+    get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    register_active_run, update_active_run, unregister_active_run,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
 )
 from api.helpers import redact_session_data, _redact_text
+from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
+from api.turn_journal import append_turn_journal_event_for_stream
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
 # save/restore around the entire agent run.
 _ENV_LOCK = threading.Lock()
+
+
+def _prewarm_skill_tool_modules():
+    """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
+
+    First-time module imports can trigger heavy initialisation (disk I/O,
+    transitive imports, plugin discovery).  Performing those imports while
+    holding ``_ENV_LOCK`` serialises every concurrent session behind the
+    slowest import.  Prewarming ensures the modules are already in
+    ``sys.modules`` before the lock is acquired, so the lock body only
+    does lightweight attribute patching.
+
+    We cannot place these at module top-level because ``tools.*`` lives
+    in the hermes-agent package which may not be on ``sys.path`` at
+    import time (Docker volume-mount ordering).  A dedicated helper
+    keeps the lazy-import try/except in one place and makes the intent
+    explicit.
+    """
+    for _mod_name in ('tools.skills_tool', 'tools.skill_manager_tool'):
+        try:
+            __import__(_mod_name)
+        except ImportError:
+            pass
+
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
@@ -84,6 +112,19 @@ def _is_quota_error_text(err_text: str) -> bool:
         or 'used up your usage' in _err_lower
         or ('plan' in _err_lower and 'limit' in _err_lower and 'reached' in _err_lower)
     )
+
+
+def _clarify_timeout_seconds(default: int = 120) -> int:
+    """Resolve clarify timeout from config, with bounded fallback."""
+    try:
+        cfg = get_config()
+        raw = cfg.get("clarify", {}).get("timeout", default)
+        timeout_seconds = int(raw)
+        if timeout_seconds <= 0:
+            return default
+        return timeout_seconds
+    except Exception:
+        return default
 
 
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
@@ -836,9 +877,41 @@ def _title_retry_completion_budget(provider: str = '', model: str = '', base_url
 
 
 def _title_retry_status(status: str) -> bool:
+    # Whether to grant a second budget attempt within the same prompt+model
+    # combination.  ``llm_length`` indicates the model would have produced
+    # content with more headroom, so doubling the budget can help.
+    #
+    # ``llm_empty_reasoning`` historically also triggered a retry, but for
+    # reasoning models (Qwen3-thinking, DeepSeek-R1, Kimi-K2, etc.) that
+    # status means the model burned its entire budget on hidden reasoning
+    # tokens and emitted nothing visible.  Doubling the budget in that case
+    # just doubles the GPU/credit cost without changing the outcome — the
+    # next attempt produces the same shape.  We skip the retry for empty-
+    # reasoning statuses and let the title path fall through to the local
+    # fallback summary.  See issue #2083 for the LM Studio + Qwen3 repro.
     return status in {
         'llm_length',
         'llm_length_aux',
+    }
+
+
+def _title_should_skip_remaining_attempts(status: str) -> bool:
+    """Statuses where re-issuing the next prompt against the same model
+    produces the same failing shape (model burned its budget on hidden
+    reasoning, hit a hard provider gate, etc.).
+
+    Short-circuit the prompt-iteration loop so we don't issue a second
+    full-budget LLM call (and twice the GPU/credit burn) only to land in
+    the same fallback path. See issue #2083.
+
+    Add a status here only when retrying the next prompt is provably
+    wasted work (single-call signal already establishes that the next
+    call will return the same shape). Length-truncation WITHOUT
+    reasoning is NOT in the set — that's legitimately recoverable by
+    a larger budget on a different prompt and stays in
+    :func:`_title_retry_status`.
+    """
+    return status in {
         'llm_empty_reasoning',
         'llm_empty_reasoning_aux',
     }
@@ -881,10 +954,16 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
             or _safe_text_value(_safe_obj_value(message, 'reasoning_content'))
             or _safe_text_value(_safe_obj_value(message, 'thinking'))
         )
-        if finish_reason == 'length':
-            return '', f'llm_length{suffix}'
+        # When the model emitted reasoning tokens but no visible content, it
+        # burned its budget on hidden thinking — retrying with a larger budget
+        # almost never recovers a useful title (see issue #2083: Qwen3-thinking
+        # via LM Studio loops indefinitely on auto-title generation).  Report
+        # this case distinctly so callers can short-circuit instead of double-
+        # billing the GPU/credit on a near-certain repeat.
         if reasoning:
             return '', f'llm_empty_reasoning{suffix}'
+        if finish_reason == 'length':
+            return '', f'llm_length{suffix}'
         return '', f'llm_empty{suffix}'
     except Exception:
         return '', f'llm_empty{suffix}'
@@ -937,6 +1016,15 @@ def generate_title_raw_via_aux(
             except Exception as e:
                 last_status = 'llm_error_aux'
                 logger.debug("Aux title generation attempt %s failed: %s", idx + 1, e)
+            # If the model just burned its budget on hidden reasoning, retrying
+            # the next prompt against the same model produces the same shape.
+            # Short-circuit to the local fallback path (#2083).
+            if _title_should_skip_remaining_attempts(last_status):
+                logger.debug(
+                    "Aux title generation short-circuiting after %s (reasoning-only response).",
+                    last_status,
+                )
+                break
         return None, last_status
     except Exception as e:
         logger.debug("Aux title generation failed: %s", e)
@@ -1036,6 +1124,15 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                     getattr(agent, 'model', None),
                     e,
                 )
+            # If the model just burned its budget on hidden reasoning, retrying
+            # the next prompt against the same model produces the same shape.
+            # Short-circuit to the local fallback path (#2083).
+            if _title_should_skip_remaining_attempts(last_status):
+                logger.debug(
+                    "Agent title generation short-circuiting after %s (reasoning-only response).",
+                    last_status,
+                )
+                break
         return None, last_status
     except Exception as e:
         logger.debug("Agent title generation failed: %s", e)
@@ -1536,6 +1633,49 @@ def _is_context_compression_marker(msg):
     )
 
 
+def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
+    """Normalize a text blob used in compression summary cards."""
+    if not isinstance(raw_text, str):
+        return None
+    txt = raw_text.strip()
+    if not txt:
+        return None
+    txt = re.sub(r"\s+", " ", txt).strip()
+    if len(txt) > limit:
+        txt = f"{txt[: limit - 6]}…"
+    return txt
+
+
+def _compression_anchor_message_key(message):
+    if not isinstance(message, dict):
+        return None
+    role = str(message.get('role') or '')
+    if not role or role == 'tool':
+        return None
+    content = message.get('content', '')
+    text = _message_text(content)
+    if len(text) > 160:
+        text = text[:160]
+    ts = message.get('_ts') or message.get('timestamp')
+    attachments = message.get('attachments')
+    attach_count = len(attachments) if isinstance(attachments, list) else 0
+    if not text and not attach_count and not ts:
+        return None
+    return {'role': role, 'ts': ts, 'text': text, 'attachments': attach_count}
+
+
+def _compression_summary_from_messages(messages):
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        if not _is_context_compression_marker(m):
+            continue
+        text = _message_text(m.get('content'))
+        if text:
+            return text
+    return None
+
+
 def _find_current_user_turn(messages, msg_text):
     needle = " ".join(str(msg_text or '').split())
     fallback = None
@@ -1563,6 +1703,16 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
+
+
+def _stream_writeback_is_current(session, stream_id):
+    """Return True only while a worker still owns the session writeback.
+
+    cancel_stream() intentionally clears ``active_stream_id`` early so the UI can
+    accept a follow-up turn while the old worker is unwinding. That old worker
+    must not later persist its stale result over the newer transcript.
+    """
+    return bool(stream_id) and getattr(session, 'active_stream_id', None) == stream_id
 
 
 def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
@@ -1632,6 +1782,18 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             # before the agent runs. When the agent returns that same user turn
             # in result_messages, keep the durable checkpoint and append only
             # the assistant/tool delta.
+            continue
+        if (
+            key is not None
+            and isinstance(msg, dict)
+            and msg.get('role') == 'assistant'
+            and merged
+            and _message_identity(merged[-1]) == key
+        ):
+            # Some provider/result replay paths can include the same assistant
+            # message twice in the current delta. Treat only adjacent identity
+            # matches as replay duplicates so identical answers in separate
+            # user turns remain visible.
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
@@ -1911,6 +2073,25 @@ def _run_agent_streaming(
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    register_active_run(
+        stream_id,
+        session_id=session_id,
+        started_at=time.time(),
+        phase="starting",
+        workspace=str(workspace),
+        model=model,
+        provider=model_provider,
+        ephemeral=bool(ephemeral),
+    )
+    if not ephemeral:
+        try:
+            append_turn_journal_event_for_stream(
+                session_id,
+                stream_id,
+                {"event": "worker_started", "created_at": time.time()},
+            )
+        except Exception:
+            logger.debug("Failed to append worker_started turn journal event", exc_info=True)
     s = None
     _rt = {}
     old_cwd = None
@@ -1932,6 +2113,103 @@ def _run_agent_streaming(
         STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
         STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
+    agent = None
+    _live_prompt_estimate_tokens = [0]
+    _live_prompt_exact_tokens = [0]
+    _live_prompt_estimate_seen_ids = set()
+
+    def _seed_live_prompt_estimate() -> int:
+        """Capture the latest exact prompt size before adding live tool deltas."""
+        if _live_prompt_estimate_tokens[0] > 0:
+            return _live_prompt_estimate_tokens[0]
+        _base = 0
+        _agent = agent
+        if _agent is not None:
+            try:
+                _cc = getattr(_agent, 'context_compressor', None)
+                if _cc:
+                    _base = getattr(_cc, 'last_prompt_tokens', 0) or 0
+            except Exception:
+                _base = 0
+        if not _base:
+            try:
+                _session_obj = get_session(session_id)
+                _base = getattr(_session_obj, 'last_prompt_tokens', 0) or 0
+            except Exception:
+                _base = 0
+        _live_prompt_estimate_tokens[0] = int(_base or 0)
+        _live_prompt_exact_tokens[0] = _live_prompt_estimate_tokens[0]
+        return _live_prompt_estimate_tokens[0]
+
+    def _bump_live_prompt_estimate(messages) -> int:
+        """Increment a rough next-prompt estimate from live tool activity."""
+        if not messages:
+            return _live_prompt_estimate_tokens[0]
+        try:
+            from agent.model_metadata import estimate_messages_tokens_rough
+            _delta = int(estimate_messages_tokens_rough(messages) or 0)
+        except Exception:
+            _delta = 0
+        if _delta > 0:
+            _seed_live_prompt_estimate()
+            _live_prompt_estimate_tokens[0] += _delta
+        return _live_prompt_estimate_tokens[0]
+
+    def _live_usage_snapshot():
+        """Best-effort live usage payload for mid-stream UI updates.
+
+        During tool execution the final `done` event has not fired yet, but the
+        frontend still benefits from seeing the latest known token / context
+        values. These are exact for the most recent model call and a truthful
+        lower bound for the pending next call after a tool result is appended.
+        """
+        _usage = {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'estimated_cost': 0,
+            'context_length': 0,
+            'threshold_tokens': 0,
+            'last_prompt_tokens': 0,
+        }
+        try:
+            _session_obj = get_session(session_id)
+        except Exception:
+            _session_obj = None
+
+        _agent = agent
+        if _agent is not None:
+            try:
+                _usage['input_tokens'] = getattr(_agent, 'session_prompt_tokens', 0) or 0
+                _usage['output_tokens'] = getattr(_agent, 'session_completion_tokens', 0) or 0
+                _usage['estimated_cost'] = getattr(_agent, 'session_estimated_cost_usd', 0) or 0
+            except Exception:
+                pass
+            try:
+                _cc = getattr(_agent, 'context_compressor', None)
+                if _cc:
+                    _usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
+                    _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                    _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+            except Exception:
+                pass
+
+        if _session_obj is not None:
+            for _field in ('input_tokens', 'output_tokens', 'estimated_cost', 'context_length', 'threshold_tokens', 'last_prompt_tokens'):
+                if not _usage.get(_field):
+                    try:
+                        _usage[_field] = getattr(_session_obj, _field, 0) or 0
+                    except Exception:
+                        pass
+
+        _real_prompt_tokens = int(_usage.get('last_prompt_tokens') or 0)
+        if _real_prompt_tokens and _real_prompt_tokens != _live_prompt_exact_tokens[0]:
+            _live_prompt_exact_tokens[0] = _real_prompt_tokens
+            _live_prompt_estimate_tokens[0] = _real_prompt_tokens
+        elif _live_prompt_estimate_tokens[0] > _real_prompt_tokens:
+            _usage['last_prompt_tokens'] = _live_prompt_estimate_tokens[0]
+
+        return _usage
+
     # Register this stream with the global streaming meter
     meter().begin_session(stream_id)
 
@@ -1948,7 +2226,8 @@ def _run_agent_streaming(
             if _metering_stop.wait(interval):
                 break  # stream was cancelled or ended — exit
             stats = meter().get_stats()
-            stats['session_id'] = stream_id
+            stats['session_id'] = session_id
+            stats['usage'] = _live_usage_snapshot()
             put('metering', stats)
 
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
@@ -1994,6 +2273,7 @@ def _run_agent_streaming(
     _agent_lock = None
     try:
         s = get_session(session_id)
+        update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
         s.model = model
         provider_context = (
@@ -2015,7 +2295,11 @@ def _run_agent_streaming(
         # two concurrent tabs on different profiles don't clobber each other via the
         # process-level active-profile global.  Falls back gracefully.
         try:
-            from api.profiles import get_hermes_home_for_profile, get_profile_runtime_env
+            from api.profiles import (
+                patch_skill_home_modules,
+                get_hermes_home_for_profile,
+                get_profile_runtime_env,
+            )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
@@ -2027,7 +2311,25 @@ def _run_agent_streaming(
             from pathlib import Path as _Path
             _profile_home_path = _Path(_profile_home) if _profile_home else _Path.home() / '.hermes'
             _profile_runtime_env = {}
-
+            patch_skill_home_modules = None
+        
+        # Capture the resolved profile name now, while profile context is
+        # reliable. Used in the compression migration block to stamp s.profile
+        # on the continuation session. We resolve it here rather than calling
+        # get_active_profile_name() at compression time because that function
+        # reads thread-local storage (_tls.profile) set by set_request_profile()
+        # on the HTTP handler thread. The streaming thread is a separate
+        # threading.Thread and does not inherit TLS. At compression time,
+        # get_active_profile_name() would fall back to the process-global
+        # _active_profile, which may belong to a different concurrent tab.
+        _resolved_profile_name = getattr(s, 'profile', None)
+        if not _resolved_profile_name:
+            try:
+                from api.profiles import get_active_profile_name
+                _resolved_profile_name = get_active_profile_name()
+            except Exception:
+                _resolved_profile_name = None
+        
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
@@ -2035,6 +2337,10 @@ def _run_agent_streaming(
             _profile_home,
         )
         _set_thread_env(**_thread_env)
+        # Prewarm skill-tool imports *before* acquiring the lock so that
+        # first-time module initialisation (which can be slow) does not
+        # block other concurrent sessions waiting on _ENV_LOCK (#2024).
+        _prewarm_skill_tool_modules()
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -2051,6 +2357,15 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_KEY'] = session_id
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
+                # Patch module-level caches to match the active profile.
+                # _set_hermes_home() does this for process-wide switches
+                # but per-request switches skip it (#1700).
+                # Modules were prewarmed by _prewarm_skill_tool_modules()
+                # above, so we only do lightweight sys.modules lookups and
+                # attribute assignments here — no first-time import under
+                # the lock (#2024).
+                if patch_skill_home_modules is not None:
+                    patch_skill_home_modules(Path(_profile_home))
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
@@ -2111,7 +2426,7 @@ def _run_agent_streaming(
 
         def _clarify_callback_impl(question, choices, sid, cancel_evt, put_event):
             """Bridge Hermes clarify prompts to the WebUI."""
-            timeout = 120
+            timeout = _clarify_timeout_seconds()
             choices_list = [str(choice) for choice in (choices or [])]
             data = {
                 'question': str(question or ''),
@@ -2119,6 +2434,7 @@ def _run_agent_streaming(
                 'session_id': sid,
                 'kind': 'clarify',
                 'requested_at': time.time(),
+                'timeout_seconds': timeout,
             }
             try:
                 from api.clarify import submit_pending as _submit_clarify_pending, clear_pending as _clear_clarify_pending
@@ -2170,7 +2486,8 @@ def _run_agent_streaming(
                     return
                 _metering_last_emit[0] = now
                 stats = meter().get_stats()
-                stats['session_id'] = stream_id
+                stats['session_id'] = session_id
+                stats['usage'] = _live_usage_snapshot()
                 stats.setdefault('tps_available', False)
                 stats.setdefault('estimated', False)
                 put('metering', stats)
@@ -2220,6 +2537,35 @@ def _run_agent_streaming(
             # closes over it) never captures an unbound name even if this
             # block is reordered later (Issue #765).
             _checkpoint_activity = [0]
+
+            def _record_live_tool_start(tool_call_id, name, args):
+                if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
+                    return
+                _live_prompt_estimate_seen_ids.add(tool_call_id)
+                _tool_call = {
+                    'id': tool_call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': str(name or ''),
+                        'arguments': json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True),
+                    },
+                }
+                _bump_live_prompt_estimate([{
+                    'role': 'assistant',
+                    'content': '',
+                    'tool_calls': [_tool_call],
+                }])
+
+            def _record_live_tool_complete(tool_call_id, name, function_result):
+                if not tool_call_id:
+                    return
+                _result_text = _tool_result_snippet(function_result)
+                _bump_live_prompt_estimate([{
+                    'role': 'tool',
+                    'name': str(name or ''),
+                    'tool_call_id': tool_call_id,
+                    'content': _result_text,
+                }])
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_text
@@ -2276,6 +2622,10 @@ def _run_agent_streaming(
                         'preview': preview,
                         'args': args_snap,
                     })
+                    _tool_stats = meter().get_stats()
+                    _tool_stats['session_id'] = session_id
+                    _tool_stats['usage'] = _live_usage_snapshot()
+                    put('metering', _tool_stats)
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
@@ -2319,7 +2669,31 @@ def _run_agent_streaming(
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
                     })
+                    _tool_stats = meter().get_stats()
+                    _tool_stats['session_id'] = session_id
+                    _tool_stats['usage'] = _live_usage_snapshot()
+                    put('metering', _tool_stats)
                     return
+
+            def on_tool_start(tool_call_id, name, args):
+                try:
+                    _record_live_tool_start(tool_call_id, name, args)
+                    _tool_stats = meter().get_stats()
+                    _tool_stats['session_id'] = session_id
+                    _tool_stats['usage'] = _live_usage_snapshot()
+                    put('metering', _tool_stats)
+                except Exception:
+                    logger.debug('Failed to update live prompt estimate on tool start', exc_info=True)
+
+            def on_tool_complete(tool_call_id, name, args, function_result):
+                try:
+                    _record_live_tool_complete(tool_call_id, name, function_result)
+                    _tool_stats = meter().get_stats()
+                    _tool_stats['session_id'] = session_id
+                    _tool_stats['usage'] = _live_usage_snapshot()
+                    put('metering', _tool_stats)
+                except Exception:
+                    logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
@@ -2411,6 +2785,8 @@ def _run_agent_streaming(
                         'model': _fb_entry.get('model', ''),
                         'provider': _fb_entry.get('provider', ''),
                         'base_url': _fb_entry.get('base_url'),
+                        'api_key': _fb_entry.get('api_key'),
+                        'key_env': _fb_entry.get('key_env'),
                     }
 
             # Build kwargs defensively — guard newer params so the WebUI
@@ -2502,6 +2878,10 @@ def _run_agent_streaming(
                 _agent_kwargs['reasoning_config'] = _reasoning_config
             if 'interim_assistant_callback' in _agent_params:
                 _agent_kwargs['interim_assistant_callback'] = on_interim_assistant
+            if 'tool_start_callback' in _agent_params:
+                _agent_kwargs['tool_start_callback'] = on_tool_start
+            if 'tool_complete_callback' in _agent_params:
+                _agent_kwargs['tool_complete_callback'] = on_tool_complete
             if 'status_callback' in _agent_params:
                 _agent_kwargs['status_callback'] = _agent_status_callback
             if 'max_iterations' in _agent_params and _max_iterations_cfg is not None:
@@ -2567,6 +2947,10 @@ def _run_agent_streaming(
                     # objects (put queue, cancel_event) that are new each request.
                     agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
                     agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
+                    if hasattr(agent, 'tool_start_callback'):
+                        agent.tool_start_callback = _agent_kwargs.get('tool_start_callback')
+                    if hasattr(agent, 'tool_complete_callback'):
+                        agent.tool_complete_callback = _agent_kwargs.get('tool_complete_callback')
                     if hasattr(agent, 'status_callback'):
                         agent.status_callback = _agent_kwargs.get('status_callback')
                     if hasattr(agent, 'interim_assistant_callback'):
@@ -2784,6 +3168,14 @@ def _run_agent_streaming(
             if _ckpt_thread is not None:
                 _ckpt_thread.join(timeout=15)
             with _agent_lock:
+                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                    logger.info(
+                        "Skipping stale stream writeback for session %s stream %s; active_stream_id=%s",
+                        getattr(s, 'session_id', session_id),
+                        stream_id,
+                        getattr(s, 'active_stream_id', None),
+                    )
+                    return
                 _result_messages = result.get('messages') or _previous_context_messages
                 _next_context_messages = _restore_reasoning_metadata(
                     _previous_context_messages,
@@ -3007,6 +3399,22 @@ def _run_agent_streaming(
                     old_path = SESSION_DIR / f'{old_sid}.json'
                     new_path = SESSION_DIR / f'{new_sid}.json'
                     s.session_id = new_sid
+                    # Carry profile identity across the compression boundary.
+                    # Without this, s.profile stays None on the continuation
+                    # session. On the next request, _run_agent_streaming calls
+                    # get_hermes_home_for_profile(getattr(s, 'profile', None))
+                    # which falls back to the default profile's HERMES_HOME.
+                    # Memory writes then land in the wrong profile's MEMORY.md.
+                    # Stamping here also ensures s.save() persists a non-null
+                    # profile field to the continuation session's JSON file,
+                    # covering the case where the session is later evicted from
+                    # SESSIONS and reconstructed from disk via Session.load().
+                    if not s.profile and _resolved_profile_name:
+                        s.profile = _resolved_profile_name
+                        logger.info(
+                            "Stamped profile=%r on continuation session %s after compression",
+                            _resolved_profile_name, new_sid,
+                        )
                     with LOCK:
                         if old_sid in SESSIONS:
                             SESSIONS[new_sid] = SESSIONS.pop(old_sid)
@@ -3036,6 +3444,17 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
+                    visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
+                    s.compression_anchor_visible_idx = (
+                        max(0, len(visible_after) - 1) if visible_after else None
+                    )
+                    s.compression_anchor_message_key = (
+                        _compression_anchor_message_key(visible_after[-1]) if visible_after else None
+                    )
+                    s.compression_anchor_summary = _compact_summary_text(
+                        _compression_summary_from_messages(s.messages)
+                        or _compression_summary_from_messages(s.context_messages)
+                    )
                     put('compressed', {
                         'message': 'Context auto-compressed to continue the conversation',
                     })
@@ -3214,7 +3633,44 @@ def _run_agent_streaming(
                         # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
+                if not ephemeral and s.messages:
+                    _latest_assistant_idx = next(
+                        (idx for idx in range(len(s.messages) - 1, -1, -1)
+                         if isinstance(s.messages[idx], dict) and s.messages[idx].get('role') == 'assistant'),
+                        None,
+                    )
+                    if _latest_assistant_idx is not None:
+                        _latest_assistant = s.messages[_latest_assistant_idx]
+                        try:
+                            append_turn_journal_event_for_stream(
+                                s.session_id,
+                                stream_id,
+                                {
+                                    "event": "assistant_started",
+                                    "created_at": float(_latest_assistant.get('timestamp') or time.time()),
+                                    "assistant_message_index": _latest_assistant_idx,
+                                },
+                            )
+                        except Exception:
+                            logger.debug("Failed to append assistant_started turn journal event", exc_info=True)
                 s.save()
+                if not ephemeral:
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "completed",
+                                "created_at": time.time(),
+                                "assistant_message_index": next(
+                                    (idx for idx in range(len(s.messages) - 1, -1, -1)
+                                     if isinstance(s.messages[idx], dict) and s.messages[idx].get('role') == 'assistant'),
+                                    None,
+                                ),
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append completed turn journal event", exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings
@@ -3355,6 +3811,7 @@ def _run_agent_streaming(
                         'session_id': session_id,
                         'state': 'evaluating',
                         'message': 'Evaluating goal progress…',
+                        'message_key': 'goal_evaluating_progress',
                     })
                     _goal_decision = evaluate_goal_after_turn(
                         session_id,
@@ -3369,6 +3826,8 @@ def _run_agent_streaming(
                         'session_id': session_id,
                         'state': 'continuing' if decision.get('should_continue') else 'idle',
                         'message': _goal_message,
+                        'message_key': decision.get('message_key') or ('goal_continuing' if _goal_message else ''),
+                        'message_args': decision.get('message_args') or [],
                         'decision': decision,
                     })
                 if decision.get('should_continue'):
@@ -3382,6 +3841,8 @@ def _run_agent_streaming(
                             'continuation_prompt': continuation_prompt,
                             'text': continuation_prompt,
                             'message': _goal_message,
+                            'message_key': decision.get('message_key') or 'goal_continuing',
+                            'message_args': decision.get('message_args') or [],
                             'decision': decision,
                         })
             except Exception as _goal_exc:
@@ -3532,6 +3993,14 @@ def _run_agent_streaming(
                                 _ckpt_thread.join(timeout=15)
                             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
                             with _lock_ctx:
+                                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                                    logger.info(
+                                        "Skipping stale stream self-heal writeback for session %s stream %s; active_stream_id=%s",
+                                        getattr(s, 'session_id', session_id),
+                                        stream_id,
+                                        getattr(s, 'active_stream_id', None),
+                                    )
+                                    return
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
@@ -3573,6 +4042,14 @@ def _run_agent_streaming(
             # API calls so the LLM never sees its own error as prior context on the next turn.
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
+                if not ephemeral and not _stream_writeback_is_current(s, stream_id):
+                    logger.info(
+                        "Skipping stale stream error writeback for session %s stream %s; active_stream_id=%s",
+                        getattr(s, 'session_id', session_id),
+                        stream_id,
+                        getattr(s, 'active_stream_id', None),
+                    )
+                    return
                 _materialize_pending_user_turn_before_error(s)
                 s.active_stream_id = None
                 s.pending_user_message = None
@@ -3591,6 +4068,19 @@ def _run_agent_streaming(
                     s.save()
                 except Exception:
                     pass
+                if not ephemeral:
+                    try:
+                        append_turn_journal_event_for_stream(
+                            s.session_id,
+                            stream_id,
+                            {
+                                "event": "interrupted",
+                                "created_at": time.time(),
+                                "reason": _exc_type,
+                            },
+                        )
+                    except Exception:
+                        logger.debug("Failed to append interrupted turn journal event", exc_info=True)
         put('apperror', _error_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.
@@ -3603,6 +4093,7 @@ def _run_agent_streaming(
         if (s is not None
                 and getattr(s, 'active_stream_id', None) == stream_id
                 and getattr(s, 'pending_user_message', None)):
+            update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
@@ -3613,6 +4104,7 @@ def _run_agent_streaming(
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
+            unregister_active_run(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker
             # is set by goal_continue (line ~3328) inside the SAME function
             # call and consumed atomically by `_start_chat_stream_for_session`
@@ -3830,6 +4322,14 @@ def cancel_stream(stream_id: str) -> bool:
         with _get_session_agent_lock(_cancel_session_id):
             try:
                 _cs = get_session(_cancel_session_id)
+                if not _stream_writeback_is_current(_cs, stream_id):
+                    logger.info(
+                        "Skipping stale cancel writeback for session %s stream %s; active_stream_id=%s",
+                        _cancel_session_id,
+                        stream_id,
+                        getattr(_cs, 'active_stream_id', None),
+                    )
+                    return True
                 # ── Preserve the user's typed message before clearing pending state (#1298) ──
                 # The agent's internal messages list (where the user message was appended at
                 # the start of run_conversation()) may not have been merged back into

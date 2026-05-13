@@ -9,12 +9,15 @@ Discovery order for all paths:
   4. Fail loudly with a human-readable fix-it message if required modules are missing
 """
 
+from __future__ import annotations
+
 import collections
 import copy
 import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -657,6 +660,7 @@ _PROVIDER_DISPLAY = {
     "qwen": "Qwen",
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
+    "xiaomi": "Xiaomi",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -707,6 +711,8 @@ _PROVIDER_ALIASES = {
     "nvidia-nim": "nvidia",
     "build-nvidia": "nvidia",
     "nemotron": "nvidia",
+    "mimo": "xiaomi",
+    "xiaomi-mimo": "xiaomi",
     # Legacy alias — earlier WebUI builds wrote ``provider: local`` for unknown
     # loopback endpoints, but ``local`` is not registered in
     # ``hermes_cli.auth.PROVIDER_REGISTRY``. Routing it through ``custom``
@@ -744,7 +750,14 @@ def _custom_provider_slug_from_name(name: object) -> str:
         return ""
     if raw.startswith("custom:"):
         return raw
-    return "custom:" + raw.replace(" ", "-")
+    # Keep name-derived custom provider slugs out of the @provider:model colon
+    # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
+    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    if not slug:
+        return ""
+    return "custom:" + slug
 
 
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
@@ -1074,6 +1087,14 @@ _PROVIDER_MODELS = {
         {"id": "nvidia/nemotron-3-nano-30b-a3b", "label": "Nemotron 3 Nano 30B"},
         {"id": "nvidia/llama-3.3-nemotron-super-49b-v1.5", "label": "Llama 3.3 Nemotron Super 49B"},
         {"id": "qwen/qwen3-next-80b-a3b-instruct", "label": "Qwen3 Next 80B"},
+    ],
+    # Xiaomi MiMo — direct API via api.xiaomimimo.com
+    "xiaomi": [
+        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
+        {"id": "mimo-v2-flash",    "label": "MiMo V2 Flash"},
     ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
@@ -1477,6 +1498,33 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+def _get_provider_base_url(provider_id):
+    """Look up the configured base_url for a provider (e.g. lmstudio).
+
+    Checks two locations, in order:
+      1. ``cfg["providers"][<provider_id>]["base_url"]`` — the explicit
+         per-provider override.
+      2. ``cfg["model"]["base_url"]`` — falls back here when
+         ``cfg["model"]["provider"] == provider_id``. This is the historical
+         shape (the model block carries both the active provider AND the
+         base URL for that provider in a single record).
+
+    Returns the URL stripped of trailing ``/`` if configured, otherwise None.
+    """
+    prov_cfg = cfg.get("providers", {}).get(provider_id, {}) or {}
+    explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    model_cfg = cfg.get("model", {}) or {}
+    if isinstance(model_cfg, dict):
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if model_provider == str(provider_id).strip().lower():
+            model_base = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            if model_base:
+                return model_base
+    return None
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1526,18 +1574,36 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
-    custom_providers = cfg.get("custom_providers", [])
-    if isinstance(custom_providers, list):
+    # However, when the active provider is an explicit non-custom provider and
+    # the requested model_id is the configured default model, that active
+    # provider takes precedence over overlapping custom_providers[] entries.
+    # Otherwise WebUI routes to custom:<name> instead of the intended endpoint
+    # and can surface a 401 from the wrong provider (#1922).
+    # For all other cases, preserve custom_providers[] routing for explicitly
+    # selected custom provider models.
+    _is_explicit_non_custom_provider = (
+        config_provider is not None
+        and config_provider != 'custom'
+        and not config_provider.startswith('custom:')
+    )
+    _default_model = model_cfg.get('default') if isinstance(model_cfg, dict) else None
+    _skip_custom_providers = (
+        _is_explicit_non_custom_provider
+        and _default_model is not None
+        and model_id == _default_model
+    )
+    custom_providers = cfg.get('custom_providers', [])
+    if isinstance(custom_providers, list) and not _skip_custom_providers:
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get("model") or "").strip()
-            entry_name = (entry.get("name") or "").strip()
-            entry_base_url = (entry.get("base_url") or "").strip()
+            entry_model = (entry.get('model') or '').strip()
+            entry_name = (entry.get('name') or '').strip()
+            entry_base_url = (entry.get('base_url') or '').strip()
             entry_model_ids = set()
             if entry_model:
                 entry_model_ids.add(entry_model)
-            entry_models = entry.get("models")
+            entry_models = entry.get('models')
             if isinstance(entry_models, dict):
                 entry_model_ids.update(
                     key.strip()
@@ -1545,7 +1611,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                     if isinstance(key, str) and key.strip()
                 )
             if entry_name and model_id in entry_model_ids:
-                provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
+                provider_hint = _custom_provider_slug_from_name(entry_name)
                 return model_id, provider_hint, entry_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
@@ -1581,7 +1647,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
-        return bare_model, provider_hint, None
+        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -1589,20 +1655,21 @@ def resolve_model_provider(model_id: str) -> tuple:
         # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
         if config_provider == "openrouter":
             return model_id, "openrouter", config_base_url
+        # Portal providers (Nous, OpenCode, NVIDIA NIM) serve models from multiple
+        # upstream namespaces — check them BEFORE the prefix-strip branch so that
+        # a model id whose prefix happens to equal the config_provider (e.g.
+        # nvidia/nemotron-... on NVIDIA NIM) still keeps the full namespaced path.
+        # The earlier ordering ran this guard AFTER the prefix-strip, so it never
+        # fired in the prefix==config_provider case, causing HTTP 404 from the
+        # portal which requires the full provider/model id (#2177; sibling of
+        # #854 / #894 for Nous, where this guard was originally added).
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
+        if config_provider in _PORTAL_PROVIDERS:
+            return model_id, config_provider, config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
             return bare, config_provider, config_base_url
-        # Portal providers (Nous, OpenCode) serve models from multiple upstream
-        # namespaces — check them BEFORE the config_base_url branch so that a
-        # Nous user whose config.yaml also has a base_url doesn't accidentally
-        # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
-        # name sent to Nous → 404 because Nous requires the full namespace path).
-        # NVIDIA NIM also serves models from multiple namespaces (qwen, nvidia, etc.)
-        # and requires the full model path.
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
-        if config_provider in _PORTAL_PROVIDERS:
-            return model_id, config_provider, config_base_url
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
         # Keep that narrow exception before the custom endpoint protection so
@@ -2740,6 +2807,7 @@ def get_available_models() -> dict:
                 "GLM_API_KEY",
                 "KIMI_API_KEY",
                 "DEEPSEEK_API_KEY",
+                "XIAOMI_API_KEY",
                 "OPENCODE_ZEN_API_KEY",
                 "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
@@ -2775,6 +2843,8 @@ def get_available_models() -> dict:
                 detected_providers.add("minimax-cn")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
+            if all_env.get("XIAOMI_API_KEY"):
+                detected_providers.add("xiaomi")
             if all_env.get("XAI_API_KEY"):
                 detected_providers.add("x-ai")
             if all_env.get("MISTRAL_API_KEY"):
@@ -2783,6 +2853,9 @@ def get_available_models() -> dict:
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+            # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
+            if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
+                detected_providers.add("lmstudio")
 
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
@@ -2842,7 +2915,7 @@ def get_available_models() -> dict:
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return "custom:" + entry_name.lower().replace(" ", "-")
+                        return _custom_provider_slug_from_name(entry_name)
                     return "custom"
 
             return ""
@@ -3369,6 +3442,62 @@ def get_available_models() -> dict:
                         if extras:
                             group_entry["extra_models"] = extras
                         groups.append(group_entry)
+                elif pid == "lmstudio":
+                    # LM Studio is a local server — fetch live loaded models via
+                    # the OpenAI-compatible /v1/models endpoint (#WebUI).
+                    #
+                    # Two-tier lookup, each in its own try so a failure in one
+                    # does not abort the other (the bug pattern that broke
+                    # tests/test_issue1527_lmstudio_base_url_classification on
+                    # CI environments where hermes_cli isn't importable —
+                    # ImportError in the cli tier was hijacking the whole
+                    # branch and silently skipping the urlopen fallback).
+                    raw_models = []
+                    lm_ids: list[str] = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+                        lm_ids = _provider_model_ids("lmstudio") or []
+                    except Exception:
+                        logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
+
+                    if lm_ids:
+                        raw_models = [{"id": mid, "label": mid} for mid in lm_ids]
+                    else:
+                        # Fallback: fetch /models directly from the configured
+                        # base URL. Looks for the URL in either
+                        # `cfg["providers"]["lmstudio"]["base_url"]` or
+                        # `cfg["model"]["base_url"]` (via _get_provider_base_url),
+                        # so the historical model-block config shape still works.
+                        lm_cfg = cfg.get("providers", {}).get("lmstudio", {}) or {}
+                        lm_base_url = _get_provider_base_url("lmstudio") or ""
+                        lm_api_key = str(lm_cfg.get("api_key") or "").strip() if isinstance(lm_cfg, dict) else ""
+                        if lm_base_url:
+                            headers = {"User-Agent": "OpenAI/Python 1.0"}
+                            if lm_api_key:
+                                headers["Authorization"] = f"Bearer {lm_api_key}"
+                            endpoint = (lm_base_url + "/models").rstrip("/")
+                            try:
+                                import urllib.request as _urlreq
+                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                with _urlreq.urlopen(req, timeout=5) as resp:
+                                    lm_data = json.loads(resp.read().decode())
+                                for m in (lm_data.get("data") or []):
+                                    if isinstance(m, dict):
+                                        mid = str(m.get("id") or "").strip()
+                                        if mid and {"id": mid, "label": mid} not in raw_models:
+                                            raw_models.append({"id": mid, "label": mid})
+                            except Exception:
+                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
+
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     raw_models = []
@@ -3383,7 +3512,9 @@ def get_available_models() -> dict:
                         if isinstance(cfg_models, dict):
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                         elif isinstance(cfg_models, list):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models]
+                            raw_models = [{"id": k["id"] if isinstance(k, dict) else k,
+                                            "label": k.get("label", k["id"]) if isinstance(k, dict) else k}
+                                           for k in cfg_models]
 
                     if not raw_models:
                         raw_models = _models_from_live_provider_ids(
@@ -3661,7 +3792,47 @@ STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated dur
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# Active agent-run registry. This intentionally tracks worker lifecycle rather
+# than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
+# still unwinding, blocked in a provider call, or waiting for delegated work.
+ACTIVE_RUNS: dict = {}
+ACTIVE_RUNS_LOCK = threading.Lock()
+LAST_RUN_FINISHED_AT: float | None = None
 SERVER_START_TIME = time.time()
+
+
+def register_active_run(stream_id: str, **metadata) -> None:
+    """Mark a WebUI agent worker as alive until its outer finally exits."""
+    if not stream_id:
+        return
+    now = time.time()
+    entry = dict(metadata or {})
+    entry.setdefault("stream_id", stream_id)
+    entry.setdefault("started_at", now)
+    entry.setdefault("phase", "running")
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS[stream_id] = entry
+
+
+def update_active_run(stream_id: str, **metadata) -> None:
+    """Update active-run metadata without creating a new run implicitly."""
+    if not stream_id:
+        return
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is not None:
+            entry.update(metadata)
+
+
+def unregister_active_run(stream_id: str) -> None:
+    """Remove a worker from the active-run registry and record idle start."""
+    if not stream_id:
+        return
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's

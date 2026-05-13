@@ -1,5 +1,500 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **PR #2179** (self-built, closes #2177) — NVIDIA NIM no longer 404s when WebUI is configured with `provider: nvidia` and a `nvidia/<model>` id. `resolve_model_provider()` in `api/config.py` had the `_PORTAL_PROVIDERS` guard (Nous, OpenCode-Zen, OpenCode-Go, NVIDIA NIM — providers whose APIs require the full namespaced `provider/model` wire format) sitting **after** the `prefix == config_provider` strip branch. For `model_id="nvidia/nemotron-3-super-120b-a12b"` + `config_provider="nvidia"`, the strip branch fired first and returned the bare `nemotron-...` to NIM, which then 404'd because NIM requires the full path. Same bug class as #854 / #894 (Nous portal). The guard was originally added with NVIDIA in mind but the structural ordering was wrong. Fix is a pure reorder of two `if` blocks — hoist `_PORTAL_PROVIDERS` ahead of the strip — so all portal providers always preserve the full `provider/model` id regardless of whether the prefix happens to equal the provider name. Also closes a latent symmetric bug for the Nous case if a `nous/<model>` id ever entered the catalog. Cross-tool trace against hermes-agent's `hermes_cli/models.py` (line 59, 177, 237-239) and `agent/model_metadata.py:68` confirms the agent CLI sends `nvidia/nemotron-...` verbatim — both tools now agree on the wire format. 118-line regression suite covering the reported case, cross-namespace `qwen/` and `meta/` ids, every static nvidia model in `_PROVIDER_MODELS`, the latent `nous/<model>` ordering pin, and a non-portal-provider regression pin for the anthropic strip behavior. nesquena APPROVED with 200-line end-to-end trace + 12-shape behavioural harness + cross-tool wire-format verification. Reported on Discord by @vishnu in #report-bugs.
+
+## [v0.51.53] — 2026-05-13 — Release AC (stage-346 — 10-PR contributor batch — stale-stream guard extension + guarded worktree remove + CSP report collector + perf + i18n + ctl fix + defense-in-depth)
+
+### Added
+
+- **PR #2156** by @franksong2702 — Issue #2057 Slice 2: guarded worktree remove action. New `POST /api/session/worktree/remove` and `remove_worktree_for_session(session, *, force=False)` helper. Rejects removal when the worktree is locked by an active stream or terminal, when it has local changes, untracked files, or unpushed commits ahead of origin. Clean removal runs without `--force`; `--force` is only used when the backend is explicitly called with `force=True`. Adds explicit per-session UI in the sidebar action menu (i18n strings for 9 locales), confirm dialog with two screenshot artifacts in `docs/pr-media/2156/`, and a 335-line regression suite in `tests/test_worktree_remove.py` covering the five fail-closed cases plus the explicit `force=True` override.
+
+- **PR #2160** by @franksong2702 — CSP report collector endpoint (closes #2095). New unauthenticated `POST /api/csp-report` accepts both legacy `report-uri` JSON (`{"csp-report": ...}`) and modern `application/reports+json` array payloads, with per-client in-memory rate limiting; over-limit reports are dropped with a warning while still returning 204 to avoid browser retry amplification. Existing CSP report-only header now advertises the collector via `report-uri /api/csp-report; report-to csp-endpoint`, with a matching `Report-To` response header. 117-line regression suite covering headers, auth/CSRF carve-out, both payload shapes, and rate-limit behavior.
+
+### Fixed
+
+- **PR #2158** by @franksong2702 (closes #2154) — Extends the stale-stream writeback guard from PR #2136 to two additional sites Opus advisor flagged on stage-345 review: the outer exception path (`api/streaming.py:3989`) that materializes `pending_user_message` and appends an `_error_message`, and the self-heal retry success path (`api/streaming.py:3947`) that persists `_heal_result`. Both can run after `active_stream_id` has rotated to a newer stream — same corruption pattern PR #2136 fixed on the normal success path. Each new site now mirrors the canonical guard: `if not _stream_writeback_is_current(s, stream_id): logger.info("Skipping stale stream writeback at <site>"); return`. Adds regression coverage that pins both guards before their respective persistence operations.
+
+- **PR #2159** by @franksong2702 (closes #2157) — `/api/sessions` no longer serializes stale `active_stream_id` / `pending_*` fields after a stream dies or the server restarts. Adds a bounded route-layer post-pass that only considers rows with `active_stream_id` set and `is_streaming` not true, loads candidates with `metadata_only=True`, and delegates cleanup to the existing safe `_clear_stale_stream_state()` helper (preserves the #1558 full-load safety path and per-session lock recheck). Re-reads `all_sessions()` after a cleanup so the JSON response matches the persisted session state.
+
+- **PR #2161** by @franksong2702 (closes #2098) — Localized 5 Logs severity-filter keys (`logs_severity_*`) for `ja`, `ru`, `es`, `de`, `zh`, `zh-Hant`, `pt`, `ko`. Removes the affected `// TODO: translate` placeholders and adds the missing Traditional Chinese entries for these five keys. Regression coverage verifies each target locale has the expected localized values and that these key lines no longer carry TODO placeholders.
+
+- **PR #2173** by @franksong2702 (closes #2172) — `ctl.sh status` and `ctl.sh stop` now correctly recognize daemons started through a custom `HERMES_WEBUI_PYTHON` wrapper. Persists the resolved Python executable in `webui.ctl.env` as `PYTHON_EXE`, and `_is_owned_webui_pid()` now recognizes the recorded wrapper path while preserving the existing repo-root state guard. Stabilizes the existing ctl tests by waiting for the fake-wrapper log before reading it. Fixes the Python 3.13 CI failure exposed by PR #2171's session-tail tests.
+
+- **PR #2175** by @Michaelyklam (refs #2155) — Softened the session-lineage count badge from `X segments` to `X prior turn(s)` in the English base locale. Existing lineage expand/collapse behavior and accessibility attributes unchanged. Focused regression test verifies the new English badge label and forbids the old "segments" wording.
+
+- **PR #2176** by @MrFant — `_apply_provider_prefix()` no longer crashes with `AttributeError: 'dict' object has no attribute 'startswith'` when a provider's `models` config contains dict entries (`{"id": "x", "label": "y"}`) instead of plain strings. Fix extracts `id` and `label` from dict entries while keeping string entries as-is. Resolves `/api/models` and `/api/onboarding/status` 500 errors for users with dict-shaped model lists.
+
+### Performance
+
+- **PR #2166** by @franksong2702 — Consolidated session post-render processing into a single `postProcessRenderedMessages(container)` pass instead of two overlapping passes after both cached and freshly-rebuilt message DOM (plus a third highlight pass during idle session-loads). Scopes inline preview, tree-view, Mermaid, KaTeX, and code/copy-button passes to one walk over the rendered container. Vanilla JS architecture preserved; no changes to the markdown renderer, session loading, or DOM diffing model.
+
+- **PR #2170** by @franksong2702 — `/api/session?messages=0&resolve_model=0` metadata loads no longer pay the `_lookup_cli_session_metadata()` Agent/CLI scan for native WebUI sessions. New `_needs_cli_session_metadata()` predicate keeps the Agent metadata merge path for imported CLI sessions, messaging-backed sessions, read-only sessions, and external-agent sessions, but skips it for ordinary WebUI-native sessions. Profiling on real production state showed this was the remaining hot path after PR #2166 removed the duplicate browser post-render work.
+
+### Stage-346 maintainer fixes
+
+- **`server.py` CSP-report auth carve-out scoped to POST only** — Opus SHOULD-FIX from stage-346 review on PR #2160. The original carve-out (`parsed.path != "/api/csp-report" and not check_auth`) bypassed auth for all write methods on the endpoint, not just the POST that browsers actually use for CSP violation reports. PATCH/DELETE to that path currently fall through to a 403 (CSRF check) or 404 (routing), so the broad bypass was harmless — but defense-in-depth says scope the carve-out to its actual use. New check: `parsed.path == "/api/csp-report" and self.command == "POST"`. ~6 LOC. CSP report regression suite (6 tests) still passes.
+
+## [v0.51.52] — 2026-05-12 — Release AB (stage-345 — 2-PR low-risk batch — stream-ownership guard + Refresh-usage button on provider quota card)
+
+### Fixed
+
+- **PR #2136** by @LumenYoung — Stale stream writebacks no longer poison the active session transcript. `cancel_stream()` intentionally clears `active_stream_id` early so the UI can accept a follow-up turn while an old worker is unwinding — but the old worker could still return later from `run_conversation()` and persist its stale result over the newer transcript, causing visible transcript / turn journal / `state.db` to disagree (especially around cancel+retry on compressed continuations). Adds a single-line ownership check `_stream_writeback_is_current(session, stream_id)` (token equality against `session.active_stream_id`) and short-circuits both finalize paths: the success path in `_run_agent_streaming` and the cancel-handler path in `cancel_stream()`. When the stream no longer owns the writeback, both paths log `Skipping stale stream/cancel writeback` and return cleanly without persisting. 89-line regression suite in `tests/test_stale_stream_writeback.py`; companion updates to `tests/test_issue1361_cancel_data_loss.py` and `tests/test_sprint42.py` for the new return-without-persist behavior.
+
+### Added
+
+- **PR #2150** by @Jordan-SkyLF — "Refresh usage" button on the Provider quota card in Settings → Providers. Calls `/api/provider/quota?refresh=1&ts=<now>` with `cache: 'no-store'` to bypass browser, service worker, and reverse-proxy caches that may have stamped a previous quota response, then re-renders just the quota card from the fresh response and shows a `Last checked ...` timestamp. Disabled `Refreshing…` state during the in-flight request; success toast on completion or failure toast if the refresh fails. Note: the `refresh=1` query param is a no-op at the server today (`get_provider_quota()` has no in-process cache layer), so the win is strictly browser-side cache-bust + the `no-store` fetch option. A future maintainer follow-up may add server-side TTL caching of OAuth account-limit fetches, at which point the `refresh=1` param becomes load-bearing on both sides.
+
+## [v0.51.51] — 2026-05-12 — Release AA (stage-344 — 16-PR contributor batch — i18n + insights bucketing/mobile + manual-compress async + workspace recovery + iOS PWA scroll + Cloudflare login health + fr locale)
+
+### Added
+
+- **PR #2130** by @dso2ng — Lazy lineage-report fetch on sidebar segment-badge expand. The sidebar already showed `N segments` for collapsed compression lineage rows (refs #1906, #1943) and the backend report endpoint is now shipped (refs #2012), but some rows only had a backend `_compression_segment_count` from `/api/sessions` while the browser hadn't materialized the older segment rows — clicking the badge couldn't reveal the full bounded list. Adds a small per-sidebar-cache lineage-report cache/inflight map in `static/sessions.js`, invalidates it on each fresh `/api/sessions` refresh, and on expand fetches `GET /api/session/lineage/report?session_id=<tip>` only when `_sessionSegmentCount(s)` exceeds the locally-materialized `_lineage_segments` count. Merges returned report `segments` by `session_id` with existing client segments, skipping the visible tip and `child_session` rows. Leaves report `children` out of the compression-segment list so subagent/fork child semantics remain separate. 132-line regression suite covering fetch-needed detection, report-segment merging/dedup, endpoint construction, and inflight cache de-duping.
+
+- **PR #2142** by @legeantbleu — French (`fr`) locale. ~938 UI strings translated via Google Translate then sanitized for JS string escaping. Inserted at the end of `static/i18n.js`'s `LOCALES` map (insertion-order convention used by every locale since `it` landed). Stage-344 maintainer fix added the matching tuple entries in `tests/test_issue1488_composer_voice_buttons.py:TestComposerVoiceButtonI18n.LOCALES` + sibling `TestVoiceModePreferenceGate.LOCALES`, plus the matching `_LOGIN_LOCALE['fr']` block in `api/routes.py` so the login page localizes for French users (issue #1442 parity contract), plus an inverted `_resolve_login_locale_key('fr')` assertion in `tests/test_login_locale_parity.py` that previously assumed fr falls back to en. Mirrors the stage-340 fix for the `it` locale (PR #2067).
+
+### Fixed
+
+- **PR #2120** by @Michaelyklam (closes #2103) — Daily Tokens chart no longer overflows its card on 90/365 day ranges. Adds `_bucketDailyTokensForChart()` in `static/panels.js` that keeps ≤30 rows per-day and buckets longer ranges into summed chart rows (90→45 bars at 2-day buckets, 365→46 bars at 8-day buckets, ≤52 ceiling). Updates the Daily Tokens render loop to use bucketed chart rows, date-range labels, and summed tooltip values. Switched chart columns to shrink-safe `minmax(0,1fr)` so the bars stay inside the card. Backend `/api/insights` payload unchanged. 130-line regression suite covering short-range preservation, long-range bounding, label/title shape on bucketed rows, render-loop usage, and shrink-safe CSS.
+
+- **PR #2121** by @Michaelyklam (refs #2104) — Token Breakdown + Models row stacks on mobile instead of forcing horizontal page overflow. New `insights-usage-grid` class wraps the row with a scoped `@media (max-width: 640px)` rule that flips it to `grid-template-columns: 1fr`. Contains remaining model-table overflow inside the card. 27-line regression suite covering the mobile breakpoint, single-column layout, contained `overflow-x`, and presence of the scoped rule.
+
+- **PR #2123** by @Michaelyklam (closes #2112) — Portuguese (`pt`) locale parity: 5 missing session-management keys (bulk delete/archive, select mode, select all, selected count, no-selection text) added so Portuguese users stop silently falling back to English. Extended `tests/test_login_locale_parity.py` with a session-management key parity check across all locale blocks.
+
+- **PR #2125** by @Michaelyklam (closes #2093) — Renamed `_patch_skill_home_modules` → `patch_skill_home_modules` in `api/profiles.py` since the helper is imported by streaming code and asserted by tests across modules. Updated streaming import/fallback/call sites in `api/streaming.py` and the env-lock regression test expectations. Expanded `api/compression_anchor.py`'s module docstring to explain manual vs automatic compression anchoring and `auto_compression=True` behavior. Documentation/rename-only — no runtime behavior change.
+
+- **PR #2128** by @franksong2702 (closes #2087) — Manual `/compress` no longer fails behind reverse proxies that time out long synchronous requests. Adds `POST /api/session/compress/start` (start or reuse an in-process manual compression job keyed by `session_id`) + `GET /api/session/compress/status?session_id=...` (poll `running`/`done`/`error`/`idle`). Reuses the existing `_handle_session_compress` implementation inside the worker so the save path, provider resolution, sanitization, and the legacy synchronous endpoint stay aligned. Adds a stream-state guard before save so a compression worker can't overwrite a session that started another stream while compression was running. 10-minute cleanup for terminal job results, with successful `done` payloads released after first status consumption. `static/commands.js` `/compress` and `/compact` now start, poll, and apply the saved compressed session; session-load resume wiring picks up in-flight compression on page reload.
+
+- **PR #2129** by @Michaelyklam (closes #2092) — `_purgeStaleInflightEntries()` now iterates `INFLIGHT` keys and explicitly drops ids absent from the current session list. Pre-fix the cleanup only removed entries for sessions still present in `_allSessions` and marked non-streaming, so deleted/archived/filtered-out sessions left ghost entries indefinitely. Preserves still-streaming sessions. 124-line regression suite covering absent/present-non-streaming/present-streaming cases.
+
+- **PR #2135** by @franksong2702 (closes #2126, refs #2131) — `/api/models/live?provider=custom:<slug>` now only returns models from the requested named provider entry instead of every `custom_providers[].model`. Direct `/v1/models` fallback uses the matched named provider's `base_url`+`api_key` pair instead of the active profile's `model.base_url`/`model.api_key`. `custom:<slug>` reads only the matching named entry; bare `custom` reads only unnamed entries. Includes model IDs from both singular `model` and plural `models` config forms. Cache key behavior preserved (already provider-scoped). Regression coverage for named-provider scoping, bare-custom scoping, and direct fetch endpoint/key selection.
+
+- **PR #2137** by @franksong2702 (closes #2122) — Login page health probe now sends `credentials: 'same-origin'` instead of `credentials: 'omit'`. Cloudflare Access and similar same-origin reverse proxies need the access cookie to reach the proxy, so the prior omit caused WebUI to falsely disable login before `/health` ever resolved. Keeps the health URL mount-relative (`health`) for subpath deployments. Static regression test pins same-origin credentials and forbids the omit variant.
+
+- **PR #2138** by @dobby-d-elf — Live Hermes WebUI chats no longer get stuck with `Error: Path does not exist: ...` when the session points at a deleted workspace. Workspace fallback now looks up the live `DEFAULT_WORKSPACE` instead of using a stale import-time snapshot. Old sessions with deleted implicit workspaces are repaired to the current valid workspace during chat start, so the next send recovers instead of erroring. 71-line regression suite for both the stale-fallback and missing-session-workspace recovery paths.
+
+- **PR #2139** by @Michaelyklam (refs #2097) — Turn-journal terminal-collision audit slice. `derive_turn_journal_states()` now returns `(states, terminal_collisions)`; collisions carry the `turn_id` plus terminal events in timestamp order when a turn records more than one terminal event (completed + interrupted both fire). Latest-by-timestamp derived state behavior preserved for existing callers; session recovery audit and existing tests updated to unpack the new tuple. Audit-only: no multi-process append safety in this PR.
+
+- **PR #2140** by @franksong2702 (closes #2133) — WebUI fallback activation now passes `api_key` and `key_env` in the normalized fallback entry to `AIAgent`, matching what the CLI path preserves. Hermes Agent fallback resolution already knew how to use these — WebUI was dropping them, leaving env-backed fallback providers unauthenticated after a primary provider 401. Legacy single-dict `fallback_model` and list-form `fallback_providers` selection behavior unchanged.
+
+- **PR #2141** by @franksong2702 (closes #2102) — Settings → System header no longer clips off the right edge on phones. Section header now stacks vertically under the existing Settings mobile breakpoint; the System update/version control group wraps to use available width; individual version badges keep their text intact while the group wraps. CSS-only change inside the existing breakpoint scope. Mobile layout static regression added.
+
+- **PR #2143** by @dobby-d-elf — iPhone PWA chat bottom-scroll stutter fixed. Removed the Start/End scroll controls from the transcript scroll layout — they were sticky children inside `#messages`, which on iOS momentum/elastic scrolling perturbed the scroll surface at the bottom boundary. Now the transcript is wrapped in a `.messages-shell` and the controls render as absolute overlays outside `#messages`, so `#messages` is back to a plain native scrolling container. Adds a small visibility dead zone for the down-arrow button so elastic bottom pulls don't flash the button while already at the bottom.
+
+- **PR #2132** by @Michaelyklam (refs #2096) — Docs-only: added `Synchronous durability design rationale` to `docs/rfcs/turn-journal.md`. Documents why submitted-event journaling stays synchronously fsync-backed today, qualitative fsync latency expectations for SSD/HDD/Docker-overlay filesystems, and maintainer benchmark guidance for measuring p50/p95/p99 append/fsync latency before any future async lifecycle journaling.
+
+### Stage-344 maintainer fixes
+
+- **`api/routes.py:_handle_session_compress_start/status` (#2128 polish)** — Opus SHOULD-FIX from stage-344 review. Two related UX bugs in the new async manual-compression flow: (1) `compress/status` popped the `done` job entry on first read, which left a second open tab with `{status:"idle"}` and a "Compression job is no longer available" toast — fixed by letting the existing 10-minute TTL handle eviction so all tabs see the same terminal payload; (2) re-invoking `compress/start` within the 10-minute TTL returned the stale prior `done` payload instead of running a new compression — fixed by always dropping the existing entry and starting a fresh worker, so a user closing a tab mid-compress and re-running `/compress` on a fresh open gets a new result. Both are 1-block tweaks; existing `tests/test_sprint46.py` 10/10 still passes. The third Opus SHOULD-FIX (#2135 `cfg["model"]` fallback when `provider=custom:X` doesn't match any entry) is deferred to a follow-up — it's strictly no-worse-than-master behavior, but worth tightening to skip the URL probe when no entry matched.
+
+## [v0.51.50] — 2026-05-12 — Release Z (stage-343 — single-PR — ctl.sh bash 3.2 macOS compat fix + regression test suite)
+
+### Fixed
+
+- **PR #2117** by @ayushere — `ctl.sh start` no longer crashes on macOS (bash 3.2) with `preserved[@]: unbound variable`. The dotenv-preserve loop in `_load_repo_dotenv_preserving_env()` iterated `"${preserved[@]}"` under `set -euo pipefail`, which bash 4+ silently allows on empty arrays but bash 3.2 (still the default `/usr/bin/bash` on macOS) treats as an unbound-variable error. Guards the iteration with `if [[ ${#preserved[@]} -gt 0 ]]; then ... fi` — matches the canonical bash 3.2 strict-mode pattern. This is the third bash 3.2 compat fix to land in `ctl.sh` (prior: `025f137f` guarded `CTL_BOOTSTRAP_ARGS[@]` with the `${arr[@]+...}` pass-through pattern, `630981a0` replaced `[[ -v ${key} ]]` with `[[ -n "${!key+x}" ]]`). Defense-in-depth: added `tests/test_ctl_bash32_compat.py` (5 static-pattern regressions) pinning both empty-array guards plus a denylist for bash 4+ syntax (`declare -A`, `mapfile`, `[[ -v ]]`, `${var^^}`, `${var,,}`) so the next regression surfaces in CI instead of a macOS user's terminal. Stage-343 reviewer added the regression-test file alongside the contributor's 5-LOC fix to ctl.sh.
+
+## [v0.51.49] — 2026-05-12 — Release Y (stage-342 — 3-PR contributor batch — read-only worktree status endpoint + worktree-retained response preference + Codex quota credential-pool fallback)
+
+### Added
+
+- **PR #2109** by @franksong2702 — Read-only worktree status endpoint for the #2057 lifecycle tracker. `GET /api/session/worktree/status?session_id=...` returns the session-owned worktree path, filesystem existence, dirty/untracked state, ahead/behind counts when an upstream is configured, and live stream/embedded-terminal lock flags. Uses `git worktree list --porcelain`, `git status --porcelain --untracked-files=normal`, and `rev-list --left-right --count HEAD...@{u}` only — no mutating git state, 2-second per-call timeouts (tightened from PR-submitted 5s during stage review). Session-id scoped (rejects non-worktree sessions with 400), does not accept arbitrary filesystem paths. This is the non-destructive status surface Nathan requested as the next slice before any future explicit remove-worktree action. 221-line regression suite covering clean/dirty/untracked/missing-path/live-stream-lock/embedded-terminal-lock/endpoint-success/non-worktree-rejection cases.
+
+### Fixed
+
+- **PR #2113** by @franksong2702 (closes #2111) — Session archive/delete success toasts now prefer the backend `worktree_retained` response over the cached session-sidebar snapshot. Pre-fix a stale sidebar snapshot (other browser tab archived the session, server-side mutation moved the worktree, etc.) could make the success toast say "worktree preserved on disk" even when the backend response said no worktree was retained. Frontend now treats `response.worktree_retained: true/false` as source of truth and falls back to `session.worktree_path` only when the backend doesn't return the flag (older-server compatibility). Both single-session and batch (Promise.all) archive/delete paths updated; batch retained-count derived from per-response flags instead of the pre-POST cached `_worktreeSessionCount`. The pre-flight confirm dialog still uses the cached snapshot (it renders before the POST exists), but the post-POST toast now reflects backend truth.
+
+- **PR #2116** by @starship-s — OpenAI Codex provider quota card no longer reports "unavailable" when Codex chat requests actually work. Runtime requests authenticate via the modern `agent.credential_pool`, but the account-usage probe only tried the legacy singleton Codex token path. Adds a Codex-only credential-pool fallback inside the existing isolated `_account_usage_subprocess`: when `agent.account_usage.fetch_account_usage()` returns no available snapshot, the fallback selects the active `openai-codex` credential-pool entry, derives the Codex usage endpoint from the runtime base URL (handles `/backend-api/codex` → `/wham/usage` and custom bases → `/api/codex/usage`), and serializes the existing snapshot shape expected by the WebUI. Stays inside the child process so active Hermes profile context remains isolated; legacy unavailable diagnostics preserved when the pool fallback can't produce a usable result; non-Codex providers unchanged. Returns only quota display data — never credential labels, access tokens, or raw exception strings. 151-line regression suite covers the success path, both URL-resolution branches, and the unavailable-fallthrough case.
+
+
+### Stage-342 maintainer fixes
+
+- **`api/worktrees.py:_run_git` default timeout 5s → 2s** — Opus SHOULD-FIX from stage-342 review: PR #2109's new `/api/session/worktree/status` endpoint runs up to four `git` subprocess calls per request, each defaulting to a 5-second timeout. Worst case 20 seconds per polling request piling up on the `ThreadingHTTPServer` thread pool is risky given today's `_cron_env_lock` near-miss on production 8787. Status probes should fail fast — a worktree that takes longer than 2 seconds to enumerate is already in trouble, and the client can retry. Mechanical 1-LOC default-arg change; all four call sites already pass `cwd` positionally and rely on the default. ~1 LOC.
+
+## [v0.51.48] — 2026-05-12 — Release X (stage-341 — 3 contributor PRs — Hermes run adapter RFC + title-retry loop fix on reasoning-only models + worktree archive/delete confirm copy)
+
+### Added
+
+- **PR #2105** by @Michaelyklam — Hermes run adapter contract RFC at `docs/rfcs/hermes-run-adapter-contract.md` (refs #1925). 315-line spec/gap matrix that defines the event/control compatibility contract WebUI needs before browser-originated chat turns can be routed to Hermes-owned runtime execution. Documents the ownership boundary (Hermes Agent owns run creation, lifecycle, event ordering, replay, terminal state, approvals, clarify, cancellation; WebUI owns browser auth, transcript rendering, tool cards, approval/clarify widgets, workspace UX), the minimum `start_run`/`observe_run`/`get_run`/`cancel_run`/`queue_or_continue`/`respond_approval`/`respond_clarify` IPC surface, and a gap matrix mapping current `STREAMS`/`CANCEL_FLAGS`/`AGENT_INSTANCES`/callback queues to Hermes-owned targets with explicit "no private callback queue" / "no runtime surrogate" non-goals. First success criterion is restart/reattach (start a non-trivial run, restart hermes-webui, browser reconnects, replays from last cursor, cancels with Hermes-emitted terminal state) — not "basic chat streamed once." Status: Proposed.
+
+### Fixed
+
+- **PR #2107** (self-built, closes #2083) — Title-generation budget-doubling retry loop on reasoning-only model responses. Reporter @darkopetrovic on LM Studio with Qwen3.6-35B-A3B (and the broader class: DeepSeek-R1, Kimi-K2, other Qwen3-thinking variants) saw GPU never going idle after each prompt — the chat turn finished cleanly but the auto-title generation request burned its 500-token budget on hidden `reasoning_content`, emitted `content=""` with `finish_reason=length`, got classified as `llm_length`, retried at 1024 tokens, returned the same shape, then iterated through `_title_prompts()`'s two prompts for ~3000 reasoning tokens per new chat. The agent-side `is_lmstudio` classifier in `run_agent.py:9468` misses `custom:` providers pointing at LM Studio, so the `reasoning_effort: "none"` adapter never fires for that route. WebUI-side belt-and-braces fix: (1) `_extract_title_response()` reorders the empty-response classification to check `reasoning_content` first regardless of `finish_reason` — reasoning presence is the diagnostic signal, not finish_reason; (2) `_title_retry_status()` drops `llm_empty_reasoning{,_aux}` from the retry set (length-without-reasoning still retries — legitimate budget-truncation case); (3) new `_title_should_skip_remaining_attempts()` short-circuits the prompt-iteration loop, both aux and agent routes break to `_fallback_title_from_exchange` for a local-summary title. Net: 4 calls → 1 call per chat. `tests/test_title_aux_routing.py` inverts the old reasoning-retry assertions and adds two new tests for the legitimate length-without-reasoning retry path. nesquena APPROVED with 200-line end-to-end trace + behavioral harness confirming the 4→1 call reduction.
+
+- **PR #2064** by @franksong2702 — Worktree session archive/delete confirm copy now reassures users that the underlying worktree directory remains on disk (refs #2057). Pre-fix the confirm dialogs said only "Delete this conversation?" / "Archive this conversation?" without clarifying that worktree-backed conversations preserve the worktree files even when the conversation row is removed — users were reasonably afraid of losing local work. Adds an explicit `worktree_retained` boolean on the `/api/session` payload that the frontend reads to surface "The worktree at /path will remain on disk." (single) and "N worktree-backed conversation(s) will keep their worktree directories on disk." (bulk) variants in both archive and delete dialogs. 81-line i18n update across all 9 locales (en/it/ja/ru/es/de/zh/pt/ko) with an English-bundle locale-leak fix caught during screenshot capture (several worktree strings had landed under Russian in error). Regression coverage in `tests/test_issue2057_worktree_lifecycle.py` + `tests/test_issue2057_worktree_ui_static.py`. UX-gate cleared with 5 viewports (4×1280px desktop covering single + bulk archive/delete confirms, 1×390px mobile of single-delete confirming dialog fits without overflow).
+
+### Stage-341 maintainer fixes
+
+- **`docs/rfcs/README.md`** — Added a single bullet to the conventions block clarifying that RFCs are design directions, not invitations to file implementation PRs against fragments. Implementation slices need maintainer confirmation in the tracking issue first. Applied alongside PR #2105 to head off the speculative-fragment pattern we just had to put on hold with PR #2071 (well-written 651-LOC collector with no callers). ~6 LOC.
+
+- **`static/i18n.js:it` block** — Opus SHOULD-FIX from stage-341 review: PR #2064 was branched before stage-340 landed the `it` locale (#2067), so the 9 new `session_*worktree*` keys were missing for Italian users. Mechanical add inside the `it:` block at the parallel position to en/ja. Falls back to English silently without this fix; with this fix, Italian users see the worktree-retention reassurance copy in their locale. Parallels the stage-340 `cron_toast_notifications_*` fix exactly. ~9 LOC.
+
+- **`api/streaming.py` short-circuit observability** — Opus SHOULD-FIX from stage-341 review: PR #2107's new `_title_should_skip_remaining_attempts` short-circuit `break` was silent in both the aux and agent title-generation paths. Added a `logger.debug` call before each `break` so production logs surface why the prompt-iteration loop exited early (nesquena flagged this as non-blocking; landed as polish in the same release). Also expanded the function's docstring to document the membership criterion explicitly so future additions (`llm_safety_blocked`, `llm_oauth_quota`, etc.) have a clear inclusion test. ~16 LOC.
+
+
+## [v0.51.47] — 2026-05-11 — Release W (4-PR contributor batch — per-cron toast toggle + Italian locale + stale-gateway agent-health fix + CI/console hygiene)
+
+### Added
+
+- **PR #2100** by @ai-ag2026 — Per-cron toast notification toggle. New `toast_notifications` boolean on cron job payloads (default-true for legacy preservation) wired through `_renderCronForm`, `_renderCronDetail`, `openCronCreate`, `openCronEdit`, `duplicateCurrentCron`, and `saveCronForm`. The polling loop in `startCronPolling()` gates `showToast(...)` on `c.toast_notifications !== false` so muted jobs still update the Tasks badge and new-run marker but skip the toast. Full i18n parity (9 locales: en/it/ja/ru/es/de/zh/pt/ko after PR #2067 landed) and 158-line regression suite in `tests/test_cron_toast_notifications.py`.
+
+- **PR #2067** by @samuelgudi — Italian (`it`) locale. ~280 UI strings translated covering boot, messages, MCP, commands, goals, settings, sessions, kanban, panels, and the offline state. Inserted alphabetically (`en → it → ja`) in `static/i18n.js`'s `LOCALES` map and mirrored in the `LOGIN_LOCALES` server-rendered table in `api/routes.py`. Updated `TestComposerVoiceButtonI18n.LOCALES` to include `"it"`; sibling `TestVoiceModePreferenceGate` also gets the tuple so its newly-adaptive `len(self.LOCALES)` count assert resolves.
+
+### Fixed
+
+- **PR #2075** by @LumenYoung — Stale `gateway_state == "running"` runtime status is now reported as `alive: null` (unknown) instead of `alive: false` (refs #1879). In multi-container WebUI+gateway deployments the older gateway builds only refresh `gateway_state.json` on lifecycle changes, not every tick — so a stale `running` file means "WebUI cannot see the gateway" rather than "gateway is down". New `_runtime_status_is_stale_running()` helper sits in front of the existing `_runtime_status_is_stale_stopped()` branch in `build_agent_health_payload()` so the heartbeat banner no longer flips to a confirmed-outage state when the gateway is actually fine but PID-checking across containers is impossible. 52 LOC including the inversion of the matching assertion in `test_issue1879_cross_container_gateway_liveness.py`.
+
+- **PR #2070** by @ai-ag2026 — CI and console-noise hygiene. (1) Quoted `"pyyaml>=6.0"` in `.github/workflows/tests.yml` install step so the shell stops parsing the unquoted `>` as stdout redirection. (2) Registered the `integration` pytest marker in a new `pytest.ini` to suppress collection-time warnings on tests that hit the live test server. (3) Lowered the live-model success diagnostic in `_fetchLiveModels()` from `console.log` to `console.debug` so model-fetch chatter no longer floods the default browser console. New `tests/test_ci_hygiene.py` (29 LOC) pins all three regressions.
+
+### Stage-340 maintainer fixes
+
+- **`tests/test_issue1488_composer_voice_buttons.py:TestVoiceModePreferenceGate`** — Defined `LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")` on the class. PR #2067 made `test_settings_pane_has_voice_mode_i18n_keys` count adaptive via `len(self.LOCALES)` but only defined `LOCALES` on the sibling `TestComposerVoiceButtonI18n`, so CI failed with `AttributeError`. Mirroring the tuple is the surgical fix; the alternative (back to a hard-coded `9`) would have rotted next time someone adds a locale. ~2 LOC.
+
+- **`static/i18n.js:it` block** — Opus SHOULD-FIX from stage-340 review: added the four `cron_toast_notifications_*` keys (label, hint, enabled, disabled) inside the `it:` block. PR #2067 inserted the `it` locale between `en` and `ja`; PR #2100 added those keys to the other 8 locales but missed `it`. ~4 LOC, mechanical add immediately after `cron_profile_server_default_hint` to mirror the en/ja position.
+
+## [v0.51.46] — 2026-05-11 — Release V (5-PR contributor batch — CSP report-only + logs panel polish + plugin slash commands + turn-journal crash-safe writer + lifecycle events)
+
+### Added
+
+- **PR #2059** by @ai-ag2026 — Append-only WebUI turn journal helper at `api/turn_journal.py` (new file, ~128 LOC). Writes one JSONL file per session under `_turn_journal/` and fsyncs `submitted`-turn events before the worker thread starts via `/api/chat/start` (after pending session state is saved and before `threading.Thread(...)` starts). `recovery_audit` extended to report non-terminal journal turns as `turn_journal_pending_turn` when the submitted user message is not present in the sidecar. Intentionally the minimal slice from `docs/rfcs/turn-journal.md` (RFC #2042): writer + reader + state derivation + audit-only reporting. No replay or repair yet.
+
+- **PR #2062** by @ai-ag2026 — Turn-journal lifecycle events on top of #2059's submitted-event writer. Records `worker_started` when the streaming worker begins, `assistant_started` before the final session save once an assistant message exists, `completed` after the final save, and `interrupted` on the provider-error path. `append_turn_journal_event_for_stream(...)` reuses the `turn_id` associated with the stream's submitted event. Still audit-only / journaling-only — does not replay turns or repair assistant output. The little WAL goblin remains on a leash.
+
+- **PR #2089** by @plerohellec — Plugin-defined slash commands now surface in the WebUI command picker and execute via a new `/api/commands/exec` route (closes #1935). `list_commands()` in `api/commands.py` merges `hermes_cli.plugins.get_plugin_commands()` into the `/api/commands` payload with `category: "Plugin"`; the frontend intercepts plugin commands in `static/messages.js` and `static/commands.js` to route through the plugin execution endpoint instead of falling through to the agent. Pre-fix the WebUI only learned slash commands from `hermes_cli.commands.COMMAND_REGISTRY` (commands.py:23), so plugin-registered commands were invisible to the picker, autocomplete, and routing — they fell through to the agent as raw text and the agent's response was about an unknown command. This is the WebUI half of the parity fix; the corresponding agent-side plumbing already existed in `hermes_cli/plugins.py:1424` (`get_plugin_commands()`).
+
+### Fixed
+
+- **PR #2085** by @bergeouss — Logs panel: clipboard `_copyText()` fallback + severity filter (closes #2081). Pre-fix `copyLogsAll()` called `navigator.clipboard.writeText()` directly with no fallback — failed silently on large payloads / non-secure contexts / unfocused pages, leaving users with a useless error toast. Now routes through `_copyText()` from `ui.js` which already has a `<textarea>` + `document.execCommand('copy')` fallback. Also adds a Severity dropdown (All / Errors / Warnings+) that filters the in-memory log cache without re-fetching — `errors.log` is ~90% WARNING tool noise so filtering down to ERROR/CRITICAL is a real triage time-saver. `copyLogsAll()` copies the FILTERED subset when a filter is active. 5 new i18n keys in all 9 locales.
+
+- **PR #2084** by @ai-ag2026 — `Content-Security-Policy-Report-Only` header (refs #1909). All WebUI responses now ship a CSP slice in report-only mode — non-enforcing, so the browser collects violations without blocking page behavior. Current UI allowances (`'unsafe-inline'` for scripts and styles, plus `https://cdn.jsdelivr.net` for the Prism/xterm/katex CDN assets that `static/index.html` loads with SRI hashes) are explicit so future tightening passes can replace them one constraint at a time. `object-src 'none'`, `base-uri 'self'`, and `frame-ancestors 'self'` are already enforced because they don't break the current UI. Server-side change only (`server.py` headers), zero client-side risk.
+
+### Stage-339 maintainer review (Opus advisor)
+
+- **`server.py:_CSP_REPORT_ONLY`** — Dropped `'unsafe-eval'` after Opus verified by grepping all production JS that nothing uses `eval()`, `new Function()`, or string-form `setTimeout`/`setInterval`. Keeping the allowance would have been a gratuitous privilege that defeats the purpose of the dry-run. ~1 LOC.
+
+- **`server.py:_CSP_REPORT_ONLY`** — Added `https://cdn.jsdelivr.net` to `script-src` and `style-src`. `static/index.html` loads Prism, xterm.js, and katex CSS from jsdelivr with SRI integrity hashes. Without the allowance, every page load would fire known-good CSP violations and drown out the real dry-run signal. ~2 LOC.
+
+- **`api/commands.py:execute_plugin_command`** — Sanitized the plugin error message. Previously returned `f"Plugin command error: {exc}"` which would leak paths / env / internal state from a `FileNotFoundError('/etc/something/secret.key')`-shape exception verbatim to the user-facing chat. Now returns only `type(exc).__name__`; the full traceback is logged at WARNING via `logger.warning(..., exc_info=exc)`. ~4 LOC.
+
+## [v0.51.45] — 2026-05-11 — Release U (9-PR contributor batch — themes docs + gitignore policy + kanban parity + skill cache patching + fork lineage + sidebar spinner + custom provider slug + session recovery polish + compression anchor refactor)
+
+### Added
+
+- **PR #2074** by @franksong2702 — `_patch_skill_home_modules(home)` centralizes patching of both `tools.skills_tool` and `tools.skill_manager_tool` module-level skill paths so process-wide HERMES_HOME switches and per-request streaming switches stay aligned. Closes #2023. Closes the cleanup gap from the original #2023 fix where the streaming per-request path patched both modules but the process-wide switch path only patched `tools.skills_tool`. Preserves the no-import-under-`_ENV_LOCK` invariant from #2024.
+
+- **PR #2077** by @franksong2702 — Compression anchor visibility helpers collapsed into a single shared module `api/compression_anchor.py` (new file, 77 lines) so the manual `/api/session/compress` path in `api/routes.py` and the streaming auto-compression path in `api/streaming.py` share one canonical implementation. Net effect: 48 lines removed from `routes.py`, 41 from `streaming.py`, plus 59-line regression suite. Closes #2028.
+
+### Fixed
+
+- **PR #2068** by @franksong2702 — Stuck sidebar spinners on completed sessions (closes #2066). `_isSessionLocallyStreaming()` no longer consults `INFLIGHT` for non-active sessions — INFLIGHT entries for non-active sessions are always artifacts and never affect spinner state. Added `_purgeStaleInflightEntries()` cleanup pass and 71-line regression file `tests/test_issue2066_stale_sidebar_spinner.py` covering the abnormal-termination cases (page refresh / network drop / gateway restart) that the symptomatic 5-minute-staleness alternative would have left broken.
+
+- **PR #2056** by @franksong2702 — Custom provider name slugs no longer preserve slug-hostile punctuation (closes #2047). Friendly setup names like `Local (127.0.0.1:15721)` now become `custom:local-127.0.0.1-15721` instead of `custom:local-(127.0.0.1:15721)`. The latter shape collided with the `@provider:model` grammar and could corrupt the model into `15721):deepseek-v4-flash`. Endpoint-derived `custom:<host>:<port>` slugs continue to flow through the host-port parser unchanged. `_custom_provider_slug_from_name()` is now reused by both model resolution and available-model lookup instead of duplicating `lower().replace(" ", "-")`.
+
+- **PR #2065** by @franksong2702 — Four low-severity polish items from the v0.51.42 Opus pre-release review (closes #2050). (1) `state.db` rows with `source='webui'` but zero readable messages now emit `state_db_orphan_webui_row` / `unsafe_to_repair` / `manual_review` instead of being silently dropped. (2) `repair_safe_session_recovery()` returns an explicit `clean` flag preserving `ok` for compatibility; `/api/session/recovery/repair-safe` 200/409 dispatch keys off `clean`, so a 409 now means "audit still has findings" rather than "repair code failed." (3) `MEDIA_ALLOWED_ROOTS` splits on `os.pathsep` (POSIX `:` / Windows `;`) instead of a hard-coded colon. (4) Replaced the confusing `details[-1:]` one-element slice with an explicit local detail-recorded flag.
+
+- **PR #2063** by @dso2ng — Explicit `session_source="fork"` sessions are kept out of `read_session_lineage_report()` continuation chains. The query now fetches optional `session_source` so the existing continuation helper can see fork metadata; pre-fix the backend read-only lineage report bridge added in #2012 contradicted the sidebar collapse logic taught in #2014 (where forks are explicit branches, not compression continuations). Regression covers a fork child whose parent ended via compression.
+
+### Refactored
+
+- **PR #2077** (cross-listed) — see Added.
+
+### Documentation
+
+- **PR #2088** by @michael-dg — `THEMES.md` re-aligned with the post-#627 `Theme × Skin` architecture. The old monolithic palette names (`Dark`, `Light`, `Slate`, `Solarized Dark`, `Monokai`, `Nord`, `OLED`) no longer match the actual two-picker model (Theme `System` / `Dark` / `Light` applied as `.dark` class on `<html>`, plus Skin — 8 named accent palettes — applied as `data-skin="<name>"`). The Settings → Appearance panel exposes both pickers plus Font Size, and `/theme <name>` accepts theme + skin tokens.
+
+- **PR #2073** by @ai-ag2026 — Top-level Markdown docs (`docs/*.md`) are now tracked instead of silently ignored by the broad `docs/*` rule. Arbitrary scratch/reference files under `docs/` (non-`.md`) remain ignored by default. Regression tests cover the intended `git check-ignore` behavior on both paths.
+
+### Tests
+
+- **PR #2076** by @franksong2702 — `test_kanban_locale_parity` (added to `tests/test_kanban_ui_static.py`) catches missing-key regressions across ~86 `kanban_*` i18n keys × 9 locales (en, ja, ru, es, de, zh, zh-Hant, pt, ko). Follows the existing `test_lineage_segment_locale_keys_are_defined_for_sidebar_locales` pattern. Issue #1973 flagged that this regression class was previously caught only by manual review during the Opus pre-ship audit.
+
+### Stage-338 maintainer review (Opus advisor)
+
+- **`api/providers.py:1049`** — Custom provider entries that slugify to an empty string were silently dropped, which made misconfigurations hard to diagnose. `logger.warning()` now surfaces the bad config entry. ~4 LOC; pure observability change.
+
+
+## [v0.51.44] — 2026-05-11 — Release T (5-PR contributor batch — security + worktree sessions + LM Studio + onboarding docs + transcript dedup, plus comprehensive test-suite network isolation)
+
+### Added
+
+- **PR #2052** by @franksong2702 — `docs/onboarding.md` (181 lines) covering install path choices, safe wizard re-runs with isolated `HERMES_HOME` / `HERMES_WEBUI_STATE_DIR`, provider groups, Docker/local-server Base URL rules (the most common Discord support question — `localhost` inside a container is not the host running LM Studio or Ollama), workspace setup, password step, files written by the wizard, and issue-reporting diagnostics. README pointer added from the quick-start section and Docs list. Stale `~/.hermes/webui-mvp` → `~/.hermes/webui` correction in `.env.example` and the README env-var table (the running app uses `~/.hermes/webui` per `api/config.py:42`).
+
+- **PR #2053** by @franksong2702 — Worktree-backed session creation. `POST /api/session/new` accepts a `worktree: true` flag that calls the agent's `_setup_worktree()` helper to create an isolated git worktree at `<repo>/.worktrees/hermes-XXXX`, persists `worktree_path` / `worktree_branch` / `worktree_repo_root` / `worktree_created_at` on the WebUI `Session`, surfaces a "New conversation in worktree" action in the workspace menu, and shows a subtle sidebar worktree indicator. Empty worktree sessions stay visible in the sidebar (the empty-session filter at `api/models.py:1067/1107` exempts sessions with a `worktree_path`). Note: the underlying Hermes Agent helper may add `.worktrees/` to the repository `.gitignore` the first time a worktree is created for that repo — operators will see a small uncommitted edit to `.gitignore` after their first worktree session. Cleanup lifecycle (auto-remove on session delete/archive) is deliberately deferred to a follow-up PR — needs explicit safeguards for active streams, terminals, dirty files, and unpushed commits. Closes #1955.
+
+- **PR #1970** by @dobby-d-elf — First-class LM Studio provider support with live model discovery. A dedicated `elif pid == "lmstudio":` branch in `get_available_models()` calls `hermes_cli.provider_model_ids("lmstudio")` first, falling back to a direct GET `<base_url>/models` request when env vars (`LM_API_KEY` + `LM_BASE_URL`) haven't been injected yet — this fixes the race where the provider's `.env` isn't loaded into `os.environ` before the picker runs. Detection in `detected_providers` now also fires on `LM_API_KEY` + `LM_BASE_URL` env vars and on `cfg["providers"]["lmstudio"]` config entries. The new `_get_provider_base_url()` helper plus the change to `resolve_model_provider()` from `return bare_model, provider_hint, None` to `return bare_model, provider_hint, _get_provider_base_url(provider_hint)` lets users with `providers.<id>.base_url` in `config.yaml` flow that URL through model resolution consistently (pre-fix they had to also set it under `cfg["model"]`). The "Configured" badge code from the initial PR submission was dropped per maintainer review — see PR #1970 thread for the UX discussion.
+
+### Fixed
+
+- **PR #2048** by @Hinotoi-agent — `[security]` Session import validates `workspace` field against `resolve_trusted_workspace()`. Pre-fix, a crafted JSON import with `"workspace": "/"` was persisted as the `Session.workspace`, after which `/api/file?session_id=<sid>&path=etc/hosts` resolved against `/` and served host files. The patch routes the imported value through the same resolver every other workspace-bearing endpoint already uses (`/api/session/new`, `/api/branch`, `/api/fork`, `/api/clone`), returning 400 on `ValueError` (blocked system root) or `TypeError` (non-path workspace value like `{"not": "a path"}`). Severity is highest on `0.0.0.0`-bound / reverse-proxied / LAN-exposed deployments with password auth where `PR:L` applies — there the bug turned "authenticated session creation" into "authenticated read of any process-readable file." Default loopback-only deployments without auth were lower risk because anyone on loopback can usually read `/etc/hosts` directly. Includes 105 LOC of regression coverage in `tests/test_session_import_workspace_validation.py` and a belt-and-braces invariant test against the resolver itself.
+
+- **PR #2055** by @franksong2702 — Duplicate assistant transcript merge. `_merge_display_messages_after_agent_result()` at `api/streaming.py:1754` now skips adjacent duplicate assistant messages by merge identity (`role + content + tool_call_id + json.dumps(tool_calls, sort_keys=True)`). Some provider/result replay paths produced two copies of the same assistant bubble in the current delta, which then got persisted into `s.messages` and sent back to the browser in the `done` SSE payload, producing duplicate assistant chat bubbles. The guard is intentionally adjacent-only so two separate turns that happen to produce identical assistant text remain visible — confirmed via the new negative-path test. Closes #2051.
+
+### Fixed (maintainer review on stage-337)
+
+- **PR #1970 lmstudio regression** — the new lmstudio branch in `get_available_models()` only looked at `cfg["providers"]["lmstudio"]["base_url"]`, missing the historical config shape where users put `base_url` under `cfg["model"]` when `model.provider == lmstudio`. Three pre-existing tests in `tests/test_issue1527_lmstudio_base_url_classification.py` broke on stage-337 because of this gap. The fix enhances `_get_provider_base_url()` to fall back to `cfg["model"]["base_url"]` when `cfg["model"]["provider"]` matches the requested provider id, then routes the lmstudio branch through the helper. Belt-and-suspenders negative-case test asserts `model.base_url` does NOT leak to non-active providers (so a user with `model.provider: anthropic` + `model.base_url: <anthropic-proxy>` + `providers.openai` without base_url still gets None for openai, not the anthropic proxy URL). 6 new regression tests in `tests/test_pr1970_lmstudio_base_url_fallback.py`.
+
+- **PR #2053 × PR #2041 state.db worktree recovery silent data loss** — Opus advisor caught this during stage review. PR #2041 (v0.51.42) added state.db sidecar reconciliation that rebuilds a missing `<sid>.json` from the canonical state.db row. PR #2053 added worktree-backed sessions with new metadata fields. `_state_db_row_to_sidecar()` was hard-coding `'workspace': ''` and not propagating `worktree_path` / `worktree_branch` / `worktree_repo_root` / `worktree_created_at` / `message_count` from the row to the rebuilt sidecar. Result: a worktree-backed session that lost its JSON sidecar and got rebuilt from state.db disappeared from the sidebar (the empty-session filter at `api/models.py:1067` exempts sessions with `worktree_path`, but the rebuilt sidecar had none) and downstream tools (terminal panels, file pickers using `s.workspace`) operated on empty string. Fix: extend the `_read_state_db_missing_sidecar_rows()` SELECT to include the missing columns (each gated by `_sql_optional_col()` for older state.db schemas) and propagate them in `_state_db_row_to_sidecar()`. Three new regression tests in `tests/test_state_db_worktree_recovery.py` lock the round-trip, the non-worktree no-spurious-propagation case, and the empty-worktree-session-must-stay-visible invariant.
+
+### Test infrastructure
+
+- **Hermetic network isolation across the whole test suite.** Before this release, an accidentally-leaking outbound TLS handshake from the test_server fixture (Anthropic IPv6, Amazon, OpenRouter, observed via `ss -tnp` during stage-337 debugging) was adding 60+s of wall-time to pytest runs and creating a class of flaky failures. Two new layers now enforce no-outbound by default:
+
+  1. **Pytest process** (tests/conftest.py module-level monkey-patch on `socket.create_connection` + `socket.socket.connect`). Allowed destinations: loopback (`127.0.0.0/8`, `::1`), RFC1918 (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`), RFC5737 TEST-NET-3 (`203.0.113/24`), RFC2606 reserved TLDs (`.invalid`, `.test`, `.example`, `.local`, `localhost`). Everything else raises `OSError("hermes test network isolation")`. Tests that legitimately need real outbound opt back in via the new `allow_outbound_network` fixture (zero current callers).
+
+  2. **test_server subprocess** (server.py). `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` env var (set by tests/conftest.py on every spawn) activates an identical guard at the top of server.py at import time, before any api/* module loads. The env var is unset in production, so the guard is a no-op outside the test harness. Without this, the pytest-side block didn't cover the spawned subprocess.
+
+- **`test_dns_resolution_failure` refactored** to mock `socket.getaddrinfo` raising `gaierror` instead of relying on real DNS for a `*.invalid` hostname. Hermetic now, and matches the mock-based pattern every other test in the same file uses.
+
+- **`tests/test_conftest_network_isolation.py`** with 9 adversarial tests proving (a) outbound to the exact Anthropic IPv6 + Amazon IPv4 + Google DNS destinations we observed leaking is now blocked, (b) loopback / RFC1918 / link-local / reserved-TLD destinations pass through, (c) the `allow_outbound_network` opt-in fixture works.
+
+### Tests
+
+5,166 → **5,192 collected** (+26 net new across the 4 new regression test files). All passing on Python 3.11/3.12/3.13. Full suite wall-time: 161s → **95s** (the previously-leaking outbound TLS handshakes were the long tail).
+
+### Contributors
+
+@Hinotoi-agent (×1, first contribution) · @franksong2702 (×3) · @dobby-d-elf (×1, first contribution) · @nesquena (3 maintainer review fixes)
+
+### Notes
+
+- The state.db × worktree recovery interaction (PR #2053 × PR #2041) is the second case in two releases where Opus advisor caught a real cross-PR data-loss bug that neither PR's individual test suite would have surfaced (the first was the v0.51.43 CSS breakpoint asymmetry). The pattern is worth its weight — cross-PR adversarial review with grep-grounded prompts catches what unit tests miss when the failure mode lives at the seam between two features.
+
+- LM Studio support is now first-class. Live model discovery + base URL discovery from either `providers.<id>.base_url` OR `cfg["model"]["base_url"]` (when `model.provider` matches) means users with either config shape get a populated model picker without manual `config.yaml` edits.
+
+## [v0.51.43] — 2026-05-11 — Release S (fused community PR — desktop sidebar collapse)
+
+### Added
+
+- **PR #2054** by @jasonjcwu and @spektro33 (fused, co-authored) — Desktop users can now collapse the session-list sidebar by clicking the already-active rail icon, or with Cmd/Ctrl+B. State persists across reloads via localStorage and survives bfcache restores. Two discoverability paths, **no new visible UI affordance** — default appearance is identical to master, only users who actively try to toggle ever see a difference. Cross-panel rail clicks behave exactly as before (no collapse, just panel switch). Mobile (<641px) is unaffected. The behaviour is gated behind one new `opts.fromRailClick` flag on `switchPanel()` so every programmatic call-site (commands, deeplinks, internal state changes) preserves master semantics exactly. Inline `<script>` flash-prevention in `<head>` sets `data-sidebar-collapsed='1'` on `<html>` BEFORE the stylesheet loads, so cold loads with persisted-collapsed state paint correctly from frame 0 with no flicker. `aria-expanded` mirrors open/collapsed state on the active rail button for screen-reader announcements. Smooth `.24s cubic-bezier(.22,1,.36,1)` slide animation matches the workspace-panel collapse on the right. Drag-resize cursor stays instant via `body.resizing .sidebar { transition:none }`. Closes #1884 (jasonjcwu) and #1924 (spektro33).
+
+### Fixed (maintainer review on PR #2054)
+
+- **CSS breakpoint asymmetry** — pre-fix, the JS `_isDesktopWidth()` guard matched `min-width:641px` (where the rail itself becomes visible) but the `.sidebar-collapsed` CSS rules were inside `@media(min-width:901px)` (copied from the workspace-panel block without thinking). In the 641-900px band (tablet portrait, small laptop windows), clicking the active rail icon would write `.sidebar-collapsed` to the DOM, set `aria-expanded='false'`, and persist `localStorage='1'` — but the sidebar would visually stay open at 300px because CSS didn't match. User sees no visual change, screen reader announces "collapsed" for a still-visible sidebar, then resizing ≥901px later collapses by surprise. Fix hoists the three `.sidebar-collapsed` rules into their own `@media(min-width:641px)` block. Caught by @nesquena reviewing PR #2054; new regression test `test_css_breakpoint_matches_js_isdesktopwidth` parses both files at every CI run and asserts the JS / CSS thresholds match.
+
+### Test infrastructure
+
+- **`AWS_EC2_METADATA_DISABLED=true` set at conftest module load** — botocore's credential chain probes EC2 IMDS (169.254.169.254) by default during agent imports. On VPS hosts where IMDS is reachable but rate-limited (HTTP 429), this dragged a 161s test run to 600+s. Matches the guard `hermes_cli/doctor.py` already uses in its parallel-probe block.
+
+- **Credential-strip allowlist expanded from 6 prefixes to 40+** — the test_server fixture now strips MEM0, XAI, MISTRAL, OLLAMA, GROQ, AWS, Azure OpenAI, messaging bot tokens, search-engine API keys, image-gen keys, GitHub tokens, etc. before spawning the test server. Defence-in-depth against accidental outbound API calls from tests; a real outbound TLS connection to a provider's IPv6 endpoint was observed during test runs before the expansion. The test server uses a mock config and should never make real provider calls.
+
+### Tests
+
+5,120 → **5,166 collected** (+46 net new across the 35-test structural suite for sidebar collapse, the CSS-breakpoint regression guard nesquena added, and small per-locale i18n additions in dependent suites). All passing on Python 3.11/3.12/3.13.
+
+### Notes
+
+- This is the first PR in the repo where the maintainer review caught a real defect (CSS breakpoint asymmetry) before merge AND the fix was pushed directly onto the contributor's branch with a regression test. The merged commit includes both the original fusion and the fix as separate authored commits, preserving the audit trail.
+
+## [v0.51.42] — 2026-05-11 — Release R (5-PR contributor batch — session recovery state.db reconciliation + RFC convention + MEDIA_ALLOWED_ROOTS + Slack cron delivery)
+
+### Added
+
+- **PR #2040** by @ai-ag2026 — Read-only `GET /api/session/recovery/audit` endpoint that returns the existing audit report (live + `.bak` + `state.db` cross-check) over HTTP, and `POST /api/session/recovery/repair-safe` that runs the same deterministic repairs as startup recovery (`recover_all_sessions_on_startup`) and returns before/after audit evidence. The POST returns `409` when repairable/unsafe findings remain rather than reporting `ok` for an incomplete repair. Both routes inherit the global `check_auth()` gate at `server.py:133`. CLI parity: `python -m api.session_recovery --repair-safe` for operators on the box without HTTP access.
+
+- **PR #2041** by @ai-ag2026 — DB-backed reconciliation for WebUI-origin sessions whose JSON sidecar is missing. When `state.db.sessions` has a `source='webui'` row but `~/.hermes/webui-public/sessions/<sid>.json` is gone (failed save, manual `rm`, restore-from-backup with mismatched dirs), the new `recover_missing_sidecars_from_state_db()` materializes a safe sidecar from the canonical row plus ordered `messages` rows. **Never overwrites an existing sidecar.** Atomic write via per-pid/per-tid `.json.reconcile.tmp.<pid>.<tid>` + `os.link()` create-or-fail (closes the TOCTOU window against concurrent `Session.save()`; on race-loss the live sidecar wins and reconciliation silently skips). Only `source='webui'` rows are materialized; CLI/messaging/cron rows stay on their existing bridge path. Rows without readable message bodies are skipped (no blank-shell sidecars). Audit reports unrepaired rows as `state_db_missing_sidecar` / `repairable`. Includes a round-trip schema-parity test that loads a materialized sidecar through `Session.load()` to catch future drift between `_state_db_row_to_sidecar()` and `Session.__init__()`.
+
+- **PR #2042** by @ai-ag2026 — Crash-safe turn-journal RFC at `docs/rfcs/turn-journal.md`. Establishes the `docs/rfcs/` convention with a small README explaining when an RFC applies (durability/recovery, schema, new architectural primitives) and the status header format. The RFC itself proposes a JSONL write-ahead log per session that records turn intent before the worker starts, so crash recovery can replace inference-from-fragments with deterministic replay. Status: Proposed; ships as a design document, not as an implementation.
+
+- **PR #2044** by @watzon — `MEDIA_ALLOWED_ROOTS` environment variable extends `/api/media` file-serving whitelist at runtime. The built-in allowed roots (`~/.hermes`, `/tmp`, active workspace) remain the default; setting `MEDIA_ALLOWED_ROOTS=/home/user/models:/home/user/Pictures` (colon-separated absolute paths) appends to the list. Non-existent or invalid entries are silently skipped. Resolves the "local MEDIA: path blocked outside allowed roots" usability gap for power users who keep ComfyUI outputs, model assets, or shared media in custom directories. Path-traversal validation (`Path.resolve()` + `commonpath` containment check) unchanged; SVG-as-attachment guard unchanged; image-MIME inline-only guard unchanged. Static unit test confirms the env var is referenced in source.
+
+- **PR #2045** by @georgebdavis — Slack appears in the cron delivery dropdown alongside Local / Discord / Telegram. The WebUI cron handler at `api/routes.py:7066` passes `body.get("deliver")` straight through to `cron.jobs.create_job`, and hermes-agent already routes `deliver=slack` to the Slack platform adapter — this was a frontend-only gap. First-time contributor.
+
+### Fixed (maintainer follow-up to PR #2041)
+
+- **Concurrency hardening** — Two data-corruption vectors flagged in Opus review of #2041, fixed in the staged release rather than left as follow-up: (1) the `.reconcile.tmp` filename now includes pid+tid (was a fixed path per SID, vulnerable to two-operator interleaved writes corrupting the same tmp); (2) `tmp.replace(target)` swapped for `os.link()` + `unlink(tmp)` so a race with a concurrent `Session.save()` for the same SID can't overwrite a live sidecar (skips with `sidecar_appeared_during_reconcile` instead). Matches the existing `Session.save()` convention at `api/models.py:484`.
+
+### Tests
+
+5108 → **5120 passing, 8 skipped, 1 xfailed, 2 xpassed, 0 regressions** (+12 net passing across new test files for session-recovery-API HTTP-shape contracts, state.db sidecar reconciliation including the round-trip schema-parity guard and the per-pid tmp-suffix guard, and the MEDIA_ALLOWED_ROOTS static reference). Full suite ~161s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- New convention: `docs/rfcs/` for design documents on durability, recovery, schema, and cross-cutting infrastructure. First entry is the turn-journal RFC from #2042; future contributors are invited to file design proposals there before large changes.
+
+## [v0.51.41] — 2026-05-11 — Release Q (3-PR contributor batch — session recovery audit + run-lifecycle health + transcript dedup)
+
+### Fixed
+
+- **PR #2035** by @ai-ag2026 — Recover orphaned `<sid>.json.bak` snapshots on startup (extends #1558 P0 fix). The existing post-#1558 recovery path only scanned `*.json`, so a crash that left only the `.bak` snapshot meant data was on disk but invisible to `/api/sessions` and the sidebar. Now the startup self-heal looks up the orphan `sid` in `state.db.sessions`; if the row exists, the snapshot is restored, the session index rebuilt, and the live sidecar appears again. If `state.db` lacks the row (explicit tombstone), the orphan is left alone. Companion change in `api/routes.py` unlinks `<sid>.json.bak` on explicit delete so intentional deletes don't get resurrected later. Fail-open on `state.db` unreadable/locked/older-schema — recovery stays best-effort.
+
+- **PR #2036** by @ai-ag2026 — Read-only `audit_session_recovery()` report + module CLI (`python -m api.session_recovery --audit --session-dir <dir> [--state-db <db>]`). Classifies shrunken live sidecars, orphan backups, orphans without a `state.db` row, and stale `_index.json` entries. Pure read-only audit — no writes, no rebuilds, no restores. Outputs machine-readable JSON. Stacked on #2035 (and auto-closed it).
+
+- **PR #2038** by @franksong2702 — Closed the message-identity dedup gap in `/api/session` messaging transcript merges (closes #2027). The dedup key now prefers `id`/`message_id` when message identity is available; legacy role/content/timestamp/tool-metadata key remains as fallback for messages without IDs. Prevents silent loss of legitimate retries (rare but high-impact when it hits).
+
+### Added
+
+- **PR #2039** by @ai-ag2026 — Active-run lifecycle visibility in `/health`. SSE `active_streams` only describes channel state; a worker can outlive its SSE stream while unwinding, blocked in a provider call, handling cancellation, or waiting on delegated work. Adds `active_runs`, per-run metadata/age, `oldest_run_age_seconds`, `last_run_finished_at`, and idle grace timing. Restart/update guards now have visibility into worker lifecycle, not just SSE channel state. Worker lifecycle wired through `_register_run` / `_update_run` / `_unregister_run` in streaming.
+
+### Tests
+
+5100 → **5108 passing, 0 regressions** (+8 net new across new test files for session-recovery audit, run-lifecycle health, transcript dedup, and orphan-backup recovery). Full suite ~160s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 3 PRs from 2 different authors (#2035 stacked under #2036 — auto-closed when #2036 merged).
+- `api/routes.py` was touched by all three PRs with disjoint hunks (#2039 at lines 2529/2609, #2038 at 3040, #2036 at 4147).
+- `CHANGELOG.md` was the only true conflict (`#2038` predates v0.51.40 release entry); resolved by preserving v0.51.40 history and re-adding the #2038 bullet under [Unreleased] before promoting.
+
+### Follow-ups
+
+- Test isolation: at least one test in `test_update_banner_fixes.py` or `test_updates.py` triggers a real `os.execv` that re-executes the entire pytest suite. Suite still passes (~5108 each loop) but full run takes 4× the time. Worth a targeted fix in the next maintenance batch.
+
+
+## [v0.51.40] — 2026-05-11 — Release P (4-PR contributor batch — quota subprocess hardening + env-lock prewarm + cron one-shot warning + Xiaomi env key)
+
+### Fixed
+
+- **PR #2030** by @Michaelyklam — Hardened the account-usage quota probe subprocess path (#1912 slice 1 of N): added a module-level bounded semaphore to cap concurrent profile-isolated probe children, set `stdin=subprocess.DEVNULL` for the child, and wired `preexec_fn` + `prctl(PR_SET_PDEATHSIG, SIGTERM)` so probe children receive SIGTERM if the WebUI parent dies. Persistent warm worker reuse remains the next follow-up if this slice is not enough under load.
+
+- **PR #2032** by @Michaelyklam — Moved skill-tool imports outside the streaming `_ENV_LOCK` critical section (closes #2024). First-time `tools.skills_tool` / `tools.skill_manager_tool` imports now run via `_prewarm_skill_tool_modules()` before the lock is acquired; the in-lock path uses `sys.modules.get(...)` lookups and existing `HERMES_HOME` / `SKILLS_DIR` attribute patching. Keeps the lock critical section limited to lightweight env/cache mutation so concurrent streams don't wait behind cold import latency. AST/source-level regression test guards against reintroducing in-lock imports.
+
+- **PR #2033** by @franksong2702 — Surfaced one-shot cron schedule semantics in the WebUI Scheduled Jobs form (refs #2031). Hermes Agent treats bare durations/dates (`30m`, `2h`, `2026-05-11T08:00`) as one-shot schedules that get removed after they run; the form now classifies the input and shows a live warning hint pointing users toward `every 30m` or a cron expression for recurring jobs. Static regression coverage for the classifier, warning wiring, i18n keys, and CSS class.
+
+- **PR #2034** by @franksong2702 — Closed the Xiaomi MiMo `XIAOMI_API_KEY` env-detection gap (issue #2025). WebUI now treats Xiaomi like the other API-key providers: exported or `.env`-stored `XIAOMI_API_KEY` enables the Xiaomi model group fallback in `get_available_models()`, Settings provider-key detection via `/api/providers`, and onboarding provider metadata with the direct API base URL. README/CHANGELOG provider notes updated; provider-env scrub lists extended so real local Xiaomi keys don't leak into tests.
+
+### Tests
+
+5082 → **5100 passing, 0 regressions** (+18 net new across the four new test files for #2024 invariant, quota subprocess, cron one-shot warning, and Xiaomi env detection). Full suite under 152s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 4 PRs from 3 different authors. `api/providers.py` was touched by #2030 (+110/-7 in quota probe path) and #2034 (+1 in `_PROVIDER_ENV_VAR` map) with disjoint hunks. `CHANGELOG.md` Unreleased section was the only true conflict (#2033 + #2034 both added bullets); resolved by keeping both entries. Stage merge otherwise clean.
+
+## [v0.51.39] — 2026-05-10 — Release O (4-PR contributor batch — Railway docker fix + Stop-button race + provider resolver + live context tracking)
+
+### Fixed
+
+- **PR #2017** by @michael-dg — `docker_init.bash` failed on user-namespaced rootless container runtimes (Railway). In-container UID 0 maps to a host UID outside the writable subuid range, so `save_env /tmp/hermeswebui_root_env.txt` failed with `Permission denied` even though `id -u` returns 0. The existing read-only-rootfs guard at `:192-197` only covered `/etc/group` / `/etc/passwd` writability and didn't catch this signature. Adds a writability probe before `save_env` and a fallback chain (`${itdir}/hermeswebui_root_env.txt` → `/app/.hermeswebui_root_env`); exports `_HW_ROOT_ENV_PATH` so the post-su phase finds the same file. State-dir verifier left intact (silent degradation there would mask real volume-permission misconfig). Closes #2010.
+
+- **PR #2018** by @rhelmer — Stop button didn't refresh after `/api/chat/start` returned a `stream_id`. The client became busy before it had a new stream id, updated the send button at that moment, but never updated again once the id arrived — so the Stop button only fixed itself when something else triggered a refresh (e.g. the user typing). Now refreshes when the new stream id is received and again when an old `activeStreamId` is cleared, so the button doesn't lie about whether stop/cancel is valid. Includes regression coverage in `tests/test_1062_busy_input_modes.py`.
+
+- **PR #2022** by @Michaelyklam — `resolve_model_provider()` in `api/config.py` checked `custom_providers[]` first, so when the configured default model also appeared in a custom provider entry, the request routed to `custom:<name>` instead of the explicit active provider. Users hit confusing 401/auth errors from a provider they didn't intend to use (#1922). The narrow fix skips custom-provider shadowing only for the configured default model when the active provider is an explicit non-custom provider. Existing custom-provider routing for explicitly selected custom-models and slash-containing endpoint model IDs is preserved. Regression tests added for `ai-gateway` and `xiaomi` overlap cases. Closes #1922.
+
+### Added
+
+- **PR #2009** by @dobby-d-elf — Live context-window tracking during streaming. Two gaps closed in the WebUI context indicator:
+  - **Updates during tool calls.** Token usage and context length were previously updated only after a full response completed; the indicator now receives live `usage` events mid-stream while tools are executing, so users see real-time consumption instead of stale numbers. Server emits `_live_usage_snapshot()` payloads during tool execution; frontend merges them via `_syncCtxIndicator()`. Tracks input tokens, output tokens, estimated cost, context length, threshold tokens, and last prompt tokens.
+  - **Reset on new sessions.** `_syncCtxIndicator()` is now called from `newSession()` so the indicator starts from the fresh session's reading instead of carrying stale values from the previous conversation.
+
+  Live metering events are tagged with the real WebUI `session_id` so the frontend session filter accepts them. Token-driven metering events include the live `usage` payload to keep the indicator moving while the agent is actively streaming. Reused cached agents refresh `tool_start_callback` and `tool_complete_callback` so live tracking continues after the first turn in a session.
+
+### Tests
+
+5066+ → **5071+ passing, 0 regressions** (+5 net new across `test_1062_busy_input_modes.py`, `test_model_resolver.py`, `test_issue1617_tps_message_header.py`). Full suite under 160s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- 4 PRs from 4 different authors. `static/messages.js` was the only multi-PR file (#2009 + #2018), with disjoint hunks at lines ~1159 and ~210/244/261 respectively. `api/streaming.py` only touched by #2009. Stage merge clean with no conflicts.
+
+## [v0.51.38] — 2026-05-10 — Release N (UI polish — toast + mobile + diff renderer + sidebar)
+
+### Fixed
+
+- **PR #1988** by @Michaelyklam — Auto-compression toast lifetime increased so the user sees the boundary summary long enough to register what happened. Auto-compression rewrites session context, so its completion toast carries more trust weight than a generic "settings saved" notification. Per #1834 Option A — the smallest safe slice. Adds regression coverage.
+
+- **PR #2007** by @insecurejezza — Wrap markdown code blocks on mobile instead of forcing horizontal scrolling. Desktop behavior unchanged. Includes Prism token spans, preview markdown, and diff line spans in the mobile wrapping rules. Regression coverage in `test_mobile_markdown_wrapping.py`.
+
+- **PR #2008** by @franksong2702 — CLI session patch diff rendering. Historical CLI sessions that predate session-level `tool_calls` reconstruct tool cards from per-message metadata in `static/ui.js`; that fallback truncated tool results to 200 chars and only showed the first 120 chars of tool arguments, so `apply_patch`/edit diffs recorded with `verbosity=all` could disappear behind a generic `Success` result. The renderer now preserves diff-like tool outputs, promotes `apply_patch`/edit payloads into the tool-card snippet when the result is non-diff, and labels long diff expanders as `Show diff`. 245-line regression test (`test_issue1824_cli_patch_diff_rendering.py`) covers both the API payload preservation and the renderer fallback. Closes #1824.
+
+- **PR #2013** by @ai-ag2026 — Avoid sidebar jumps when the active session is already visible. Previously the virtualized session sidebar always re-anchored on the active row, which produced a jump even when the row was inside the current window. Now only re-anchors when the active row is outside the rendered window. Regression coverage in `test_issue500_session_list_virtualization.py`.
+
+### Tests
+
+5049 → **5057 collected, 5057 passing, 0 regressions** (+8 net new). Full suite 154s on Python 3.11 with `HERMES_HOME` isolation.
+
+## [v0.51.37] — 2026-05-10 — Release M (compression / lineage backend)
+
+### Fixed
+
+- **PR #2004** by @franksong2702 — Persisted compression boundary summary for reload UI. Both manual `/session/compress` and auto-compression paths now persist `compression_anchor_summary`, `compression_anchor_visible_idx`, and `compression_anchor_message_key` so the compression card renders correctly after a page reload. Closes #1833.
+
+- **PR #2006** by @qxxaa — Stamp profile on continuation session after context compression. In multi-profile deployments, memory writes after auto-compression silently targeted the **default profile's** `MEMORY.md`, regardless of which profile the browser session was using. Root cause: the compression migration block in `_periodic_checkpoint` did not carry `s.profile` across to the continuation session, so subsequent requests fell back to the default profile's `HERMES_HOME`. Fix resolves the profile name from `s.profile` (or `get_active_profile_name()` while TLS still holds) at streaming-thread start, then stamps `s.profile = _resolved_profile_name` on the continuation session. Verified evidence: session `0dfefb` had read the wrong profile's `MEMORY.md` (16% / 4 entries) instead of the troubleshooting profile's bank (72-77% / 5000+ chars).
+
+- **PR #2011** by @ai-ag2026 — Sidebar lineage collapse: prefer the latest compressed segment when a parent row is touched. Previously the sidebar collapse helper picked representatives by timestamp only, which could surface a touched-parent row instead of the newer compressed tip. Now keys on `_compression_segment_count` so the highest-count segment wins. Regression test added.
+
+- **PR #2014** by @ai-ag2026 — Keep explicit `/api/session/branch` forks out of compression-lineage collapse. Forked sessions now mark `session_source="fork"` on creation, and the sidebar lineage helper guards against folding fork rows into the compression-collapse path even when the parent isn't currently in the rendered window. Backend marker test + sidebar guard test added.
+
+- **PR #2015** by @Jellypowered — Stitch continuation-lineage transcripts in WebUI. Sessions split by continuation events (compression boundary, CLI-close) could show only the latest segment in the WebUI message history. `get_cli_session_messages()` now walks the valid continuation lineage and stitches messages across sessions so the full conversation is visible.
+
+### Added
+
+- **PR #2012** by @dso2ng — New read-only `/api/session/lineage-report/<sid>` endpoint exposing a bounded JSON diagnostic of a session's compression/branching lineage. Pure backend probe — no client UI changes. The sidebar lineage UI (#1906/#1943) already covers user-facing affordances; this fills the bounded backend probe gap for CLI/scripting use.
+
+### Tests
+
+5049 → **5058 collected, 5058 passing, 0 regressions** (+9 net new across `test_session_lineage_collapse.py`, `test_session_lineage_full_transcript.py`, `test_session_lineage_report.py`, `test_465_session_branching.py`, `test_auto_compression_card.py`, `test_sprint46.py`). Full suite 157s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- `api/routes.py` (4 PRs touched it) and `api/streaming.py` (2 PRs) were the multi-PR files. All hunks at distinct anchors; stage merge clean with no conflicts.
+- Theme coherence: every PR in this batch addresses session compression, lineage, or continuation-stitching — the same conceptual surface from different angles.
+
+## [v0.51.36] — 2026-05-10 — Release L (locale + provider + cross-cutting)
+
+### Fixed
+
+- **PR #1992** by @29n — `ctl.sh` line 42 used `[[ -v ${key} ]]`, which requires bash 4.2+. macOS ships with bash 3.2 → `conditional binary operator expected` error. Replaced with `[[ -n "${!key+x}" ]]` — a portable variable-set check that works on bash 3.2+, zsh, and POSIX-compatible shells. No behavior change.
+
+- **PR #1998** by @franksong2702 — Localized `/goal` runtime status strings. Added 13 i18n keys (`goal_evaluating_progress`, `goal_working_toward`, `goal_continuing_toast`, `goal_status_*`, `goal_set/paused/resumed/cleared/no_goal`, `goal_achieved`, `goal_paused_budget_exhausted`, `goal_continuing`) across all locales; new keys reach `static/messages.js` and `static/commands.js` so the goal UI no longer hardcodes English. Closes #1933.
+
+- **PR #2000** by @qxxaa — Skill tools resolve from the wrong profile after per-request profile switch. `tools/skills_tool.py` and `tools/skill_manager_tool.py` cache `HERMES_HOME` as a module-level constant at import time. The process-wide `switch_profile()` path patches both modules via `_set_hermes_home()`, but the per-request path (`switch_profile(process_wide=False)`, introduced in #1700) only updated `os.environ['HERMES_HOME']` and skipped the module patching. Result: agents on non-default profiles always saw the root profile's skills. Fix adds the same monkeypatching to the per-request branch in `api/streaming.py`. Closes the parity gap with #1700.
+
+- **PR #2001** by @franksong2702 — `clarify.timeout` config was ignored by WebUI clarify prompts. The callback used a hardcoded `timeout = 120`. Now reads `clarify.timeout` from `api.config.get_config()` with bounded fallback (defaults to 120 on missing/invalid config), and threads `timeout_seconds` into the `api.clarify.submit_pending` payload so the frontend countdown matches the backend timeout. Regression test in `tests/test_sprint42.py`. Closes #1999.
+
+- **PR #2005** by @vikarag — Added Xiaomi as a first-class provider in the WebUI's model catalog. `hermes-agent` already registered Xiaomi (verified at `hermes_cli/models.py:782` + auth entries) but `api/config.py` was missing the corresponding `_PROVIDER_DISPLAY` / `_PROVIDER_ALIASES` / `_PROVIDER_MODELS` entries, so the provider list showed Xiaomi as `Unsupported` and the model dropdown fell back to OpenRouter. Adds `xiaomi` display name, `mimo`/`xiaomi-mimo` aliases, and 5 MiMo models (V2.5 Pro/V2.5/V2 Pro/V2 Omni/V2 Flash).
+
+### i18n
+
+- **PR #2002** by @eov128 — Refreshed Simplified Chinese (zh) translation. Two kinds of changes:
+  - Decoded `\uXXXX` escape sequences to literal CJK characters in already-translated strings (semantically identical at runtime; improves source readability and grep-ability)
+  - Translated 30+ previously-untranslated strings tagged `// TODO: translate` — covering MCP server status (`mcp_status_active`, `mcp_status_configured`, ...), MCP tools panel, session toolsets, workspace hidden files, terminal pane, and personality switch hint
+
+  **Stage 330 conflict resolution:** #1998 added new `goal_*` English keys interleaved with the `cmd_interrupt` block that #2002 was rewriting; resolved by preserving #1998's new English keys (TODO: translate) above the section while taking #2002's CJK literals for `cmd_*` / `settings_*` keys.
+
+  **Stage 330 test fix:** `tests/test_chinese_locale.py::test_chinese_locale_includes_representative_translations` was pinned to the source-encoded `\uXXXX` form for `settings_title` and `login_title`. Broadened to accept either `\uXXXX` or literal CJK (same runtime behavior). Other source-form assertions in this test were already on literal CJK.
+
+### Tests
+
+5049 → **5049 collected, 5049 passing, 0 regressions** (one PR added new tests in `test_kanban_ui_static.py` already counted in stage 329; stage 330 net is flat). Full suite 158s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Notes
+
+- `api/streaming.py` was the high-collision file (4 PRs touched it: #1998 #2000 #2001 #2006-not-in-this-stage). Stage merge clean; #2000 and #2001 each added separate ~17-LOC blocks at distinct anchor points, no overlap.
+- All 6 PRs from 6 different authors except for #1998+#2001 (both @franksong2702). Disjoint themes.
+
+## [v0.51.35] — 2026-05-10 — Release K (kanban polish + i18n DE pluralization)
+
+### Fixed
+
+- **PR #1990** by @franksong2702 — Kanban dispatcher race guard. Adds `_kanbanIsDispatching` flag around `runKanbanDispatcher()` and `nudgeKanbanDispatcher()` in `static/panels.js`; both Run/Preview buttons go disabled while the call is in-flight, so a fast double-click can't fire the dispatcher twice (which would post duplicate POSTs and surface duplicate toasts). Re-enables on success or error in `finally`. Closes #1984.
+
+- **PR #1991** by @franksong2702 — German `profile_skill_count` pluralization. The DE locale had `profile_skill_count: '{count} Fähigkeiten'` as a literal string with the placeholder token still in it (so 1, 2, 5 skills all rendered as `{count} Fähigkeiten`). Switched to the same `(count) => …` interpolation function form already used by the other locales. Regression test `tests/test_issue1989_profile_skill_count.py` pins DE to function form and asserts the literal token never reaches the rendered string. Closes #1989.
+
+- **PR #1993** by @franksong2702 — Kanban assignee-dropdown profile cache invalidation. `_kanbanProfileNamesCache` was populated lazily on first modal open and never expired; creating or deleting a profile elsewhere in the UI didn't refresh it, so the assignee dropdown could show a freshly-deleted profile or miss a freshly-created one. Added a 30-second TTL (`_kanbanProfileNamesCacheAt` + `_KANBAN_PROFILE_NAMES_CACHE_TTL_MS`) and an explicit `_invalidateKanbanProfileCache()` helper called from `saveProfileForm()`, `deleteCurrentProfile()`, and `deleteProfile()`. Closes #1985.
+
+- **PR #1995** by @franksong2702 — Kanban modal focus trap + edit-mode status hint. Two related fixes bundled (#1995 was rebased on top of #1994 in the contributor's branch):
+  - **Focus trap (#1974).** Tab/Shift-Tab in the Kanban task and board modals could move keyboard focus to controls behind the modal. Added a shared `_trapModalFocus(modalEl)` helper in `static/panels.js`; wired into `openKanbanCreate()`, `openKanbanEdit()`, `openKanbanCreateBoard()`, and `openKanbanRenameBoard()`. Cleanup tracker `_kanbanTaskModalFocusCleanup` removes the trap on close so a sequence of open→close→open doesn't leak listeners.
+  - **Status hint (#1986).** When opening Edit on a task whose real status is `running`/`blocked`/`done`/`archived` (which the dropdown displays as `triage` because the dispatcher only writes to `triage`/`todo`/`ready`), the modal now shows an inline hint explaining the displayed-vs-real mismatch. The dropdown behaviour is unchanged — only an additional UX cue. New CSS for `.kanban-status-hint`, new i18n key `kanban_status_hint_real` across all 8 locales.
+
+  Closes #1974, #1986.
+
+- **PR #1996** by @franksong2702 — Kanban modal locale parity regression test. Adds `tests/test_kanban_ui_static.py::test_kanban_modal_locales_have_full_modal_vocabulary` that anchors on the existing `kanban_no_comments` key and asserts every locale supporting Kanban has the modal vocabulary. Hardens locale-block parsing to handle quoted locales. Pure test addition.
+
+### Tests
+
+5049 → **5054 collected, 5054 passing, 0 regressions** (+5 net new). Full suite 154s on Python 3.11 with `HERMES_HOME` isolation.
+
+### Stage augmentation
+
+- **`9242305a`** — Opus advisor flagged that `kanban_status_original_hint` (added by #1995) was missing in the `zh-Hant` block, so Traditional Chinese users would get the English fallback. Added the Traditional Chinese translation (`實際狀態：{0}。此對話框僅支援編輯 Triage/Todo/Ready。`) at line 6537 and extended `tests/test_kanban_ui_static.py::test_kanban_modal_locales_have_full_modal_vocabulary`'s `modal_keys` list to assert the key — so any future kanban modal key added without zh-Hant translation will fail CI.
+
+### Notes
+
+- `static/panels.js` was the high-collision file in this batch (5 PRs touched it). Stage merge cleanly; one syntactic conflict at the `_kanbanProfileNamesCache` declaration block when #1995 landed on top of #1993 — both PRs added new module-level `let` declarations adjacent to `_kanbanProfileNamesCache`. Resolved by preserving both declaration blocks (the variables are independent).
+- Six PRs in batch, all from @franksong2702. Disjoint concerns, disjoint i18n keys, disjoint tests. The 5-files panels.js overlap was the only nontrivial integration risk and resolved cleanly.
+
 ## [v0.51.34] — 2026-05-09 — Release J (kanban edit/dispatch + zh-Hant kanban i18n)
 
 ### Added
@@ -44,10 +539,6 @@ Three nice-to-have polish items called out by Opus that don't block this release
 - **`_kanbanIsDispatching` flag** to disable the Run/Preview buttons during in-flight POST (current double-click path is benign — atomic `claim_task` server-side prevents destructive double-spawn — but produces a "0 spawned" second toast).
 - **Profile-cache invalidation hook** for `_kanbanProfileNamesCache` so profile create/delete from elsewhere in the WebUI propagates without a reload. Current behavior is graceful degradation (orphaned-profile assignee → dispatcher logs `skipped_nonspawnable`, user can re-edit).
 - **Status-display hint** near the modal status `<select>` for non-editable original states (running/blocked/done/archived → mapped to `triage` in the dropdown). The tracker fix makes untouched-submit harmless, but a small visual hint like "(real status: running)" would reduce user confusion.
-
-## [Unreleased]
-
-### Fixed
 
 - **bug(profile/mcp): non-default profile MCP servers never load** ([#1968](https://github.com/nesquena/hermes-webui/issues/1968)). `_run_agent_streaming` called `discover_mcp_tools()` ~100 lines BEFORE the per-session `os.environ['HERMES_HOME'] = _profile_home` mutation, so MCP discovery always read the default profile's `~/.hermes/config.yaml` regardless of which profile the session was stamped with. Result: switching profiles in the WebUI dropdown was effectively cosmetic for MCP — non-default profiles never registered their stdio (npx/node) MCP servers. Fix relocates the `discover_mcp_tools()` call past the `_ENV_LOCK` env-mutation block so `get_hermes_home()` resolves to the session's actual profile home. Adds 4 static regression tests (`tests/test_issue1968_mcp_profile_discovery.py`) pinning the call ordering, lock-release placement, single call site, and try/except wrapping. **Caveat (out of scope, agent-side):** `_servers` in `tools/mcp_tool.py` is a process-global dict keyed only by server name, so concurrent use of multiple non-default profiles in the same WebUI process still has a "first profile wins per name" issue. Fully fixing that requires keying `_servers` by `(profile_home, name)` upstream in hermes-agent. This PR ships layer 1 only.
 

@@ -170,6 +170,47 @@ console.log(JSON.stringify(collapsed));
     assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg10", "seg9", "seg8", "seg7"]
 
 
+def test_sidebar_lineage_collapse_prefers_highest_compression_segment_over_touched_parent():
+    """A touched parent segment must not hide the newer compressed tip.
+
+    Opening or polling an older segment can refresh its updated_at without adding
+    messages. The collapsed sidebar row must still pick the highest compression
+    segment, otherwise the visible chat jumps back to a parent that lacks the
+    completed assistant answer.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'seg13', title:'Schaue dir die Release (fork)', message_count:2490, updated_at:200, last_message_at:200, _lineage_root_id:'root', _compression_segment_count:13}},
+  {{session_id:'seg14', title:'Schaue dir die Release (fork)', message_count:2532, updated_at:150, last_message_at:150, _lineage_root_id:'root', _compression_segment_count:14}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["seg14"]
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["seg14", "seg13"]
+
+
 
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
@@ -297,11 +338,16 @@ def test_lineage_segment_expansion_static_contract():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "const _expandedLineageKeys = new Set();" in js
+    assert "const _lineageReportCache = new Map();" in js
+    assert "const _lineageReportInflight = new Map();" in js
     assert "session-lineage-count,.session-lineage-segments,.session-lineage-segment" in js
     assert "segmentCountEl.setAttribute('aria-expanded'" in js
     assert "_expandedLineageKeys.has(lineageKey)" in js
     assert "_expandedLineageKeys.add(lineageKey)" in js
     assert "_expandedLineageKeys.delete(lineageKey)" in js
+    assert "_fetchLineageReportForRow(s,lineageKey).then" in js
+    assert "'/api/session/lineage/report?session_id='" in js
+    assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
     assert "const segTitle=seg.title||t('session_lineage_segment_untitled');" in js
@@ -311,6 +357,133 @@ def test_lineage_segment_expansion_static_contract():
     assert ".session-lineage-count.expandable:hover" in css
     assert ".session-lineage-segments{" in css
     assert ".session-lineage-segment{" in css
+
+
+def test_lineage_report_fetch_is_needed_only_when_backend_count_exceeds_materialized_segments():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageLocalSegmentCount'));
+eval(extractFunc('_lineageReportNeedsFetch'));
+const backendOnly = {{session_id:'tip', _lineage_key:'root', _compression_segment_count:25}};
+const localFull = {{
+  session_id:'tip',
+  _lineage_key:'root',
+  _compression_segment_count:2,
+  _lineage_segments:[{{session_id:'tip'}}, {{session_id:'root'}}],
+}};
+const before = _lineageReportNeedsFetch(backendOnly, 'root', 25);
+_lineageReportCache.set('root', {{segments:[{{session_id:'tip'}}, {{session_id:'root'}}]}});
+const afterCache = _lineageReportNeedsFetch(backendOnly, 'root', 25);
+const fullLocal = _lineageReportNeedsFetch(localFull, 'root', 2);
+console.log(JSON.stringify({{before, afterCache, fullLocal}}));
+"""
+    assert json.loads(_run_node(source)) == {"before": True, "afterCache": False, "fullLocal": False}
+
+
+def test_cached_lineage_report_segments_merge_with_materialized_segments_without_duplicates_or_children():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageSegmentsForRender'));
+_lineageReportCache.set('root', {{
+  segments:[
+    {{session_id:'tip', title:'Tip', role:'tip', started_at:30}},
+    {{session_id:'root', title:'Root', role:'hidden_segment', started_at:20}},
+    {{session_id:'older', title:'Older', role:'hidden_segment', started_at:10}},
+    {{session_id:'child', title:'Child', role:'child_session', started_at:40}},
+  ],
+  children:[{{session_id:'child', title:'Child', role:'child_session'}}],
+}});
+const row = {{
+  session_id:'tip',
+  _lineage_key:'root',
+  _lineage_segments:[{{session_id:'tip', title:'Tip'}}, {{session_id:'root', title:'Root'}}],
+}};
+const segments = _lineageSegmentsForRender(row, 'root').map(seg => seg.session_id);
+console.log(JSON.stringify(segments));
+"""
+    assert json.loads(_run_node(source)) == ["root", "older"]
+
+
+def test_lineage_report_fetch_uses_endpoint_once_and_caches_result():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+let _lineageReportCacheGeneration = 0;
+const calls = [];
+function api(path) {{
+  calls.push(path);
+  return Promise.resolve({{found:true, segments:[{{session_id:'tip'}}, {{session_id:'root'}}]}});
+}}
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_fetchLineageReportForRow'));
+(async()=>{{
+  const row = {{session_id:'tip', _lineage_key:'root'}};
+  const [first, second] = await Promise.all([
+    _fetchLineageReportForRow(row, 'root'),
+    _fetchLineageReportForRow(row, 'root'),
+  ]);
+  await _fetchLineageReportForRow(row, 'root');
+  console.log(JSON.stringify({{
+    calls,
+    cached:_lineageReportCache.has('root'),
+    same:first===second,
+  }}));
+}})().catch(err=>{{console.error(err); process.exit(1);}});
+"""
+    result = json.loads(_run_node(source))
+    assert result == {
+        "calls": ["/api/session/lineage/report?session_id=tip"],
+        "cached": True,
+        "same": True,
+    }
 
 
 def test_active_hidden_lineage_segment_auto_expands_parent():
@@ -359,3 +532,30 @@ def test_lineage_segment_locale_keys_are_defined_for_sidebar_locales():
     locale_count = i18n.count("session_meta_messages:")
     for key in required:
         assert i18n.count(key) >= locale_count, f"{key} missing from one or more locale blocks"
+
+def test_session_meta_segments_softened_label_no_literal_segment_in_english():
+    """Regression: the sidebar badge for compressed/lineage rows must not visibly
+    say 'X segments' by default — the technical internal term should be replaced
+    with softer user-facing copy (#2155).
+
+    This verifies the English base locale's session_meta_segments key so that
+    t() fallback for untranslated locales also produces softened copy.
+    """
+    import re
+    i18n_text = (REPO_ROOT / 'static' / 'i18n.js').read_text(encoding='utf-8')
+    # Locate the English base-locale block (first occurrence, before any _lang guard).
+    first_lang = i18n_text.index('_lang: \'en\'')
+    second_lang = i18n_text.index('_lang:', first_lang + 1)
+    english_slice = i18n_text[first_lang:second_lang]
+    assert 'session_meta_segments:' in english_slice, 'session_meta_segments missing from English locale'
+    # Capture only the arrow-function value (not the key name which also contains 'segment').
+    match = re.search(
+        r"session_meta_segments:\s*(\(\w+\)\s*=>\s*[^,]+)",
+        english_slice,
+    )
+    assert match, 'session_meta_segments value not found in English locale'
+    rendered = match.group(1)
+    assert 'segment' not in rendered, (
+        f"session_meta_segments English value still contains the technical word 'segment': {rendered}. "
+        "Expected softened copy like 'prior turn(s)' instead. See #2155."
+    )

@@ -906,7 +906,7 @@ async function _fetchLiveModels(provider, sel){
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
-      console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
+      console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
@@ -1676,12 +1676,14 @@ function _recordNonMessageScrollIntent(e){
     // input event so later scrollTop decreases caused by layout/windowing do
     // not masquerade as user intent and strand live streaming away from bottom.
     _lastMessageUpwardIntentMs=performance.now();
-    _messageUserUnpinned=true;
     // User is intentionally moving in the transcript. Cancel any delayed
     // scrollToBottom settling that was scheduled by session-load/layout growth.
     _cancelBottomSettle();
-    _nearBottomCount=0;
-    _scrollPinned=false;
+    if(typeof e.deltaY==='number'&&e.deltaY<0){
+      _messageUserUnpinned=true;
+      _nearBottomCount=0;
+      _scrollPinned=false;
+    }
   }
 }
 function _recentMessageUpwardIntent(){
@@ -1721,7 +1723,8 @@ if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetS
         if(_scrollPinned) _messageUserUnpinned=false;
       } // #1360
       const btn=$('scrollToBottomBtn');
-      if(btn) btn.style.display=_scrollPinned?'none':'flex';
+      const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
+      if(btn) btn.style.display=showBottomButton?'flex':'none';
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
@@ -4685,6 +4688,113 @@ function clearMessageRenderCache(){
   _sessionHtmlCacheSid=null;
 }
 
+function _clipCliToolSnippet(text, maxLen=20000){
+  const s=String(text||'');
+  if(s.length<=maxLen) return s;
+  return `${s.slice(0,maxLen)}\n\n... truncated ${s.length-maxLen} chars ...`;
+}
+
+function _cliToolResultText(raw){
+  const s=String(raw||'');
+  try{
+    const rd=JSON.parse(s);
+    if(rd && typeof rd==='object'){
+      for(const key of ['output','result','error','content','diff','patch']){
+        if(Object.prototype.hasOwnProperty.call(rd,key)){
+          const v=rd[key];
+          if(v==null) return '';
+          return typeof v==='string' ? v : JSON.stringify(v,null,2);
+        }
+      }
+    }
+  }catch(e){}
+  return s;
+}
+
+function _cliLooksLikePatchDiff(text){
+  const s=String(text||'');
+  if(!s) return false;
+  if(/\*\*\* Begin Patch/.test(s)) return true;
+  if(/^diff --git /m.test(s)) return true;
+  if(/^@@\s/m.test(s)) return true;
+  if(/(^|\n)---\s+/.test(s) && /(^|\n)\+\+\+\s+/.test(s)) return true;
+  return false;
+}
+
+function _cliToolResultSnippet(raw){
+  const fullText=_cliToolResultText(raw);
+  if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
+  return String(fullText||'').slice(0,200);
+}
+
+function _prefixedCliDiffLines(prefix, value){
+  return String(value||'').split('\n').map(line=>`${prefix}${line}`).join('\n');
+}
+
+function _firstOwnedValue(obj, keys){
+  for(const key of keys){
+    if(obj && Object.prototype.hasOwnProperty.call(obj,key)) return obj[key];
+  }
+  return undefined;
+}
+
+function _cliPatchSnippetFromArgs(name, args){
+  if(!args || typeof args!=='object') return '';
+  const toolName=String(name||'').toLowerCase();
+  for(const key of ['patch','diff']){
+    const v=args[key];
+    if(typeof v==='string' && v.trim()) return _clipCliToolSnippet(v);
+  }
+  for(const key of ['input','content']){
+    const v=args[key];
+    if(typeof v==='string' && _cliLooksLikePatchDiff(v)) return _clipCliToolSnippet(v);
+  }
+  const isEditLike=toolName==='apply_patch'
+    || toolName==='patch'
+    || toolName.includes('edit')
+    || toolName==='replace'
+    || toolName==='str_replace';
+  if(!isEditLike) return '';
+  const oldValue=_firstOwnedValue(args,['old_string','old_str','old','before']);
+  const newValue=_firstOwnedValue(args,['new_string','new_str','new','after']);
+  if(oldValue!==undefined || newValue!==undefined){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const lines=[];
+    if(path) lines.push(path);
+    if(oldValue!==undefined) lines.push(_prefixedCliDiffLines('-', oldValue));
+    if(newValue!==undefined) lines.push(_prefixedCliDiffLines('+', newValue));
+    return _clipCliToolSnippet(lines.join('\n'));
+  }
+  if(Array.isArray(args.edits)){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const chunks=[];
+    if(path) chunks.push(path);
+    args.edits.slice(0,5).forEach(edit=>{
+      if(!edit || typeof edit!=='object') return;
+      const before=_firstOwnedValue(edit,['old_string','old_str','old','before']);
+      const after=_firstOwnedValue(edit,['new_string','new_str','new','after']);
+      if(before!==undefined) chunks.push(_prefixedCliDiffLines('-', before));
+      if(after!==undefined) chunks.push(_prefixedCliDiffLines('+', after));
+    });
+    if(chunks.length) return _clipCliToolSnippet(chunks.join('\n'));
+  }
+  return '';
+}
+
+function _cliToolCardSnippet(resultSnippet, patchSnippet){
+  if(_cliLooksLikePatchDiff(resultSnippet)) return resultSnippet;
+  if(!patchSnippet) return resultSnippet || '';
+  const result=String(resultSnippet||'').trim();
+  if(!result) return patchSnippet;
+  const generic=/^(success|ok|done|done\.|exit code: 0)$/i.test(result);
+  if(generic) return patchSnippet;
+  return `${resultSnippet}\n\n${patchSnippet}`;
+}
+
+function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
+  return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -4745,8 +4855,7 @@ function renderMessages(options){
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -4763,6 +4872,9 @@ function renderMessages(options){
   const sessionCompressionAnchorKey=(
     S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
   ) ? S.session.compression_anchor_message_key : null;
+  const sessionCompressionSummary=(
+    S.session && typeof S.session.compression_anchor_summary==='string'
+  ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
@@ -4779,8 +4891,10 @@ function renderMessages(options){
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
-  const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
-  const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
+  const referenceText=referenceMessage
+    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
+    : sessionCompressionSummary;
+  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
@@ -5074,20 +5188,12 @@ function renderMessages(options){
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
     const resultsByTid={};
-    const _snipFromRaw=(raw)=>{
-      const s=String(raw||'');
-      try{
-        const rd=JSON.parse(s);
-        if(rd && typeof rd==='object') return String(rd.output||rd.result||rd.error||s).slice(0,200);
-      }catch(e){}
-      return s.slice(0,200);
-    };
     S.messages.forEach(m=>{
       if(!m) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
       if(m.role==='tool'){
         const tid=m.tool_call_id||m.tool_use_id||'';
-        if(tid) resultsByTid[tid]=_snipFromRaw(m.content);
+        if(tid) resultsByTid[tid]=_cliToolResultSnippet(m.content);
         return;
       }
       // Anthropic format: tool_result blocks inside a user message content array
@@ -5099,7 +5205,7 @@ function renderMessages(options){
           const raw=typeof p.content==='string'?p.content
                    :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
                    :'';
-          resultsByTid[tid]=_snipFromRaw(raw);
+          resultsByTid[tid]=_cliToolResultSnippet(raw);
         });
       }
     });
@@ -5113,10 +5219,20 @@ function renderMessages(options){
         const name=fn.name||tc.name||'tool';
         let args={};
         try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        const tid=tc.id||tc.call_id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||'';
         let argsSnap={};
         Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        const tid=tc.id||tc.call_id||'';
-        derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:argsSnap,
+          done:true,
+        });
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -5124,12 +5240,22 @@ function renderMessages(options){
           if(!p||typeof p!=='object'||p.type!=='tool_use') return;
           const name=p.name||'tool';
           const args=p.input||{};
+          const tid=p.id||'';
+          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+          const resultSnippet=resultsByTid[tid]||'';
           const argsSnap={};
           if(args && typeof args==='object'){
             Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
           }
-          const tid=p.id||'';
-          derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+          derived.push({
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:rawIdx,
+            args:argsSnap,
+            done:true,
+          });
         });
       }
     });
@@ -5286,8 +5412,7 @@ function renderMessages(options){
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
+  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -5352,6 +5477,9 @@ function buildToolCard(tc){
     }
   }
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const moreLabel=tc.is_diff?'Show diff':'Show more';
+  const lessLabel=tc.is_diff?'Hide diff':'Show less';
+  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(isRunning?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
@@ -5373,7 +5501,7 @@ function buildToolCard(tc){
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?this.dataset.moreLabel:this.dataset.lessLabel">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -5595,6 +5723,19 @@ async function regenerateResponse(btn) {
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+function postProcessRenderedMessages(container) {
+  highlightCode(container);
+  addCopyButtons(container);
+  loadDiffInline(container);
+  loadCsvInline(container);
+  loadExcalidrawInline(container);
+  loadPdfInline(container);
+  loadHtmlInline(container);
+  renderMermaidBlocks(container);
+  renderKatexBlocks(container);
+  initTreeViews(container);
+}
+
 function highlightCode(container) {
   // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
   if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
@@ -5618,8 +5759,9 @@ function _loadJsyamlThen(cb){
   document.head.appendChild(s);
 }
 
-function initTreeViews(){
-  document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
+function initTreeViews(container){
+  const root=container||document;
+  root.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
     const rawText=wrap.dataset.raw;
     const lang=wrap.dataset.lang;
     let parsed=null;
@@ -5776,9 +5918,10 @@ function addCopyButtons(container){
 let _mermaidLoading=false;
 let _mermaidReady=false;
 
-function loadDiffInline(){
+function loadDiffInline(container){
   const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
-  document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5803,9 +5946,10 @@ function loadDiffInline(){
   });
 }
 
-function loadCsvInline(){
+function loadCsvInline(container){
   const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
-  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5838,9 +5982,10 @@ function loadCsvInline(){
   });
 }
 
-function loadExcalidrawInline(){
+function loadExcalidrawInline(container){
   const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
-  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
@@ -5964,9 +6109,10 @@ function _renderExcalidrawCanvases(){
 // the full buffer is received — ideally the server would enforce it before
 // streaming (out of scope for this client-side PR).
 let _pdfjsReady=false, _pdfjsLoading=false;
-function loadPdfInline(){
+function loadPdfInline(container){
   const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
-  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
@@ -6038,9 +6184,10 @@ function loadPdfInline(){
 }
 
 // ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
-function loadHtmlInline(){
+function loadHtmlInline(container){
   const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
-  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
@@ -6063,8 +6210,9 @@ function loadHtmlInline(){
   });
 }
 
-function renderMermaidBlocks(){
-  const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
+function renderMermaidBlocks(container){
+  const root=container||document;
+  const blocks=root.querySelectorAll('.mermaid-block:not([data-rendered])');
   if(!blocks.length) return;
   if(!_mermaidReady){
     if(!_mermaidLoading){
@@ -6113,8 +6261,9 @@ function renderMermaidBlocks(){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(){
-  const blocks=document.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+function renderKatexBlocks(container){
+  const root=container||document;
+  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){

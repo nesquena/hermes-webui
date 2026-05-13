@@ -12,6 +12,7 @@ let _kanbanLanesByProfile = false;
 let _kanbanCurrentBoard = null;
 let _kanbanBoardsList = null;
 let _kanbanBoardMenuOpen = false;
+let _kanbanIsDispatching = false;
 // SSE event stream — replaces the 30s polling cadence with a long-lived
 // /api/kanban/events/stream connection. Falls back to polling when the
 // EventSource fails to connect (proxy that strips text/event-stream, etc).
@@ -31,6 +32,7 @@ let _profilePreFormDetail = null;
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 let _logsAutoRefreshTimer = null;
 let _lastLogsLines = [];
+let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
@@ -182,6 +184,26 @@ function _consumeSettingsTargetPanel(fallback = 'chat') {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
+  // ── Desktop sidebar collapse toggle (rail-click only) ──
+  // If the click came from a rail icon AND we're on desktop, the rail icon
+  // does double duty: clicking the already-active panel collapses the sidebar;
+  // clicking any panel while collapsed expands first. Programmatic switches
+  // (no opts.fromRailClick) are unaffected so legacy callers preserve
+  // behaviour exactly.
+  if (opts.fromRailClick && typeof _isSidebarCollapsed === 'function'
+      && typeof _isDesktopWidth === 'function' && _isDesktopWidth()) {
+    if (_isSidebarCollapsed()) {
+      // Expand first, then continue to the normal panel switch below so
+      // the clicked panel becomes (or stays) active in the same gesture.
+      expandSidebar();
+    } else if (prevPanel === nextPanel) {
+      // Same panel clicked while sidebar is open → collapse and short-circuit.
+      // Skip the guard/cleanup work below; nothing about the active panel
+      // is changing, only the visibility of the panel container.
+      toggleSidebar(true);
+      return false;
+    }
+  }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
@@ -192,6 +214,8 @@ async function switchPanel(name, opts = {}) {
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
+  // Refresh aria-expanded on the newly-active rail button to mirror sidebar state.
+  if (typeof _syncSidebarAria === 'function') _syncSidebarAria();
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
@@ -228,6 +252,26 @@ async function switchPanel(name, opts = {}) {
 function _isRecurringCronJob(job) {
   const kind = job && job.schedule && job.schedule.kind;
   return kind === 'cron' || kind === 'interval';
+}
+
+function _cronScheduleKindForInput(value) {
+  const schedule = String(value || '').trim();
+  if (!schedule) return '';
+  const lower = schedule.toLowerCase();
+  if (lower.startsWith('every ')) return 'interval';
+  if (lower.startsWith('@')) return 'cron';
+  const parts = schedule.split(/\s+/);
+  if (parts.length >= 5 && parts.slice(0, 5).every(p => /^[\d*\-,/]+$/.test(p))) return 'cron';
+  if (schedule.includes('T') || /^\d{4}-\d{2}-\d{2}/.test(schedule)) return 'once';
+  if (/^\d+\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.test(schedule)) return 'once';
+  return '';
+}
+
+function _syncCronScheduleWarning() {
+  const input = $('cronFormSchedule');
+  const warning = $('cronFormScheduleOnceWarning');
+  if (!input || !warning) return;
+  warning.style.display = _cronScheduleKindForInput(input.value) === 'once' ? '' : 'none';
 }
 
 function _hasUnlimitedRepeat(job) {
@@ -443,6 +487,7 @@ function _renderCronDetail(job){
           <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
         </div>
       </div>` : '';
+  const toastNotifications = job.toast_notifications !== false;
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
@@ -456,6 +501,7 @@ function _renderCronDetail(job){
         <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span></div></div>
         ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
       </div>
@@ -639,6 +685,7 @@ function duplicateCurrentCron(){
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
+    toast_notifications: job.toast_notifications !== false,
     isEdit: false,
   });
   if (!_cronSkillsCache) {
@@ -672,7 +719,7 @@ function openCronCreate(){
   _cronMode = 'create';
   _cronIsDuplicate = false;
   _cronSelectedSkills = [];
-  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', isEdit:false });
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', profile:'', toast_notifications:true, isEdit:false });
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
@@ -690,6 +737,7 @@ function openCronEdit(job){
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
+    toast_notifications: job.toast_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     isEdit: true,
@@ -702,12 +750,13 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=false, script='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
   const isNoAgent = !!no_agent;
+  const toastNotifications = toast_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
   body.innerHTML = `
@@ -721,6 +770,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
           <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
           <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
           <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
+          <div id="cronFormScheduleOnceWarning" class="detail-form-warning cron-once-warning" style="display:none">${esc(t('cron_schedule_once_warning') || "Duration forms like '30m' run once and are removed after running. Use 'every 30m' to keep a recurring job.")}</div>
         </div>
         <div class="detail-form-row ${isNoAgent ? 'cron-no-agent-prompt-row' : ''}">
           <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
@@ -733,6 +783,7 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
             ${deliverOpt('local', t('cron_deliver_local') || 'Local (save output only)')}
             ${deliverOpt('discord','Discord')}
             ${deliverOpt('telegram','Telegram')}
+            ${deliverOpt('slack','Slack')}
           </select>
         </div>
         <div class="detail-form-row">
@@ -741,6 +792,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
             ${_cronProfileOptions(profile)}
           </select>
           <div class="detail-form-hint">${esc(t('cron_profile_server_default_hint') || 'Uses the WebUI server default profile at run time')}</div>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormToastNotifications">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</label>
+          <label class="detail-form-check" for="cronFormToastNotifications">
+            <input type="checkbox" id="cronFormToastNotifications" ${toastNotifications ? 'checked' : ''}>
+            <span>${esc(t('cron_toast_notifications_hint') || 'Show a toast when this cron finishes.')}</span>
+          </label>
         </div>
         <div class="detail-form-row">
           <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
@@ -758,6 +816,12 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, no_agent=fa
   if (empty) empty.style.display = 'none';
   _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _renderCronSkillTags();
+  const scheduleEl = $('cronFormSchedule');
+  if (scheduleEl) {
+    scheduleEl.addEventListener('input', _syncCronScheduleWarning);
+    scheduleEl.addEventListener('change', _syncCronScheduleWarning);
+    _syncCronScheduleWarning();
+  }
   const focusEl = $('cronFormName');
   if (focusEl) focusEl.focus();
 }
@@ -827,6 +891,7 @@ async function saveCronForm(){
   const promptEl=$('cronFormPrompt');
   const delivEl=$('cronFormDeliver');
   const profileEl=$('cronFormProfile');
+  const toastEl=$('cronFormToastNotifications');
   const errEl=$('cronFormError');
   if(!schEl||!promptEl||!errEl) return;
   const name=(nameEl?nameEl.value:'').trim();
@@ -834,13 +899,14 @@ async function saveCronForm(){
   const prompt=promptEl.value.trim();
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
+  const toastNotifications=toastEl?!!toastEl.checked:true;
   const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile};
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
@@ -853,7 +919,7 @@ async function saveCronForm(){
       if (job) openCronDetail(editedId);
       return;
     }
-    const body={schedule,prompt,deliver,profile: profile};
+    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -1424,11 +1490,14 @@ function _kanbanBoardQuery(extra){
 }
 
 async function nudgeKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
   // Dry-run dispatch: show what WOULD be spawned, without actually spawning
   // workers.  Uses ?dry_run=1 so the dispatcher reports its plan without
   // mutating the board.  The result shape includes spawned/skipped_unassigned/
   // skipped_nonspawnable/promoted/auto_blocked so users can diagnose why a
   // Ready task isn't being picked up before they commit to a real run.
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
   try {
     const dispatchEndpoint = '/api/kanban/dispatch';
     const result = await api(
@@ -1437,10 +1506,16 @@ async function nudgeKanbanDispatcher(){
     );
     showToast(_kanbanFormatDispatchResult(result, true), 'info', 6000);
     await loadKanban(true);
-  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
 }
 
 async function runKanbanDispatcher(){
+  if (_kanbanIsDispatching) return;
   // Real dispatch: claims Ready tasks and spawns worker subprocesses
   // (one `hermes -p <assignee>` per claimed row, up to max=8 per call).
   // Confirmation dialog first because this actually consumes API budget on
@@ -1450,14 +1525,17 @@ async function runKanbanDispatcher(){
     showToast(t('kanban_unavailable') || 'Kanban unavailable', 'error');
     return;
   }
-  const ok = await showConfirmDialog({
-    title: t('kanban_run_dispatcher') || 'Run dispatcher',
-    message: t('kanban_run_dispatcher_confirm')
-      || 'This will claim Ready tasks on this board and spawn worker subprocesses (one per task, up to 8 per click). Continue?',
-    confirmLabel: t('kanban_run_dispatcher') || 'Run dispatcher',
-  });
-  if (!ok) return;
+
+  _kanbanIsDispatching = true;
+  _setKanbanDispatcherButtonsDisabled(true);
   try {
+    const ok = await showConfirmDialog({
+      title: t('kanban_run_dispatcher') || 'Run dispatcher',
+      message: t('kanban_run_dispatcher_confirm')
+        || 'This will claim Ready tasks on this board and spawn worker subprocesses (one per task, up to 8 per click). Continue?',
+      confirmLabel: t('kanban_run_dispatcher') || 'Run dispatcher',
+    });
+    if (!ok) return;
     const dispatchEndpoint = '/api/kanban/dispatch';
     const result = await api(
       dispatchEndpoint + '?max=8' + (_kanbanCurrentBoard ? '&board=' + encodeURIComponent(_kanbanCurrentBoard) : ''),
@@ -1465,7 +1543,19 @@ async function runKanbanDispatcher(){
     );
     showToast(_kanbanFormatDispatchResult(result, false), 'info', 8000);
     await loadKanban(true);
-  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+  } catch(e) {
+    showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error');
+  } finally {
+    _kanbanIsDispatching = false;
+    _setKanbanDispatcherButtonsDisabled(false);
+  }
+}
+
+function _setKanbanDispatcherButtonsDisabled(disabled){
+  document.querySelectorAll('.kanban-run-dispatch-btn, .kanban-nudge-dispatch-btn').forEach((btn) => {
+    btn.disabled = !!disabled;
+    btn.classList.toggle('disabled', !!disabled);
+  });
 }
 
 function _kanbanFormatDispatchResult(result, dryRun){
@@ -1679,6 +1769,13 @@ async function createKanbanTask(){
 let _kanbanTaskModalMode = 'create';   // 'create' | 'edit'
 let _kanbanTaskModalEditingId = null;  // task id when mode === 'edit'
 let _kanbanProfileNamesCache = null;   // populated lazily on first modal open
+let _kanbanProfileNamesCacheAt = 0;
+const _KANBAN_PROFILE_NAMES_CACHE_TTL_MS = 30000;
+function _invalidateKanbanProfileCache() {
+  _kanbanProfileNamesCache = null;
+  _kanbanProfileNamesCacheAt = 0;
+}
+let _kanbanTaskModalFocusCleanup = null;
 // Status the modal *displayed* on edit-mode open.  If the user doesn't touch
 // the dropdown, we must NOT send `status` in the PATCH payload — otherwise
 // editing a task whose real status is non-editable in this dropdown
@@ -1687,11 +1784,16 @@ let _kanbanProfileNamesCache = null;   // populated lazily on first modal open
 // review: editing a 'running' task without touching status was reclaiming
 // the worker and moving the task back to triage.
 let _kanbanTaskModalInitialDisplayedStatus = null;
+let _kanbanBoardModalFocusCleanup = null;
 
 async function _kanbanLoadProfileNames(){
-  // Hit /api/profiles once per session and cache; refresh is cheap if needed.
+  // Hit /api/profiles once per session and cache for a short TTL.
   // Returns an array of profile names (sorted, default first if present).
-  if (Array.isArray(_kanbanProfileNamesCache)) return _kanbanProfileNamesCache;
+  const hasFreshCache = (
+    Array.isArray(_kanbanProfileNamesCache) &&
+    (Date.now() - _kanbanProfileNamesCacheAt) < _KANBAN_PROFILE_NAMES_CACHE_TTL_MS
+  );
+  if (hasFreshCache) return _kanbanProfileNamesCache;
   try {
     const data = await api('/api/profiles');
     const profiles = Array.isArray(data && data.profiles) ? data.profiles : [];
@@ -1703,9 +1805,11 @@ async function _kanbanLoadProfileNames(){
       return a.localeCompare(b);
     });
     _kanbanProfileNamesCache = names;
+    _kanbanProfileNamesCacheAt = Date.now();
     return names;
   } catch(_) {
     _kanbanProfileNamesCache = [];
+    _kanbanProfileNamesCacheAt = Date.now();
     return [];
   }
 }
@@ -1771,6 +1875,7 @@ function openKanbanCreate(){
   // tasks that need human review before being marked actionable; users who
   // want it can still pick it from the status dropdown.
   _kanbanResetTaskModalFields({status: 'ready'});
+  _kanbanSetTaskModalStatusHint(null);
   _kanbanSetTaskModalLabels('create');
   _kanbanPopulateAssigneeSelect('').then(() => {
     // After the dropdown is populated, default-select the first profile (not
@@ -1784,6 +1889,11 @@ function openKanbanCreate(){
   });
   _kanbanPopulateTenantDatalist();
   modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => {
     const titleEl = document.getElementById('kanbanTaskModalTitleInput');
     if (titleEl) titleEl.focus();
@@ -1817,6 +1927,7 @@ async function openKanbanEdit(taskId){
   // (the mapped 'triage' would land in the PATCH payload, and _patch_task
   // would call _set_status_direct → reclaim worker → move to triage).
   const initialDisplayedStatus = _kanbanEditableStatusFor(task.status);
+  const originalStatus = task.status || initialDisplayedStatus;
   _kanbanTaskModalInitialDisplayedStatus = initialDisplayedStatus;
   _kanbanResetTaskModalFields({
     title: task.title || '',
@@ -1828,9 +1939,15 @@ async function openKanbanEdit(taskId){
   // Populate the assignee select AFTER reset so the option exists when we
   // call sel.value = currentAssignee.
   await _kanbanPopulateAssigneeSelect(task.assignee || '');
+  _kanbanSetTaskModalStatusHint(originalStatus, initialDisplayedStatus);
   _kanbanSetTaskModalLabels('edit');
   _kanbanPopulateTenantDatalist();
   modal.hidden = false;
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
+  _kanbanTaskModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => {
     const titleEl = document.getElementById('kanbanTaskModalTitleInput');
     if (titleEl) { titleEl.focus(); titleEl.select(); }
@@ -1879,10 +1996,61 @@ function _kanbanSetTaskModalLabels(mode){
   }
 }
 
+function _kanbanSetTaskModalStatusHint(realStatus, editableStatus){
+  const hintEl = document.getElementById('kanbanTaskModalStatusOriginalHint');
+  if (!hintEl) return;
+  if (!realStatus || realStatus === editableStatus) {
+    hintEl.hidden = true;
+    hintEl.textContent = '';
+    return;
+  }
+  const statusLabel = t(`kanban_status_${realStatus}`) || realStatus;
+  hintEl.textContent = String(t('kanban_status_original_hint')).replace('{0}', statusLabel);
+  hintEl.hidden = false;
+}
+
 function _kanbanPopulateTenantDatalist(){
   const tenants = (_kanbanBoard && Array.isArray(_kanbanBoard.tenants)) ? _kanbanBoard.tenants : [];
   const tList = document.getElementById('kanbanTaskModalTenantList');
   if (tList) tList.innerHTML = tenants.map(v => `<option value="${esc(v)}"></option>`).join('');
+}
+
+function _trapModalFocus(modalEl){
+  if (!modalEl) return () => {};
+  const selector = 'a[href], button, textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
+  const collect = () => {
+    const candidates = Array.from(modalEl.querySelectorAll(selector));
+    return candidates.filter((el) => {
+      if (el.disabled || el.hidden) return false;
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      return el.tabIndex >= 0;
+    });
+  };
+  let focusableEls = collect();
+  const onKeyDown = (ev) => {
+    if (ev.key !== 'Tab') return;
+    if (!focusableEls.length) {
+      ev.preventDefault();
+      return;
+    }
+    const current = document.activeElement;
+    let idx = focusableEls.indexOf(current);
+    if (idx === -1) {
+      ev.preventDefault();
+      focusableEls[0].focus();
+      return;
+    }
+    if (ev.shiftKey) idx -= 1;
+    else idx += 1;
+    idx = (idx + focusableEls.length) % focusableEls.length;
+    ev.preventDefault();
+    focusableEls[idx].focus();
+  };
+  modalEl.addEventListener('keydown', onKeyDown);
+  return () => {
+    modalEl.removeEventListener('keydown', onKeyDown);
+  };
 }
 
 function closeKanbanTaskModal(){
@@ -1891,6 +2059,11 @@ function closeKanbanTaskModal(){
   _kanbanTaskModalMode = 'create';
   _kanbanTaskModalEditingId = null;
   _kanbanTaskModalInitialDisplayedStatus = null;
+  _kanbanSetTaskModalStatusHint(null, null);
+  if (_kanbanTaskModalFocusCleanup) {
+    _kanbanTaskModalFocusCleanup();
+    _kanbanTaskModalFocusCleanup = null;
+  }
   document.removeEventListener('keydown', _kanbanTaskModalKey);
 }
 
@@ -2329,6 +2502,11 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
   // Auto-focus name field
   setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
   // Auto-suggest slug from name as user types
@@ -2368,6 +2546,11 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
+  _kanbanBoardModalFocusCleanup = _trapModalFocus(modal);
   setTimeout(() => document.getElementById('kanbanBoardModalName').focus(), 50);
   document.addEventListener('keydown', _kanbanBoardModalEsc);
 }
@@ -2379,6 +2562,10 @@ function _kanbanBoardModalEsc(ev){
 function closeKanbanBoardModal(){
   const modal = document.getElementById('kanbanBoardModal');
   if (modal) modal.hidden = true;
+  if (_kanbanBoardModalFocusCleanup) {
+    _kanbanBoardModalFocusCleanup();
+    _kanbanBoardModalFocusCleanup = null;
+  }
   document.removeEventListener('keydown', _kanbanBoardModalEsc);
 }
 
@@ -2491,6 +2678,32 @@ function _selectedLogsTail() {
   return [100,200,500,1000].includes(value) ? value : 200;
 }
 
+function _severityForLine(line) {
+  const text = String(line || '').toUpperCase();
+  if (/\b(ERROR|CRITICAL|TRACEBACK)\b/.test(text)) return 'error';
+  if (/\b(WARNING|WARN)\b/.test(text)) return 'warning';
+  if (/\b(DEBUG)\b/.test(text)) return 'debug';
+  if (/\b(INFO)\b/.test(text)) return 'info';
+  return 'other';
+}
+
+function _filteredLogsLines() {
+  if (_logsSeverityFilter === 'all') return _lastLogsLines;
+  return _lastLogsLines.filter(line => {
+    const sev = _severityForLine(line);
+    if (_logsSeverityFilter === 'errors') return sev === 'error';
+    if (_logsSeverityFilter === 'warnings') return sev === 'warning' || sev === 'error';
+    return true;
+  });
+}
+
+function _applyLogsSeverityFilter() {
+  const el = $('logsSeverityFilter');
+  _logsSeverityFilter = (el && el.value) || 'all';
+  // Re-render from cached lines without re-fetching
+  _renderLogs({ lines: _lastLogsLines, hint: '', truncated: false, _fromFilter: true });
+}
+
 function _logLineSeverityClass(line) {
   const text = String(line || '').toUpperCase();
   if (/\b(WARNING|WARN)\b/.test(text)) return 'log-line-warning';
@@ -2538,14 +2751,19 @@ function _renderLogs(data) {
   const box = $('logsOutput');
   const status = $('logsStatus');
   if (!box) return;
-  const lines = Array.isArray(data && data.lines) ? data.lines : [];
-  _lastLogsLines = lines.slice();
+  const rawLines = Array.isArray(data && data.lines) ? data.lines : [];
+  // Only update cache when loading fresh data (not when re-rendering from filter)
+  if (data && !data._fromFilter) _lastLogsLines = rawLines.slice();
+  const displayLines = _filteredLogsLines();
   const hint = data && data.hint ? `<div class="logs-hint">${esc(data.hint)}</div>` : '';
   const truncated = data && data.truncated ? `<div class="logs-hint warn">${esc(t('logs_truncated_hint'))}</div>` : '';
-  if (!lines.length) {
-    box.innerHTML = `${hint}${truncated}<div class="logs-empty">${esc(t('logs_empty'))}</div>`;
+  const filterNote = _logsSeverityFilter !== 'all'
+    ? `<div class="logs-hint">${esc(displayLines.length + ' / ' + _lastLogsLines.length + ' ' + t('logs_filter_active'))}</div>`
+    : '';
+  if (!displayLines.length) {
+    box.innerHTML = `${hint}${truncated}${filterNote}<div class="logs-empty">${esc(t('logs_empty'))}</div>`;
   } else {
-    box.innerHTML = `${hint}${truncated}` + lines.map(line => {
+    box.innerHTML = `${hint}${truncated}${filterNote}` + displayLines.map(line => {
       const cls = _logLineSeverityClass(line);
       return `<div class="log-line ${cls}">${esc(line)}</div>`;
     }).join('');
@@ -2554,7 +2772,7 @@ function _renderLogs(data) {
   if (status) {
     const bytes = data && Number(data.total_bytes || 0);
     const when = data && data.mtime ? new Date(data.mtime * 1000).toLocaleString() : t('logs_no_mtime');
-    status.textContent = `${lines.length} / ${data.tail || _selectedLogsTail()} lines · ${bytes.toLocaleString()} bytes · ${when}`;
+    status.textContent = `${rawLines.length} / ${data.tail || _selectedLogsTail()} lines · ${bytes.toLocaleString()} bytes · ${when}`;
   }
 }
 
@@ -2582,9 +2800,10 @@ function _syncLogsAutoRefresh() {
 }
 
 async function copyLogsAll() {
-  const text = _lastLogsLines.join('\n');
+  const lines = _filteredLogsLines();
+  const text = lines.join('\n');
   try {
-    await navigator.clipboard.writeText(text);
+    await _copyText(text);
     showToast(t('logs_copied'));
   } catch(e) {
     showToast(t('copy_failed'), 'error');
@@ -2699,6 +2918,66 @@ function _renderLlmWikiStatus(d) {
     </div>`;
 }
 
+/**
+ * Bucket daily token rows for chart display.
+ * Returns rows unchanged when length <= 30 (per-day resolution).
+ * For longer ranges, groups consecutive days into buckets:
+ *   31–90 days → 2-day buckets
+ *   91–180 days → 3-day buckets
+ *   181–365 days → 8-day buckets
+ * Result is always <= ~52 bars.
+ * Each bucket row has:
+ *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
+ *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
+ *   - date: first date in bucket (used for date label slicing)
+ *   - input_tokens, output_tokens, sessions, cost: summed across bucket
+ */
+function _bucketDailyTokensForChart(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const len = rows.length;
+  if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
+
+  // Target <= 75 bars; derive bucket size
+  let bucketSize;
+  if (len <= 90) {
+    bucketSize = 2;
+  } else if (len <= 180) {
+    bucketSize = 3;
+  } else if (len <= 365) {
+    bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
+  } else {
+    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+  }
+
+  const result = [];
+  for (let i = 0; i < len; i += bucketSize) {
+    const slice = rows.slice(i, i + bucketSize);
+    const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
+    const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
+    const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
+
+    const firstDate = slice[0].date;
+    const lastDate = slice[slice.length - 1].date;
+
+    // Label: short form for axis
+    const firstLabel = String(firstDate).slice(5);  // MM-DD
+    const lastLabel = String(lastDate).slice(5);
+    const label = (firstDate === lastDate) ? firstLabel : (firstLabel + '–' + lastLabel);
+
+    result.push({
+      label,
+      title: firstDate + (firstDate !== lastDate ? ' – ' + lastDate : ''),
+      date: firstDate,
+      input_tokens,
+      output_tokens,
+      sessions,
+      cost,
+    });
+  }
+  return result;
+}
+
 function _renderInsights(d, box, wikiStatus) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
@@ -2718,21 +2997,24 @@ function _renderInsights(d, box, wikiStatus) {
     { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
   ];
 
-  // Daily token trend
+  // Daily token trend — bucket long ranges to avoid horizontal overflow
   const dailyTokens = Array.isArray(d.daily_tokens) ? d.daily_tokens : [];
+  const chartRows = _bucketDailyTokensForChart(dailyTokens);
   let dailyHtml = '';
-  if (dailyTokens.length) {
-    const maxDailyTokens = Math.max(...dailyTokens.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
-    const labelEvery = Math.max(Math.ceil(dailyTokens.length / 7), 1);
+  if (chartRows.length) {
+    const maxDailyTokens = Math.max(...chartRows.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
+    const labelEvery = Math.max(Math.ceil(chartRows.length / 7), 1);
     dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-daily-token-chart">` +
-      dailyTokens.map((r, idx) => {
+      chartRows.map((r, idx) => {
         const input = Number(r.input_tokens || 0);
         const output = Number(r.output_tokens || 0);
         const inputPct = Math.max((input / maxDailyTokens) * 100, input ? 2 : 0).toFixed(1);
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
-        const showLabel = idx === 0 || idx === dailyTokens.length - 1 || idx % labelEvery === 0;
-        const title = `${r.date} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
-        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(String(r.date).slice(5)) : ''}</span></div>`;
+        const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
+        const titleDate = r.title || r.date;
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
+        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
       `</div><div class="insights-daily-legend"><span><i class="insights-daily-legend-input"></i>${esc(t('insights_input_tokens'))}</span><span><i class="insights-daily-legend-output"></i>${esc(t('insights_output_tokens'))}</span></div></div>`;
   } else {
@@ -2804,7 +3086,7 @@ function _renderInsights(d, box, wikiStatus) {
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
     ${dailyHtml}
-    <div class="insights-row">
+    <div class="insights-row insights-usage-grid">
       ${tokenCards}
       ${modelsHtml}
     </div>
@@ -3524,6 +3806,24 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   // ── Footer actions ────────────────────────────────────────────────────────
   dd.appendChild(document.createElement('div')).className='ws-divider';
   dd.appendChild(_renderWorkspaceAction(
+    t('workspace_new_worktree_conversation'),
+    t('workspace_new_worktree_conversation_meta'),
+    li('git-branch',12),
+    async()=>{
+      closeWsDropdown();
+      try{
+        await newSession(false,{worktree:true});
+        await renderSessionList();
+        const msg=$('msg');
+        if(msg)msg.focus();
+        showToast(t('workspace_worktree_created'));
+      }catch(e){
+        showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+      }
+    }
+  ));
+  dd.appendChild(document.createElement('div')).className='ws-divider';
+  dd.appendChild(_renderWorkspaceAction(
     t('workspace_choose_path'),
     t('workspace_choose_path_meta'),
     li('folder',12),
@@ -4193,6 +4493,7 @@ async function deleteCurrentProfile(){
   if(!_ok) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     _clearProfileDetail();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
@@ -4476,6 +4777,7 @@ async function saveProfileForm(){
     if (baseUrl) payload.base_url = baseUrl;
     if (apiKey) payload.api_key = apiKey;
     await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
+    _invalidateKanbanProfileCache();
     _profilePreFormDetail = null;
     await loadProfilesPanel();
     showToast(t('profile_created', name));
@@ -4496,6 +4798,7 @@ async function deleteProfile(name) {
   if(!_delProf) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _invalidateKanbanProfileCache();
     await loadProfilesPanel();
     showToast(t('profile_deleted', name));
   } catch (e) { showToast(t('delete_failed') + e.message); }
@@ -5205,13 +5508,20 @@ const _RECOMMENDED_PROVIDERS = ['venice','bankr','anthropic','openrouter','nous'
 let _providerActiveTab = 'recommended';
 // <<< hermes-fork
 
+async function _fetchProviderQuotaStatus(force=false){
+  const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
+  const status=await api(endpoint,{cache:'no-store'});
+  if(status&&typeof status==='object') status.client_fetched_at=new Date().toISOString();
+  return status;
+}
+
 async function loadProvidersPanel(){
   const list=$('providersList');
   const empty=$('providersEmpty');
   if(!list) return;
   try{
     const data=await api('/api/providers');
-    const quota=await api('/api/provider/quota').catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||'Quota status unavailable'}));
+    const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||'Quota status unavailable',client_fetched_at:new Date().toISOString()}));
     const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
     list.innerHTML='';
     _providerCardEls.clear();
@@ -5295,6 +5605,40 @@ async function loadProvidersPanel(){
   // <<< hermes-fork
 }
 
+async function _refreshProviderQuota(card,button){
+  if(!card) return;
+  if(button){
+    button.disabled=true;
+    button.textContent='Refreshing…';
+    button.setAttribute('aria-busy','true');
+  }
+  let failed=false;
+  let next;
+  try{
+    next=await _fetchProviderQuotaStatus(true);
+    failed=next&&next.ok===false;
+  }catch(e){
+    failed=true;
+    next={ok:false,status:'unavailable',quota:null,message:e.message||'Quota status unavailable',client_fetched_at:new Date().toISOString()};
+  }
+  try{
+    const fresh=_buildProviderQuotaCard(next);
+    if(fresh){
+      card.replaceWith(fresh);
+      if(typeof showToast==='function') showToast(failed?'Provider usage refresh failed':'Provider usage refreshed');
+      return;
+    }
+  }catch(e){
+    failed=true;
+  }
+  if(card.isConnected&&button){
+    button.disabled=false;
+    button.textContent='Refresh usage';
+    button.removeAttribute('aria-busy');
+  }
+  if(typeof showToast==='function') showToast('Provider usage refresh failed');
+}
+
 function _formatProviderQuotaMoney(value){
   if(value===null||value===undefined||value==='') return '—';
   const n=Number(value);
@@ -5324,6 +5668,15 @@ function _formatProviderQuotaWindowLabel(accountLimits,w){
     if(raw.toLowerCase()==='weekly') return 'Weekly limit';
   }
   return raw||'Window';
+}
+
+function _formatProviderQuotaLastChecked(status){
+  const accountLimits=status&&status.account_limits;
+  const value=(accountLimits&&accountLimits.fetched_at)||status&&status.client_fetched_at;
+  if(!value) return 'Last checked after refresh';
+  const d=new Date(value);
+  if(Number.isNaN(d.getTime())) return 'Last checked after refresh';
+  try{return 'Last checked '+d.toLocaleString();}catch(e){return 'Last checked '+value;}
 }
 
 function _buildProviderQuotaCard(status){
@@ -5373,11 +5726,17 @@ function _buildProviderQuotaCard(status){
       <div>
         <div class="provider-quota-title">Active provider quota</div>
         <div class="provider-quota-subtitle">${esc(provider)}</div>
+        <div class="provider-quota-checked">${esc(_formatProviderQuotaLastChecked(status))}</div>
       </div>
-      <span class="provider-quota-badge">${esc(state.replace(/_/g,' '))}</span>
+      <div class="provider-quota-actions">
+        <span class="provider-quota-badge">${esc(state.replace(/_/g,' '))}</span>
+        <button class="provider-quota-refresh" type="button" data-provider-quota-refresh title="Refresh provider usage limits now">Refresh usage</button>
+      </div>
     </div>
     <div class="provider-quota-body">${body}</div>
   `;
+  const refreshBtn=card.querySelector('[data-provider-quota-refresh]');
+  if(refreshBtn) refreshBtn.addEventListener('click',()=>_refreshProviderQuota(card,refreshBtn));
   return card;
 }
 
@@ -5924,7 +6283,9 @@ function startCronPolling(){
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
-          showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
+          if(c.toast_notifications !== false){
+            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
+          }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
         }
@@ -5964,7 +6325,7 @@ function _clearCronUnreadForJob(jobId){
 }
 
 const _origSwitchPanel=switchPanel;
-switchPanel=async function(name){ return _origSwitchPanel(name); };
+switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
