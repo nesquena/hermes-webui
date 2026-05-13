@@ -24,3 +24,15 @@ def test_active_session_external_refresh_has_focus_and_visibility_hooks():
     assert "visibilitychange" in SESSIONS_JS
     assert "window.addEventListener('focus'" in SESSIONS_JS
     assert "ensureActiveSessionExternalRefreshPoll();" in SESSIONS_JS
+
+
+def test_force_reload_clears_stale_blocking_prompts_immediately():
+    """External refresh should not leave old approval/clarify modals blocking the composer.
+
+    hideApprovalCard() and hideClarifyCard() defer hiding for their minimum-visible
+    timers unless force=true. That is correct for active streams, but when a
+    same-session external state.db update triggers loadSession(..., {force:true}),
+    the session has completed elsewhere and stale prompts should be removed now.
+    """
+    assert "hideApprovalCard(forceReload)" in SESSIONS_JS
+    assert "hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed')" in SESSIONS_JS

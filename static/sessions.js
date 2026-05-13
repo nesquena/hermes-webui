@@ -460,10 +460,10 @@ async function loadSession(sid, opts){
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
-  stopApprovalPolling();hideApprovalCard();
+  stopApprovalPolling();hideApprovalCard(forceReload);
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
-  if(typeof hideClarifyCard==='function') hideClarifyCard();
+  if(typeof hideClarifyCard==='function') hideClarifyCard(forceReload, forceReload?'external-refresh':'dismissed');
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
