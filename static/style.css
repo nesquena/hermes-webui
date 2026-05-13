@@ -3775,7 +3775,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .logs-empty,.logs-hint{margin:8px 14px;padding:12px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:var(--surface);white-space:normal;font-family:var(--font-ui,system-ui,sans-serif);font-size:12px;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
 
-  .settings-branding-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start;}
+  .settings-branding-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-areas:"name logo" "favicon logo";gap:12px;align-items:start;}
+  #mainSettings .settings-branding-grid > .settings-field{margin-bottom:0;}
+  .settings-branding-grid > .settings-field:nth-child(1){grid-area:name;}
+  .settings-branding-grid > .settings-field:nth-child(2){grid-area:logo;}
+  .settings-branding-grid > .settings-field:nth-child(3){grid-area:favicon;}
+  @media (max-width:680px){.settings-branding-grid{grid-template-columns:1fr;grid-template-areas:"name" "logo" "favicon";}}
   .brand-file-control{display:flex;align-items:center;min-width:0;width:100%;height:38px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;overflow:hidden;}
   .brand-file-actions{display:grid;grid-template-columns:minmax(92px,.8fr) minmax(160px,1.2fr);gap:8px;margin-top:8px;}
   .brand-file-action{min-height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:7px;background:rgba(255,255,255,.03);color:var(--accent);font-size:12px;font-weight:650;cursor:pointer;white-space:nowrap;}

@@ -237,6 +237,16 @@ def test_custom_logo_retains_skin_accent_glow():
     assert ".brand-logo.is-custom{background:transparent;border-color:var(--border2);box-shadow:none" not in style
 
 
+def test_branding_settings_grid_keeps_favicon_tucked_under_name():
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    assert 'grid-template-areas:"name logo" "favicon logo"' in style
+    assert "#mainSettings .settings-branding-grid > .settings-field{margin-bottom:0;}" in style
+    assert ".settings-branding-grid > .settings-field:nth-child(1){grid-area:name;}" in style
+    assert ".settings-branding-grid > .settings-field:nth-child(2){grid-area:logo;}" in style
+    assert ".settings-branding-grid > .settings-field:nth-child(3){grid-area:favicon;}" in style
+    assert '@media (max-width:680px){.settings-branding-grid{grid-template-columns:1fr;grid-template-areas:"name" "logo" "favicon";}}' in style
+
+
 def test_cached_custom_logo_hides_default_logo_before_boot_reconciliation():
     style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "html[data-branding-logo-cached] #appTitlebarLogo:not(.is-custom) > svg" in style
