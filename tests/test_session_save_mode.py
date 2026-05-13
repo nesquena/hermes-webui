@@ -71,6 +71,47 @@ def test_deferred_chat_start_persists_pending_only_before_thread(_isolate_state,
     assert on_disk["pending_user_message"] == "hello deferred"
 
 
+def test_deferred_chat_start_preserves_longer_persisted_display_transcript(_isolate_state, monkeypatch):
+    monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "deferred"}})
+    long_messages = [
+        {"role": "user", "content": "before compression"},
+        {"role": "assistant", "content": "long answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+    persisted = Session(
+        session_id="compressed_child",
+        workspace=str(_isolate_state.parent),
+        messages=long_messages,
+        compression_anchor_visible_idx=1,
+        compression_anchor_message_key={"role": "assistant", "ts": None, "text": "long answer", "attachments": 0},
+        compression_anchor_summary="Context compacted",
+    )
+    persisted.save()
+    short_context = Session(
+        session_id=persisted.session_id,
+        workspace=str(_isolate_state.parent),
+        messages=[{"role": "assistant", "content": "compressed summary"}],
+    )
+
+    routes._prepare_chat_start_session_for_stream(
+        short_context,
+        msg="next turn",
+        attachments=[],
+        workspace=str(_isolate_state.parent),
+        model=short_context.model,
+        model_provider=short_context.model_provider,
+        stream_id="stream_after_compression",
+        started_at=321.0,
+    )
+
+    on_disk = json.loads(short_context.path.read_text(encoding="utf-8"))
+    assert on_disk["messages"] == long_messages
+    assert on_disk["pending_user_message"] == "next turn"
+    assert on_disk["active_stream_id"] == "stream_after_compression"
+    assert on_disk["compression_anchor_visible_idx"] == 1
+    assert on_disk["compression_anchor_message_key"]["text"] == "long answer"
+
+
 def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_state, monkeypatch):
     monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
     s = new_session(workspace=str(_isolate_state.parent))
@@ -89,6 +130,42 @@ def test_eager_chat_start_checkpoints_first_user_message_before_thread(_isolate_
     assert on_disk["messages"][0]["content"] == "hello eager"
     assert on_disk["messages"][0]["attachments"][0]["name"] == "note.txt"
     assert on_disk["pending_user_message"] == "hello eager"
+
+
+def test_eager_chat_start_appends_checkpoint_to_preserved_display_transcript(_isolate_state, monkeypatch):
+    monkeypatch.setattr(config, "cfg", {"webui": {"session_save_mode": "eager"}})
+    long_messages = [
+        {"role": "user", "content": "older question"},
+        {"role": "assistant", "content": "older answer"},
+    ]
+    persisted = Session(
+        session_id="eager_compressed_child",
+        workspace=str(_isolate_state.parent),
+        messages=long_messages,
+    )
+    persisted.save()
+    short_context = Session(
+        session_id=persisted.session_id,
+        workspace=str(_isolate_state.parent),
+        messages=[{"role": "assistant", "content": "summary"}],
+    )
+
+    routes._prepare_chat_start_session_for_stream(
+        short_context,
+        msg="new eager turn",
+        attachments=[],
+        workspace=str(_isolate_state.parent),
+        model=short_context.model,
+        model_provider=short_context.model_provider,
+        stream_id="stream_eager_after_compression",
+        started_at=654.0,
+    )
+
+    on_disk = json.loads(short_context.path.read_text(encoding="utf-8"))
+    assert on_disk["messages"] == long_messages + [
+        {"role": "user", "content": "new eager turn", "timestamp": 654}
+    ]
+    assert on_disk["pending_user_message"] == "new eager turn"
 
 
 def test_eager_wal_repair_does_not_duplicate_checkpointed_user_message(_isolate_state, monkeypatch):
