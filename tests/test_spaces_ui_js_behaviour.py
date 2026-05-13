@@ -596,11 +596,13 @@ global.fetch = async function(path, opts = {}) {
           queued_space_repair_count: 1,
           latest_space_repair_event: { event_id: 'evt-space-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } },
           renderer: '<script>bad()</script>',
-          revisions: [
+          revisions: (scenario === 'recoveryUnsafeRevisionEventId' ? [
+            { event_id: 'renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK', event_type: 'space.updated', space_id: 'broken', created_at: 1710000250, details: { note: 'safe recovery unsafe-event probe' }, restore_preview: { name: 'Recovery unsafe revision probe', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown' }] }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget'], widgets_to_add: [], widgets_to_remove: [] } },
+          ] : []).concat([
             { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, timeline_state: 'current', is_current_revision: true, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
             { event_id: 'rev-return-present', event_type: 'space.updated', space_id: 'broken', created_at: 1710000150, timeline_state: 'future', is_return_to_present_candidate: true, details: { fields: ['widgets'], note: 'return safely to present', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Broken present checkpoint', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], widgets_to_add: [], widgets_to_remove: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
             { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' }, restore_preview: { name: 'Broken safe checkpoint', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget', 'raw-html-widget', 'script-widget', 'api_auth_widget', 'source-widget', 'secret-widget'], widgets_to_add: ['added-widget'], widgets_to_remove: ['removed-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-          ],
+          ]),
           widgets: [
             { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>', queued_event_count: 1, latest_queued_event: { event_id: 'evt-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } } },
             { id: 'disabled-widget', kind: 'markdown', title: 'Disabled Widget', disabled: true, disabled_reason: 'render failed' },
@@ -940,11 +942,15 @@ global.fetch = async function(path, opts = {}) {
     ] });
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
-    return response({ revisions: [
+    const labRevisions = [
       { event_id: 'rev3', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000060, timeline_state: 'future', is_return_to_present_candidate: false, details: { widget_id: 'weather', fields: ['layout'], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab intermediate', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather intermediate', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
       { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, timeline_state: 'future', is_return_to_present_candidate: true, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: ['weather'], space_fields_to_update: ['name'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
       { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, timeline_state: 'current', is_current_revision: true, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widget_count_delta: -1, widgets_to_add: [], widgets_to_remove: ['notes'], widgets_to_update: ['weather'], space_fields_to_update: ['description'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-    ] });
+    ];
+    if (scenario === 'openSpaceDetailUnsafeRevisionEventId') {
+      labRevisions.unshift({ event_id: 'renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK', event_type: 'space.updated', space_id: 'lab', created_at: 1710000070, details: { note: 'safe unsafe-event probe' }, restore_preview: { name: 'Unsafe revision probe', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather intermediate', kind: 'markdown' }] }, restore_diff: { has_changes: true, widgets_to_update: ['weather'], widgets_to_add: [], widgets_to_remove: [] } });
+    }
+    return response({ revisions: labRevisions });
   }
   if (path === 'api/spaces/widget/upsert') {
     return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
@@ -1964,10 +1970,10 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runAllDemoSmokes', {});
-  } else if (scenario === 'openSpaceDetail') {
+  } else if (scenario === 'openSpaceDetail' || scenario === 'openSpaceDetailUnsafeRevisionEventId') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
-  } else if (scenario === 'openSpaceCanvasRecovery') {
+  } else if (scenario === 'openSpaceCanvasRecovery' || scenario === 'recoveryUnsafeRevisionEventId') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
     beforeHtml = root.innerHTML;
@@ -2617,6 +2623,22 @@ def test_spaces_ui_revision_history_labels_non_candidate_future_rows_metadata_on
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
 
 
+def test_spaces_ui_revision_history_omits_unsafe_event_id_restore_actions_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetailUnsafeRevisionEventId")
+
+    assert "Unsafe revision probe" in out["rootHtml"]
+    assert "[REDACTED]" in out["rootHtml"]
+    assert "data-event-id=\"renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK\"" not in out["rootHtml"]
+    assert "renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "data-event-id=\"rev2\">Return to present</button>" in out["rootHtml"]
+    assert "data-event-id=\"rev3\">Restore</button>" in out["rootHtml"]
+    assert "data-event-id=\"rev1\"" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
 def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driver_path):
     out = _run_spaces_scenario(driver_path, "openSpaceCanvasRecovery")
 
@@ -2653,6 +2675,22 @@ def test_spaces_ui_recovery_history_labels_return_to_present_candidate_metadata_
     assert 'data-event-id="rev-return-present">Restore revision</button>' not in recovery_html
     assert "Broken present checkpoint" in recovery_html
     assert "Bad &lt;Widget&gt;" in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html.lower()
+    assert "api_key" not in recovery_html.lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in recovery_html
+
+
+def test_spaces_ui_recovery_history_omits_unsafe_event_id_restore_actions_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryUnsafeRevisionEventId")
+
+    recovery_html = out["recoveryHtml"]
+    assert "Recovery unsafe revision probe" in recovery_html
+    assert "[REDACTED]" in recovery_html
+    assert "data-event-id=\"renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK\"" not in recovery_html
+    assert "renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK" not in recovery_html
+    assert 'data-event-id="rev-return-present">Return to present</button>' in recovery_html
+    assert 'data-event-id="rev-before-break">Restore revision</button>' in recovery_html
     assert "<script>" not in recovery_html
     assert "renderer" not in recovery_html.lower()
     assert "api_key" not in recovery_html.lower()

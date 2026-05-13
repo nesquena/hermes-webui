@@ -923,7 +923,9 @@
   function renderRevisionHistory(spaceId, revisions){
     const safeRevisions = Array.isArray(revisions) ? revisions : [];
     const rows = safeRevisions.length ? safeRevisions.slice(0, 10).map(function(rev){
-      const eventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const rawEventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const eventId = safePathIdText(rawEventId);
+      const eventIdLabel = eventId || (rawEventId ? '[REDACTED]' : 'no-event-id');
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
@@ -935,7 +937,7 @@
       const restoreButton = !currentRevision && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventIdLabel)+'</div>' +
         (timelineLabel ? '<div class="capy-spaces-muted">'+escapeHtml(timelineLabel)+'</div>' : '') +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
@@ -1079,10 +1081,11 @@
   }
 
   function renderRestoreWidgetButtons(spaceId, eventId, diff, actionName){
-    if (!spaceId || !eventId) return '';
+    const safeEventId = safePathIdText(eventId);
+    if (!spaceId || !safeEventId) return '';
     const action = actionName || 'restoreWidgetRevision';
     return safeRestoreWidgetIds(diff).map(function(widgetId){
-      return '<button type="button" class="capy-spaces-btn" data-capy-action="'+escapeHtml(action)+'" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Restore widget</button>';
+      return '<button type="button" class="capy-spaces-btn" data-capy-action="'+escapeHtml(action)+'" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(safeEventId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Restore widget</button>';
     }).join('');
   }
 
@@ -2502,7 +2505,7 @@
       return;
     }
     if (action === 'restoreRevision') {
-      const eventId = button.dataset.eventId || '';
+      const eventId = safePathIdText(button.dataset.eventId || '');
       if (!spaceId || !eventId || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Restore Space revision?', message: 'Restore space "'+spaceId+'" to revision '+eventId.slice(0, 12)+'? The current manifest remains in revision history.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
@@ -2511,7 +2514,7 @@
       return;
     }
     if (action === 'restoreWidgetRevision') {
-      const eventId = button.dataset.eventId || '';
+      const eventId = safePathIdText(button.dataset.eventId || '');
       const widgetId = button.dataset.widgetId || '';
       if (!spaceId || !eventId || !widgetId || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Restore widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+'? Other widgets in this Space are left unchanged.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
@@ -2699,7 +2702,9 @@
     const safeRevisions = Array.isArray(revisions) ? revisions.slice(0, 5) : [];
     if (!safeRevisions.length) return '<div class="capy-spaces-muted">No recovery rollback points yet.</div>';
     return safeRevisions.map(function(rev){
-      const eventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const rawEventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const eventId = safePathIdText(rawEventId);
+      const eventIdLabel = eventId || (rawEventId ? '[REDACTED]' : 'no-event-id');
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'revision';
       const detailText = formatRevisionDetails(rev && rev.details);
       const previewText = formatRestorePreview(rev && rev.restore_preview);
@@ -2711,7 +2716,7 @@
       const widgetRestoreButtons = currentRevision ? '' : renderRestoreWidgetButtons(actionSpaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventIdLabel)+'</div>' +
         (timelineLabel ? '<div class="capy-spaces-muted">'+escapeHtml(timelineLabel)+'</div>' : '') +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
@@ -2963,7 +2968,7 @@
     }
     if (typeof showConfirmDialog !== 'function') return;
     if (action === 'restoreRecoveryRevision') {
-      const eventId = button.dataset.eventId || '';
+      const eventId = safePathIdText(button.dataset.eventId || '');
       if (!eventId) return;
       const ok = await showConfirmDialog({title: 'Restore recovery revision?', message: 'Restore Space "'+spaceId+'" to revision '+eventId.slice(0, 12)+' from safe recovery? The current manifest remains in revision history, and generated widget bodies are not displayed here.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
@@ -2972,7 +2977,7 @@
       return;
     }
     if (action === 'restoreRecoveryWidgetRevision') {
-      const eventId = button.dataset.eventId || '';
+      const eventId = safePathIdText(button.dataset.eventId || '');
       const widgetId = button.dataset.widgetId || '';
       if (!eventId || !widgetId) return;
       const ok = await showConfirmDialog({title: 'Restore recovery widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+' in safe recovery? Other widgets are left unchanged, and generated widget bodies are not displayed here.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
