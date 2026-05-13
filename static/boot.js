@@ -1367,6 +1367,100 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+
+const HERMES_DEFAULT_FAVICONS = {
+  svg: 'static/favicon.svg',
+  png32: 'static/favicon-32.png',
+  shortcut: 'static/favicon.ico',
+  apple: 'static/apple-touch-icon.png',
+};
+
+function _isSafeLogoUrl(value){
+  const raw=(value||'').trim();
+  if(!raw) return '';
+  if(raw.length>256000) return '';
+  if(raw.startsWith('data:image/')){
+    const header=(raw.split(',',1)[0]||'').toLowerCase();
+    const parts=header.split(';');
+    const mime=(parts[0]||'').replace(/^data:/,'');
+    const allowed={
+      'image/png':true,
+      'image/jpeg':true,
+      'image/webp':true,
+      'image/gif':true,
+      'image/x-icon':true,
+      'image/vnd.microsoft.icon':true,
+    };
+    return allowed[mime] && parts.includes('base64') ? raw : '';
+  }
+  if(!/^https?:\/\//i.test(raw)) return '';
+  try{
+    const u=new URL(raw);
+    return (u.protocol==='http:'||u.protocol==='https:') && u.host ? u.href : '';
+  }catch(_){
+    return '';
+  }
+}
+
+function _renderHermesTitlebarLogoFallback(el){
+  if(!el) return;
+  el.innerHTML='<svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true"><defs><linearGradient id="app-titlebar-gold" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#F5C542"/><stop offset="100%" style="stop-color:#D4961C"/></linearGradient></defs><rect x="30" y="10" width="4" height="46" rx="2" fill="url(#app-titlebar-gold)"/><path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/><path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/><circle cx="32" cy="10" r="4" fill="#F5C542"/></svg>';
+}
+
+function _renderHermesEmptyLogoFallback(el){
+  if(!el) return;
+  el.innerHTML='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus"><defs><linearGradient id="hermes-gold" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/><stop offset="100%" style="stop-color:#D4961C;stop-opacity:1"/></linearGradient></defs><rect x="30" y="10" width="4" height="46" rx="2" fill="url(#hermes-gold)"/><path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/><path d="M30 22 C26 19, 18 19, 14 22 C18 20, 24 20, 28 24" fill="#D4961C" opacity="0.8"/><path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/><path d="M34 22 C38 19, 46 19, 50 22 C46 20, 40 20, 36 24" fill="#D4961C" opacity="0.8"/><path d="M32 48 C22 44, 20 38, 26 34 C20 36, 18 42, 24 46 C18 40, 22 30, 30 28 C24 32, 22 38, 28 42" fill="none" stroke="#F5C542" stroke-width="2.5" stroke-linecap="round"/><path d="M32 48 C42 44, 44 38, 38 34 C44 36, 46 42, 40 46 C46 40, 42 30, 34 28 C40 32, 42 38, 36 42" fill="none" stroke="#D4961C" stroke-width="2.5" stroke-linecap="round"/><circle cx="32" cy="10" r="4" fill="#F5C542"/><circle cx="32" cy="10" r="2" fill="#FFF8E1" opacity="0.7"/></svg>';
+}
+
+function _renderHermesSmallLetterFallback(el){
+  if(!el) return;
+  const name=(window._botName||'Hermes').trim()||'Hermes';
+  el.textContent=name.charAt(0).toUpperCase();
+}
+
+function _setLogoTarget(el, url, fallbackFactory){
+  if(!el) return;
+  el.classList.toggle('is-custom', !!url);
+  if(!url){
+    if(fallbackFactory) fallbackFactory(el);
+    return;
+  }
+  el.innerHTML='';
+  const img=document.createElement('img');
+  img.src=url;
+  img.alt='';
+  img.decoding='async';
+  img.loading='eager';
+  img.onerror=function(){
+    el.classList.remove('is-custom');
+    if(fallbackFactory) fallbackFactory(el);
+  };
+  el.appendChild(img);
+}
+
+function applyBrandingLogo(value){
+  const url=_isSafeLogoUrl(value);
+  window._botLogo=url;
+  const favSvg=document.getElementById('faviconSvg');
+  const fav32=document.getElementById('favicon32');
+  const favShortcut=document.getElementById('faviconShortcut');
+  const apple=document.getElementById('appleTouchIcon');
+  if(url){
+    if(favSvg) favSvg.setAttribute('href',url);
+    if(fav32) fav32.setAttribute('href',url);
+    if(favShortcut) favShortcut.setAttribute('href',url);
+    if(apple) apple.setAttribute('href',url);
+  }else{
+    if(favSvg) favSvg.setAttribute('href',HERMES_DEFAULT_FAVICONS.svg);
+    if(fav32) fav32.setAttribute('href',HERMES_DEFAULT_FAVICONS.png32);
+    if(favShortcut) favShortcut.setAttribute('href',HERMES_DEFAULT_FAVICONS.shortcut);
+    if(apple) apple.setAttribute('href',HERMES_DEFAULT_FAVICONS.apple);
+  }
+  _setLogoTarget(document.getElementById('appTitlebarLogo'), url, _renderHermesTitlebarLogoFallback);
+  _setLogoTarget(document.getElementById('emptyStateLogo'), url, _renderHermesEmptyLogoFallback);
+  _setLogoTarget(document.getElementById('settingsBotLogoPreview'), url, _renderHermesSmallLetterFallback);
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -1385,6 +1479,7 @@ function applyBotName(){
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
+    window._botLogo=s.bot_logo||'';
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
@@ -1406,6 +1501,7 @@ function applyBotName(){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     applyBotName();
+    applyBrandingLogo(window._botLogo);
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -1422,6 +1518,7 @@ function applyBotName(){
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
+    window._botLogo='';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
@@ -1431,6 +1528,7 @@ function applyBotName(){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     applyBotName();
+    applyBrandingLogo('');
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)

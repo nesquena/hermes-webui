@@ -5082,6 +5082,8 @@ function _preferencesPayloadFromUi(){
   if(busyInputModeSel) payload.busy_input_mode=busyInputModeSel.value;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
+  const botLogoField=$('settingsBotLogo');
+  if(botLogoField) payload.bot_logo=botLogoField.value;
   return payload;
 }
 
@@ -5130,6 +5132,11 @@ async function _autosavePreferencesSettings(payload){
       window._showTps=!!(saved&&saved.show_tps);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.bot_logo!==undefined && typeof applyBrandingLogo==='function'){
+      applyBrandingLogo((saved&&saved.bot_logo)||'');
+      const logoField=$('settingsBotLogo');
+      if(logoField) logoField.value=(saved&&saved.bot_logo)||'';
     }
     _settingsPreferencesAutosaveRetryPayload=null;
     _setPreferencesAutosaveStatus('saved');
@@ -5387,6 +5394,24 @@ async function loadSettingsPanel(){
         botNameTimer=setTimeout(_schedulePreferencesAutosave,500);
       },{once:false});
     }
+    const botLogoField=$('settingsBotLogo');
+    if(botLogoField){
+      botLogoField.value=settings.bot_logo||'';
+      botLogoField.addEventListener('input',()=>{
+        if(typeof applyBrandingLogo==='function') applyBrandingLogo(botLogoField.value);
+        _schedulePreferencesAutosave();
+      },{once:false});
+      botLogoField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
+    const botLogoClear=$('settingsBotLogoClear');
+    if(botLogoClear){
+      botLogoClear.addEventListener('click',()=>{
+        if(botLogoField) botLogoField.value='';
+        if(typeof applyBrandingLogo==='function') applyBrandingLogo('');
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    if(typeof applyBrandingLogo==='function') applyBrandingLogo(settings.bot_logo||'');
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -5943,7 +5968,9 @@ function _applySavedSettingsUi(saved, body, opts){
   window._busyInputMode=body.busy_input_mode||'queue';
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
   window._botName=body.bot_name||'Hermes';
+  window._botLogo=(saved&&saved.bot_logo!==undefined)?saved.bot_logo:(body.bot_logo||'');
   if(typeof applyBotName==='function') applyBotName();
+  if(typeof applyBrandingLogo==='function') applyBrandingLogo(window._botLogo);
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
   if(typeof startGatewaySSE==='function'){
@@ -6055,6 +6082,7 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  body.bot_logo=(($('settingsBotLogo')||{}).value||'').trim();
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{

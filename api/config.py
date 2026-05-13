@@ -3903,6 +3903,9 @@ _SETTINGS_DEFAULTS = {
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
+    "bot_logo": os.getenv(
+        "HERMES_WEBUI_BOT_LOGO", ""
+    ),  # optional custom logo/favicon image URL
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
@@ -3972,6 +3975,35 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     return next_theme, next_skin
 
 
+_BOT_LOGO_DATA_MIME_ALLOWLIST = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+}
+
+
+def _normalize_bot_logo(value) -> str:
+    """Return a safe custom bot logo URL/data URL, or an empty fallback value."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 256_000:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return raw[:4096]
+    if raw.lower().startswith("data:image/"):
+        header = raw.split(",", 1)[0].lower()
+        parts = header.split(";")
+        mime = parts[0][5:] if parts and parts[0].startswith("data:") else ""
+        if mime in _BOT_LOGO_DATA_MIME_ALLOWLIST and "base64" in parts[1:]:
+            return raw
+    return ""
+
+
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
@@ -4000,6 +4032,7 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    settings["bot_logo"] = _normalize_bot_logo(settings.get("bot_logo"))
     settings["default_model"] = get_effective_default_model()
     return settings
 
@@ -4071,6 +4104,8 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
+            if k == "bot_logo":
+                v = _normalize_bot_logo(v)
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
