@@ -862,7 +862,7 @@ global.fetch = async function(path, opts = {}) {
       title: scenario === 'runtimeUnsafeWidgetTitlePrompt' ? 'renderer panel token SECRET_VALUE_DO_NOT_LEAK' : '<Weather>',
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: false },
       recovery: { disabled: false },
-      revision_event_id: 'rev-weather',
+      revision_event_id: scenario === 'viewWidgetDetailsUnsafeRevisionEventId' ? 'source' : '0123456789abcdef0123456789abcdef',
       metadata: {
         content_status: 'agent-managed-empty',
         export: { pdf: 'planned' },
@@ -1326,7 +1326,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
     await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4' });
-  } else if (scenario === 'viewWidgetDetails') {
+  } else if (scenario === 'viewWidgetDetails' || scenario === 'viewWidgetDetailsUnsafeRevisionEventId') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
@@ -2998,6 +2998,22 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "onerror" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_view_widget_details_redacts_unsafe_revision_event_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "viewWidgetDetailsUnsafeRevisionEventId")
+    html = out["rootHtml"]
+
+    assert "Widget details" in html
+    assert "&lt;Weather&gt;" in html
+    assert "Revision: [REDACTED]" in html
+    assert "Revision: source" not in html
+    assert "source" not in html.lower()
+    assert "../" not in html
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "renderer" not in html.lower()
+    assert "<script>" not in html
 
 
 def test_spaces_ui_widget_details_renders_opaque_metadata_only_sandbox_iframe(driver_path):

@@ -593,6 +593,11 @@
     return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) && !unsafeActionIdPattern.test(text) ? text : '';
   }
 
+  function safeRevisionEventIdText(value){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    return /^[a-f0-9]{32}$/.test(text) ? text : '';
+  }
+
   function safeDisplayMetadataText(value, fallback){
     const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
     if (!text) return fallback || '';
@@ -1671,7 +1676,10 @@
     const layout = widgetLayout(safeWidget);
     const recovery = safeWidget.recovery && typeof safeWidget.recovery === 'object' ? safeWidget.recovery : {};
     const recoveryText = recovery.disabled ? 'Recovery: disabled' : 'Recovery: enabled';
-    const revision = safeWidget.revision_event_id ? ' · Revision: '+escapeHtml(safeWidget.revision_event_id) : '';
+    const rawRevision = safeWidget.revision_event_id ? String(safeWidget.revision_event_id) : '';
+    const safeRevision = safeRevisionEventIdText(rawRevision);
+    const revisionLabel = safeRevision || (rawRevision ? '[REDACTED]' : '');
+    const revision = revisionLabel ? ' · Revision: '+escapeHtml(revisionLabel) : '';
     const metadata = safeWidget.metadata && typeof safeWidget.metadata === 'object' && !Array.isArray(safeWidget.metadata) ? safeWidget.metadata : {};
     const metadataText = formatRevisionDetails(metadata || {});
     const metadataRow = metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '';

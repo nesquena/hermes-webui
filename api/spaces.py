@@ -4947,8 +4947,9 @@ def read_widget_detail(space_id: str, widget_id: str) -> dict[str, Any]:
     recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
     if recovery:
         detail["recovery"] = _payload_summary(recovery)
-    if widget.get("revision_event_id"):
-        detail["revision_event_id"] = _payload_text_summary(widget.get("revision_event_id"), 120)
+    revision_event_id = _public_revision_event_id(widget.get("revision_event_id"))
+    if revision_event_id:
+        detail["revision_event_id"] = revision_event_id
     return detail
 
 

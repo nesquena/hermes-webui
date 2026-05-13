@@ -142,6 +142,53 @@ def test_public_space_summaries_redact_unsafe_current_revision_event_id(monkeypa
     assert "escape" not in serialized
 
 
+def test_public_widget_detail_redacts_unsafe_revision_event_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-revision-id-lab", "name": "Widget Revision ID Lab"})
+    safe_widget_revision = "0123456789abcdef0123456789abcdef"
+    unsafe_widget_revision = "rev/../escape"
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "safe-widget", "kind": "status", "title": "Safe Widget"},
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "unsafe-widget", "kind": "status", "title": "Unsafe Widget"},
+    )
+    manifest_path = spaces._manifest_path(created["space_id"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for widget in manifest["widgets"]:
+        if widget["id"] == "safe-widget":
+            widget["revision_event_id"] = safe_widget_revision
+        if widget["id"] == "unsafe-widget":
+            widget["revision_event_id"] = unsafe_widget_revision
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    safe_detail = spaces.read_widget_detail(created["space_id"], "safe-widget")
+    unsafe_detail = spaces.read_widget_detail(created["space_id"], "unsafe-widget")
+    tool_read = spaces.run_space_tool(
+        "space.spaces.readWidget",
+        {"spaceId": created["space_id"], "widgetId": "unsafe-widget"},
+    )
+    current_read = spaces.run_space_tool(
+        "space.current.readWidget",
+        {"activeSpaceId": created["space_id"], "widgetId": "unsafe-widget"},
+    )
+    serialized = json.dumps(
+        {"safe_detail": safe_detail, "unsafe_detail": unsafe_detail, "tool_read": tool_read, "current_read": current_read},
+        sort_keys=True,
+    ).lower()
+
+    assert safe_detail["revision_event_id"] == safe_widget_revision
+    assert "revision_event_id" not in unsafe_detail
+    assert tool_read["widget"] == unsafe_detail
+    assert current_read["widget"] == unsafe_detail
+    assert safe_widget_revision in serialized
+    assert unsafe_widget_revision not in serialized
+    assert "../" not in serialized
+    assert "escape" not in serialized
+
+
 def test_space_public_display_metadata_preserves_benign_source_and_data_labels(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
