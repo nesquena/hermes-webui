@@ -7014,7 +7014,34 @@ def _handle_chat_start(handler, body, diag=None):
         try:
             s = get_session(body["session_id"])
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # Auto-import CLI session for continuation
+            sid = body["session_id"]
+            cli_meta = None
+            for cs in get_cli_sessions():
+                if cs["session_id"] == sid:
+                    cli_meta = cs
+                    break
+            if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            msgs = get_cli_session_messages(sid)
+            if not msgs:
+                return bad(handler, "Session not found", 404)
+            s = import_cli_session(
+                sid,
+                cli_meta.get("title") or title_from(msgs, "CLI Session"),
+                msgs,
+                cli_meta.get("model") or "unknown",
+                profile=cli_meta.get("profile"),
+                created_at=cli_meta.get("created_at"),
+                updated_at=cli_meta.get("updated_at"),
+                parent_session_id=cli_meta.get("parent_session_id"),
+            )
+            s.is_cli_session = True
+            s.source_tag = cli_meta.get("source_tag")
+            s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+            s.session_source = cli_meta.get("session_source")
+            s.source_label = cli_meta.get("source_label")
+            s.save(touch_updated_at=False)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:
