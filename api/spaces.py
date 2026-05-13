@@ -455,7 +455,7 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
         "description": _public_display_text_summary(space.get("description", ""), 300),
         "created_at": space.get("created_at"),
         "updated_at": space.get("updated_at"),
-        "revision_event_id": space.get("revision_event_id"),
+        "revision_event_id": _public_revision_event_id(space.get("revision_event_id")),
         "widget_count": len(widgets) if isinstance(widgets, list) else 0,
         "disabled": bool(recovery.get("disabled")),
         "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
@@ -1360,6 +1360,11 @@ def _event_id_is_safe(event_id: Any) -> bool:
     return bool(re.fullmatch(r"[a-f0-9]{32}", str(event_id or "")))
 
 
+def _public_revision_event_id(event_id: Any) -> str | None:
+    event_id_text = str(event_id or "")
+    return event_id_text if _event_id_is_safe(event_id_text) else None
+
+
 def _event_summary(event: dict[str, Any], sid: str, current_snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
@@ -1538,7 +1543,7 @@ def build_agent_context(space_id: str | None) -> str:
             )
         if len(widget_events) > 10:
             lines.append(f"- … {len(widget_events) - 10} more queued widget event(s) omitted")
-    revision = _active_context_value(space.get("revision_event_id"), 120)
+    revision = _public_revision_event_id(space.get("revision_event_id"))
     if revision:
         lines.append(f"revision_event_id: {revision}")
     lines.append(
@@ -1707,7 +1712,7 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
         "capabilities": _public_root_metadata_summary(space.get("capabilities"))
         if isinstance(space.get("capabilities"), dict)
         else {},
-        "revision_event_id": space.get("revision_event_id"),
+        "revision_event_id": _public_revision_event_id(space.get("revision_event_id")),
         "revision_events": [event_id for event_id in (space.get("revision_events") or []) if _event_id_is_safe(event_id)],
         "recovery": {"safe_mode_available": True},
         "widgets": [],

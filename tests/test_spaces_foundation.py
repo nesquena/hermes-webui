@@ -104,6 +104,44 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_public_space_summaries_redact_unsafe_current_revision_event_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "revision-id-lab", "name": "Revision ID Lab"})
+    safe_revision = created["revision_event_id"]
+    unsafe_revision = "rev/../escape"
+    manifest_path = spaces._manifest_path(created["space_id"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["revision_event_id"] = unsafe_revision
+    manifest["revision_events"] = [safe_revision, unsafe_revision]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    listed = spaces.list_spaces()
+    detail = spaces.read_space_detail(created["space_id"])
+    tool_list = spaces.run_space_tool("space.list", {})
+    tool_get = spaces.run_space_tool("space.get", {"space_id": created["space_id"]})
+    active_context = spaces.build_agent_context(created["space_id"])
+    serialized = json.dumps(
+        {
+            "listed": listed,
+            "detail": detail,
+            "tool_list": tool_list,
+            "tool_get": tool_get,
+            "active_context": active_context,
+        },
+        sort_keys=True,
+    ).lower()
+
+    assert listed[0]["revision_event_id"] is None
+    assert detail["revision_event_id"] is None
+    assert detail["revision_events"] == [safe_revision]
+    assert tool_list["spaces"][0]["revision_event_id"] is None
+    assert tool_get["space"]["revision_event_id"] is None
+    assert safe_revision in serialized
+    assert unsafe_revision not in serialized
+    assert "../" not in serialized
+    assert "escape" not in serialized
+
+
 def test_space_public_display_metadata_preserves_benign_source_and_data_labels(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
