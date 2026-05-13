@@ -725,6 +725,57 @@ class TestUpdateCompareSource:
         assert "_showUpdateBanner(data)" in block
 
 
+class TestWhatsNewSummaryToggle:
+    def test_settings_default_and_persistence_allow_whats_new_summary_toggle(self):
+        src = read('api/config.py')
+        assert '"whats_new_summary_enabled": False' in src
+        bool_keys_start = src.find('_SETTINGS_BOOL_KEYS')
+        assert bool_keys_start != -1
+        bool_keys = src[bool_keys_start:src.find('}', bool_keys_start)]
+        assert '"whats_new_summary_enabled"' in bool_keys
+
+    def test_settings_panel_places_summary_toggle_next_to_update_check(self):
+        src = read('static/index.html')
+        check_idx = src.find('id="settingsCheckUpdates"')
+        summary_idx = src.find('id="settingsWhatsNewSummary"')
+        assert check_idx != -1, "settingsCheckUpdates checkbox missing"
+        assert summary_idx != -1, "settingsWhatsNewSummary checkbox missing"
+        assert check_idx < summary_idx, "summary toggle should sit after the update-check toggle"
+        nearby = src[summary_idx:summary_idx + 900]
+        assert 'settings_label_whats_new_summary' in nearby
+        assert 'settings_desc_whats_new_summary' in nearby
+
+    def test_settings_js_loads_saves_and_boots_summary_toggle(self):
+        panels = read('static/panels.js')
+        boot = read('static/boot.js')
+        assert "$('settingsWhatsNewSummary')" in panels
+        assert 'payload.whats_new_summary_enabled' in panels
+        assert 'settings.whats_new_summary_enabled' in panels
+        assert 'body.whats_new_summary_enabled' in panels
+        assert 'window._whatsNewSummaryEnabled' in boot
+        assert 'whats_new_summary_enabled' in boot
+
+    def test_update_banner_summary_flow_keeps_diff_links_after_summary(self):
+        src = read('static/ui.js')
+        assert 'function _renderUpdateSummaryPanel' in src
+        assert 'async function showWhatsNewSummary' in src
+        assert "api('/api/updates/summary'" in src
+        assert 'updateSummaryDiffLinks' in src
+        assert 'Regular diff comparison' in src
+        assert '_renderUpdateWhatsNewLinks(data,{mode' in src
+        assert 'window._whatsNewSummaryEnabled' in src
+
+    def test_summary_endpoint_and_prompt_are_human_readable_not_technical(self):
+        routes = read('api/routes.py')
+        updates = read('api/updates.py')
+        assert '"/api/updates/summary"' in routes
+        assert 'summarize_update_payload' in routes
+        assert 'def summarize_update_payload' in updates
+        assert 'human-readable' in updates
+        assert 'avoid technical jargon' in updates
+        assert 'regular diff comparison' in updates
+
+
 # ── Regression: force button reset on retry ──────────────────────────────────
 
 class TestForceButtonResetOnRetry:

@@ -3910,16 +3910,87 @@ function _updateWhatsNewTargets(data){
     url:_updateCompareUrl(target.info),
   })).filter((target)=>target.info&&target.info.behind>0&&target.url);
 }
+function _appendUpdateDiffLinks(container,targets,prefix){
+  if(!container) return;
+  if(prefix) container.appendChild(document.createTextNode(prefix));
+  targets.forEach((target,idx)=>{
+    if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent=target.label;
+    container.appendChild(link);
+  });
+}
+function _hideUpdateSummaryPanel(){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(panel) panel.style.display='none';
+  if(text) text.textContent='';
+  if(links){links.replaceChildren();links.style.display='none';}
+}
+function _renderUpdateSummaryPanel(summary,data){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(!panel||!text) return;
+  panel.style.display='block';
+  text.textContent=summary||'No summary available.';
+  const targets=_updateWhatsNewTargets(data||window._updateData||{});
+  if(links){
+    links.replaceChildren();
+    if(targets.length){
+      links.style.display='block';
+      _appendUpdateDiffLinks(links,targets,'Regular diff comparison: ');
+    }else{
+      links.style.display='none';
+    }
+  }
+}
+async function showWhatsNewSummary(){
+  const data=window._updateData||{};
+  _renderUpdateSummaryPanel('Writing a simple summary…',data);
+  try{
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:data})});
+    _renderUpdateSummaryPanel(res&&res.summary,data);
+  }catch(e){
+    console.warn('[updates] summary failed',e);
+    _renderUpdateSummaryPanel('Could not generate the summary right now. The regular diff comparison is still available below.',data);
+  }
+}
 function _renderUpdateWhatsNewLinks(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
   const container=$('updateWhatsNewLinks');
   if(!container) return;
   container.replaceChildren();
   const targets=_updateWhatsNewTargets(data);
   if(!targets.length){
     container.style.display='none';
+    _hideUpdateSummaryPanel();
     return;
   }
   container.style.display='block';
+  const useSummary=(options.mode||'')==='summary'||window._whatsNewSummaryEnabled===true;
+  if(useSummary){
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='linklike';
+    btn.style.color='var(--accent)';
+    btn.style.textDecoration='underline';
+    btn.style.background='none';
+    btn.style.border='0';
+    btn.style.padding='0';
+    btn.style.cursor='pointer';
+    btn.textContent='What changed? Read simple summary';
+    btn.onclick=()=>showWhatsNewSummary();
+    container.appendChild(btn);
+    return;
+  }
+  _hideUpdateSummaryPanel();
   if(targets.length===1){
     const target=targets[0];
     const link=document.createElement('a');
@@ -3932,18 +4003,7 @@ function _renderUpdateWhatsNewLinks(data){
     container.appendChild(link);
     return;
   }
-  container.appendChild(document.createTextNode("What's new: "));
-  targets.forEach((target,idx)=>{
-    if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
-    const link=document.createElement('a');
-    link.href=target.url;
-    link.target='_blank';
-    link.rel='noopener';
-    link.style.color='var(--accent)';
-    link.style.textDecoration='underline';
-    link.textContent=target.label;
-    container.appendChild(link);
-  });
+  _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
   const parts=[];
@@ -3962,7 +4022,8 @@ function _showUpdateBanner(data){
   if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
-  _renderUpdateWhatsNewLinks(data);
+  const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
+  _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');

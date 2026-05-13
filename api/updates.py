@@ -301,6 +301,115 @@ def check_for_updates(force=False):
         _check_in_progress = False
 
 
+def _repo_path_for_update_target(target: str):
+    if target == 'webui':
+        return REPO_ROOT
+    if target == 'agent':
+        return _AGENT_DIR
+    return None
+
+
+def _commit_subjects_for_update(info: dict, *, limit: int = 24) -> list[str]:
+    """Return commit subjects for an update range, if the local git refs exist."""
+    if not isinstance(info, dict):
+        return []
+    target = info.get('name')
+    if target not in ('webui', 'agent'):
+        target = 'webui' if info.get('repo_url', '').endswith('hermes-webui') else target
+    path = _repo_path_for_update_target(target)
+    if path is None or not (Path(path) / '.git').exists():
+        return []
+    current = str(info.get('current_sha') or '').strip()
+    latest = str(info.get('latest_sha') or '').strip()
+    if not (current and latest):
+        return []
+    out, ok = _run_git(['log', '--format=%s', f'{current}..{latest}', f'-n{limit}'], path, timeout=5)
+    if not ok or not out:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _fallback_update_summary(updates: dict, details: list[dict]) -> str:
+    lines = []
+    for item in details:
+        label = item.get('label') or item.get('name') or 'Hermes'
+        behind = item.get('behind') or 0
+        commits = item.get('commits') or []
+        if commits:
+            lines.append(f"{label}: {behind} update(s). Highlights: " + '; '.join(commits[:5]) + '.')
+        else:
+            lines.append(f"{label}: {behind} update(s) are available. Open the regular diff comparison below for the exact changes.")
+    return '\n'.join(lines) or 'Updates are available. Open the regular diff comparison below for the exact changes.'
+
+
+def _update_summary_prompt(details: list[dict]) -> tuple[str, str]:
+    system = (
+        "You write human-readable release summaries for Hermes users. "
+        "Focus on what the user will notice in the product. Keep it simple, specific, and short. "
+        "avoid technical jargon, implementation details, SHA names, branch names, and file paths unless necessary. "
+        "End with one plain sentence noting that the regular diff comparison is available below for details."
+    )
+    user_lines = [
+        "Summarize these available updates in 3-6 concise bullets.",
+        "Use everyday language and explain visible behavior changes, not code mechanics.",
+        "",
+    ]
+    for item in details:
+        user_lines.append(f"{item['label']}: {item['behind']} commit(s) behind")
+        commits = item.get('commits') or []
+        if commits:
+            user_lines.extend(f"- {subject}" for subject in commits)
+        else:
+            user_lines.append("- No local commit subjects available; summarize only the update count.")
+        user_lines.append("")
+    return system, '\n'.join(user_lines)
+
+
+def summarize_update_payload(updates: dict, llm_callback=None) -> dict:
+    """Build a human-readable What's New summary and keep regular diff comparison links.
+
+    ``llm_callback`` receives ``(system_prompt, user_prompt)`` and returns text.
+    The caller may wire that to AIAgent; this module keeps a deterministic
+    fallback so the banner remains useful when no LLM provider is configured.
+    """
+    if not isinstance(updates, dict):
+        updates = {}
+    details = []
+    for key, label in (('webui', 'WebUI'), ('agent', 'Agent')):
+        info = updates.get(key)
+        if not isinstance(info, dict) or int(info.get('behind') or 0) <= 0:
+            continue
+        item = {
+            'name': key,
+            'label': label,
+            'behind': int(info.get('behind') or 0),
+            'compare_url': info.get('compare_url'),
+            'commits': _commit_subjects_for_update({'name': key, **info}),
+        }
+        details.append(item)
+    fallback = _fallback_update_summary(updates, details)
+    generated_by = 'fallback'
+    summary = fallback
+    if details and callable(llm_callback):
+        system, prompt = _update_summary_prompt(details)
+        try:
+            candidate = (llm_callback(system, prompt) or '').strip()
+            if candidate:
+                summary = candidate
+                generated_by = 'llm'
+        except Exception:
+            summary = fallback
+    return {
+        'ok': True,
+        'summary': summary,
+        'generated_by': generated_by,
+        'targets': details,
+    }
+
+
+# ── Self-update application ───────────────────────────────────────────────────
+
+
 def _schedule_restart(delay: float = 2.0) -> None:
     """Re-exec this process after *delay* seconds.
 

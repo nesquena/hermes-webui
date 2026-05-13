@@ -3909,6 +3909,7 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "font_size": "default",  # small | default | large
@@ -4037,6 +4038,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_cli_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "whats_new_summary_enabled",
     "sound_enabled",
     "notifications_enabled",
     "show_thinking",
