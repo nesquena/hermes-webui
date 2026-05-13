@@ -298,6 +298,50 @@
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
+  function renderResearchHarnessSmokePreview(data){
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return '';
+    const progress = data.research_progress && typeof data.research_progress === 'object' && !Array.isArray(data.research_progress)
+      ? data.research_progress
+      : {};
+    const progressWidgets = progress.widgets && typeof progress.widgets === 'object' && !Array.isArray(progress.widgets)
+      ? progress.widgets
+      : {};
+    const plan = progressWidgets.plan && typeof progressWidgets.plan === 'object' && !Array.isArray(progressWidgets.plan) ? progressWidgets.plan : {};
+    const planMeta = plan.metadata && typeof plan.metadata === 'object' && !Array.isArray(plan.metadata) ? plan.metadata : {};
+    const planStatus = planMeta.status && typeof planMeta.status === 'object' && !Array.isArray(planMeta.status) ? planMeta.status : {};
+    const phase = safeDisplayMetadataText(planStatus.phase || '', 'pending') || 'pending';
+    const sources = progressWidgets.sources && typeof progressWidgets.sources === 'object' && !Array.isArray(progressWidgets.sources) ? progressWidgets.sources : {};
+    const sourceMeta = sources.metadata && typeof sources.metadata === 'object' && !Array.isArray(sources.metadata) ? sources.metadata : {};
+    const sourceTable = sourceMeta.table && typeof sourceMeta.table === 'object' && !Array.isArray(sourceMeta.table) ? sourceMeta.table : {};
+    const sourceRows = Array.isArray(sourceTable.rows) ? sourceTable.rows : [];
+    const notes = progressWidgets.notes && typeof progressWidgets.notes === 'object' && !Array.isArray(progressWidgets.notes) ? progressWidgets.notes : {};
+    const notesMeta = notes.metadata && typeof notes.metadata === 'object' && !Array.isArray(notes.metadata) ? notes.metadata : {};
+    const notesState = notesMeta.notes && typeof notesMeta.notes === 'object' && !Array.isArray(notesMeta.notes) ? notesMeta.notes : {};
+    const noteItems = Array.isArray(notesState.items) ? notesState.items : [];
+    const noteCount = Number(notesState.item_count || noteItems.length || 0);
+    const artifactReceipt = data.research_artifact && typeof data.research_artifact === 'object' && !Array.isArray(data.research_artifact)
+      ? data.research_artifact
+      : {};
+    const artifact = artifactReceipt.artifact && typeof artifactReceipt.artifact === 'object' && !Array.isArray(artifactReceipt.artifact) ? artifactReceipt.artifact : {};
+    const valueSummary = artifact.value_summary && typeof artifact.value_summary === 'object' && !Array.isArray(artifact.value_summary) ? artifact.value_summary : {};
+    const metadataSummary = artifact.metadata_summary && typeof artifact.metadata_summary === 'object' && !Array.isArray(artifact.metadata_summary) ? artifact.metadata_summary : {};
+    const artifactTitle = safeDisplayMetadataText(valueSummary.title || '', 'metadata-only summary') || 'metadata-only summary';
+    const artifactStatus = safeDisplayMetadataText(valueSummary.status || '', 'pending') || 'pending';
+    const exportReady = safeDisplayMetadataText(metadataSummary.export_pdf || '', 'not ready') || 'not ready';
+    const rollbackCheck = data.research_rollback_check && typeof data.research_rollback_check === 'object' && !Array.isArray(data.research_rollback_check)
+      ? data.research_rollback_check
+      : {};
+    const queued = Number(data.queued_event_count || 0) > 0;
+    const replayVerified = rollbackCheck.verified === true && rollbackCheck.replayed_after_restore === true;
+    const hasResearchReceipt = Object.keys(progressWidgets).length || Object.keys(artifact).length || Object.keys(rollbackCheck).length || queued;
+    if (!hasResearchReceipt) return '';
+    return '<div class="capy-spaces-card capy-spaces-demo-flow"><h4>Research harness checklist</h4>' +
+      '<div class="capy-spaces-muted">Phase: '+escapeHtml(phase)+' · Sources: '+sourceRows.length+' · Notes: '+noteCount+'</div>' +
+      '<div class="capy-spaces-muted">Summary artifact: '+escapeHtml(artifactTitle)+' · Artifact status: '+escapeHtml(artifactStatus)+' · PDF export: '+escapeHtml(exportReady)+'</div>' +
+      '<div class="capy-spaces-muted">Queued PDF export: '+(queued ? 'yes' : 'no')+' · Rollback replay: '+(replayVerified ? 'verified' : 'not verified')+' · Restored widgets: '+Number(rollbackCheck.restored_widget_count || 0)+'</div>' +
+      '</div>';
+  }
+
   function renderWeatherPromptFlow(flow){
     if (!flow || typeof flow !== 'object' || Array.isArray(flow)) return '';
     const blankSpace = flow.blank_space ? 'yes' : 'no';
@@ -371,6 +415,7 @@
       ? data.music_flow
       : {};
     const musicPreview = renderMusicSmokePreview(musicFlow);
+    const researchPreview = demo === 'demo_research_harness_pdf_export' ? renderResearchHarnessSmokePreview(data) : '';
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const hasNotesPreview = !!notesPreview;
     const hasKanbanPreview = !!kanbanPreview;
@@ -388,7 +433,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
