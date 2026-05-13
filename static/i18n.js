@@ -2868,11 +2868,11 @@ const LOCALES = {
     logs_no_mtime: '未書き込み',
     logs_truncated_hint: '大きなログファイルの末尾を表示しています。メモリ使用量を抑えるため、古いデータは省略されました。',
     logs_copied: 'ログをコピーしました',
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '重大度',
+    logs_severity_all: 'すべて',
+    logs_severity_errors: 'エラー',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '表示中（フィルター有効）',
 
     // Insights
     insights_title: '使用状況分析',
@@ -3781,11 +3781,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Уровень',
+    logs_severity_all: 'Все',
+    logs_severity_errors: 'Ошибки',
+    logs_severity_warnings: 'Предупреждения+',
+    logs_filter_active: 'показано (фильтр активен)',
     new_conversation: 'Новая беседа',
     filter_conversations: 'Фильтр бесед...',
     session_time_unknown: 'Неизвестно',
@@ -4823,11 +4823,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Severidad',
+    logs_severity_all: 'Todo',
+    logs_severity_errors: 'Errores',
+    logs_severity_warnings: 'Advertencias+',
+    logs_filter_active: 'mostrados (filtro activo)',
     new_conversation: 'Nueva conversación',
     filter_conversations: 'Filtrar conversaciones...',
     session_time_unknown: 'Desconocido',
@@ -5848,11 +5848,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Schweregrad',
+    logs_severity_all: 'Alle',
+    logs_severity_errors: 'Fehler',
+    logs_severity_warnings: 'Warnungen+',
+    logs_filter_active: 'angezeigt (Filter aktiv)',
     new_conversation: 'Neuer Chat',
     filter_conversations: 'Chats filtern...',
     scheduled_jobs: 'Geplante Aufgaben',
@@ -6906,11 +6906,11 @@ const LOCALES = {
     logs_no_mtime: '尚未写入',
     logs_truncated_hint: '此处显示的是日志文件的末尾内容。为节省内存，已省略较早的数据。',
     logs_copied: '日志已复制',
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '严重性',
+    logs_severity_all: '全部',
+    logs_severity_errors: '错误',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '已显示（筛选器已启用）',
     new_conversation: '新建对话',
     filter_conversations: '筛选对话…',
     session_time_unknown: '未知',
@@ -7936,6 +7936,11 @@ const LOCALES = {
     kanban_dispatch_auto_blocked: '自動封鎖',
     kanban_dispatch_timed_out: '逾時',
     kanban_dispatch_crashed: '崩潰',
+    logs_severity: '嚴重性',
+    logs_severity_all: '全部',
+    logs_severity_errors: '錯誤',
+    logs_severity_warnings: '警告+',
+    logs_filter_active: '已顯示（篩選器已啟用）',
     new_conversation: '新對話',
     filter_conversations: '篩選對話',
     scheduled_jobs: '排程任務',
@@ -9141,11 +9146,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: 'Severidade',
+    logs_severity_all: 'Todos',
+    logs_severity_errors: 'Erros',
+    logs_severity_warnings: 'Avisos+',
+    logs_filter_active: 'exibidos (filtro ativo)',
     new_conversation: 'Nova conversa',
     filter_conversations: 'Filtrar conversas...',
     session_time_unknown: 'Desconhecido',
@@ -10147,11 +10152,11 @@ const LOCALES = {
     logs_no_mtime: 'not written yet',  // TODO: translate
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
     logs_copied: 'Logs copied',  // TODO: translate
-    logs_severity: 'Severity',  // TODO: translate
-    logs_severity_all: 'All',  // TODO: translate
-    logs_severity_errors: 'Errors',  // TODO: translate
-    logs_severity_warnings: 'Warnings+',  // TODO: translate
-    logs_filter_active: 'shown (filter active)',  // TODO: translate
+    logs_severity: '심각도',
+    logs_severity_all: '전체',
+    logs_severity_errors: '오류',
+    logs_severity_warnings: '경고+',
+    logs_filter_active: '표시됨(필터 활성)',
     new_conversation: '새 대화',
     filter_conversations: '대화 필터…',
     session_time_unknown: 'Unknown',
