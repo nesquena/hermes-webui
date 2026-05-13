@@ -37,9 +37,14 @@ def get_active_sessions():
         conn = sqlite3.connect(db_path, timeout=1)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
+        # Only consider sessions started in the last hour as "active"
+        # (avoids showing stale sessions that were never properly closed)
+        cutoff = time.time() - 3600
         rows = conn.execute(
-            "SELECT session_id, project, parent_session_id, started_at "
-            "FROM sessions WHERE ended_at IS NULL ORDER BY started_at"
+            "SELECT id, title, source, parent_session_id, started_at "
+            "FROM sessions WHERE ended_at IS NULL AND started_at > ? "
+            "ORDER BY started_at",
+            (cutoff,)
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -111,7 +116,7 @@ def stream_activity(write_fn):
     sessions = get_active_sessions()
     for s in sessions:
         if not s.get("parent_session_id"):
-            known_sessions[s["session_id"]] = next_id[0]
+            known_sessions[s["id"]] = next_id[0]
             next_id[0] += 1
     if known_sessions:
         demo_active[0] = False
@@ -122,7 +127,7 @@ def stream_activity(write_fn):
         events = []
 
         for s in sessions:
-            sid = s["session_id"]
+            sid = s["id"]
             current_ids.add(sid)
             if sid not in known_sessions:
                 # New session appeared — remove demo if active
@@ -133,7 +138,7 @@ def stream_activity(write_fn):
                 aid = next_id[0]
                 next_id[0] += 1
                 known_sessions[sid] = aid
-                name = s.get("project") or "Neo"
+                name = s.get("title") or s.get("source") or "Neo"
                 if not s.get("parent_session_id"):
                     events.append({"type": "agentCreated", "id": aid, "folderName": name})
                 else:
@@ -183,8 +188,8 @@ def _build_agent_list(sessions):
     for s in sessions:
         if not s.get("parent_session_id"):
             agent_ids.append(next_id)
-            folder_names[next_id] = s.get("project") or "Neo"
-            session_map[s["session_id"]] = next_id
+            folder_names[next_id] = s.get("title") or s.get("source") or "Neo"
+            session_map[s["id"]] = next_id
             next_id += 1
     return agent_ids, folder_names, session_map
 
