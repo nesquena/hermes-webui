@@ -5713,17 +5713,17 @@ def test_recovery_snapshot_exposes_safe_admin_gate_summary(monkeypatch, tmp_path
             "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         },
     )
-    spaces.disable_widget_for_recovery(
-        created["space_id"],
-        "bad-widget",
-        reason="renderer crashed with api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
-    )
     spaces.queue_widget_event(
         created["space_id"],
         "bad-widget",
         "agent.repair",
         {"source": "recovery-panel", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
         prompt="Repair without leaking SECRET_VALUE_DO_NOT_LEAK or generated source body",
+    )
+    spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "bad-widget",
+        reason="renderer crashed with api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
     )
     spaces.disable_space_for_recovery(
         created["space_id"],
