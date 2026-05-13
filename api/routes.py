@@ -3893,6 +3893,21 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         raise
 
+    def _route_alias_value(*names):
+        values = []
+        for name in names:
+            if name not in body:
+                continue
+            value = body.get(name)
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value:
+                values.append(value)
+        if values and any(value != values[0] for value in values[1:]):
+            raise ValueError("Conflicting Capy Spaces route selector aliases")
+        return values[0] if values else ""
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
@@ -4815,11 +4830,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/revision/restore":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        event_id = body.get("event_id")
-        if not space_id or not event_id:
-            return bad(handler, "Missing space_id or event_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            event_id = _route_alias_value("event_id", "eventId", "revision_event_id", "revisionEventId")
+            if not space_id or not event_id:
+                return bad(handler, "Missing space_id or event_id")
             return j(handler, capy_spaces.restore_revision(space_id, event_id))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
@@ -4830,12 +4845,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/revision/restore-widget":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        event_id = body.get("event_id")
-        widget_id = body.get("widget_id")
-        if not space_id or not event_id or not widget_id:
-            return bad(handler, "Missing space_id, event_id, or widget_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            event_id = _route_alias_value("event_id", "eventId", "revision_event_id", "revisionEventId")
+            widget_id = _route_alias_value("widget_id", "widgetId")
+            if not space_id or not event_id or not widget_id:
+                return bad(handler, "Missing space_id, event_id, or widget_id")
             return j(handler, capy_spaces.restore_widget_revision(space_id, event_id, widget_id))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
@@ -4989,10 +5004,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/disable-space":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(
                 handler,
                 capy_spaces.disable_space_for_recovery(
@@ -5009,10 +5024,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/enable-space":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(
                 handler,
                 capy_spaces.enable_space_for_recovery(
@@ -5029,11 +5044,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/repair-space":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
-        payload = body["payload"] if "payload" in body else {}
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
+            payload = body["payload"] if "payload" in body else {}
             return j(
                 handler,
                 capy_spaces.queue_space_repair_event(
@@ -5052,11 +5067,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/disable-widget":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        widget_id = body.get("widget_id")
-        if not space_id or not widget_id:
-            return bad(handler, "Missing space_id or widget_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId")
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
             return j(
                 handler,
                 capy_spaces.disable_widget_for_recovery(
@@ -5074,11 +5089,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/enable-widget":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        widget_id = body.get("widget_id")
-        if not space_id or not widget_id:
-            return bad(handler, "Missing space_id or widget_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId")
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
             return j(
                 handler,
                 capy_spaces.enable_widget_for_recovery(
@@ -5096,10 +5111,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/disable-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
-        if not module_id:
-            return bad(handler, "Missing module_id")
         try:
+            module_id = _route_alias_value("module_id", "moduleId", "id")
+            if not module_id:
+                return bad(handler, "Missing module_id")
             return j(
                 handler,
                 capy_spaces.disable_module_for_recovery(
@@ -5116,10 +5131,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/enable-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
-        if not module_id:
-            return bad(handler, "Missing module_id")
         try:
+            module_id = _route_alias_value("module_id", "moduleId", "id")
+            if not module_id:
+                return bad(handler, "Missing module_id")
             return j(
                 handler,
                 capy_spaces.enable_module_for_recovery(
@@ -5136,11 +5151,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/recovery/repair-module":
         from api import spaces as capy_spaces
-        module_id = body.get("module_id") or body.get("moduleId") or body.get("id")
-        if not module_id:
-            return bad(handler, "Missing module_id")
-        payload = body["payload"] if "payload" in body else {}
         try:
+            module_id = _route_alias_value("module_id", "moduleId", "id")
+            if not module_id:
+                return bad(handler, "Missing module_id")
+            payload = body["payload"] if "payload" in body else {}
             return j(
                 handler,
                 capy_spaces.queue_recovery_module_repair_event(

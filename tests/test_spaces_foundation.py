@@ -9274,6 +9274,125 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert body["generated_widgets_rendered"] is False
 
 
+def test_revision_restore_routes_accept_camelcase_ids_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "camel-route-restore", "name": "Camel Route Restore"})
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "route-widget",
+            "kind": "html",
+            "title": "Route widget original",
+            "renderer": "<script>restoreLeak()</script>",
+            "source": "api_key = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "route-widget", {"title": "Route widget patched"})
+    initial_event_id = upserted["revision_event_id"]
+
+    handled, status, restored_space = _route_post(
+        "/api/spaces/revision/restore",
+        {"spaceId": created["space_id"], "revisionEventId": initial_event_id},
+    )
+    handled_widget, status_widget, restored_widget = _route_post(
+        "/api/spaces/revision/restore-widget",
+        {"spaceId": created["space_id"], "eventId": upserted["revision_event_id"], "widgetId": "route-widget"},
+    )
+
+    assert handled is None
+    assert handled_widget is None
+    assert status == 200
+    assert status_widget == 200
+    assert restored_space["ok"] is True
+    assert restored_space["space"]["space_id"] == created["space_id"]
+    assert restored_space["restored_event_id"]
+    assert restored_widget["ok"] is True
+    assert restored_widget["space_id"] == created["space_id"]
+    assert restored_widget["widget"]["id"] == "route-widget"
+    assert restored_widget["restored_event_id"]
+    serialized = json.dumps({"space": restored_space, "widget": restored_widget}).lower()
+    assert "restoreleak" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_revision_restore_routes_reject_conflicting_camelcase_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "camel-route-conflict", "name": "Camel Route Conflict"})
+    other = spaces.create_space({"space_id": "camel-route-other", "name": "Camel Route Other"})
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "route-widget",
+            "kind": "html",
+            "title": "Route widget original",
+            "renderer": "<script>conflictLeak()</script>",
+            "source": "api_key = 'SECRET_VALUE_DO_NOT_LEAK'",
+        },
+    )
+    spaces.patch_widget(created["space_id"], "route-widget", {"title": "Route widget patched"})
+
+    conflict_cases = [
+        (
+            "/api/spaces/revision/restore",
+            {
+                "space_id": created["space_id"],
+                "spaceId": other["space_id"],
+                "event_id": created["revision_event_id"],
+            },
+        ),
+        (
+            "/api/spaces/revision/restore",
+            {
+                "spaceId": created["space_id"],
+                "event_id": created["revision_event_id"],
+                "revisionEventId": upserted["revision_event_id"],
+            },
+        ),
+        (
+            "/api/spaces/revision/restore-widget",
+            {
+                "spaceId": created["space_id"],
+                "eventId": upserted["revision_event_id"],
+                "widget_id": "route-widget",
+                "widgetId": "other-widget",
+            },
+        ),
+        (
+            "/api/spaces/revision/restore-widget",
+            {
+                "spaceId": created["space_id"],
+                "event_id": created["revision_event_id"],
+                "revisionEventId": upserted["revision_event_id"],
+                "widgetId": "route-widget",
+            },
+        ),
+    ]
+
+    bodies = []
+    for path, payload in conflict_cases:
+        handled, status, body = _route_post(path, payload)
+        assert handled is None
+        assert status == 400
+        assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+        bodies.append(body)
+
+    current = spaces.read_widget_detail(created["space_id"], "route-widget")
+    assert current["title"] == "Route widget patched"
+    serialized = json.dumps(bodies).lower()
+    assert "conflictleak" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+
 def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Tool Route"})
@@ -9536,6 +9655,171 @@ def test_recovery_disable_enable_module_routes_return_metadata_only(monkeypatch,
     assert "secret_value_do_not_leak" not in recovery_serialized
 
 
+def test_recovery_widget_and_space_routes_accept_camelcase_ids_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-camel-recovery", "name": "Route Camel Recovery"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakCamelRecovery()</script>",
+            "source": "token SECRET_VALUE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    handled_disable_space, status_disable_space, disabled_space = _route_post(
+        "/api/spaces/recovery/disable-space",
+        {"spaceId": created["space_id"], "reason": "renderer api_auth bearer placeholder"},
+    )
+    handled_enable_space, status_enable_space, enabled_space = _route_post(
+        "/api/spaces/recovery/enable-space",
+        {"spaceId": created["space_id"]},
+    )
+    handled_repair_space, status_repair_space, repaired_space = _route_post(
+        "/api/spaces/recovery/repair-space",
+        {
+            "spaceId": created["space_id"],
+            "prompt": "Repair generated source without leaking SECRET_VALUE_DO_NOT_LEAK",
+            "payload": {"action": "repair-space", "renderer": "<script>bad()</script>"},
+            "session_id": "session token SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    handled_disable_widget, status_disable_widget, disabled_widget = _route_post(
+        "/api/spaces/recovery/disable-widget",
+        {"spaceId": created["space_id"], "widgetId": "bad-widget", "reason": "source renderer api_key placeholder"},
+    )
+    handled_enable_widget, status_enable_widget, enabled_widget = _route_post(
+        "/api/spaces/recovery/enable-widget",
+        {"spaceId": created["space_id"], "widgetId": "bad-widget"},
+    )
+
+    assert handled_disable_space is None
+    assert handled_enable_space is None
+    assert handled_repair_space is None
+    assert handled_disable_widget is None
+    assert handled_enable_widget is None
+    assert status_disable_space == 200
+    assert status_enable_space == 200
+    assert status_repair_space == 200
+    assert status_disable_widget == 200
+    assert status_enable_widget == 200
+    assert disabled_space["space_id"] == created["space_id"]
+    assert disabled_space["disabled"] is True
+    assert disabled_space.get("disabled_reason") in (None, "[REDACTED]")
+    assert enabled_space["space_id"] == created["space_id"]
+    assert enabled_space["disabled"] is False
+    assert repaired_space["space_id"] == created["space_id"]
+    assert repaired_space["queued"] is True
+    assert repaired_space["event_name"] == "agent.repair"
+    assert repaired_space["prompt_preview"] == "[REDACTED]"
+    assert repaired_space["payload_summary"] == {"action": "repair-space"}
+    assert disabled_widget["space_id"] == created["space_id"]
+    assert disabled_widget["widget_id"] == "bad-widget"
+    assert disabled_widget["disabled"] is True
+    assert disabled_widget.get("disabled_reason") in (None, "[REDACTED]")
+    assert enabled_widget["space_id"] == created["space_id"]
+    assert enabled_widget["widget_id"] == "bad-widget"
+    assert enabled_widget["disabled"] is False
+    repair_events = spaces.list_space_repair_events(created["space_id"])
+    assert repair_events and repair_events[0]["event_id"] == repaired_space["event_id"]
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(
+        {
+            "disabled_space": disabled_space,
+            "enabled_space": enabled_space,
+            "repaired_space": repaired_space,
+            "disabled_widget": disabled_widget,
+            "enabled_widget": enabled_widget,
+            "repair_events": repair_events,
+            "recovery": recovery,
+        }
+    ).lower()
+    assert "breakcamelrecovery" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_recovery_widget_and_space_routes_reject_conflicting_camelcase_aliases_metadata_only(
+    monkeypatch, tmp_path
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-camel-conflict", "name": "Route Camel Conflict"})
+    other = spaces.create_space({"space_id": "route-camel-other", "name": "Route Camel Other"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>conflictRecovery()</script>",
+            "source": "token SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    conflict_cases = [
+        (
+            "/api/spaces/recovery/disable-space",
+            {"space_id": created["space_id"], "spaceId": other["space_id"], "reason": "renderer api_auth"},
+        ),
+        (
+            "/api/spaces/recovery/enable-space",
+            {"space_id": created["space_id"], "spaceId": other["space_id"]},
+        ),
+        (
+            "/api/spaces/recovery/repair-space",
+            {
+                "space_id": created["space_id"],
+                "spaceId": other["space_id"],
+                "prompt": "Repair source SECRET_VALUE_DO_NOT_LEAK",
+                "payload": {"renderer": "<script>bad()</script>"},
+            },
+        ),
+        (
+            "/api/spaces/recovery/disable-widget",
+            {
+                "spaceId": created["space_id"],
+                "widget_id": "bad-widget",
+                "widgetId": "other-widget",
+                "reason": "source api_key",
+            },
+        ),
+        (
+            "/api/spaces/recovery/enable-widget",
+            {"spaceId": created["space_id"], "widget_id": "bad-widget", "widgetId": "other-widget"},
+        ),
+    ]
+
+    bodies = []
+    for path, payload in conflict_cases:
+        handled, status, body = _route_post(path, payload)
+        assert handled is None
+        assert status == 400
+        assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+        bodies.append(body)
+
+    assert spaces.list_space_repair_events(created["space_id"]) == []
+    recovery = spaces.recovery_snapshot()
+    assert recovery["summary"]["disabled_space_count"] == 0
+    assert recovery["summary"]["disabled_widget_count"] == 0
+    serialized = json.dumps({"bodies": bodies, "recovery": recovery}).lower()
+    assert "conflictrecovery" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+
 def test_recovery_module_routes_accept_camelcase_module_id_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
@@ -9592,6 +9876,66 @@ def test_recovery_module_routes_accept_camelcase_module_id_metadata_only(monkeyp
     assert "api_auth" not in serialized
     assert "api_key" not in serialized
     assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_recovery_module_routes_reject_conflicting_camelcase_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    for module_id in ("route-module-conflict", "route-module-other"):
+        spaces.upsert_recovery_module(
+            {
+                "module_id": module_id,
+                "name": f"Route Module {module_id}",
+                "description": "Metadata-only module descriptor",
+                "scope": "space",
+                "source": "export const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+                "renderer": "<script>moduleConflict()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            }
+        )
+
+    conflict_cases = [
+        (
+            "/api/spaces/recovery/disable-module",
+            {
+                "module_id": "route-module-conflict",
+                "moduleId": "route-module-other",
+                "reason": "renderer api_auth",
+            },
+        ),
+        (
+            "/api/spaces/recovery/enable-module",
+            {"module_id": "route-module-conflict", "moduleId": "route-module-other"},
+        ),
+        (
+            "/api/spaces/recovery/repair-module",
+            {
+                "module_id": "route-module-conflict",
+                "moduleId": "route-module-other",
+                "prompt": "Repair source SECRET_VALUE_DO_NOT_LEAK",
+                "payload": {"renderer": "<script>bad()</script>"},
+            },
+        ),
+    ]
+
+    bodies = []
+    for path, payload in conflict_cases:
+        handled, status, body = _route_post(path, payload)
+        assert handled is None
+        assert status == 400
+        assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+        bodies.append(body)
+
+    assert spaces.list_recovery_module_repair_events("route-module-conflict") == []
+    snapshot = spaces.recovery_snapshot()
+    assert snapshot["summary"]["disabled_module_count"] == 0
+    serialized = json.dumps({"bodies": bodies, "snapshot": snapshot}).lower()
+    assert "moduleconflict" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
 
