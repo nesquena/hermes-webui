@@ -3095,6 +3095,28 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _serve_manifest(handler) -> bool:
+    """Serve static/manifest.json with the correct PWA Content-Type.
+
+    Shared by the root (/manifest.json, /manifest.webmanifest) and
+    session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
+    routes so Firefox Android can fetch the manifest when installing from
+    a /session/<id> page.  See #2226.
+    """
+    static_root = Path(__file__).parent.parent / "static"
+    manifest_path = (static_root / "manifest.json").resolve()
+    if manifest_path.exists():
+        data = manifest_path.read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+        return True
+    return j(handler, {"error": "not found"}, status=404)
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -3104,6 +3126,15 @@ def handle_get(handler, parsed) -> bool:
         # its own path-traversal sandbox via Path.resolve()+relative_to().
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
+
+    # Firefox Android resolves <link rel="manifest"> against the page URL
+    # before the dynamic <base href> script runs when installing from
+    # /session/<id>, producing requests like /session/manifest.json.
+    # Without this guard the catch-all below returns index.html instead of
+    # the manifest, and Firefox falls back to a generated letter icon.
+    # See #2226.
+    if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
+        return _serve_manifest(handler)
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:
@@ -3159,18 +3190,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
-        static_root = Path(__file__).parent.parent / "static"
-        manifest_path = (static_root / "manifest.json").resolve()
-        if manifest_path.exists():
-            data = manifest_path.read_bytes()
-            handler.send_response(200)
-            handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
-            handler.send_header("Cache-Control", "no-store")
-            handler.send_header("Content-Length", str(len(data)))
-            handler.end_headers()
-            handler.wfile.write(data)
-            return True
-        return j(handler, {"error": "not found"}, status=404)
+        return _serve_manifest(handler)
 
     if parsed.path == "/sw.js":
         static_root = Path(__file__).parent.parent / "static"

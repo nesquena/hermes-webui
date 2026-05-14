@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **PR #2270** by @Michaelyklam (closes #2226) — Firefox Android PWA installs from `/session/<id>` pages now resolve the Hermes manifest and icons instead of falling back to a generated letter icon. The dynamic `<base href>` script now runs before manifest/favicon links, `/session/manifest.json` and `/session/manifest.webmanifest` return the real manifest JSON, and session-prefixed manifest routes are now marked as public auth-skip routes. Adds 211 lines of regression coverage for the manifest responses and the session-prefixed 512px icon path.
+
+- **PR #2268** by @eleboucher — `docker_init.bash` no longer fails under Kubernetes `runAsUser` configurations where the running UID has no `/etc/passwd` entry. Pre-fix, the bare `whoami` invocation aborted the script under `set -e` because `whoami` exited with a non-zero status on missing-passwd UIDs. Now falls back to a synthetic `uid-<numeric-uid>` name when `whoami` fails (`whoami 2>/dev/null || echo "uid-$(id -u)"`). Two-line change.
+
+### Tests
+
+- **PR #2272** by @Michaelyklam (refs #2235) — 493-line regression test file `tests/test_2235_initial_aux_title.py` covering the first-turn WebUI title-update path when auxiliary title generation is configured. Asserts a valid aux-generated title replaces the provisional first-user-message slice and persists/emits title events; covers fallback preservation, refresh-path parity, and title_status diagnostics for aux success/failure/skipped cases. Test-only change pinning the existing behavior before any refactor of #2235.
+
+## [v0.51.63] — 2026-05-14 — Release AM (stage-356 — 2-PR small batch — #2234 aux-model routing + #2265 mixed-case provider canonicalization (closes #2245))
+
+### Fixed
+
 - **PR #2265** by @Michaelyklam (closes #2245) — Model picker provider lookup now canonicalizes configured provider keys before loading their configured models. Pre-fix, custom provider keys with mixed casing or underscores such as `CLIPpoxy` or `snake_case_provider` were lower-cased during canonicalization, but the resulting canonical key didn't match the raw `config.yaml` key, so the model allowlist lookup silently returned empty and the model picker dropdown showed no models for that provider. The fix maps canonical provider IDs back to their raw config.yaml provider keys before loading `provider_cfg`. Original config keys are preserved for provider settings rendering. 242-line regression test covering CLIPpoxy + snake_case_provider plus built-in/fallback behavior.
 
 - **PR #2234** by @Jordan-SkyLF (post-v0.51.62 rebase, follow-up to v0.51.62's category-refinement portion) — Update summary generation now routes through the documented `auxiliary.compression` text-model slot instead of a WebUI-only `auxiliary.update_summary` magic key. The reviewer concern was that `update_summary` would have been a non-discoverable WebUI-specific config key; using the existing documented compression/summarization slot keeps the PR self-contained to `hermes-webui` and gives users a way to override summary generation through an existing config surface. The existing main-model fallback is preserved if auxiliary resolution or generation fails. Adds route comment explaining why summary generation maps to compression instead of inventing a new task name.
