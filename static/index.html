@@ -359,24 +359,149 @@
       <div class="dashboard-header">
         <div>
           <div class="dashboard-title">OFFICE</div>
-          <div class="dashboard-subtitle">3D Workspace</div>
+          <div class="dashboard-subtitle">2D Workspace</div>
         </div>
         <div class="dashboard-health">
-          <span>CLAW3D READY</span>
+          <div class="dashboard-health-dot"></div>
+          <span id="workspaceStatus">SYSTEMS ONLINE</span>
         </div>
       </div>
       <div class="dashboard-content">
-        <div class="office-placeholder">
-          <svg class="office-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-            <line x1="8" y1="21" x2="16" y2="21"/>
-            <line x1="12" y1="17" x2="12" y2="21"/>
-          </svg>
-          <div class="office-title">3D Workspace</div>
-          <div class="office-description">
-            This space is reserved for the Claw3D immersive workspace environment.
-            The 3D interface will provide spatial organization of agents, tasks, and data flows
-            for enhanced productivity and visualization.
+        <div class="workspace-2d-container">
+          <!-- 2D Workspace Map -->
+          <div class="workspace-map" id="workspaceMap">
+            <!-- Engineering Zone -->
+            <div class="workspace-zone engineering" id="zone-engineering">
+              <div class="zone-header">
+                <h3>Engineering</h3>
+                <div class="zone-status active"></div>
+              </div>
+              <div class="zone-content">
+                <div class="zone-furniture">
+                  <div class="workstation"></div>
+                  <div class="workstation"></div>
+                </div>
+                <div class="agent-container" id="agents-engineering"></div>
+              </div>
+            </div>
+
+            <!-- Research Zone -->
+            <div class="workspace-zone research" id="zone-research">
+              <div class="zone-header">
+                <h3>Research</h3>
+                <div class="zone-status active"></div>
+              </div>
+              <div class="zone-content">
+                <div class="zone-furniture">
+                  <div class="lab-bench"></div>
+                  <div class="whiteboard"></div>
+                </div>
+                <div class="agent-container" id="agents-research"></div>
+              </div>
+            </div>
+
+            <!-- Operations Zone -->
+            <div class="workspace-zone operations" id="zone-operations">
+              <div class="zone-header">
+                <h3>Operations</h3>
+                <div class="zone-status active"></div>
+              </div>
+              <div class="zone-content">
+                <div class="zone-furniture">
+                  <div class="server-rack"></div>
+                  <div class="monitoring-desk"></div>
+                </div>
+                <div class="agent-container" id="agents-operations"></div>
+              </div>
+            </div>
+
+            <!-- Meeting Zone -->
+            <div class="workspace-zone meeting" id="zone-meeting">
+              <div class="zone-header">
+                <h3>Meeting</h3>
+                <div class="zone-status idle"></div>
+              </div>
+              <div class="zone-content">
+                <div class="zone-furniture">
+                  <div class="conference-table"></div>
+                </div>
+                <div class="agent-container" id="agents-meeting"></div>
+              </div>
+            </div>
+
+            <!-- Lounge Zone -->
+            <div class="workspace-zone lounge" id="zone-lounge">
+              <div class="zone-header">
+                <h3>Lounge</h3>
+                <div class="zone-status idle"></div>
+              </div>
+              <div class="zone-content">
+                <div class="zone-furniture">
+                  <div class="couch"></div>
+                  <div class="coffee-table"></div>
+                </div>
+                <div class="agent-container" id="agents-lounge"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Workspace Controls -->
+          <div class="workspace-controls">
+            <button class="workspace-btn" id="zoomInBtn" title="Zoom In">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+                <line x1="11" y1="8" x2="11" y2="14"/>
+                <line x1="8" y1="11" x2="14" y2="11"/>
+              </svg>
+            </button>
+            <button class="workspace-btn" id="zoomOutBtn" title="Zoom Out">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="M21 21l-4.35-4.35"/>
+                <line x1="8" y1="11" x2="14" y2="11"/>
+              </svg>
+            </button>
+            <button class="workspace-btn" id="resetViewBtn" title="Reset View">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+                <path d="M21 3v5h-5"/>
+                <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+                <path d="M8 16H3v5"/>
+              </svg>
+            </button>
+            <button class="workspace-btn" id="pauseBtn" title="Pause Simulation">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="6" y="4" width="4" height="16"/>
+                <rect x="14" y="4" width="4" height="16"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Agent Info Panel -->
+          <div class="agent-info-panel" id="agentInfoPanel" style="display: none;">
+            <div class="agent-info-header">
+              <div class="agent-info-avatar" id="selectedAgentAvatar"></div>
+              <div class="agent-info-details">
+                <div class="agent-info-name" id="selectedAgentName"></div>
+                <div class="agent-info-role" id="selectedAgentRole"></div>
+                <div class="agent-info-status" id="selectedAgentStatus"></div>
+              </div>
+              <button class="agent-info-close" onclick="closeAgentInfo()">×</button>
+            </div>
+            <div class="agent-info-content">
+              <div class="agent-info-task" id="selectedAgentTask"></div>
+              <div class="agent-info-metrics">
+                <div class="metric">
+                  <span class="metric-label">Tasks Completed</span>
+                  <span class="metric-value" id="selectedAgentTasks">0</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Uptime</span>
+                  <span class="metric-value" id="selectedAgentUptime">0h</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
