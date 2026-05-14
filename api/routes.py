@@ -7021,33 +7021,64 @@ def _handle_chat_start(handler, body, diag=None):
             s = get_session(body["session_id"])
         except KeyError:
             # Auto-import CLI session for continuation
+            # Mirrors the archive endpoint pattern at routes.py:4916-4967
             sid = body["session_id"]
-            cli_meta = None
-            for cs in get_cli_sessions():
-                if cs["session_id"] == sid:
-                    cli_meta = cs
-                    break
+            cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
-            msgs = get_cli_session_messages(sid)
-            if not msgs:
-                return bad(handler, "Session not found", 404)
-            s = import_cli_session(
-                sid,
-                cli_meta.get("title") or title_from(msgs, "CLI Session"),
-                msgs,
-                cli_meta.get("model") or "unknown",
-                profile=cli_meta.get("profile"),
-                created_at=cli_meta.get("created_at"),
-                updated_at=cli_meta.get("updated_at"),
-                parent_session_id=cli_meta.get("parent_session_id"),
-            )
-            s.is_cli_session = True
-            s.source_tag = cli_meta.get("source_tag")
-            s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
-            s.session_source = cli_meta.get("session_source")
-            s.source_label = cli_meta.get("source_label")
-            s.save(touch_updated_at=False)
+            if cli_meta.get("read_only"):
+                return bad(handler, "Read-only imported sessions cannot be continued", 400)
+            if _is_messaging_session_record(cli_meta):
+                # Messaging transcripts live in the gateway store; create a
+                # placeholder only so the gateway can serve messages at render
+                # time (routes.py:3146-3148).
+                s = Session(
+                    session_id=sid,
+                    title=cli_meta.get("title") or "Messaging Session",
+                    workspace=get_last_workspace(),
+                    messages=[],
+                    model=cli_meta.get("model") or "unknown",
+                    created_at=cli_meta.get("created_at"),
+                    updated_at=cli_meta.get("updated_at"),
+                )
+                s.is_cli_session = True
+                s.source_tag = cli_meta.get("source_tag")
+                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                s.session_source = cli_meta.get("session_source")
+                s.source_label = cli_meta.get("source_label")
+                s.user_id = cli_meta.get("user_id")
+                s.chat_id = cli_meta.get("chat_id")
+                s.chat_type = cli_meta.get("chat_type")
+                s.thread_id = cli_meta.get("thread_id")
+                s.session_key = cli_meta.get("session_key")
+                s.platform = cli_meta.get("platform")
+                s.save(touch_updated_at=False)
+            else:
+                msgs = get_cli_session_messages(sid)
+                if not msgs:
+                    return bad(handler, "Session not found", 404)
+                s = import_cli_session(
+                    sid,
+                    cli_meta.get("title") or title_from(msgs, "CLI Session"),
+                    msgs,
+                    cli_meta.get("model") or "unknown",
+                    profile=cli_meta.get("profile"),
+                    created_at=cli_meta.get("created_at"),
+                    updated_at=cli_meta.get("updated_at"),
+                    parent_session_id=cli_meta.get("parent_session_id"),
+                )
+                s.is_cli_session = True
+                s.source_tag = cli_meta.get("source_tag")
+                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                s.session_source = cli_meta.get("session_source")
+                s.source_label = cli_meta.get("source_label")
+                s.user_id = cli_meta.get("user_id")
+                s.chat_id = cli_meta.get("chat_id")
+                s.chat_type = cli_meta.get("chat_type")
+                s.thread_id = cli_meta.get("thread_id")
+                s.session_key = cli_meta.get("session_key")
+                s.platform = cli_meta.get("platform")
+                s.save(touch_updated_at=False)
         diag.stage("validate_profile") if diag else None
         requested_profile = str(body.get("profile") or "").strip()
         if requested_profile:
