@@ -5271,7 +5271,7 @@ def handle_post(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         try:
             space_id = _route_alias_value("space_id", "spaceId")
-            widget_id = _route_alias_value("widget_id", "widgetId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
                 return bad(handler, "Missing space_id or widget_id")
             return j(
@@ -5293,7 +5293,7 @@ def handle_post(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         try:
             space_id = _route_alias_value("space_id", "spaceId")
-            widget_id = _route_alias_value("widget_id", "widgetId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
                 return bad(handler, "Missing space_id or widget_id")
             return j(

@@ -10251,6 +10251,19 @@ def test_recovery_widget_and_space_routes_reject_conflicting_camelcase_aliases_m
             "/api/spaces/recovery/enable-widget",
             {"spaceId": created["space_id"], "widget_id": "bad-widget", "widgetId": "other-widget"},
         ),
+        (
+            "/api/spaces/recovery/disable-widget",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "bad-widget",
+                "id": "other-widget",
+                "reason": "source api_key",
+            },
+        ),
+        (
+            "/api/spaces/recovery/enable-widget",
+            {"spaceId": created["space_id"], "widgetId": "bad-widget", "id": "other-widget"},
+        ),
     ]
 
     bodies = []
