@@ -1508,7 +1508,9 @@ function closeSessionActionMenu(){
     _sessionActionMenu = null;
   }
   if(_sessionActionAnchor){
-    _sessionActionAnchor.classList.remove('active');
+    if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
+      _sessionActionAnchor.classList.remove('active');
+    }
     const row=_sessionActionAnchor.closest('.session-item');
     if(row) row.classList.remove('menu-open');
     _sessionActionAnchor = null;
@@ -1573,6 +1575,37 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _playSessionActionMenuEntrance(menu){
+  if(!menu) return;
+  const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(reduce) return;
+  if(typeof menu.animate==='function'){
+    try{
+      const anim=menu.animate(
+        [
+          {opacity:0, transform:'translate3d(0,-4px,0) scale(.985)'},
+          {opacity:1, transform:'translate3d(0,0,0) scale(1)'}
+        ],
+        {duration:500, easing:'cubic-bezier(.2,.8,.2,1)'}
+      );
+      if(anim&&anim.finished) anim.finished.catch(()=>{});
+      return;
+    }catch(_){}
+  }
+  menu.classList.add('open-animated');
+}
+
+async function _archiveSession(session, archived=true){
+  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
+  try{
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    session.archived=archived;
+    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    await renderSessionList();
+    showToast(archived?_sessionArchiveToast(response,session):t('session_restored'));
+  }catch(err){showToast(t('session_archive_failed')+err.message);}
+}
+
 function _openSessionActionMenu(session, anchorEl){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -1584,7 +1617,7 @@ function _openSessionActionMenu(session, anchorEl){
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
-  menu.className='session-action-menu open';
+  menu.className='session-action-menu';
   // Rename — first menu item by request (#1764). Double-click rename is
   // timing-sensitive: the first click frequently registers as "open the
   // chat" before the second click arrives, so users open the conversation
@@ -1643,13 +1676,7 @@ function _openSessionActionMenu(session, anchorEl){
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
-      try{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
-        session.archived=!session.archived;
-        if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
-        await renderSessionList();
-        showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
-      }catch(err){showToast(t('session_archive_failed')+err.message);}
+      await _archiveSession(session,!session.archived);
     }
   ));
   if(!isExternalSession){
@@ -1695,10 +1722,11 @@ function _openSessionActionMenu(session, anchorEl){
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
-  anchorEl.classList.add('active');
+  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
   const row=anchorEl.closest('.session-item');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  _playSessionActionMenuEntrance(menu);
 }
 
 document.addEventListener('click',e=>{
@@ -3133,8 +3161,63 @@ function renderSessionListFromCache(){
     let _pointerActive=false;
     let _isDragging=false;
     let _clearDragTimer=null;
+    let _longPressTimer=null;
+    let _longPressMenuOpened=false;
+    let _swipeHandled=false;
+    const _longPressDelay=560;
+    const _swipeActionThreshold=96;
+    const _swipeCancelRatio=0.75;
+    const _clearLongPressTimer=()=>{
+      if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
+    };
+    const _beginSessionTouchGesture=(clientX,clientY)=>{
+      _pointerActive=true;
+      _pointerDownX=clientX;
+      _pointerDownY=clientY;
+      _isDragging=false;
+      _longPressMenuOpened=false;
+      _swipeHandled=false;
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+      el.classList.remove('dragging');
+    };
+    const _scheduleSessionLongPressMenu=()=>{
+      _clearLongPressTimer();
+      _longPressTimer=setTimeout(()=>{
+        if(!_pointerActive||_isDragging||_renamingSid||_sessionSelectMode||readOnly) return;
+        _longPressMenuOpened=true;
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        _openSessionActionMenu(s, el);
+      },_longPressDelay);
+    };
+    const _isSessionSwipeTarget=()=>{
+      return !readOnly&&!_renamingSid&&!_sessionSelectMode;
+    };
+    const _canSwipeDeleteSession=()=>{
+      return _isSessionSwipeTarget()&&!_isMessagingSession(s)&&!_isCliSession(s);
+    };
+    const _handleSessionSwipe=(signedDx,signedDy)=>{
+      if(_swipeHandled||!_isSessionSwipeTarget()) return false;
+      if(Math.abs(signedDx)<_swipeActionThreshold) return false;
+      if(Math.abs(signedDy)>Math.abs(signedDx)*_swipeCancelRatio) return false;
+      _swipeHandled=true;
+      _clearLongPressTimer();
+      clearTimeout(_tapTimer);
+      _tapTimer=null;
+      _lastTapTime=0;
+      if(signedDx>0){
+        _archiveSession(s,true);
+      }else if(_canSwipeDeleteSession()){
+        deleteSession(s.session_id);
+      }else if(typeof showToast==='function'){
+        showToast('Imported sessions cannot be deleted here.',3000);
+      }
+      return true;
+    };
     const _clearPointerDragState=()=>{
       _pointerActive=false;
+      _clearLongPressTimer();
       if(_isDragging){
         _isDragging=false;
         if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
@@ -3143,35 +3226,43 @@ function renderSessionListFromCache(){
     };
     el.onpointerdown=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
-      _pointerActive=true;
-      _pointerDownX=e.clientX;
-      _pointerDownY=e.clientY;
-      _isDragging=false;
-      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      el.classList.remove('dragging');
+      _beginSessionTouchGesture(e.clientX,e.clientY);
+      if(e.pointerType==='touch'||e.pointerType==='pen'){
+        _scheduleSessionLongPressMenu();
+      }
     };
     el.onpointermove=(e)=>{
       // Plain hover also dispatches pointermove. Only mark a row as dragging
       // after an actual press starts on this row; otherwise hovered rows stay
       // faded until the next sidebar rerender clears their DOM nodes.
       if(!_pointerActive) return;
-      if(_isDragging) return;
       const dx=Math.abs(e.clientX-_pointerDownX);
       const dy=Math.abs(e.clientY-_pointerDownY);
-      if(dx>5||dy>5){
+      if(!_isDragging&&(dx>5||dy>5)){
+        if(dy>8||dx>10) _clearLongPressTimer();
         _isDragging=true;
         el.classList.add('dragging');
         // Cancel any pending drag-clear so we don't flash hover mid-drag
         if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
       }
+      const signedDx=e.clientX-_pointerDownX;
+      const signedDy=e.clientY-_pointerDownY;
+      _handleSessionSwipe(signedDx,signedDy);
     };
     el.onpointercancel=_clearPointerDragState;
     el.onpointerleave=()=>{ if(_pointerActive) _clearPointerDragState(); };
     el.onpointerup=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       _pointerActive=false;
+      _clearLongPressTimer();
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
+      if(_longPressMenuOpened||_swipeHandled){e.stopPropagation();return;}
+      if(_sessionActionMenu&&!_sessionActionMenu.contains(e.target)){
+        closeSessionActionMenu();
+        e.stopPropagation();
+        return;
+      }
       if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
@@ -3215,6 +3306,42 @@ function renderSessionListFromCache(){
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
     };
+    el.oncontextmenu=(e)=>{
+      if(e.pointerType==='touch'||e.pointerType==='pen'){
+        e.preventDefault();
+      }
+    };
+    el.addEventListener('touchstart',(e)=>{
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      _beginSessionTouchGesture(touch.clientX,touch.clientY);
+      _scheduleSessionLongPressMenu();
+    },{passive:true});
+    el.addEventListener('touchmove',(e)=>{
+      if(!_pointerActive) return;
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      const signedDx=touch.clientX-_pointerDownX;
+      const signedDy=touch.clientY-_pointerDownY;
+      const dx=Math.abs(signedDx);
+      const dy=Math.abs(signedDy);
+      if(dx>10||dy>8) _clearLongPressTimer();
+      if(!_isDragging&&(dx>5||dy>5)){
+        _isDragging=true;
+        el.classList.add('dragging');
+        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+      }
+      if(dx>16&&dx>dy*1.2) e.preventDefault();
+      _handleSessionSwipe(signedDx,signedDy);
+    },{passive:false});
+    el.addEventListener('touchend',()=>{
+      _pointerActive=false;
+      _clearLongPressTimer();
+      if(_isDragging){
+        _isDragging=false;
+        _clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);
+      }
+    },{passive:true});
     return el;
   }
 }
