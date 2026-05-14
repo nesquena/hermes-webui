@@ -50,3 +50,17 @@ def test_workflows_dag_canvas_and_node_inspector_are_present():
         ".workflow-node-inspector",
     ):
         assert selector in STYLE_CSS
+
+
+def test_workflows_main_view_participates_in_panel_minimize_switching():
+    compact_css = "".join(STYLE_CSS.split())
+    assert "main.main>#mainWorkflows" in compact_css
+    assert "not(.showing-workflows)" in STYLE_CSS
+    assert "main.main.showing-workflows>#mainWorkflows{display:flex;}" in compact_css
+
+
+def test_workflow_dag_nodes_are_opaque_over_graph_background():
+    node_rule_start = STYLE_CSS.index(".workflow-dag-node{")
+    node_rule = STYLE_CSS[node_rule_start : STYLE_CSS.index("}", node_rule_start)]
+    assert "background:var(--surface);" in node_rule
+    assert "transparent" not in node_rule

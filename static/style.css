@@ -2366,16 +2366,18 @@ main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
 main.main > #mainKanban,
+main.main > #mainWorkflows,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workflows):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
 main.main.showing-tasks > #mainTasks{display:flex;}
 main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
+main.main.showing-workflows > #mainWorkflows{display:flex;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
@@ -3858,7 +3860,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-dag-canvas{position:relative;overflow:auto;border:1px solid var(--border);border-radius:16px;background:radial-gradient(circle at 1px 1px,rgba(148,163,184,.20) 1px,transparent 0);background-size:22px 22px;box-shadow:inset 0 1px 0 rgba(255,255,255,.04);}
 .workflow-dag-edge-layer{position:absolute;inset:0;pointer-events:none;overflow:visible;}
 .workflow-dag-edge{fill:none;stroke:rgba(148,163,184,.55);stroke-width:2;}
-.workflow-dag-node{position:absolute;width:180px;min-height:76px;display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--border);border-radius:14px;background:color-mix(in srgb,var(--panel) 92%,transparent);color:var(--text);text-align:left;cursor:pointer;box-shadow:0 10px 28px rgba(0,0,0,.18);}
+.workflow-dag-node{position:absolute;width:180px;min-height:76px;display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);text-align:left;cursor:pointer;box-shadow:0 10px 28px rgba(0,0,0,.18);}
 .workflow-dag-node:hover,.workflow-dag-node:focus{outline:none;border-color:var(--accent);transform:translateY(-1px);}
 .workflow-dag-node-title{font-weight:750;font-size:13px;line-height:1.25;}
 .workflow-dag-node-meta,.workflow-dag-gate{font-size:11px;color:var(--muted);line-height:1.25;}
