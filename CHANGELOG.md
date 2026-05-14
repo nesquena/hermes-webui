@@ -4,7 +4,13 @@
 
 ### Fixed
 
-- **Issue #2245** — Model picker provider lookup now canonicalizes configured provider keys before loading their configured models. Custom provider keys such as `CLIPpoxy` or `snake_case_provider` still display their configured model allowlists after canonicalization while preserving the original config key for provider settings.
+- **PR #2265** by @Michaelyklam (closes #2245) — Model picker provider lookup now canonicalizes configured provider keys before loading their configured models. Pre-fix, custom provider keys with mixed casing or underscores such as `CLIPpoxy` or `snake_case_provider` were lower-cased during canonicalization, but the resulting canonical key didn't match the raw `config.yaml` key, so the model allowlist lookup silently returned empty and the model picker dropdown showed no models for that provider. The fix maps canonical provider IDs back to their raw config.yaml provider keys before loading `provider_cfg`. Original config keys are preserved for provider settings rendering. 242-line regression test covering CLIPpoxy + snake_case_provider plus built-in/fallback behavior.
+
+- **PR #2234** by @Jordan-SkyLF (post-v0.51.62 rebase, follow-up to v0.51.62's category-refinement portion) — Update summary generation now routes through the documented `auxiliary.compression` text-model slot instead of a WebUI-only `auxiliary.update_summary` magic key. The reviewer concern was that `update_summary` would have been a non-discoverable WebUI-specific config key; using the existing documented compression/summarization slot keeps the PR self-contained to `hermes-webui` and gives users a way to override summary generation through an existing config surface. The existing main-model fallback is preserved if auxiliary resolution or generation fails. Adds route comment explaining why summary generation maps to compression instead of inventing a new task name.
+
+## [v0.51.62] — 2026-05-14 — Release AL (stage-355 — 11-PR full sweep — metadata-only cache hit fixes + skill detail + phone UX + display-title projection + escaping + RFC update)
+
+### Fixed
 
 - **PR #2244** by @franksong2702 (fixes #2243) — `Archive Session` no longer fails when the in-memory session cache contains a metadata-only stub for the target. Pre-fix, the route loaded via `get_session(sid)` which returned the cached `_loaded_metadata_only=True` instance, then `Session.save()` correctly refused to write because the metadata stub's `messages=[]` would have overwritten the full transcript (#1558 guard). Now the archive route reloads the full session from disk before mutating `archived` and refreshes the cache. Existing CLI/imported-session fallback unchanged. 47-line regression test pinning the route-level behaviour.
 
@@ -23,8 +29,6 @@
 - **PR #2259** by @franksong2702 (closes #2258) — Update-link regression tests (`test_issue1579_whats_new_link_404.py`) now explicitly pin the throwaway bare repository `HEAD` to `refs/heads/master`. Pre-fix, on machines whose global Git default branch was not `master`, the bare repo's `HEAD` could point elsewhere and the subsequent clone/rev-parse chain silently failed. Test-only change. Makes the fixture deterministic.
 
 - **PR #2234** by @Jordan-SkyLF (post-v0.51.61 rebase) — Update summary category handling now preserves all explicit `Notice:` and `Worth knowing:` bullets the summarizer returns instead of forcing a three-item split. Distinct categories are deduplicated against each other so the same content can't appear twice across sections. Keeps the existing fallback grouping when the model doesn't return explicit prefixes. The summary panel becomes scrollable when longer summaries need more vertical room. Caps large update-summary commit input to the latest 24 commit subjects and discloses that scope in the generated summary while keeping the full comparison link available.
-
-- **PR #2234** by @Jordan-SkyLF (follow-up to the v0.51.62 category refinement) — Update summary generation now prefers the documented `auxiliary.compression` text-model slot before falling back to the main configured model, avoiding a WebUI-only `auxiliary.update_summary` magic key that would not appear in Hermes Agent setup/config documentation.
 
 ### Added
 
