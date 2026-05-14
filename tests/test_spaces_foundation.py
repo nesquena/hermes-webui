@@ -6394,6 +6394,66 @@ def test_space_tool_adapter_widget_restore_rejects_conflicting_event_positional_
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_widget_restore_rejects_conflicting_widget_selector_alias_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-widget-selector-conflict", "name": "Widget Selector Conflict"})
+    original = spaces.upsert_widget(created["space_id"], {"id": "panel", "kind": "markdown", "title": "Original panel"})
+    spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes current"})
+    spaces.patch_widget(created["space_id"], "panel", {"title": "Patched panel"})
+
+    with pytest.raises(ValueError, match="widget selector aliases"):
+        spaces.run_space_tool(
+            "space.recovery.restore_widget",
+            {
+                "spaceId": created["space_id"],
+                "eventId": original["revision_event_id"],
+                "widget_id": "panel",
+                "widgetId": "notes",
+                "source": "raw generated source SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>should-not-leak()</script>",
+            },
+        )
+
+    panel = spaces.read_widget(created["space_id"], "panel")
+    notes = spaces.read_widget(created["space_id"], "notes")
+    serialized = json.dumps({"panel": panel, "notes": notes}).lower()
+    assert panel["title"] == "Patched panel"
+    assert notes["title"] == "Notes current"
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_widget_restore_rejects_conflicting_id_and_positional_widget_selector_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-widget-id-pos-conflict", "name": "Widget ID Positional Conflict"})
+    original = spaces.upsert_widget(created["space_id"], {"id": "panel", "kind": "markdown", "title": "Original panel"})
+    spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes current"})
+    spaces.patch_widget(created["space_id"], "panel", {"title": "Patched panel"})
+
+    with pytest.raises(ValueError, match="widget selector aliases"):
+        spaces.run_space_tool(
+            "space.recovery.restore_widget",
+            {
+                "args": [created["space_id"], original["revision_event_id"], "panel"],
+                "id": "notes",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>should-not-leak()</script>",
+            },
+        )
+
+    panel = spaces.read_widget(created["space_id"], "panel")
+    notes = spaces.read_widget(created["space_id"], "notes")
+    serialized = json.dumps({"panel": panel, "notes": notes}).lower()
+    assert panel["title"] == "Patched panel"
+    assert notes["title"] == "Notes current"
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_widget_revision_restore_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-widget-restore", "name": "Tool Widget Restore"})

@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 02:28 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 04:03 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces recovery/admin rollback tool adapters now reject conflicting revision event selector aliases before rollback side effects, preserving the current manifest when callers send inconsistent Space-Agent-style event fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces recovery/admin widget-restore tool adapters now reject conflicting widget selector aliases before rollback side effects, preserving the current widget manifest when callers send inconsistent Space-Agent-style widget fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting widget restore aliases`
+  - Added RED/GREEN backend coverage proving `space.recovery.restore_widget` rejects conflicting `widget_id` / `widgetId` selectors and `id` / positional widget selector conflicts before restoring a widget revision, leaving current widget metadata unchanged and keeping public detail reads free of generated renderer/API-auth/secret-looking markers.
+  - Hardened the shared Space-tool widget selector resolver so widget restore branches validate `widget_id`, `widgetId`, `id`, and positional `args[2]` as a consistency set before side effects, while preserving pure positional restore calls.
+  - Validation at completion: focused RED failed before implementation (`1 failed`), follow-up `id` vs positional RED failed before the review-gap fix (`1 failed`); focused GREEN passed (`2 passed`); rollback/admin/widget-restore regressions passed (`9 passed, 260 deselected`); full Spaces foundation suite passed (`269 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static recovery widget-restore browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/widget-restore-alias-qa.png`.
 
 - `fix(spaces): reject conflicting rollback event aliases`
   - Added RED/GREEN backend coverage proving `space.admin.rollback` rejects conflicting `event_id` / `revisionEventId` and named-vs-positional revision-event selector aliases before restoring an older revision, leaves the current Space manifest unchanged, and does not expose generated renderer/API-auth/secret-looking markers in public details.
