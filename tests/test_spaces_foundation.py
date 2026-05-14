@@ -9803,6 +9803,69 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert body["generated_widgets_rendered"] is False
 
 
+def test_spaces_safe_get_routes_accept_camelcase_query_aliases_and_reject_conflicts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "get-camel-route", "name": "Get Camel Route"})
+    other = spaces.create_space({"space_id": "get-other-route", "name": "Get Other Route"})
+    widget = spaces.upsert_widget(
+        target["space_id"],
+        {
+            "id": "route-widget",
+            "kind": "markdown",
+            "title": "Safe route widget",
+            "renderer": "<script>getRouteLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    spaces.queue_widget_event(
+        target["space_id"],
+        "route-widget",
+        "agent.prompt",
+        {"query": "safe", "renderer": "<script>eventLeak()</script>"},
+        prompt="Bearer SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    for path, key in [
+        (f"/api/spaces/get?spaceId={target['space_id']}", "space"),
+        (f"/api/spaces/widgets?spaceId={target['space_id']}", "widgets"),
+        (f"/api/spaces/widget?spaceId={target['space_id']}&widgetId=route-widget", "widget"),
+        (f"/api/spaces/widget/events?spaceId={target['space_id']}&widgetId=route-widget", "events"),
+        (f"/api/spaces/revisions?spaceId={target['space_id']}", "revisions"),
+    ]:
+        handled, status, body = _route_get(path)
+        assert handled is None
+        assert status == 200
+        assert key in body
+        serialized = json.dumps(body).lower()
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+        assert "bearer" not in serialized
+        assert "api_key" not in serialized
+        if key == "revisions":
+            assert any(event["event_id"] == widget["revision_event_id"] for event in body["revisions"])
+
+    handled, status, body = _route_get(
+        f"/api/spaces/revisions?space_id={target['space_id']}&spaceId={other['space_id']}&renderer=%3Cscript%3Eleak()%3C/script%3E"
+    )
+    serialized = json.dumps(body).lower()
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, body = _route_get(
+        f"/api/spaces/widget?spaceId={target['space_id']}&widget_id=route-widget&widgetId=other-widget&api_key=SECRET_VALUE_DO_NOT_LEAK"
+    )
+    serialized = json.dumps(body).lower()
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_delete_route_accepts_camelcase_id_and_rejects_conflicts_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     camel = spaces.create_space({"space_id": "delete-camel-route", "name": "Delete Camel Route"})

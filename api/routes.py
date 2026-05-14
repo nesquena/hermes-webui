@@ -2865,6 +2865,19 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
+    def _query_alias_value(qs, *names):
+        values = []
+        for name in names:
+            for value in qs.get(name, []):
+                if value is None:
+                    continue
+                value = str(value).strip()
+                if value:
+                    values.append(value)
+        if values and any(value != values[0] for value in values[1:]):
+            raise ValueError("Conflicting Capy Spaces route selector aliases")
+        return values[0] if values else ""
+
     if parsed.path.startswith("/session/static/"):
         # Strip the leading "/session" so _serve_static() sees a path that
         # starts with "/static/" (its required prefix). _serve_static enforces
@@ -3593,7 +3606,11 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        space_id = parse_qs(parsed.query).get("space_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        try:
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+        except ValueError as e:
+            return bad(handler, str(e))
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
@@ -3608,7 +3625,10 @@ def handle_get(handler, parsed) -> bool:
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
         qs = parse_qs(parsed.query)
-        space_id = qs.get("space_id", [""])[0]
+        try:
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+        except ValueError as e:
+            return bad(handler, str(e))
         limit = qs.get("limit", [20])[0]
         if not space_id:
             return bad(handler, "Missing space_id")
@@ -3623,7 +3643,11 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        space_id = parse_qs(parsed.query).get("space_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        try:
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+        except ValueError as e:
+            return bad(handler, str(e))
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
@@ -3638,8 +3662,11 @@ def handle_get(handler, parsed) -> bool:
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
         qs = parse_qs(parsed.query)
-        space_id = qs.get("space_id", [""])[0]
-        widget_id = qs.get("widget_id", [""])[0]
+        try:
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+            widget_id = _query_alias_value(qs, "widget_id", "widgetId")
+        except ValueError as e:
+            return bad(handler, str(e))
         limit = qs.get("limit", [20])[0]
         if not space_id:
             return bad(handler, "Missing space_id")
@@ -3655,8 +3682,11 @@ def handle_get(handler, parsed) -> bool:
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
         qs = parse_qs(parsed.query)
-        space_id = qs.get("space_id", [""])[0]
-        widget_id = qs.get("widget_id", [""])[0]
+        try:
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+            widget_id = _query_alias_value(qs, "widget_id", "widgetId")
+        except ValueError as e:
+            return bad(handler, str(e))
         if not space_id or not widget_id:
             return bad(handler, "Missing space_id or widget_id")
         try:
