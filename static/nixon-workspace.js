@@ -304,16 +304,18 @@ class NixonWorkspace {
     showAgentDetails(agent) {
         // Create a modal or tooltip with agent details
         this.showNotification(`${agent.name}: ${agent.currentTask}`);
-        
-        // Animate the agent
+
+        // Highlight the agent without using transform:scale (broke mobile layout).
+        // Use a glowing ring + box-shadow pulse instead.
         const agentElement = document.querySelector(`[data-role="${agent.role}"]`);
         if (agentElement) {
-            agentElement.style.transform = 'scale(1.2)';
+            const prevShadow = agentElement.style.boxShadow;
+            agentElement.style.boxShadow = '0 0 0 6px rgba(37, 99, 235, 0.35), 0 10px 20px rgba(0,0,0,0.25)';
             setTimeout(() => {
-                agentElement.style.transform = '';
-            }, 300);
+                agentElement.style.boxShadow = prevShadow;
+            }, 600);
         }
-        
+
         console.log('Agent details:', agent);
     }
 
@@ -669,32 +671,60 @@ function renderAgents(agents) {
     const map = document.getElementById('workspace-map');
     if (!map || !Array.isArray(agents)) return;
 
+    // Group agents by their target zone so multiple agents in the same zone
+    // can be spread out instead of stacked on top of each other.
+    const byZone = {};
     agents.forEach(agent => {
-        let el = document.querySelector(`[data-id="${agent.id}"]`);
-
-        if (!el) {
-            el = document.createElement('div');
-            el.className = 'agent';
-            el.dataset.id = agent.id;
-            map.appendChild(el);
-        }
-
         const zoneId = mapStatusToZone(agent.status);
+        (byZone[zoneId] = byZone[zoneId] || []).push(agent);
+    });
+
+    Object.entries(byZone).forEach(([zoneId, list]) => {
         const zone = document.getElementById(zoneId);
         if (!zone) return;
 
-        // Get zone position relative to map
         const mapRect = map.getBoundingClientRect();
         const zoneRect = zone.getBoundingClientRect();
-        
-        // Calculate relative position within the map
-        const relativeX = zoneRect.left - mapRect.left + (zoneRect.width / 2) - 9; // Center agent (18px / 2)
-        const relativeY = zoneRect.top - mapRect.top + (zoneRect.height / 2) - 9;
 
-        el.style.left = relativeX + 'px';
-        el.style.top = relativeY + 'px';
+        list.forEach((agent, i) => {
+            let el = document.querySelector(`[data-id="${agent.id}"]`);
+            if (!el) {
+                el = document.createElement('div');
+                el.className = 'agent';
+                el.dataset.id = agent.id;
+                el.title = `${agent.name} - ${agent.currentTask || ''}`;
+                map.appendChild(el);
+            }
+
+            const agentSize = el.offsetWidth || 22;
+            const half = agentSize / 2;
+
+            // Spread agents in a small grid inside the zone (max 3 per row).
+            const cols = Math.min(list.length, 3);
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const cellW = zoneRect.width / (cols + 1);
+            const cellH = Math.max(28, zoneRect.height / 4);
+
+            const offsetX = (col + 1) * cellW - zoneRect.width / 2;
+            const offsetY = row * cellH;
+
+            const relativeX = zoneRect.left - mapRect.left + (zoneRect.width / 2) + offsetX - half;
+            const relativeY = zoneRect.top - mapRect.top + (zoneRect.height / 2) + offsetY - half;
+
+            el.style.left = relativeX + 'px';
+            el.style.top = relativeY + 'px';
+        });
     });
 }
+
+// Re-position agents on resize/orientation change so the fixed full-screen map on
+// mobile keeps agents inside their zones.
+window.addEventListener('resize', () => {
+    if (window.nixonWorkspace && Array.isArray(window.nixonWorkspace.agents)) {
+        renderAgents(window.nixonWorkspace.agents);
+    }
+});
 
 // Initialize the workspace when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
