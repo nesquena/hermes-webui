@@ -104,10 +104,12 @@ _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
 _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 
 # Short-lived account-usage cache. The Codex pooled probe may check multiple
-# credentials, so cache the sanitized snapshot briefly to avoid re-querying the
+# credentials, so cache sanitized snapshots briefly to avoid re-querying the
 # provider on every Settings repaint/profile-panel refresh. Pool composition
 # changes can be stale for at most this TTL; that is preferred to hammering the
-# provider usage API while the Settings panel is open.
+# provider usage API while the Settings panel is open. Transient None probe
+# results are intentionally not cached; known exhausted/unavailable states are
+# represented as non-None snapshots and remain cacheable.
 _account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
 _account_usage_status_cache_lock = threading.Lock()
 
@@ -461,6 +463,9 @@ def _best_remaining_by_window(rows):
                 "credential_label": label,
             }
             current = best.get(window_label.lower())
+            # The normalized Codex account-limit payload currently exposes
+            # percentages, not absolute request/token capacity. If absolute
+            # remaining capacity becomes available, prefer it here.
             if current is None or float(remaining) > float(current.get("remaining_percent") or -1):
                 best[window_label.lower()] = candidate
     return list(best.values())
@@ -713,6 +718,12 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
 
 
 def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
+    """Decode JWT claims for token-shape classification only.
+
+    The signature is intentionally not verified because this helper is not an
+    authorization decision: it only prevents a Codex OAuth JWT-shaped value from
+    being treated as a raw OpenAI API key in provider-card detection.
+    """
     if not isinstance(token, str) or token.count(".") != 2:
         return {}
     payload = token.split(".", 2)[1]
@@ -1185,15 +1196,15 @@ def invalidate_account_usage_status_cache(provider_id: str | None = None) -> Non
 def _set_cached_account_usage(
     cache_key: tuple[str, str, str],
     snapshot: Any,
-    *,
-    preserve_non_none: bool = False,
 ) -> None:
     now = time.monotonic()
     with _account_usage_status_cache_lock:
-        if preserve_non_none and snapshot is None:
+        if snapshot is None:
             cached = _account_usage_status_cache.get(cache_key)
             if cached is not None and cached[1] is not None:
                 return
+            _account_usage_status_cache.pop(cache_key, None)
+            return
         _account_usage_status_cache[cache_key] = (now, snapshot)
         expired = [
             key for key, (fetched_at, _snapshot) in _account_usage_status_cache.items()
@@ -1284,11 +1295,11 @@ def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = 
                 home,
                 api_key=api_key,
             )
-            _set_cached_account_usage(cache_key, snapshot, preserve_non_none=refresh)
+            _set_cached_account_usage(cache_key, snapshot)
             return snapshot
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
-        _set_cached_account_usage(cache_key, None, preserve_non_none=refresh)
+        _set_cached_account_usage(cache_key, None)
         return None
 
 

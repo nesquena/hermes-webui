@@ -999,18 +999,30 @@ def test_account_usage_profile_cache_invalidates_with_credential_pool_cache(monk
 
 
 
-def test_account_usage_profile_fetch_caches_none_results(monkeypatch, tmp_path):
-    """Known-empty/unavailable account usage should be cached, not re-probed each refresh."""
+def test_account_usage_profile_fetch_caches_unavailable_snapshots(monkeypatch, tmp_path):
+    """Known unavailable account snapshots should be cached like available ones."""
     import api.providers as providers
 
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
     providers._account_usage_status_cache.clear()
     calls = []
+    unavailable_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api_pool",
+        title="Account limits",
+        plan=None,
+        windows=(),
+        details=("0/1 credentials available", "1 exhausted"),
+        available=False,
+        unavailable_reason="Credential pool exhausted until 2030-03-17T18:46:40Z.",
+        fetched_at=datetime(2030, 3, 17, 12, 30, tzinfo=timezone.utc),
+        pool={"total_credentials": 1, "available_credentials": 0, "exhausted_credentials": 1, "credentials": []},
+    )
 
     def fake_fetch(provider, home, api_key=None):
         calls.append((provider, str(home), api_key))
-        return None
+        return unavailable_snapshot
 
     monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
     try:
@@ -1020,9 +1032,52 @@ def test_account_usage_profile_fetch_caches_none_results(monkeypatch, tmp_path):
         providers._account_usage_status_cache.clear()
         _restore_config(old_cfg, old_mtime)
 
-    assert first is None
-    assert second is None
+    assert first is unavailable_snapshot
+    assert second is unavailable_snapshot
     assert calls == [("openai-codex", str(tmp_path), None)]
+
+
+def test_account_usage_profile_fetch_does_not_cache_transient_none_results(monkeypatch, tmp_path):
+    """Transient None probe results should not mask the next successful status check."""
+    import api.providers as providers
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    old_cfg, old_mtime = _with_config(model={"provider": "openai-codex"})
+    providers._account_usage_status_cache.clear()
+    calls = []
+    recovered_snapshot = SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api_pool",
+        title="Account limits",
+        plan=None,
+        windows=(),
+        details=(),
+        available=True,
+        unavailable_reason=None,
+        fetched_at=datetime(2030, 3, 17, 12, 31, tzinfo=timezone.utc),
+        pool={"total_credentials": 1, "credentials": []},
+    )
+
+    def fake_fetch(provider, home, api_key=None):
+        calls.append((provider, str(home), api_key))
+        return None if len(calls) == 1 else recovered_snapshot
+
+    monkeypatch.setattr(providers, "_agent_fetch_account_usage_for_home", fake_fetch)
+    try:
+        first = providers._fetch_account_usage_with_profile_context("openai-codex")
+        second = providers._fetch_account_usage_with_profile_context("openai-codex")
+        third = providers._fetch_account_usage_with_profile_context("openai-codex")
+    finally:
+        providers._account_usage_status_cache.clear()
+        _restore_config(old_cfg, old_mtime)
+
+    assert first is None
+    assert second is recovered_snapshot
+    assert third is recovered_snapshot
+    assert calls == [
+        ("openai-codex", str(tmp_path), None),
+        ("openai-codex", str(tmp_path), None),
+    ]
 
 
 def test_account_usage_profile_fetches_can_overlap_for_different_homes(monkeypatch, tmp_path):
