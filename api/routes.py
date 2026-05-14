@@ -3607,11 +3607,13 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        space_id = parse_qs(parsed.query).get("space_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        space_id = qs.get("space_id", [""])[0]
+        limit = qs.get("limit", [20])[0]
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"revisions": capy_spaces.list_revision_events(space_id)})
+            return j(handler, {"revisions": capy_spaces.list_revision_events(space_id, limit=limit)})
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -3638,10 +3640,11 @@ def handle_get(handler, parsed) -> bool:
         qs = parse_qs(parsed.query)
         space_id = qs.get("space_id", [""])[0]
         widget_id = qs.get("widget_id", [""])[0]
+        limit = qs.get("limit", [20])[0]
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"events": capy_spaces.list_widget_events(space_id, widget_id=widget_id or None)})
+            return j(handler, {"events": capy_spaces.list_widget_events(space_id, widget_id=widget_id or None, limit=limit)})
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:

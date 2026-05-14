@@ -9429,6 +9429,11 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert body["revisions"][-1]["event_type"] == "space.created"
     assert body["revisions"][0]["space_id"] == space_id
 
+    handled, status, limited_body = _route_get(f"/api/spaces/revisions?space_id={space_id}&limit=2")
+    assert handled is None
+    assert status == 200
+    assert [event["event_type"] for event in limited_body["revisions"]] == ["widget.patched", "widget.created"]
+
     handled, status, body = _route_post(
         "/api/spaces/revision/restore",
         {"space_id": space_id, "event_id": body["revisions"][-1]["event_id"]},
@@ -11240,6 +11245,11 @@ def test_list_widget_events_and_route_return_safe_newest_first_inbox(monkeypatch
 
     weather_events = spaces.list_widget_events(created["space_id"], widget_id="weather")
     assert [event["event_id"] for event in weather_events] == [first["event_id"]]
+
+    handled, status, body = _route_get(f"/api/spaces/widget/events?space_id={created['space_id']}&limit=1")
+    assert handled is None
+    assert status == 200
+    assert [event["event_id"] for event in body["events"]] == [second["event_id"]]
 
     handled, status, body = _route_get(f"/api/spaces/widget/events?space_id={created['space_id']}&widget_id=weather")
     assert handled is None

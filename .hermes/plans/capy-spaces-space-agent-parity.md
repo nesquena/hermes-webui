@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-13 16:24 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-13 20:11 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces product-home polish now removes literal Material icon labels, adds a denser empty-state action area, improves welcome-card close-button spacing, and softens recovery wording while preserving metadata-only safe recovery. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces history/event HTTP routes now honor bounded `limit` query parameters for revision timelines and widget event inboxes while preserving metadata-only route responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): honor bounded route history limits`
+  - Added RED/GREEN route coverage proving `/api/spaces/revisions?limit=2` and `/api/spaces/widget/events?limit=1` return bounded newest-first metadata windows instead of overfetching entire rollback/event histories.
+  - Wired the GET route adapters through the existing lower-level `list_revision_events(..., limit=...)` and `list_widget_events(..., limit=...)` clamps, preserving selector validation, default behavior, and metadata-only safety.
+  - Validation at completion: focused RED failed before implementation (`2 failed`); focused GREEN passed (`2 passed`); full Spaces foundation suite passed (`263 passed`); Spaces UI behavior + demo parity suites passed (`180 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` route-limit browser QA harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/route-limit-qa.png`.
 
 - `fix(spaces): polish product home empty state`
   - Added RED/GREEN real-`static/spaces.js` coverage for an enabled but empty Capy Spaces product home, proving the empty-state grid is action-rich, avoids literal Material icon words, keeps resource links accessible, and does not render generated widget/source/API-auth/secret-looking content.
