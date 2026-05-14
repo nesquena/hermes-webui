@@ -635,6 +635,79 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
         return False
 
 
+# Canonical OAuth provider ids known to the agent. Mirrors the set in
+# `_provider_oauth_authenticated()` but kept as a top-level constant so the
+# gate detector below can reference it without duplicating the literal.
+_OAUTH_PROVIDER_IDS = frozenset({
+    "nous",
+    "openai-codex",
+    "copilot",
+    "copilot-acp",
+    "qwen-oauth",
+    "anthropic",
+})
+
+
+def _infer_oauth_gate(cfg: dict) -> dict:
+    """Detect whether the active provider needs a one-time OAuth completion.
+
+    HermesDeploy provisions Nous Portal / Code Explorer instances with a
+    provider+model already set but no auth.json — the user is expected to
+    finish the OAuth handshake (`hermes auth add <provider> --type oauth`)
+    on first launch. This used to be a manual step buried in settings; the
+    gate makes it explicit so the WebUI can auto-open a terminal pre-loaded
+    with the command.
+
+    Returns a dict consumed by the frontend:
+      - required: True iff a known OAuth provider is configured AND auth.json
+        does not yet have token material for it
+      - provider: canonical provider id (e.g. "nous")
+      - authenticated: convenience inverse of `required` when a provider is
+        detected; False when no OAuth provider is configured at all
+      - terminal_command: exact command the frontend should send to the
+        terminal PTY to start the device flow
+
+    Detection precedence:
+      1. ``HERMES_OAUTH_PROVIDER`` env var — explicit signal stamped by the
+         host (HermesDeploy welcome flow). Always wins when set.
+      2. ``config.yaml`` provider already in the known OAuth set.
+      3. Legacy escape hatch: provider="custom" with a base_url pointing at
+         a known OAuth-only inference host (the pre-2026-05-14 HermesDeploy
+         welcome flow wrote provider="custom" for Nous Portal Auth users).
+    """
+    explicit = (os.environ.get("HERMES_OAUTH_PROVIDER") or "").strip().lower()
+
+    provider = ""
+    if explicit and explicit in _OAUTH_PROVIDER_IDS:
+        provider = explicit
+    else:
+        cfg_provider = _extract_current_provider(cfg)
+        if cfg_provider in _OAUTH_PROVIDER_IDS:
+            provider = cfg_provider
+        elif cfg_provider == "custom":
+            base_url = _extract_current_base_url(cfg).lower()
+            if "nousresearch.com" in base_url:
+                provider = "nous"
+
+    if not provider:
+        return {
+            "required": False,
+            "provider": None,
+            "authenticated": False,
+            "terminal_command": None,
+        }
+
+    authenticated = _provider_oauth_authenticated(
+        provider, _get_active_hermes_home()
+    )
+    return {
+        "required": not authenticated,
+        "provider": provider,
+        "authenticated": authenticated,
+        "terminal_command": f"hermes auth add {provider} --type oauth",
+    }
+
+
 def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     provider = _extract_current_provider(cfg)
     model = _extract_current_model(cfg)
@@ -886,6 +959,12 @@ def get_onboarding_status() -> dict:
             "last": last_workspace,
         },
         "models": available_models,
+        # Surfaced separately from `completed` because HermesDeploy sets
+        # HERMES_WEBUI_SKIP_ONBOARDING=1 (auto-completes the wizard) yet some
+        # of those instances still need a one-time OAuth handshake to make
+        # the agent usable. The frontend treats `oauth_gate.required` as a
+        # blocking modal regardless of `completed`.
+        "oauth_gate": _infer_oauth_gate(cfg),
     }
 
 

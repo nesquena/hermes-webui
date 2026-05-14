@@ -426,7 +426,12 @@ async function loadOnboardingWizard(){
     ONBOARDING.form.apiKey='';
     ONBOARDING.form.baseUrl=current.base_url||'';
     ONBOARDING.active=!status.completed;
-    if(!ONBOARDING.active) return false;
+    if(!ONBOARDING.active){
+      // Stash the status so a later boot step (after loadSession) can call
+      // loadOAuthGate with the fresh value instead of refetching.
+      try{window.__OAUTH_GATE_STATUS=status;}catch(e){}
+      return false;
+    }
     $('onboardingOverlay').style.display='flex';
     _renderOnboardingSteps();
     _renderOnboardingBody();
@@ -434,6 +439,89 @@ async function loadOnboardingWizard(){
   }catch(e){
     console.warn('onboarding status failed',e);
     return false;
+  }
+}
+
+// ── First-launch OAuth gate ────────────────────────────────────────────────
+// Backstop for HermesDeploy users on OAuth-only providers (Nous Portal,
+// OpenAI Codex). Those instances ship with HERMES_WEBUI_SKIP_ONBOARDING=1
+// so the wizard never appears, but the agent still needs the user to mint
+// real credentials via `hermes auth add <provider> --type oauth`. Without
+// this gate, the first chat raises "No LLM provider configured" and the
+// user has no in-product hint about what to do.
+const OAUTH_GATE={active:false,provider:null,pollTimer:null,banner:null};
+
+async function loadOAuthGate(status){
+  try{
+    if(!status) status=await api('/api/onboarding/status');
+    const gate=(status&&status.oauth_gate)||null;
+    if(!gate||!gate.required||!gate.provider||!gate.terminal_command) return;
+    if(OAUTH_GATE.active) return;
+    OAUTH_GATE.active=true;
+    OAUTH_GATE.provider=gate.provider;
+    _showOAuthGateBanner(gate.provider);
+    // Open the existing composer terminal panel. toggleComposerTerminal is
+    // defined in terminal.js (loaded before boot.js's call to loadOnboardingWizard).
+    if(typeof toggleComposerTerminal==='function'){
+      try{await toggleComposerTerminal(true);}catch(e){}
+    }
+    // Wait for the PTY shell to print its prompt before sending the auth
+    // command. 1500ms is empirical: faster than that and the keystrokes
+    // race the prompt; slower feels laggy.
+    setTimeout(async()=>{
+      try{
+        const sid=(typeof _terminalSessionId==='function')?_terminalSessionId():null;
+        if(!sid){_oauthGateNote('Open a workspace, then re-open this page to finish signing in.');return;}
+        await api('/api/terminal/input',{method:'POST',body:JSON.stringify({
+          session_id:sid,
+          data:gate.terminal_command+'\n',
+        })});
+      }catch(e){console.warn('oauth gate terminal write failed',e);}
+    },1500);
+    // Poll every 5s. Server-side _provider_oauth_authenticated() flips the
+    // moment auth.json is written, so this exits within a poll cycle of the
+    // user completing the device-code flow in their browser.
+    OAUTH_GATE.pollTimer=setInterval(async()=>{
+      try{
+        const fresh=await api('/api/onboarding/status');
+        const g=(fresh&&fresh.oauth_gate)||null;
+        if(g&&g.authenticated){_hideOAuthGateBanner(true);}
+      }catch(e){}
+    },5000);
+  }catch(e){console.warn('oauth gate load failed',e);}
+}
+
+function _oauthGateProviderLabel(provider){
+  if(provider==='openai-codex') return 'OpenAI Codex';
+  if(provider==='nous') return 'Nous Portal';
+  if(provider==='anthropic') return 'Claude / Anthropic';
+  return provider||'your provider';
+}
+
+function _showOAuthGateBanner(provider){
+  let el=document.getElementById('oauthGateBanner');
+  if(!el){
+    el=document.createElement('div');
+    el.id='oauthGateBanner';
+    el.setAttribute('role','status');
+    el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#4a4a8a;color:#fff;padding:10px 16px;text-align:center;font:14px/1.4 system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.2)';
+    document.body.appendChild(el);
+  }
+  el.textContent='Finish signing in to '+_oauthGateProviderLabel(provider)+' in the terminal below — your agent is waiting.';
+  el.style.display='block';
+  OAUTH_GATE.banner=el;
+}
+
+function _oauthGateNote(msg){
+  if(OAUTH_GATE.banner){OAUTH_GATE.banner.textContent=msg;}
+}
+
+function _hideOAuthGateBanner(showToastOnSuccess){
+  if(OAUTH_GATE.pollTimer){clearInterval(OAUTH_GATE.pollTimer);OAUTH_GATE.pollTimer=null;}
+  if(OAUTH_GATE.banner){OAUTH_GATE.banner.style.display='none';}
+  OAUTH_GATE.active=false;
+  if(showToastOnSuccess&&typeof showToast==='function'){
+    showToast('Signed in — your agent is ready to chat.',4000,'success');
   }
 }
 

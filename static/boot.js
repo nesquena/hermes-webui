@@ -1708,6 +1708,13 @@ function applyBotName(){
   await renderSessionList();
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  // OAuth gate — runs last so it has a session+workspace available when it
+  // tries to open the composer terminal. Defined in onboarding.js. Reuses
+  // the status fetched earlier by loadOnboardingWizard via window.__OAUTH_GATE_STATUS
+  // to avoid a duplicate /api/onboarding/status round-trip.
+  if(typeof loadOAuthGate==='function'){
+    try{await loadOAuthGate(window.__OAUTH_GATE_STATUS);}catch(e){console.warn('[hermes] oauth gate failed',e);}
+  }
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
