@@ -1602,7 +1602,7 @@ async function _archiveSession(session, archived=true){
     session.archived=archived;
     if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
     await renderSessionList();
-    showToast(archived?_sessionArchiveToast(response,session):t('session_restored'));
+    showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
   }catch(err){showToast(t('session_archive_failed')+err.message);}
 }
 
