@@ -221,6 +221,11 @@ def test_workflow_inbox_items_use_core_shaping_before_promote():
         "facts.draftWorkflow",
         "facts.draftDag",
         "draftDag:facts.draftDag",
+        "workflowInboxUserIntent",
+        "workflowInboxProfileHints",
+        "_workflowProfileHintsFromInput",
+        "userIntent",
+        "profileHints",
         "workflowId",
         "Promote to draft workflow",
         "Workflow inbox item promoted",
@@ -264,11 +269,14 @@ def test_workflow_dag_control_actions_render_only_from_core_facts():
     for symbol in (
         "_workflowControlActionsHtml",
         "executeWorkflowControlAction",
+        "_workflowControlResultSummary",
+        "showConfirmDialog",
         "facts.controlActions",
         "action.endpoint",
         "workflow-control-action",
         "No Core workflow actions available.",
         "Approve workflow for materialization",
+        "Completed ${label||'workflow action'}.",
     ):
         assert symbol in PANELS_JS
     assert "workflow.status==='dag_approved'" not in PANELS_JS

@@ -6672,10 +6672,35 @@ async function loadWorkflowInboxItem(itemId){
     if(detail) detail.innerHTML=`<div class="workflow-unavailable"><strong>Inbox item unavailable</strong><span>${esc((err&&err.message)||'Workflow inbox item could not load.')}</span>${_workflowErrorDetails(err)}<button class="btn secondary" onclick="loadWorkflowInboxItem('${esc(itemId)}')">Retry</button></div>`;
   }
 }
+function _workflowProfileHintsFromInput(input){
+  const value=(input&&input.value||'').trim();
+  if(!value) return {};
+  try{
+    const parsed=JSON.parse(value);
+    if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)) return parsed;
+  }catch(_err){
+    const hints={};
+    value.split('\n').forEach(line=>{
+      const trimmed=line.trim();
+      if(!trimmed) return;
+      const idx=trimmed.indexOf(':');
+      if(idx<1) return;
+      const role=trimmed.slice(0,idx).trim();
+      const profile=trimmed.slice(idx+1).trim();
+      if(role&&profile) hints[role]=profile;
+    });
+    return hints;
+  }
+  return {};
+}
 function renderWorkflowInboxDetail(item){
   const detail=$('workflowInboxDetail');
   if(!detail) return;
-  detail.innerHTML=`<div><strong>${esc(item.title||item.id||'Inbox item')}</strong><div class="workflow-inbox-empty">${esc(item.body||'No body.')}</div></div><form class="workflow-inbox-triage-form" onsubmit="triageWorkflowInboxItem(event)"><select id="workflowInboxClassification" aria-label="Workflow inbox classification"><option value="needs_shaping" ${item.classification==='needs_shaping'?'selected':''}>Needs shaping</option><option value="one_off" ${item.classification==='one_off'?'selected':''}>One-off</option><option value="decomposition_worthy" ${item.classification==='decomposition_worthy'?'selected':''}>Decomposition-worthy</option></select><input id="workflowInboxWorkspacePath" value="${esc(item.workspacePath||'')}" placeholder="Workspace path"><input id="workflowInboxAssignedWorkflowId" value="${esc(item.assignedWorkflowId||'')}" placeholder="Assigned workflow id"><button class="btn primary" type="submit">Mark triaged</button><button class="btn secondary" type="button" onclick="promoteWorkflowInboxItem()">Promote to draft workflow</button></form>`;
+  const metadata=(item&&item.metadata)||{};
+  const shapeIntent=metadata.shapeIntent||{};
+  const userIntent=shapeIntent.userIntent||'';
+  const profileHints=shapeIntent.profileHints&&Object.keys(shapeIntent.profileHints).length?JSON.stringify(shapeIntent.profileHints,null,2):'';
+  detail.innerHTML=`<div><strong>${esc(item.title||item.id||'Inbox item')}</strong><div class="workflow-inbox-empty">${esc(item.body||'No body.')}</div></div><form class="workflow-inbox-triage-form" onsubmit="triageWorkflowInboxItem(event)"><select id="workflowInboxClassification" aria-label="Workflow inbox classification"><option value="needs_shaping" ${item.classification==='needs_shaping'?'selected':''}>Needs shaping</option><option value="one_off" ${item.classification==='one_off'?'selected':''}>One-off</option><option value="decomposition_worthy" ${item.classification==='decomposition_worthy'?'selected':''}>Decomposition-worthy</option></select><input id="workflowInboxWorkspacePath" value="${esc(item.workspacePath||'')}" placeholder="Workspace path"><input id="workflowInboxAssignedWorkflowId" value="${esc(item.assignedWorkflowId||'')}" placeholder="Assigned workflow id"><textarea id="workflowInboxUserIntent" placeholder="User intent / shaping notes">${esc(userIntent)}</textarea><textarea id="workflowInboxProfileHints" placeholder="Profile hints JSON or role: profile lines">${esc(profileHints)}</textarea><button class="btn primary" type="submit">Mark triaged</button><button class="btn secondary" type="button" onclick="promoteWorkflowInboxItem()">Promote to draft workflow</button></form>`;
 }
 async function promoteWorkflowInboxItem(){
   const itemId=_currentWorkflowInboxItemId;
@@ -6688,7 +6713,12 @@ async function promoteWorkflowInboxItem(){
     const assigned=$('workflowInboxAssignedWorkflowId');
     const workflowId=(assigned&&assigned.value.trim())||item.assignedWorkflowId||`wf_${String(itemId).replace(/[^a-zA-Z0-9]+/g,'_')}`;
     const workspacePath=$('workflowInboxWorkspacePath');
+    const userIntent=$('workflowInboxUserIntent');
+    const profileHintsInput=$('workflowInboxProfileHints');
+    const profileHints=_workflowProfileHintsFromInput(profileHintsInput);
     const shapeBody={workflowId,title:item.title||workflowId,description:item.body||'',board:'default',scale:'medium'};
+    if(userIntent&&userIntent.value.trim()) shapeBody.userIntent=userIntent.value.trim();
+    if(Object.keys(profileHints).length) shapeBody.profileHints=profileHints;
     const shaped=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}/shape`,{method:'POST',body:JSON.stringify(shapeBody)});
     if(_currentWorkflowInboxItemId!==selectedItemId) return;
     const facts=_workflowFacts(shaped);
@@ -6716,7 +6746,14 @@ async function triageWorkflowInboxItem(event){
   const classification=$('workflowInboxClassification');
   const workspacePath=$('workflowInboxWorkspacePath');
   const assignedWorkflowId=$('workflowInboxAssignedWorkflowId');
+  const userIntent=$('workflowInboxUserIntent');
+  const profileHintsInput=$('workflowInboxProfileHints');
+  const profileHints=_workflowProfileHintsFromInput(profileHintsInput);
   const body={status:'triaged',classification:(classification&&classification.value)||'needs_shaping'};
+  const shapeIntent={};
+  if(userIntent&&userIntent.value.trim()) shapeIntent.userIntent=userIntent.value.trim();
+  if(Object.keys(profileHints).length) shapeIntent.profileHints=profileHints;
+  if(Object.keys(shapeIntent).length) body.metadata={shapeIntent};
   if(workspacePath&&workspacePath.value.trim()) body.workspacePath=workspacePath.value.trim();
   if(assignedWorkflowId&&assignedWorkflowId.value.trim()) body.assignedWorkflowId=assignedWorkflowId.value.trim();
   try{
@@ -6867,16 +6904,33 @@ function _workflowMaterializedTaskIds(facts){
 function workflowSyntheticMaterializationSuccessFixture(){
   return {facts:{workflowId:'synthetic-workflow',status:'materialized',tasks:[{nodeId:'plan',taskId:'synthetic-task-plan'},{nodeId:'build',taskId:'synthetic-task-build'}]},insights:null};
 }
+function _workflowControlResultSummary(label,payload){
+  const facts=_workflowFacts(payload)||{};
+  const parts=[];
+  if(facts.workflow&&facts.workflow.status) parts.push(`workflow status: ${facts.workflow.status}`);
+  if(facts.gate&&facts.gate.status) parts.push(`gate ${facts.gate.id||''} ${facts.gate.status}`.trim());
+  if(Array.isArray(facts.controlActions)) parts.push(`${facts.controlActions.length} next action${facts.controlActions.length===1?'':'s'}`);
+  return `Completed ${label||'workflow action'}.${parts.length?' '+parts.join('; ')+'.':''}`;
+}
 async function executeWorkflowControlAction(workflowId,endpoint,status,verdict,label){
   if(!workflowId||!endpoint) return;
+  const actionLabel=label||'workflow action';
+  const ok=await showConfirmDialog({
+    title: actionLabel,
+    message: `Run Core workflow action?\n\nEndpoint: ${endpoint}${status?`\nStatus: ${status}`:''}${verdict?`\nVerdict: ${verdict}`:''}`,
+    confirmLabel: actionLabel,
+    danger: status==='rejected',
+    focusCancel: status==='rejected',
+  });
+  if(!ok) return;
   const statusEl=$('workflowControlStatus');
-  if(statusEl) statusEl.textContent=`Running ${label||'workflow action'}...`;
+  if(statusEl) statusEl.textContent=`Running ${actionLabel}...`;
   const body={actorId:'webui'};
   if(status) body.status=status;
   if(verdict) body.verdict=verdict;
   try{
-    await api(endpoint,{method:'POST',body:JSON.stringify(body)});
-    if(statusEl) statusEl.textContent=`Completed ${label||'workflow action'}.`;
+    const payload=await api(endpoint,{method:'POST',body:JSON.stringify(body)});
+    if(statusEl) statusEl.textContent=_workflowControlResultSummary(actionLabel,payload);
     await Promise.all([loadWorkflows(true),loadWorkflowDag(workflowId,{silent:true})]);
   }catch(err){
     if(statusEl) statusEl.textContent=`Could not run workflow action: ${((err&&err.message)||'Unknown error')}`;
@@ -6893,6 +6947,12 @@ function _workflowControlActionsHtml(workflowId,facts){
   return actions.filter(action=>action&&action.enabled!==false&&action.endpoint).map(action=>_workflowControlActionButton(workflowId,action)).join('')||'<span class="workflow-inspector-empty">No Core workflow actions available.</span>';
 }
 async function materializeWorkflowToKanban(workflowId){
+  const ok=await showConfirmDialog({
+    title:'Materialize to Kanban',
+    message:'Create Kanban tasks from this approved Core workflow DAG? Existing materialized nodes will not create duplicate tasks.',
+    confirmLabel:'Materialize to Kanban',
+  });
+  if(!ok) return;
   const status=$('workflowMaterializeStatus');
   if(status) status.textContent='Materializing workflow into Kanban tasks...';
   try{
