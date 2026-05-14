@@ -66,3 +66,9 @@ class TestApiRetryOnNetworkError:
             "api() must still parse JSON error responses"
         assert "res.json()" in src, \
             "api() must still parse JSON success responses"
+
+    def test_api_surfaces_json_detail_errors(self):
+        """api() should show JSON detail fields instead of raw JSON blobs."""
+        src = _src()
+        assert "j.detail" in src, \
+            "api() must prefer JSON detail errors returned by workflow/Core endpoints"
