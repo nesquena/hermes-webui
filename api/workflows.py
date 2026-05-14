@@ -60,10 +60,11 @@ def handle_workflow_get(handler, parsed) -> bool:
     if parsed.query:
         upstream_url = f"{upstream_url}?{parsed.query}"
 
-    request = urllib.request.Request(
-        upstream_url,
-        headers={"Accept": "application/json", "User-Agent": "hermes-webui-workflow-proxy"},
-    )
+    headers = {"Accept": "application/json", "User-Agent": "hermes-webui-workflow-proxy"}
+    token = _dashboard_session_token(safe_base)
+    if token:
+        headers["X-Hermes-Session-Token"] = token
+    request = urllib.request.Request(upstream_url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=_WORKFLOW_TIMEOUT_SECONDS) as response:
             payload = _read_json_response(response)
@@ -79,6 +80,24 @@ def handle_workflow_get(handler, parsed) -> bool:
     except Exception as exc:
         logger.debug("workflow proxy request failed", exc_info=True)
         return _workflow_unavailable(handler, backend={"running": False, "error": exc.__class__.__name__})
+
+
+def _dashboard_session_token(safe_base: str) -> str | None:
+    """Fetch the dashboard page token needed by protected workflow APIs."""
+    request = urllib.request.Request(
+        f"{safe_base}/workflows",
+        headers={"Accept": "text/html", "User-Agent": "hermes-webui-workflow-proxy"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_WORKFLOW_TIMEOUT_SECONDS) as response:
+            html = response.read().decode("utf-8", "replace")
+    except Exception:
+        logger.debug("workflow proxy could not fetch dashboard session token", exc_info=True)
+        return None
+    match = re.search(r"__HERMES_SESSION_TOKEN__\s*=\s*[\"']([^\"']+)[\"']", html)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def _read_json_response(response) -> object:

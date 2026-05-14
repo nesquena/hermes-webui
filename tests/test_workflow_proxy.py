@@ -38,6 +38,8 @@ class _FakeResponse:
         return False
 
     def read(self):
+        if isinstance(self._payload, str):
+            return self._payload.encode("utf-8")
         return json.dumps(self._payload).encode("utf-8")
 
 
@@ -54,6 +56,8 @@ def test_workflow_proxy_route_forwards_canonical_read_model_path(monkeypatch):
 
     def fake_urlopen(request, timeout):
         calls.append((request.full_url, timeout, dict(request.header_items())))
+        if request.full_url == "http://127.0.0.1:9119/workflows":
+            return _FakeResponse('<script>window.__HERMES_SESSION_TOKEN__="token-123";</script>')
         return _FakeResponse({"facts": {"workflows": [{"id": "wf_1"}]}, "insights": None})
 
     monkeypatch.setattr(workflows.urllib.request, "urlopen", fake_urlopen)
@@ -64,7 +68,18 @@ def test_workflow_proxy_route_forwards_canonical_read_model_path(monkeypatch):
     assert handled is True
     assert handler.status == 200
     assert handler.json_body()["facts"]["workflows"][0]["id"] == "wf_1"
-    assert calls == [("http://127.0.0.1:9119/api/workflows?limit=10", 2.0, {"Accept": "application/json", "User-agent": "hermes-webui-workflow-proxy"})]
+    assert calls == [
+        ("http://127.0.0.1:9119/workflows", 2.0, {"Accept": "text/html", "User-agent": "hermes-webui-workflow-proxy"}),
+        (
+            "http://127.0.0.1:9119/api/workflows?limit=10",
+            2.0,
+            {
+                "Accept": "application/json",
+                "User-agent": "hermes-webui-workflow-proxy",
+                "X-hermes-session-token": "token-123",
+            },
+        ),
+    ]
 
 
 def test_workflow_proxy_maps_missing_backend_to_structured_unavailable(monkeypatch):

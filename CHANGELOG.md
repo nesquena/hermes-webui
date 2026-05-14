@@ -50,7 +50,7 @@
 
 ### Added
 
-- Added a first read-only Workflows WebUI slice: `/api/workflows*` proxy routes forward canonical Hermes Core/dashboard workflow read-model endpoints with structured unavailable handling, and the shell now includes a Workflows navigation entry, list panel, and read-only DAG detail placeholder for the next graph-canvas slice.
+- Added a first read-only Workflows WebUI slice: `/api/workflows*` proxy routes forward canonical Hermes Core/dashboard workflow read-model endpoints with structured unavailable handling, and the shell now includes a Workflows navigation entry, list panel, and read-only DAG detail placeholder for the next graph-canvas slice. The proxy now also carries the dashboard session token required by protected Core workflow APIs.
 
 - **PR #2207** by @Jordan-SkyLF (fixes #1579) — Update banner now shows target-aware "What's new?" links: WebUI updates link to the WebUI comparison, Agent updates link to the Agent comparison. Agent-only and WebUI-only update states no longer show a misleading cross-target comparison action. Opt-in settings toggle enables human-readable LLM-generated update summaries for each target's diff; users can still open the original diff from the summary. Cached/generated-summary button states persist across refreshes. Extended update-banner regression coverage for the diff-link and summary flows. Visual evidence: `docs/images/update-banner-whats-new-{before,after}.png` + summary on/off variants.
 
