@@ -5063,11 +5063,16 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/widget/upsert":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        widget = body.get("widget")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget = body.get("widget")
+            route_widget_id = _route_alias_value("widget_id", "widgetId", "id")
+            if isinstance(widget, dict) and route_widget_id:
+                nested_widget_id = str(widget.get("id") or "").strip()
+                if nested_widget_id and nested_widget_id != route_widget_id:
+                    raise ValueError("Conflicting Capy Spaces route selector aliases")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             result = capy_spaces.upsert_widget(space_id, widget)
             result["widget"] = capy_spaces.read_widget_detail(space_id, result["widget"]["id"])
             return j(handler, result)

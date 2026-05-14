@@ -10938,6 +10938,112 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     assert spaces.list_widgets(space_id) == []
 
 
+def test_widget_upsert_route_accepts_camelcase_space_selector_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Widget Upsert Alias"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {
+            "spaceId": created["space_id"],
+            "widget": {
+                "id": "camel-card",
+                "kind": "html",
+                "title": "Camel Card",
+                "layout": {"x": 1, "y": 2, "w": 7, "h": 3},
+                "renderer": "<script>doNotLeak()</script>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+            "renderer": "<script>routeLevel()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "camel-card",
+        "kind": "html",
+        "title": "Camel Card",
+        "layout": {"x": 1, "y": 2, "w": 7, "h": 3, "minimized": False},
+    }
+    assert spaces.read_widget(created["space_id"], "camel-card")["renderer"] == "<script>doNotLeak()</script>"
+    serialized = json.dumps(body).lower()
+    assert "donotleak" not in serialized
+    assert "routelevel" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+
+
+def test_widget_upsert_route_rejects_conflicting_space_aliases_before_side_effects_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-upsert-conflict", "name": "Route Upsert Conflict"})
+    other = spaces.create_space({"space_id": "route-upsert-other", "name": "Route Upsert Other"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {
+            "space_id": created["space_id"],
+            "spaceId": other["space_id"],
+            "widget": {
+                "id": "conflict-card",
+                "kind": "markdown",
+                "title": "Should not write",
+                "renderer": "<script>bad()</script>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+    assert spaces.list_widgets(created["space_id"]) == []
+    assert spaces.list_widgets(other["space_id"]) == []
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "source" not in serialized
+
+
+def test_widget_upsert_route_rejects_conflicting_widget_selectors_before_side_effects_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-upsert-widget-conflict", "name": "Route Widget Conflict"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {
+            "space_id": created["space_id"],
+            "widgetId": "outer-card",
+            "id": "other-outer-card",
+            "widget": {
+                "id": "inner-card",
+                "kind": "markdown",
+                "title": "Should not write",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+    assert spaces.list_widgets(created["space_id"]) == []
+    serialized = json.dumps(body).lower()
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "source" not in serialized
+
+
 def test_widget_patch_and_delete_routes_accept_camelcase_selector_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Route Widget Aliases"})
