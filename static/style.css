@@ -3849,8 +3849,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-inbox-form{display:flex;flex-direction:column;gap:8px;}
 .workflow-inbox-form input,.workflow-inbox-form textarea{width:100%;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);padding:8px;font:inherit;font-size:12px;}
 .workflow-inbox-list{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;}
-.workflow-inbox-item{display:flex;flex-direction:column;gap:3px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;}
+.workflow-inbox-item{display:flex;flex-direction:column;gap:3px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;text-align:left;color:var(--text);cursor:pointer;}
+.workflow-inbox-item:hover,.workflow-inbox-item.active{border-color:var(--accent);}
 .workflow-inbox-item span,.workflow-inbox-empty{color:var(--muted);font-size:12px;}
+.workflow-inbox-detail{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px;}
+.workflow-inbox-triage-form{display:flex;flex-direction:column;gap:8px;}
+.workflow-inbox-triage-form input,.workflow-inbox-triage-form select{width:100%;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);padding:8px;font:inherit;font-size:12px;}
 .workflow-card{display:flex;flex-direction:column;gap:4px;width:100%;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text);text-align:left;cursor:pointer;}
 .workflow-card:hover,.workflow-card:focus{border-color:var(--accent);background:var(--panel-2);outline:none;}
 .workflow-card-title{font-weight:700;font-size:13px;}

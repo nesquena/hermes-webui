@@ -5449,6 +5449,10 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/workflows/inbox/"):
+        from api.workflows import handle_workflow_patch
+
+        return handle_workflow_patch(handler, parsed, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 

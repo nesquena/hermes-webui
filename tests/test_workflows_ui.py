@@ -193,6 +193,27 @@ def test_workflow_inbox_intake_shell_lists_and_creates_raw_items():
         assert selector in STYLE_CSS
 
 
+def test_workflow_inbox_items_can_be_selected_and_triaged():
+    for symbol in (
+        "_currentWorkflowInboxItemId",
+        "loadWorkflowInboxItem",
+        "triageWorkflowInboxItem",
+        "workflowInboxDetail",
+        "workflowInboxClassification",
+        "workflowInboxWorkspacePath",
+        "workflowInboxAssignedWorkflowId",
+        "`/api/workflows/inbox/${encodeURIComponent(itemId)}`",
+        "method:'PATCH'",
+        "Decomposition-worthy",
+    ):
+        assert symbol in PANELS_JS or symbol in INDEX_HTML
+    for selector in (
+        ".workflow-inbox-detail",
+        ".workflow-inbox-triage-form",
+    ):
+        assert selector in STYLE_CSS
+
+
 def test_workflow_refresh_reloads_inbox_items_too():
     assert "await loadWorkflowInbox(true)" in PANELS_JS
     assert "loadWorkflowInbox();" in PANELS_JS

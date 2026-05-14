@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 _WORKFLOW_TIMEOUT_SECONDS = 2.0
 _WORKFLOW_PROXY_RE = re.compile(
-    r"^/api/workflows(?:$|/inbox$|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
+    r"^/api/workflows(?:$|/inbox(?:$|/[^/]+$)|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
 )
 _WORKFLOW_POST_RE = re.compile(r"^/api/workflows/inbox$")
+_WORKFLOW_PATCH_RE = re.compile(r"^/api/workflows/inbox/[^/]+$")
 
 
 def is_workflow_proxy_path(path: str) -> bool:
@@ -48,6 +49,15 @@ def handle_workflow_post(handler, parsed, body: dict | None = None) -> bool:
         return bad(handler, f"unknown workflow endpoint: POST {parsed.path}", status=404) or True
     data = json.dumps(body or {}, separators=(",", ":")).encode("utf-8")
     return _proxy_workflow_request(handler, parsed, method="POST", data=data)
+
+
+def handle_workflow_patch(handler, parsed, body: dict | None = None) -> bool:
+    """Proxy canonical workflow patch requests to Hermes Core/dashboard."""
+    value = str(parsed.path or "")
+    if ".." in value or not _WORKFLOW_PATCH_RE.fullmatch(value):
+        return bad(handler, f"unknown workflow endpoint: PATCH {parsed.path}", status=404) or True
+    data = json.dumps(body or {}, separators=(",", ":")).encode("utf-8")
+    return _proxy_workflow_request(handler, parsed, method="PATCH", data=data)
 
 
 def _proxy_workflow_request(handler, parsed, *, method: str, data: bytes | None = None) -> bool:

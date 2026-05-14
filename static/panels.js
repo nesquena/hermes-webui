@@ -6611,6 +6611,7 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 // ── Workflows panel (read-only Hermes Core proxy) ────────────────────────────
 let _workflowListLoaded=false;
 let _workflowInboxLoaded=false;
+let _currentWorkflowInboxItemId=null;
 let _currentWorkflowId=null;
 let _workflowListPollInterval=null;
 let _workflowDetailPollInterval=null;
@@ -6654,8 +6655,48 @@ function renderWorkflowInbox(items){
   }
   list.innerHTML=items.map(item=>{
     const meta=[item.status,item.classification,item.source].filter(Boolean).join(' · ');
-    return `<div class="workflow-inbox-item"><strong>${esc(item.title||item.id||'Untitled intake')}</strong>${meta?`<span>${esc(meta)}</span>`:''}</div>`;
+    const active=item.id&&item.id===_currentWorkflowInboxItemId?' active':'';
+    return `<button type="button" class="workflow-inbox-item${active}" onclick="loadWorkflowInboxItem('${esc(item.id||'')}')"><strong>${esc(item.title||item.id||'Untitled intake')}</strong>${meta?`<span>${esc(meta)}</span>`:''}</button>`;
   }).join('');
+}
+async function loadWorkflowInboxItem(itemId){
+  if(!itemId) return;
+  _currentWorkflowInboxItemId=itemId;
+  const detail=$('workflowInboxDetail');
+  if(detail) detail.innerHTML='<div class="workflow-inbox-empty">Loading inbox item...</div>';
+  try{
+    const payload=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}`);
+    const facts=_workflowFacts(payload);
+    renderWorkflowInboxDetail(facts.inboxItem||payload.inboxItem||{});
+  }catch(err){
+    if(detail) detail.innerHTML=`<div class="workflow-unavailable"><strong>Inbox item unavailable</strong><span>${esc((err&&err.message)||'Workflow inbox item could not load.')}</span>${_workflowErrorDetails(err)}<button class="btn secondary" onclick="loadWorkflowInboxItem('${esc(itemId)}')">Retry</button></div>`;
+  }
+}
+function renderWorkflowInboxDetail(item){
+  const detail=$('workflowInboxDetail');
+  if(!detail) return;
+  detail.innerHTML=`<div><strong>${esc(item.title||item.id||'Inbox item')}</strong><div class="workflow-inbox-empty">${esc(item.body||'No body.')}</div></div><form class="workflow-inbox-triage-form" onsubmit="triageWorkflowInboxItem(event)"><select id="workflowInboxClassification" aria-label="Workflow inbox classification"><option value="needs_shaping" ${item.classification==='needs_shaping'?'selected':''}>Needs shaping</option><option value="one_off" ${item.classification==='one_off'?'selected':''}>One-off</option><option value="decomposition_worthy" ${item.classification==='decomposition_worthy'?'selected':''}>Decomposition-worthy</option></select><input id="workflowInboxWorkspacePath" value="${esc(item.workspacePath||'')}" placeholder="Workspace path"><input id="workflowInboxAssignedWorkflowId" value="${esc(item.assignedWorkflowId||'')}" placeholder="Assigned workflow id"><button class="btn primary" type="submit">Mark triaged</button></form>`;
+}
+async function triageWorkflowInboxItem(event){
+  if(event) event.preventDefault();
+  const itemId=_currentWorkflowInboxItemId;
+  if(!itemId){ showToast('Select an inbox item first','error'); return; }
+  const classification=$('workflowInboxClassification');
+  const workspacePath=$('workflowInboxWorkspacePath');
+  const assignedWorkflowId=$('workflowInboxAssignedWorkflowId');
+  const body={status:'triaged',classification:(classification&&classification.value)||'needs_shaping'};
+  if(workspacePath&&workspacePath.value.trim()) body.workspacePath=workspacePath.value.trim();
+  if(assignedWorkflowId&&assignedWorkflowId.value.trim()) body.assignedWorkflowId=assignedWorkflowId.value.trim();
+  try{
+    const payload=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}`,{method:'PATCH',body:JSON.stringify(body)});
+    const facts=_workflowFacts(payload);
+    renderWorkflowInboxDetail(facts.inboxItem||payload.inboxItem||{});
+    _workflowInboxLoaded=false;
+    await loadWorkflowInbox(true);
+    showToast('Workflow inbox item triaged');
+  }catch(err){
+    showToast(((err&&err.message)||'Could not triage workflow inbox item'),'error');
+  }
 }
 async function createWorkflowInboxItem(event){
   if(event) event.preventDefault();
