@@ -3166,6 +3166,11 @@ def handle_get(handler, parsed) -> bool:
             bad(handler, str(exc), status=400)
         return True
 
+    if parsed.path == "/api/workflows" or parsed.path.startswith("/api/workflows/"):
+        from api.workflows import handle_workflow_get
+
+        return handle_workflow_get(handler, parsed)
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())

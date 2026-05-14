@@ -224,13 +224,14 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workflows','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
+  if (nextPanel === 'workflows') await loadWorkflows();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
@@ -6603,5 +6604,94 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     }
   }catch(e){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
+  }
+}
+
+// ── Workflows panel (read-only Hermes Core proxy) ────────────────────────────
+let _workflowListLoaded=false;
+let _currentWorkflowId=null;
+
+function _workflowFacts(payload){
+  return (payload&&payload.facts)||payload||{};
+}
+function _workflowTitle(workflow){
+  return workflow.title||workflow.name||workflow.id||'Untitled workflow';
+}
+function _workflowCounts(workflow){
+  const counts=workflow.counts||{};
+  const parts=[];
+  ['nodes','waiting','ready','running','blocked','done'].forEach(key=>{
+    if(counts[key]!=null) parts.push(`${key}: ${counts[key]}`);
+  });
+  return parts.join(' · ');
+}
+async function loadWorkflows(force=false){
+  const list=$('workflowList');
+  if(!list) return;
+  if(_workflowListLoaded&&!force) return;
+  list.innerHTML='<div style="padding:12px;color:var(--muted);font-size:12px">Loading...</div>';
+  try{
+    const payload=await api('/api/workflows');
+    const facts=_workflowFacts(payload);
+    const workflows=facts.workflows||payload.workflows||[];
+    _workflowListLoaded=true;
+    renderWorkflowList(workflows);
+  }catch(err){
+    _workflowListLoaded=false;
+    renderWorkflowUnavailable(err);
+  }
+}
+function renderWorkflowUnavailable(err){
+  const list=$('workflowList');
+  const detail=$('workflowDetailBody');
+  const message=(err&&err.message)||'Workflow API is not available on this Hermes backend.';
+  if(list){
+    list.innerHTML=`<div class="workflow-unavailable">
+      <strong>Workflow API is not available</strong>
+      <span>${esc(message)}</span>
+      <button class="btn secondary" onclick="loadWorkflows(true)">Retry</button>
+    </div>`;
+  }
+  if(detail){
+    detail.innerHTML=`<div class="workflow-unavailable"><strong>Workflow API is not available</strong><span>${esc(message)}</span></div>`;
+  }
+}
+function renderWorkflowList(workflows){
+  const list=$('workflowList');
+  if(!list) return;
+  if(!workflows.length){
+    list.innerHTML='<div class="workflow-empty"><strong>No workflows yet.</strong><span>Workflow DAGs will appear here after Hermes workflow plugin creates or imports one.</span></div>';
+    return;
+  }
+  list.innerHTML=workflows.map(workflow=>{
+    const id=workflow.id||workflow.workflow_id||workflow.workflowId||'';
+    const meta=[workflow.status,workflow.scale,workflow.board].filter(Boolean).join(' · ');
+    const counts=_workflowCounts(workflow);
+    return `<button class="workflow-card" onclick="loadWorkflowDag('${esc(id)}')">
+      <span class="workflow-card-title">${esc(_workflowTitle(workflow))}</span>
+      ${meta?`<span class="workflow-card-meta">${esc(meta)}</span>`:''}
+      ${counts?`<span class="workflow-card-counts">${esc(counts)}</span>`:''}
+    </button>`;
+  }).join('');
+}
+async function loadWorkflowDag(workflowId){
+  _currentWorkflowId=workflowId;
+  const detail=$('workflowDetailBody');
+  if(!detail) return;
+  detail.innerHTML='<div class="workflow-dag-placeholder">Loading workflow DAG...</div>';
+  try{
+    const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/dag`);
+    const facts=_workflowFacts(payload);
+    const nodes=facts.nodes||[];
+    const edges=facts.edges||[];
+    const workflow=facts.workflow||{id:workflowId};
+    detail.innerHTML=`<div class="workflow-dag-summary">
+      <h3>${esc(_workflowTitle(workflow))}</h3>
+      <p>Read-only DAG shell. Canvas and node drawer land in the next slice.</p>
+      <div class="workflow-dag-stats"><span>${nodes.length} nodes</span><span>${edges.length} edges</span></div>
+    </div>
+    <div class="workflow-dag-node-list">${nodes.map(node=>`<article class="workflow-node-pill status-${esc(node.status||'waiting')}"><strong>${esc(node.title||node.id)}</strong><span>${esc([node.role,node.profile,node.status].filter(Boolean).join(' · '))}</span></article>`).join('')}</div>`;
+  }catch(err){
+    detail.innerHTML=`<div class="workflow-unavailable"><strong>Could not load workflow DAG</strong><span>${esc((err&&err.message)||'Unknown workflow error')}</span><button class="btn secondary" onclick="loadWorkflowDag('${esc(workflowId)}')">Retry</button></div>`;
   }
 }

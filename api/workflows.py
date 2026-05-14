@@ -1,0 +1,109 @@
+"""Read-only proxy helpers for Hermes Core workflow APIs.
+
+The workflow source of truth lives in Hermes Core/dashboard.  WebUI only
+forwards canonical read-model requests and normalizes unavailable/unsupported
+backend failures so the browser never falls through to an HTML shell or treats
+an upstream dashboard 401 as a WebUI login expiry.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
+
+from api.helpers import bad, j
+
+logger = logging.getLogger(__name__)
+
+_WORKFLOW_TIMEOUT_SECONDS = 2.0
+_WORKFLOW_PROXY_RE = re.compile(
+    r"^/api/workflows(?:$|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
+)
+
+
+def is_workflow_proxy_path(path: str) -> bool:
+    """Return True for the small canonical workflow read-model route set."""
+    value = str(path or "")
+    if ".." in value:
+        return False
+    return bool(_WORKFLOW_PROXY_RE.fullmatch(value))
+
+
+def handle_workflow_get(handler, parsed) -> bool:
+    """Proxy a canonical workflow GET request to Hermes Core/dashboard."""
+    if not is_workflow_proxy_path(parsed.path):
+        return bad(handler, f"unknown workflow endpoint: GET {parsed.path}", status=404) or True
+
+    from api import dashboard_probe
+
+    status = dashboard_probe.get_dashboard_status()
+    if not status.get("running") or not status.get("url"):
+        return _workflow_unavailable(handler, backend=status)
+
+    base_url = str(status.get("url") or "").rstrip("/")
+    try:
+        # Re-validate the dashboard URL before using it as a proxy target. This
+        # inherits the loopback-only SSRF guard from dashboard_probe.
+        normalized = dashboard_probe.normalize_dashboard_url(base_url)
+        if normalized is None:
+            raise ValueError("missing dashboard url")
+        _host, _port, _scheme, safe_base = normalized
+    except ValueError:
+        logger.warning("refusing unsafe workflow backend URL", extra={"url": base_url})
+        return _workflow_unavailable(handler, backend={"running": False, "error": "invalid dashboard url"})
+
+    upstream_url = f"{safe_base}{parsed.path}"
+    if parsed.query:
+        upstream_url = f"{upstream_url}?{parsed.query}"
+
+    request = urllib.request.Request(
+        upstream_url,
+        headers={"Accept": "application/json", "User-Agent": "hermes-webui-workflow-proxy"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_WORKFLOW_TIMEOUT_SECONDS) as response:
+            payload = _read_json_response(response)
+            return j(handler, payload, status=getattr(response, "status", 200) or 200) or True
+    except urllib.error.HTTPError as exc:
+        # Upstream dashboard /api endpoints are session-token gated. Returning
+        # 401 from WebUI would incorrectly send the user to WebUI login, so turn
+        # upstream auth/capability misses into the stable unsupported state.
+        if exc.code in (401, 403):
+            return _workflow_unavailable(handler, backend={"running": True, "status": exc.code})
+        payload = _read_error_payload(exc)
+        return j(handler, payload, status=exc.code) or True
+    except Exception as exc:
+        logger.debug("workflow proxy request failed", exc_info=True)
+        return _workflow_unavailable(handler, backend={"running": False, "error": exc.__class__.__name__})
+
+
+def _read_json_response(response) -> object:
+    raw = response.read()
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8"))
+
+
+def _read_error_payload(exc: urllib.error.HTTPError) -> object:
+    try:
+        raw = exc.read()
+        if raw:
+            return json.loads(raw.decode("utf-8"))
+    except Exception:
+        pass
+    return {"error": exc.reason or f"upstream workflow API returned HTTP {exc.code}"}
+
+
+def _workflow_unavailable(handler, *, backend: dict | None = None):
+    return j(
+        handler,
+        {
+            "error": "Workflow API is not available on this Hermes backend.",
+            "backend": backend or {"running": False},
+        },
+        status=503,
+    ) or True
