@@ -3849,6 +3849,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-card-meta,.workflow-card-counts{color:var(--muted);font-size:12px;}
 .workflow-empty,.workflow-unavailable{display:flex;flex-direction:column;gap:8px;margin:12px;padding:14px;border:1px dashed var(--border);border-radius:12px;color:var(--muted);}
 .workflow-unavailable strong,.workflow-empty strong{color:var(--text);}
+.workflow-unavailable-meta{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;word-break:break-word;font-size:12px;}
+.workflow-unavailable-meta b,.workflow-unavailable-recovery b{color:var(--text);}
+.workflow-unavailable-recovery{display:flex;flex-direction:column;gap:3px;font-size:12px;}
 .workflow-dag-shell{padding:18px;}
 .workflow-dag-placeholder{color:var(--muted);font-size:13px;}
 .workflow-dag-summary{display:flex;flex-direction:column;gap:8px;margin-bottom:14px;}

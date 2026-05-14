@@ -169,3 +169,17 @@ def test_workflow_polling_is_synced_from_panel_switch_and_visibility_events():
     assert "_syncWorkflowPolling();" in PANELS_JS
     assert "document.addEventListener('visibilitychange',_syncWorkflowPolling)" in PANELS_JS
     assert "if (nextPanel === 'workflows') await loadWorkflows();" in PANELS_JS
+
+
+def test_workflow_unavailable_ui_surfaces_capability_reason_and_recovery_hint():
+    for symbol in (
+        "_workflowErrorDetails",
+        "JSON.parse(err.body)",
+        "workflow-unavailable-recovery",
+        "workflow-unavailable-meta",
+        "Reason",
+        "Recovery",
+        "Dashboard",
+    ):
+        assert symbol in PANELS_JS
+    assert "refreshWorkflows()" in PANELS_JS

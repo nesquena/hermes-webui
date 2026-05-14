@@ -1,4 +1,5 @@
 import json
+from email.message import Message
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
@@ -105,7 +106,7 @@ def test_workflow_proxy_preserves_not_found_but_converts_upstream_unauthorized(m
     monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": True, "url": "http://127.0.0.1:9119"})
 
     def missing_urlopen(request, timeout):
-        raise HTTPError(request.full_url, 404, "not found", {}, None)
+        raise HTTPError(request.full_url, 404, "not found", Message(), None)
 
     monkeypatch.setattr(workflows.urllib.request, "urlopen", missing_urlopen)
     missing_handler = _FakeHandler()
@@ -113,7 +114,7 @@ def test_workflow_proxy_preserves_not_found_but_converts_upstream_unauthorized(m
     assert missing_handler.status == 404
 
     def unauthorized_urlopen(request, timeout):
-        raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+        raise HTTPError(request.full_url, 401, "unauthorized", Message(), None)
 
     monkeypatch.setattr(workflows.urllib.request, "urlopen", unauthorized_urlopen)
     unauthorized_handler = _FakeHandler()
@@ -132,3 +133,35 @@ def test_workflow_proxy_rejects_noncanonical_workflow_paths():
     assert is_workflow_proxy_path("/api/workflows/wf_1/artifacts")
     assert not is_workflow_proxy_path("/api/workflows/wf_1/delete")
     assert not is_workflow_proxy_path("/api/workflows/../../secrets")
+
+
+def test_workflow_proxy_unavailable_payload_includes_actionable_capability_reason(monkeypatch):
+    from api import dashboard_probe, workflows
+    from api.routes import handle_get
+
+    monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": False, "enabled": "auto"})
+    handler = _FakeHandler()
+
+    assert handle_get(handler, urlparse("http://example.com/api/workflows")) is True
+    body = handler.json_body()
+
+    assert handler.status == 503
+    assert body["reason"] == "dashboard_unavailable"
+    assert body["capability"] == "workflows"
+    assert "Start or restart Hermes dashboard" in body["recovery"]
+    assert body["backend"]["running"] is False
+
+    def unauthorized_urlopen(request, timeout):
+        if request.full_url == "http://127.0.0.1:9119/workflows":
+            return _FakeResponse("<html></html>")
+        raise HTTPError(request.full_url, 401, "unauthorized", Message(), None)
+
+    monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": True, "url": "http://127.0.0.1:9119"})
+    monkeypatch.setattr(workflows.urllib.request, "urlopen", unauthorized_urlopen)
+    auth_handler = _FakeHandler()
+
+    assert handle_get(auth_handler, urlparse("http://example.com/api/workflows")) is True
+    auth_body = auth_handler.json_body()
+    assert auth_handler.status == 503
+    assert auth_body["reason"] == "dashboard_auth_failed"
+    assert auth_body["backend"]["status"] == 401

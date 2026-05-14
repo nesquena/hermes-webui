@@ -42,7 +42,7 @@ def handle_workflow_get(handler, parsed) -> bool:
 
     status = dashboard_probe.get_dashboard_status()
     if not status.get("running") or not status.get("url"):
-        return _workflow_unavailable(handler, backend=status)
+        return _workflow_unavailable(handler, backend=status, reason="dashboard_unavailable")
 
     base_url = str(status.get("url") or "").rstrip("/")
     try:
@@ -54,7 +54,7 @@ def handle_workflow_get(handler, parsed) -> bool:
         _host, _port, _scheme, safe_base = normalized
     except ValueError:
         logger.warning("refusing unsafe workflow backend URL", extra={"url": base_url})
-        return _workflow_unavailable(handler, backend={"running": False, "error": "invalid dashboard url"})
+        return _workflow_unavailable(handler, backend={"running": False, "error": "invalid dashboard url"}, reason="invalid_dashboard_url")
 
     upstream_url = f"{safe_base}{parsed.path}"
     if parsed.query:
@@ -74,12 +74,12 @@ def handle_workflow_get(handler, parsed) -> bool:
         # 401 from WebUI would incorrectly send the user to WebUI login, so turn
         # upstream auth/capability misses into the stable unsupported state.
         if exc.code in (401, 403):
-            return _workflow_unavailable(handler, backend={"running": True, "status": exc.code})
+            return _workflow_unavailable(handler, backend={"running": True, "status": exc.code}, reason="dashboard_auth_failed")
         payload = _read_error_payload(exc)
         return j(handler, payload, status=exc.code) or True
     except Exception as exc:
         logger.debug("workflow proxy request failed", exc_info=True)
-        return _workflow_unavailable(handler, backend={"running": False, "error": exc.__class__.__name__})
+        return _workflow_unavailable(handler, backend={"running": False, "error": exc.__class__.__name__}, reason="proxy_request_failed")
 
 
 def _dashboard_session_token(safe_base: str) -> str | None:
@@ -117,11 +117,14 @@ def _read_error_payload(exc: urllib.error.HTTPError) -> object:
     return {"error": exc.reason or f"upstream workflow API returned HTTP {exc.code}"}
 
 
-def _workflow_unavailable(handler, *, backend: dict | None = None):
+def _workflow_unavailable(handler, *, backend: dict | None = None, reason: str = "dashboard_unavailable"):
     return j(
         handler,
         {
             "error": "Workflow API is not available on this Hermes backend.",
+            "capability": "workflows",
+            "reason": reason,
+            "recovery": "Start or restart Hermes dashboard, then refresh Workflows. If the dashboard is running, verify its workflow API session token is accepted.",
             "backend": backend or {"running": False},
         },
         status=503,

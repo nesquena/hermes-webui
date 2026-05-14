@@ -6665,19 +6665,31 @@ function _syncWorkflowPolling(){
   else _workflowStartPolling();
 }
 if(typeof document !== 'undefined') document.addEventListener('visibilitychange',_syncWorkflowPolling);
+function _workflowErrorDetails(err){
+  let body={};
+  if(err&&err.body){
+    try{ body=JSON.parse(err.body); }catch(e){ body={}; }
+  }
+  const reason=body.reason||((err&&err.status)?`HTTP ${err.status}`:'unknown');
+  const recovery=body.recovery||'Refresh Workflows after the Hermes dashboard/Core workflow API is available.';
+  const backend=body.backend?JSON.stringify(body.backend):'Dashboard/Core workflow backend status unavailable.';
+  return `<div class="workflow-unavailable-meta"><b>Reason</b><span>${esc(reason)}</span><b>Dashboard</b><span>${esc(backend)}</span></div><div class="workflow-unavailable-recovery"><b>Recovery</b><span>${esc(recovery)}</span></div>`;
+}
 function renderWorkflowUnavailable(err){
   const list=$('workflowList');
   const detail=$('workflowDetailBody');
   const message=(err&&err.message)||'Workflow API is not available on this Hermes backend.';
+  const details=_workflowErrorDetails(err);
   if(list){
     list.innerHTML=`<div class="workflow-unavailable">
       <strong>Workflow API is not available</strong>
       <span>${esc(message)}</span>
-      <button class="btn secondary" onclick="loadWorkflows(true)">Retry</button>
+      ${details}
+      <button class="btn secondary" onclick="refreshWorkflows()">Retry</button>
     </div>`;
   }
   if(detail){
-    detail.innerHTML=`<div class="workflow-unavailable"><strong>Workflow API is not available</strong><span>${esc(message)}</span></div>`;
+    detail.innerHTML=`<div class="workflow-unavailable"><strong>Workflow API is not available</strong><span>${esc(message)}</span>${details}<button class="btn secondary" onclick="refreshWorkflows()">Retry</button></div>`;
   }
 }
 function renderWorkflowList(workflows){
