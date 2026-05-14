@@ -138,6 +138,34 @@ def test_api_skills_list_and_content_respect_profile_cookie():
         assert linked.get("content") == "linked file for profile-only-skill-1880\n"
 
 
+def test_skill_detail_reads_resolved_file_without_skill_view_absolute_path(monkeypatch):
+    profile = "skills1880direct"
+    with _IsolatedSkillsDirs(profile) as dirs:
+        _write_skill(
+            dirs.profile_skills,
+            "profile-direct-skill-1880",
+            "Direct profile skill",
+            "This skill should be read from the resolved SKILL.md file.",
+        )
+
+        from api import routes
+        import tools.skills_tool as skills_tool
+
+        monkeypatch.setattr(routes, "_active_skills_dir", lambda: dirs.profile_skills)
+
+        def fail_if_skill_view_called(*_args, **_kwargs):
+            raise AssertionError("WebUI local skill details must not call skill_view()")
+
+        monkeypatch.setattr(skills_tool, "skill_view", fail_if_skill_view_called)
+
+        detail = routes._skill_view_from_active_dir("profile-direct-skill-1880")
+
+        assert detail["success"] is True
+        assert detail["name"] == "profile-direct-skill-1880"
+        assert "resolved SKILL.md file" in detail["content"]
+        assert isinstance(detail["linked_files"], dict)
+
+
 def test_skill_save_and_delete_respect_profile_cookie():
     profile = "skills1880save"
     with _IsolatedSkillsDirs(profile) as dirs:
