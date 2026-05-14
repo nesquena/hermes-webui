@@ -32,3 +32,21 @@ def test_workflows_shell_has_empty_unavailable_and_card_styles():
         assert selector in STYLE_CSS
     assert "No workflows yet." in PANELS_JS
     assert "Workflow API is not available" in PANELS_JS
+
+
+def test_workflows_dag_canvas_and_node_inspector_are_present():
+    assert "renderWorkflowDagCanvas" in PANELS_JS
+    assert "workflow-dag-canvas" in PANELS_JS
+    assert "workflow-dag-edge-layer" in PANELS_JS
+    assert "workflow-dag-node" in PANELS_JS
+    assert "workflow-node-inspector" in PANELS_JS
+    assert "loadWorkflowNode" in PANELS_JS
+    assert "/nodes/${encodeURIComponent(nodeId)}" in PANELS_JS
+    for selector in (
+        ".workflow-dag-layout",
+        ".workflow-dag-canvas",
+        ".workflow-dag-edge-layer",
+        ".workflow-dag-node",
+        ".workflow-node-inspector",
+    ):
+        assert selector in STYLE_CSS

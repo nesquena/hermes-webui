@@ -6682,16 +6682,112 @@ async function loadWorkflowDag(workflowId){
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/dag`);
     const facts=_workflowFacts(payload);
-    const nodes=facts.nodes||[];
-    const edges=facts.edges||[];
-    const workflow=facts.workflow||{id:workflowId};
-    detail.innerHTML=`<div class="workflow-dag-summary">
-      <h3>${esc(_workflowTitle(workflow))}</h3>
-      <p>Read-only DAG shell. Canvas and node drawer land in the next slice.</p>
-      <div class="workflow-dag-stats"><span>${nodes.length} nodes</span><span>${edges.length} edges</span></div>
-    </div>
-    <div class="workflow-dag-node-list">${nodes.map(node=>`<article class="workflow-node-pill status-${esc(node.status||'waiting')}"><strong>${esc(node.title||node.id)}</strong><span>${esc([node.role,node.profile,node.status].filter(Boolean).join(' · '))}</span></article>`).join('')}</div>`;
+    renderWorkflowDagCanvas(workflowId,facts);
   }catch(err){
     detail.innerHTML=`<div class="workflow-unavailable"><strong>Could not load workflow DAG</strong><span>${esc((err&&err.message)||'Unknown workflow error')}</span><button class="btn secondary" onclick="loadWorkflowDag('${esc(workflowId)}')">Retry</button></div>`;
+  }
+}
+function renderWorkflowDagCanvas(workflowId,facts){
+  const detail=$('workflowDetailBody');
+  if(!detail) return;
+  const nodes=facts.nodes||[];
+  const edges=facts.edges||[];
+  const workflow=facts.workflow||{id:workflowId};
+  const layout=_workflowDagLayout(nodes,edges);
+  const width=Math.max(720,(layout.maxColumn+1)*230+80);
+  const height=Math.max(360,(layout.maxRow+1)*132+80);
+  detail.innerHTML=`<div class="workflow-dag-summary">
+    <h3>${esc(_workflowTitle(workflow))}</h3>
+    <p>Read-only DAG facts from Hermes Core. Select a node to inspect gates, artifacts, and recent events.</p>
+    <div class="workflow-dag-stats"><span>${nodes.length} nodes</span><span>${edges.length} edges</span></div>
+  </div>
+  <div class="workflow-dag-layout">
+    <div class="workflow-dag-canvas" style="min-width:${width}px;min-height:${height}px">
+      <svg class="workflow-dag-edge-layer" width="${width}" height="${height}" aria-hidden="true">${_workflowDagEdges(edges,layout.positions)}</svg>
+      ${nodes.map(node=>_workflowDagNode(node,layout.positions[node.id]||{x:40,y:40},workflowId)).join('')}
+    </div>
+    <aside class="workflow-node-inspector" id="workflowNodeInspector">
+      <strong>Node inspector</strong>
+      <span>Select a DAG node to load canonical node facts from Hermes Core.</span>
+    </aside>
+  </div>`;
+}
+function _workflowDagLayout(nodes,edges){
+  const byId={};
+  nodes.forEach(node=>{ byId[node.id]=node; });
+  const parents={};
+  const children={};
+  edges.forEach(edge=>{
+    if(!byId[edge.source]||!byId[edge.target]) return;
+    (parents[edge.target]||(parents[edge.target]=[])).push(edge.source);
+    (children[edge.source]||(children[edge.source]=[])).push(edge.target);
+  });
+  const depth={};
+  function nodeDepth(id,seen=new Set()){
+    if(depth[id]!=null) return depth[id];
+    if(seen.has(id)) return 0;
+    seen.add(id);
+    const ps=parents[id]||[];
+    depth[id]=ps.length?Math.max(...ps.map(parent=>nodeDepth(parent,seen)))+1:0;
+    return depth[id];
+  }
+  nodes.forEach(node=>nodeDepth(node.id));
+  const columns={};
+  nodes.forEach(node=>{ const col=depth[node.id]||0; (columns[col]||(columns[col]=[])).push(node); });
+  const positions={};
+  let maxColumn=0;
+  let maxRow=0;
+  Object.keys(columns).map(Number).sort((a,b)=>a-b).forEach(col=>{
+    maxColumn=Math.max(maxColumn,col);
+    columns[col].forEach((node,row)=>{
+      maxRow=Math.max(maxRow,row);
+      positions[node.id]={x:40+col*230,y:40+row*132};
+    });
+  });
+  return {positions,maxColumn,maxRow};
+}
+function _workflowDagEdges(edges,positions){
+  return edges.map(edge=>{
+    const a=positions[edge.source];
+    const b=positions[edge.target];
+    if(!a||!b) return '';
+    const x1=a.x+180, y1=a.y+36, x2=b.x, y2=b.y+36;
+    const mid=x1+Math.max(30,(x2-x1)/2);
+    return `<path d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" class="workflow-dag-edge"/>`;
+  }).join('');
+}
+function _workflowDagNode(node,pos,workflowId){
+  const status=node.status||'waiting';
+  const gate=node.gateType||node.gateLevel;
+  const meta=[node.role,node.profile,status].filter(Boolean).join(' · ');
+  return `<button class="workflow-dag-node status-${esc(status)}" style="left:${pos.x}px;top:${pos.y}px" onclick="loadWorkflowNode('${esc(workflowId)}','${esc(node.id)}')">
+    <span class="workflow-dag-node-title">${esc(node.title||node.id)}</span>
+    ${meta?`<span class="workflow-dag-node-meta">${esc(meta)}</span>`:''}
+    ${gate?`<span class="workflow-dag-gate">Gate: ${esc(gate)}</span>`:''}
+  </button>`;
+}
+async function loadWorkflowNode(workflowId,nodeId){
+  const inspector=$('workflowNodeInspector');
+  if(!inspector) return;
+  inspector.innerHTML='<span>Loading node facts...</span>';
+  try{
+    const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/nodes/${encodeURIComponent(nodeId)}`);
+    const facts=_workflowFacts(payload);
+    const node=facts.node||{id:nodeId};
+    const gates=facts.gates||[];
+    const events=facts.events||[];
+    const artifacts=facts.artifacts||[];
+    inspector.innerHTML=`<strong>${esc(node.title||node.id)}</strong>
+      <span>${esc([node.role,node.profile,node.status].filter(Boolean).join(' · ')||'No node metadata')}</span>
+      <dl class="workflow-node-facts">
+        <dt>Kanban task</dt><dd>${esc(node.kanbanTaskId||'—')}</dd>
+        <dt>Workspace</dt><dd>${esc((node.workspace&&node.workspace.worktreePath)||'scratch')}</dd>
+        <dt>Gates</dt><dd>${gates.length}</dd>
+        <dt>Artifacts</dt><dd>${artifacts.length}</dd>
+        <dt>Recent events</dt><dd>${events.length}</dd>
+      </dl>
+      ${gates.length?`<div class="workflow-inspector-section"><b>Gate status</b>${gates.map(gate=>`<span>${esc([gate.gateType,gate.status,gate.requiredActor].filter(Boolean).join(' · '))}</span>`).join('')}</div>`:''}`;
+  }catch(err){
+    inspector.innerHTML=`<strong>Could not load node</strong><span>${esc((err&&err.message)||'Unknown workflow node error')}</span><button class="btn secondary" onclick="loadWorkflowNode('${esc(workflowId)}','${esc(nodeId)}')">Retry</button>`;
   }
 }
