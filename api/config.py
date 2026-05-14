@@ -2872,11 +2872,16 @@ def get_available_models() -> dict:
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
         _cfg_providers = cfg.get("providers", {})
+        # Map canonical provider IDs back to raw config keys so the
+        # generic-provider branch can preserve mixed-case/underscore
+        # provider_cfg values (#2245).
+        _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
             for _pid_key in _cfg_providers:
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
+                _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
                 if _canonical in _PROVIDER_MODELS or _canonical in _cfg_providers or _pid_key in _cfg_providers:
                     detected_providers.add(_canonical)
 
@@ -3502,8 +3507,14 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    provider_cfg = cfg.get("providers", {}).get(pid, {})
+                elif pid in _PROVIDER_MODELS or pid in _canonical_to_raw_provider_key:
+                    # Look up provider_cfg using the original raw key from
+                    # config.yaml so that mixed-case / underscore keys like
+                    # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
+                    # (#2245).  Fall back to the canonical pid for providers
+                    # that appear in _PROVIDER_MODELS but not in cfg.
+                    _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
+                    provider_cfg = cfg.get("providers", {}).get(_raw_key, {})
                     raw_models = []
 
                     # User-configured model allowlists are explicit local

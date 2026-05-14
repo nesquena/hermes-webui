@@ -5467,8 +5467,12 @@ def handle_post(handler, parsed) -> bool:
             try:
                 from agent.auxiliary_client import get_text_auxiliary_client
 
+                # Update summaries are a short text-compression/summarization task.
+                # Reuse the documented auxiliary.compression slot instead of
+                # inventing a WebUI-only auxiliary task name that users cannot
+                # discover in the Hermes Agent setup/config UI.
                 aux_client, aux_model = get_text_auxiliary_client(
-                    "update_summary",
+                    "compression",
                     main_runtime=main_runtime,
                 )
                 if aux_client is not None and aux_model:

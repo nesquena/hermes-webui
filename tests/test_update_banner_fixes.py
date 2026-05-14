@@ -419,13 +419,14 @@ class TestForceUpdateRoute:
 
 
 class TestUpdateSummaryRouteModelSelection:
-    """Update summaries should use the auxiliary update-summary model before main model fallback."""
+    """Update summaries should use a known text auxiliary model before main model fallback."""
 
-    def test_summary_route_prefers_update_summary_auxiliary_model(self):
+    def test_summary_route_prefers_documented_compression_auxiliary_model(self):
         src = read('api/routes.py')
 
         assert 'get_text_auxiliary_client' in src
-        assert '"update_summary"' in src
+        assert '"compression"' in src
+        assert '"update_summary"' not in src
         assert 'main_runtime=main_runtime' in src
         assert 'update summary auxiliary model failed; falling back to main model' in src
         assert 'from run_agent import AIAgent' in src
