@@ -1,0 +1,513 @@
+{
+  "contractVersion": "workflow-api-v1",
+  "envelope": {
+    "facts": {},
+    "insights": null
+  },
+  "fixtures": {
+    "inboxItem": {
+      "facts": {
+        "inboxItem": {
+          "assignedWorkflowId": null,
+          "body": "Shape this inbox item into a workflow.",
+          "classification": "decomposition_worthy",
+          "createdAt": 1.0,
+          "createdBy": "webui",
+          "id": "inbox_contract",
+          "metadata": {
+            "contractVersion": "workflow-api-v1"
+          },
+          "source": "webui_chat",
+          "status": "triaged",
+          "title": "Contract inbox item",
+          "updatedAt": 1.0,
+          "workspacePath": "/tmp/workflow-contract"
+        }
+      },
+      "insights": null
+    },
+    "inboxList": {
+      "facts": {
+        "count": 1,
+        "inboxItems": [
+          {
+            "assignedWorkflowId": null,
+            "body": "Shape this inbox item into a workflow.",
+            "classification": "decomposition_worthy",
+            "createdAt": 1.0,
+            "createdBy": "webui",
+            "id": "inbox_contract",
+            "metadata": {
+              "contractVersion": "workflow-api-v1"
+            },
+            "source": "webui_chat",
+            "status": "triaged",
+            "title": "Contract inbox item",
+            "updatedAt": 1.0,
+            "workspacePath": "/tmp/workflow-contract"
+          }
+        ]
+      },
+      "insights": null
+    },
+    "inboxPromote": {
+      "facts": {
+        "dag": {
+          "edges": [
+            {
+              "kind": "depends_on",
+              "source": "shape-plan",
+              "target": "build-slice"
+            }
+          ],
+          "name": "Workflow Contract Fixture",
+          "nodes": [
+            {
+              "id": "shape-plan",
+              "profile": "planner",
+              "role": "planner",
+              "scope": {
+                "summary": "Shape the contract request."
+              },
+              "title": "Shape implementation plan"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass."
+              ],
+              "id": "build-slice",
+              "parents": [
+                "shape-plan"
+              ],
+              "profile": "engineer",
+              "role": "engineer",
+              "scope": {
+                "summary": "Build the contract request."
+              },
+              "title": "Build first slice"
+            }
+          ],
+          "scale": "large",
+          "schema_version": 1,
+          "workflow_id": "wf_contract"
+        },
+        "inboxItem": {
+          "assignedWorkflowId": "wf_contract",
+          "body": "Shape this inbox item into a workflow.",
+          "classification": "decomposition_worthy",
+          "createdAt": 1.0,
+          "createdBy": "webui",
+          "id": "inbox_contract",
+          "metadata": {
+            "contractVersion": "workflow-api-v1"
+          },
+          "source": "webui_chat",
+          "status": "promoted",
+          "title": "Contract inbox item",
+          "updatedAt": 1.0,
+          "workspacePath": "/tmp/workflow-contract"
+        },
+        "workflow": {
+          "board": "workflow-system",
+          "createdAt": 1.0,
+          "createdBy": "hermes-agent",
+          "currentGate": "gate_contract_review",
+          "description": "Canonical workflow API shape for Core/WebUI contract tests.",
+          "id": "wf_contract",
+          "metadata": {
+            "contractVersion": "workflow-api-v1"
+          },
+          "policyPath": ".hermes/workflow.yaml",
+          "policySnapshot": {
+            "version": 1
+          },
+          "scale": "large",
+          "status": "dag_draft",
+          "title": "Workflow Contract Fixture",
+          "updatedAt": 2.0,
+          "workspacePath": "/tmp/workflow-contract"
+        }
+      },
+      "insights": null
+    },
+    "inboxShape": {
+      "facts": {
+        "draftDag": {
+          "edges": [
+            {
+              "kind": "depends_on",
+              "source": "shape-plan",
+              "target": "build-slice"
+            }
+          ],
+          "name": "Workflow Contract Fixture",
+          "nodes": [
+            {
+              "id": "shape-plan",
+              "profile": "planner",
+              "role": "planner",
+              "scope": {
+                "summary": "Shape the contract request."
+              },
+              "title": "Shape implementation plan"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass."
+              ],
+              "id": "build-slice",
+              "parents": [
+                "shape-plan"
+              ],
+              "profile": "engineer",
+              "role": "engineer",
+              "scope": {
+                "summary": "Build the contract request."
+              },
+              "title": "Build first slice"
+            }
+          ],
+          "scale": "large",
+          "schema_version": 1,
+          "workflow_id": "wf_contract"
+        },
+        "draftWorkflow": {
+          "board": "workflow-system",
+          "description": "Shape this inbox item into a workflow.",
+          "id": "wf_contract",
+          "scale": "large",
+          "sourceInboxItemId": "inbox_contract",
+          "title": "Workflow Contract Fixture",
+          "workspacePath": "/tmp/workflow-contract"
+        },
+        "inboxItem": {
+          "assignedWorkflowId": null,
+          "body": "Shape this inbox item into a workflow.",
+          "classification": "decomposition_worthy",
+          "createdAt": 1.0,
+          "createdBy": "webui",
+          "id": "inbox_contract",
+          "metadata": {
+            "contractVersion": "workflow-api-v1"
+          },
+          "source": "webui_chat",
+          "status": "triaged",
+          "title": "Contract inbox item",
+          "updatedAt": 1.0,
+          "workspacePath": "/tmp/workflow-contract"
+        }
+      },
+      "insights": null
+    },
+    "workflowArtifacts": {
+      "facts": {
+        "artifacts": [
+          {
+            "createdAt": 2.0,
+            "createdBy": "hermes-agent",
+            "id": "art_contract_handoff",
+            "kind": "handoff",
+            "metadata": {
+              "contractArtifact": true
+            },
+            "mimeType": "text/markdown",
+            "path": "/tmp/workflow-contract/handoff.md",
+            "schemaVersion": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "status": "active",
+            "workflowId": "wf_contract"
+          }
+        ],
+        "count": 1,
+        "workflowId": "wf_contract"
+      },
+      "insights": null
+    },
+    "workflowDag": {
+      "facts": {
+        "artifacts": [
+          {
+            "createdAt": 2.0,
+            "createdBy": "hermes-agent",
+            "id": "art_contract_handoff",
+            "kind": "handoff",
+            "metadata": {
+              "contractArtifact": true
+            },
+            "mimeType": "text/markdown",
+            "path": "/tmp/workflow-contract/handoff.md",
+            "schemaVersion": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "status": "active",
+            "workflowId": "wf_contract"
+          }
+        ],
+        "controlActions": [
+          {
+            "enabled": true,
+            "endpoint": "/api/workflows/wf_contract/gates/gate_contract_review/resolve",
+            "gateId": "gate_contract_review",
+            "id": "approve-gate:gate_contract_review",
+            "label": "Approve review gate",
+            "method": "POST",
+            "status": "approved",
+            "type": "resolve_gate",
+            "verdict": "approved"
+          }
+        ],
+        "edges": [
+          {
+            "kind": "depends_on",
+            "source": "shape-plan",
+            "target": "build-slice"
+          }
+        ],
+        "gates": [
+          {
+            "artifactId": "art_contract_handoff",
+            "gateType": "review",
+            "id": "gate_contract_review",
+            "level": 2,
+            "metadata": {
+              "contractGate": true
+            },
+            "nodeId": "build-slice",
+            "reason": "Contract fixture gate awaiting review.",
+            "requiredActor": "reviewer",
+            "resolvedAt": null,
+            "resolvedBy": null,
+            "status": "pending",
+            "verdict": null,
+            "workflowId": "wf_contract"
+          }
+        ],
+        "nodes": [
+          {
+            "children": [
+              "build-slice"
+            ],
+            "createdAt": 1.0,
+            "definitionOfDone": [
+              "Plan reviewed."
+            ],
+            "evidence": {
+              "tests": [
+                "contract"
+              ]
+            },
+            "gateLevel": 1,
+            "gateType": null,
+            "id": "shape-plan",
+            "kanbanTaskId": "task_shape_plan",
+            "metadata": {
+              "contractNode": true
+            },
+            "parents": [],
+            "profile": "planner",
+            "role": "planner",
+            "scope": {
+              "summary": "Turn the request into a concrete workflow plan."
+            },
+            "status": "done",
+            "title": "Shape implementation plan",
+            "updatedAt": 2.0,
+            "workspace": {
+              "baseRef": "origin/main",
+              "branch": "workflow/wf_contract/shape-plan",
+              "kind": "worktree",
+              "worktreePath": "/tmp/worktrees/wf_contract-shape-plan"
+            }
+          },
+          {
+            "children": [],
+            "createdAt": 1.0,
+            "definitionOfDone": [
+              "Targeted tests pass."
+            ],
+            "evidence": {},
+            "gateLevel": 2,
+            "gateType": "review",
+            "id": "build-slice",
+            "kanbanTaskId": "task_build_slice",
+            "metadata": {},
+            "parents": [
+              "shape-plan"
+            ],
+            "profile": "engineer",
+            "role": "engineer",
+            "scope": {
+              "summary": "Implement the first independently useful workflow slice."
+            },
+            "status": "running",
+            "title": "Build first slice",
+            "updatedAt": 2.0,
+            "workspace": {
+              "baseRef": null,
+              "branch": null,
+              "kind": "scratch",
+              "worktreePath": null
+            }
+          }
+        ],
+        "workflow": {
+          "board": "workflow-system",
+          "createdAt": 1.0,
+          "createdBy": "hermes-agent",
+          "currentGate": "gate_contract_review",
+          "description": "Canonical workflow API shape for Core/WebUI contract tests.",
+          "id": "wf_contract",
+          "metadata": {
+            "contractVersion": "workflow-api-v1"
+          },
+          "policyPath": ".hermes/workflow.yaml",
+          "policySnapshot": {
+            "version": 1
+          },
+          "scale": "large",
+          "status": "running",
+          "title": "Workflow Contract Fixture",
+          "updatedAt": 2.0,
+          "workspacePath": "/tmp/workflow-contract"
+        }
+      },
+      "insights": null
+    },
+    "workflowEvents": {
+      "facts": {
+        "count": 1,
+        "events": [
+          {
+            "actorId": "workflow-contract",
+            "actorType": "system",
+            "createdAt": 3.0,
+            "data": {
+              "contractVersion": "workflow-api-v1"
+            },
+            "eventType": "workflow_contract_seeded",
+            "id": "evt_contract_seeded",
+            "message": "Seeded workflow API contract fixture.",
+            "nodeId": "shape-plan",
+            "workflowId": "wf_contract"
+          }
+        ],
+        "workflowId": "wf_contract"
+      },
+      "insights": null
+    },
+    "workflowList": {
+      "facts": {
+        "count": 1,
+        "workflows": [
+          {
+            "board": "workflow-system",
+            "createdAt": 1.0,
+            "createdBy": "hermes-agent",
+            "currentGate": "gate_contract_review",
+            "description": "Canonical workflow API shape for Core/WebUI contract tests.",
+            "id": "wf_contract",
+            "metadata": {
+              "contractVersion": "workflow-api-v1"
+            },
+            "policyPath": ".hermes/workflow.yaml",
+            "policySnapshot": {
+              "version": 1
+            },
+            "scale": "large",
+            "status": "running",
+            "title": "Workflow Contract Fixture",
+            "updatedAt": 2.0,
+            "workspacePath": "/tmp/workflow-contract"
+          }
+        ]
+      },
+      "insights": null
+    },
+    "workflowNode": {
+      "facts": {
+        "artifacts": [
+          {
+            "createdAt": 2.0,
+            "createdBy": "hermes-agent",
+            "id": "art_contract_handoff",
+            "kind": "handoff",
+            "metadata": {
+              "contractArtifact": true
+            },
+            "mimeType": "text/markdown",
+            "path": "/tmp/workflow-contract/handoff.md",
+            "schemaVersion": 1,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "status": "active",
+            "workflowId": "wf_contract"
+          }
+        ],
+        "events": [
+          {
+            "actorId": "workflow-contract",
+            "actorType": "system",
+            "createdAt": 3.0,
+            "data": {
+              "contractVersion": "workflow-api-v1"
+            },
+            "eventType": "workflow_contract_seeded",
+            "id": "evt_contract_seeded",
+            "message": "Seeded workflow API contract fixture.",
+            "nodeId": "shape-plan",
+            "workflowId": "wf_contract"
+          }
+        ],
+        "gates": [
+          {
+            "artifactId": "art_contract_handoff",
+            "gateType": "review",
+            "id": "gate_contract_review",
+            "level": 2,
+            "metadata": {
+              "contractGate": true
+            },
+            "nodeId": "build-slice",
+            "reason": "Contract fixture gate awaiting review.",
+            "requiredActor": "reviewer",
+            "resolvedAt": null,
+            "resolvedBy": null,
+            "status": "pending",
+            "verdict": null,
+            "workflowId": "wf_contract"
+          }
+        ],
+        "node": {
+          "children": [],
+          "createdAt": 1.0,
+          "definitionOfDone": [
+            "Targeted tests pass."
+          ],
+          "evidence": {},
+          "gateLevel": 2,
+          "gateType": "review",
+          "id": "build-slice",
+          "kanbanTaskId": "task_build_slice",
+          "metadata": {},
+          "parents": [
+            "shape-plan"
+          ],
+          "profile": "engineer",
+          "role": "engineer",
+          "scope": {
+            "summary": "Implement the first independently useful workflow slice."
+          },
+          "status": "running",
+          "title": "Build first slice",
+          "updatedAt": 2.0,
+          "workspace": {
+            "baseRef": null,
+            "branch": null,
+            "kind": "scratch",
+            "worktreePath": null
+          }
+        },
+        "workflowId": "wf_contract"
+      },
+      "insights": null
+    }
+  }
+}
