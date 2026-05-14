@@ -7178,6 +7178,63 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_rejects_conflicting_recovery_module_selector_aliases_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-tool",
+            "name": "Safe Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "other-module",
+            "name": "Other Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+        }
+    )
+    baseline_event_files = {path.name for path in spaces.events_dir().glob("*.json")}
+
+    cases = [
+        ("space.recovery.disable_module", {"module_id": "module-tool", "moduleId": "other-module"}),
+        ("space.admin.recovery.disable_module", {"moduleId": "module-tool", "id": "other-module"}),
+        ("space.recovery.enable_module", {"module_id": "module-tool", "id": "other-module"}),
+        ("space.admin.enable_module", {"module_id": "module-tool", "moduleId": "other-module"}),
+        (
+            "space.recovery.repair_module",
+            {
+                "module_id": "module-tool",
+                "moduleId": "other-module",
+                "payload": {"renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+                "prompt": "Repair SECRET_VALUE_DO_NOT_LEAK source",
+            },
+        ),
+        ("space.recovery.module_repair_events", {"module_id": "module-tool", "moduleId": "other-module"}),
+    ]
+
+    error_messages = []
+    for action, payload in cases:
+        with pytest.raises(ValueError, match="module selector aliases") as exc:
+            spaces.run_space_tool(action, payload)
+        error_messages.append(str(exc.value))
+
+    assert {path.name for path in spaces.events_dir().glob("*.json")} == baseline_event_files
+    assert spaces.read_recovery_module("module-tool").get("recovery", {}).get("disabled") is not True
+    assert spaces.list_recovery_module_repair_events("module-tool") == []
+    serialized = json.dumps({"errors": error_messages, "snapshot": spaces.recovery_snapshot()}).lower()
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_recovery_snapshot_redacts_camelcase_unsafe_module_ids(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(

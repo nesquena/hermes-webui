@@ -3065,6 +3065,16 @@ def _space_tool_assert_matching_aliases(
         raise ValueError(message)
 
 
+def _space_tool_module_id(payload: dict[str, Any]) -> str:
+    """Return a recovery module id from tool payload aliases, rejecting conflicts."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("module_id", "moduleId", "id"),
+        "Conflicting recovery module selector aliases",
+    )
+    return str(payload.get("module_id") or payload.get("moduleId") or payload.get("id") or "").strip()
+
+
 def _space_tool_event_id(payload: dict[str, Any]) -> str:
     """Return a revision event id from Hermes or Space Agent-style payloads."""
     raw = (
@@ -4009,7 +4019,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.disable_module",
         "space.admin.recovery.disablemodule",
     }:
-        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        module_id = validate_module_id(_space_tool_module_id(data))
         result = disable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
         return {"ok": True, "action": name, **result}
     if name in {
@@ -4023,7 +4033,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.enable_module",
         "space.admin.recovery.enablemodule",
     }:
-        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        module_id = validate_module_id(_space_tool_module_id(data))
         result = enable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         return {"ok": True, "action": name, **result}
     if name in {
@@ -4037,7 +4047,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.repair_module",
         "space.admin.recovery.repairmodule",
     }:
-        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        module_id = validate_module_id(_space_tool_module_id(data))
         result = queue_recovery_module_repair_event(
             module_id,
             data.get("payload") if "payload" in data else {},
@@ -4053,7 +4063,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.module_repair_events",
         "space.admin.recovery.repair_module_events",
     }:
-        module_id = validate_module_id(data.get("module_id") or data.get("moduleId") or data.get("id"))
+        module_id = validate_module_id(_space_tool_module_id(data))
         return {
             "ok": True,
             "action": name,
