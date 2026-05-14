@@ -44,6 +44,22 @@ from api.turn_journal import append_turn_journal_event_for_stream
 _ENV_LOCK = threading.Lock()
 
 
+
+def _context_engine_metadata(engine) -> dict:
+    raw_name = getattr(engine, "engine_name", None) or getattr(engine, "name", None) or "compressor"
+    engine_name = str(raw_name or "compressor").strip().lower() or "compressor"
+    is_lcm = engine_name == "lcm"
+    details = {
+        "engine": engine_name,
+        "retrieval_tools": ["lcm_grep", "lcm_expand", "lcm_describe"] if is_lcm else [],
+        "compression_count": getattr(engine, "compression_count", None),
+    }
+    return {
+        "engine": engine_name,
+        "mode": "lossless_retrieval" if is_lcm else "summary_compaction",
+        "details": details,
+    }
+
 def _prewarm_skill_tool_modules():
     """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
 
@@ -3706,6 +3722,11 @@ def _run_agent_streaming(
                     s.compression_anchor_message_key = (
                         _compression_anchor_message_key(visible_after[-1]) if visible_after else None
                     )
+                    engine_meta = _context_engine_metadata(getattr(agent, 'context_compressor', None))
+                    s.context_engine = engine_meta.get('engine')
+                    s.compression_anchor_engine = engine_meta.get('engine')
+                    s.compression_anchor_mode = engine_meta.get('mode')
+                    s.compression_anchor_details = engine_meta.get('details') or {}
                     s.compression_anchor_summary = _compact_summary_text(
                         _compression_summary_from_messages(s.messages)
                         or _compression_summary_from_messages(s.context_messages)
@@ -3714,6 +3735,10 @@ def _run_agent_streaming(
                         'session_id': s.session_id,
                         'message': 'Context auto-compressed to continue the conversation',
                         'usage': _live_usage_snapshot(),
+                        'engine': engine_meta.get('engine'),
+                        'mode': engine_meta.get('mode'),
+                        'compression_count': (engine_meta.get('details') or {}).get('compression_count'),
+                        'details': engine_meta.get('details') or {},
                     })
 
                 # Stamp 'timestamp' on any messages that don't have one yet

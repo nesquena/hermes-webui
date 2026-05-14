@@ -1034,6 +1034,7 @@ def _clear_stale_stream_state(session) -> bool:
     return True
 
 
+
 def _ensure_full_session_before_mutation(sid: str, session):
     """Reload cached metadata-only sessions before mutating persisted fields.
 
@@ -1053,6 +1054,109 @@ def _ensure_full_session_before_mutation(sid: str, session):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     return full_session
+
+def _context_engine_metadata(engine) -> dict:
+    """Return WebUI-safe metadata for the active context engine."""
+    raw_name = getattr(engine, "engine_name", None) or getattr(engine, "name", None) or "compressor"
+    engine_name = str(raw_name or "compressor").strip().lower() or "compressor"
+    is_lcm = engine_name == "lcm"
+    details = {
+        "engine": engine_name,
+        "retrieval_tools": ["lcm_grep", "lcm_expand", "lcm_describe"] if is_lcm else [],
+        "compression_count": getattr(engine, "compression_count", None),
+    }
+    return {
+        "engine": engine_name,
+        "mode": "lossless_retrieval" if is_lcm else "summary_compaction",
+        "details": details,
+    }
+
+
+def _context_engine_clone_fallback(engine_name: str, mode: str) -> dict:
+    engine_name = str(engine_name or "compressor").strip().lower() or "compressor"
+    copied = engine_name != "lcm"
+    return {
+        "ok": copied,
+        "engine": engine_name,
+        "mode": mode,
+        "copied_sidecar": copied,
+        "warning": None if copied else "Context engine clone hook unavailable; duplicated visible transcript only.",
+    }
+
+
+def _clone_context_engine_session_state(
+    *,
+    old_session_id: str,
+    new_session_id: str,
+    mode: str,
+    keep_count: int | None = None,
+    messages: list | None = None,
+    context_messages: list | None = None,
+    profile=None,
+    model=None,
+    model_provider=None,
+    workspace=None,
+) -> dict:
+    """Ask the configured context engine to clone session sidecar state.
+
+    Branches are treated as independent forks: the target engine should copy DB
+    state for the kept prefix and then let the new session diverge. If the hook
+    is missing, return an explicit degraded state instead of silently pretending
+    that LCM's sidecar was copied.
+    """
+    try:
+        from api.config import get_config as _get_cfg
+        cfg = _get_cfg() or {}
+        context_cfg = cfg.get("context") if isinstance(cfg.get("context"), dict) else {}
+        configured_engine = str(context_cfg.get("engine") or "compressor").strip().lower() or "compressor"
+    except Exception:
+        configured_engine = "compressor"
+
+    if configured_engine in {"", "compressor", "default", "builtin"}:
+        return _context_engine_clone_fallback("compressor", mode)
+
+    try:
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model=model,
+            provider=model_provider,
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=_resolve_cli_toolsets(),
+            session_id=old_session_id,
+        )
+        engine = getattr(agent, "context_compressor", None)
+        meta = _context_engine_metadata(engine)
+        hook = getattr(engine, "clone_session_state", None)
+        engine_messages = messages if configured_engine == "lcm" else None
+        engine_context_messages = context_messages if configured_engine == "lcm" else None
+        if callable(hook):
+            result = hook(
+                old_session_id,
+                new_session_id,
+                mode=mode,
+                keep_count=keep_count,
+                messages=engine_messages,
+                context_messages=engine_context_messages,
+            )
+            if isinstance(result, dict):
+                result.setdefault("engine", meta["engine"])
+                result.setdefault("mode", mode)
+                if mode == "branch":
+                    result.setdefault("fork_semantics", "independent_fork")
+                return result
+        result = _context_engine_clone_fallback(meta["engine"], mode)
+        if mode == "branch":
+            result["fork_semantics"] = "independent_fork"
+        return result
+    except Exception as exc:
+        result = _context_engine_clone_fallback(configured_engine, mode)
+        result["error"] = str(exc)
+        if mode == "branch":
+            result["fork_semantics"] = "independent_fork"
+        return result
+
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -4286,6 +4390,20 @@ def handle_post(handler, parsed) -> bool:
                 updated_at=time.time(),
             )
 
+            clone_state = _clone_context_engine_session_state(
+                old_session_id=session.session_id,
+                new_session_id=copied_session.session_id,
+                mode="duplicate",
+                messages=copied_session.messages,
+                context_messages=getattr(copied_session, "context_messages", None),
+                profile=getattr(session, "profile", None),
+                model=session.model,
+                model_provider=session.model_provider,
+                workspace=session.workspace,
+            )
+            copied_session.context_engine_state = clone_state
+            copied_session.context_engine = clone_state.get("engine")
+
             with LOCK:
                 SESSIONS[copied_session.session_id] = copied_session
                 SESSIONS.move_to_end(copied_session.session_id)
@@ -4715,12 +4833,28 @@ def handle_post(handler, parsed) -> bool:
         branch = Session(
             workspace=source.workspace,
             model=source.model,
+            model_provider=getattr(source, "model_provider", None),
             profile=getattr(source, "profile", None),
             title=branch_title,
             messages=forked_messages,
             parent_session_id=source.session_id,
             session_source="fork",
         )
+        clone_state = _clone_context_engine_session_state(
+            old_session_id=source.session_id,
+            new_session_id=branch.session_id,
+            mode="branch",
+            keep_count=keep_count,
+            messages=branch.messages,
+            context_messages=getattr(branch, "context_messages", None),
+            profile=getattr(source, "profile", None),
+            model=source.model,
+            model_provider=getattr(source, "model_provider", None),
+            workspace=source.workspace,
+        )
+        clone_state.setdefault("fork_semantics", "independent_fork")
+        branch.context_engine_state = clone_state
+        branch.context_engine = clone_state.get("engine")
         with LOCK:
             SESSIONS[branch.session_id] = branch
             SESSIONS.move_to_end(branch.session_id)
@@ -4735,6 +4869,7 @@ def handle_post(handler, parsed) -> bool:
             "session_id": branch.session_id,
             "title": branch_title,
             "parent_session_id": source.session_id,
+            "context_engine_state": branch.context_engine_state,
         })
 
     if parsed.path == "/api/session/compress/start":
@@ -8578,6 +8713,7 @@ def _handle_session_compress(handler, body):
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,
         )
+        engine_meta = _context_engine_metadata(agent.context_compressor)
         compressed = agent.context_compressor.compress(
             original_messages,
             current_tokens=approx_tokens,
@@ -8591,6 +8727,13 @@ def _handle_session_compress(handler, body):
             new_tokens,
             focus_topic=focus_topic,
         )
+        if engine_meta.get("engine") == "lcm":
+            summary = dict(summary or {})
+            summary.setdefault("headline", "LCM indexed context")
+            summary.setdefault(
+                "reference_message",
+                "LCM indexed this session. Earlier raw messages are preserved in the LCM store and can be retrieved with lcm_grep/lcm_expand.",
+            )
 
         with _cfg._get_session_agent_lock(sid):
             # Re-read messages to detect concurrent edits during the LLM call.
@@ -8622,6 +8765,10 @@ def _handle_session_compress(handler, body):
             s.compression_anchor_summary = _compact_summary_text(
                 summary_text or _compression_summary_from_messages(compressed) or ""
             )
+            s.context_engine = engine_meta.get("engine")
+            s.compression_anchor_engine = engine_meta.get("engine")
+            s.compression_anchor_mode = engine_meta.get("mode")
+            s.compression_anchor_details = engine_meta.get("details") or {}
             s.save()
 
         session_payload = redact_session_data(
