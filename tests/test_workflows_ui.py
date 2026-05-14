@@ -222,7 +222,7 @@ def test_workflow_refresh_reloads_inbox_items_too():
 def test_workflow_detail_can_materialize_dag_to_kanban():
     for symbol in (
         "materializeWorkflowToKanban",
-        "Materialize to Kanban",
+        "materialize_workflow",
         "workflow-materialize-actions",
         "`/api/workflows/${encodeURIComponent(workflowId)}/materialize`",
         "method:'POST'",
@@ -230,6 +230,33 @@ def test_workflow_detail_can_materialize_dag_to_kanban():
     ):
         assert symbol in PANELS_JS
     assert ".workflow-materialize-actions" in STYLE_CSS
+
+
+def test_workflow_dag_control_actions_render_only_from_core_facts():
+    for symbol in (
+        "_workflowControlActionsHtml",
+        "executeWorkflowControlAction",
+        "facts.controlActions",
+        "action.endpoint",
+        "workflow-control-action",
+        "No Core workflow actions available.",
+        "Approve workflow for materialization",
+    ):
+        assert symbol in PANELS_JS
+    assert "workflow.status==='dag_approved'" not in PANELS_JS
+    assert "workflow.status === 'dag_approved'" not in PANELS_JS
+
+
+def test_workflow_materialize_result_links_task_ids_from_synthetic_success_payload():
+    for symbol in (
+        "_workflowMaterializedTaskIds",
+        "facts.tasks",
+        "task.taskId",
+        "workflowSyntheticMaterializationSuccessFixture",
+        "synthetic-task-plan",
+        "synthetic-task-build",
+    ):
+        assert symbol in PANELS_JS
 
 
 def test_workflow_materialize_result_links_created_kanban_tasks():

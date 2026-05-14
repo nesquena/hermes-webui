@@ -135,6 +135,8 @@ def test_workflow_proxy_rejects_noncanonical_workflow_paths():
     assert is_workflow_proxy_path("/api/workflows/wf_1/artifacts")
     assert not is_workflow_proxy_path("/api/workflows/wf_1/delete")
     assert not is_workflow_proxy_path("/api/workflows/wf_1/materialize")
+    assert not is_workflow_proxy_path("/api/workflows/wf_1/approve")
+    assert not is_workflow_proxy_path("/api/workflows/wf_1/gates/gate_1/resolve")
     assert not is_workflow_proxy_path("/api/workflows/../../secrets")
 
 
@@ -225,6 +227,43 @@ def test_workflow_proxy_posts_materialize_action_to_core_dashboard(monkeypatch):
     assert calls[1][1] == "POST"
     assert calls[1][2]["X-hermes-session-token"] == "token-123"
     assert calls[1][3] == raw
+
+
+def test_workflow_proxy_posts_control_actions_to_core_dashboard(monkeypatch):
+    from api import dashboard_probe, workflows
+    from api.routes import handle_post
+
+    monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": True, "url": "http://127.0.0.1:9119"})
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.get_method(), dict(request.header_items()), request.data))
+        if request.full_url == "http://127.0.0.1:9119/workflows":
+            return _FakeResponse('<script>window.__HERMES_SESSION_TOKEN__="token-123";</script>')
+        return _FakeResponse({"facts": {"workflow": {"id": "wf_1", "status": "dag_approved"}}, "insights": None})
+
+    monkeypatch.setattr(workflows.urllib.request, "urlopen", fake_urlopen)
+    raw = b'{"actorId":"webui","status":"approved","verdict":"approved"}'
+    approve_handler = _FakeHandler()
+    approve_handler.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
+    approve_handler.rfile = __import__("io").BytesIO(raw)
+    resolve_handler = _FakeHandler()
+    resolve_handler.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
+    resolve_handler.rfile = __import__("io").BytesIO(raw)
+
+    assert handle_post(approve_handler, urlparse("http://example.com/api/workflows/wf_1/approve")) is True
+    assert handle_post(resolve_handler, urlparse("http://example.com/api/workflows/wf_1/gates/gate_1/resolve")) is True
+
+    assert approve_handler.status == 200
+    assert resolve_handler.status == 200
+    assert calls[1][0] == "http://127.0.0.1:9119/api/workflows/wf_1/approve"
+    assert calls[1][1] == "POST"
+    assert calls[1][2]["X-hermes-session-token"] == "token-123"
+    assert calls[1][3] == raw
+    assert calls[3][0] == "http://127.0.0.1:9119/api/workflows/wf_1/gates/gate_1/resolve"
+    assert calls[3][1] == "POST"
+    assert calls[3][2]["X-hermes-session-token"] == "token-123"
+    assert calls[3][3] == raw
 
 
 def test_workflow_proxy_patches_inbox_items_to_core_dashboard(monkeypatch):

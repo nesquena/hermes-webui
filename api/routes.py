@@ -4088,7 +4088,12 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, result, status=200 if result.get("clean") else 409)
 
     if parsed.path == "/api/workflows/inbox" or (
-        parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/materialize")
+        parsed.path.startswith("/api/workflows/")
+        and (
+            parsed.path.endswith("/approve")
+            or parsed.path.endswith("/materialize")
+            or parsed.path.endswith("/resolve")
+        )
     ):
         from api.workflows import handle_workflow_post
 

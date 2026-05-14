@@ -6821,13 +6821,48 @@ async function openWorkflowMaterializedKanbanTask(taskId){
   await loadKanban(true);
   await loadKanbanTask(taskId);
 }
+function _workflowMaterializedTaskIds(facts){
+  if(!facts) return [];
+  const ids=facts.createdTaskIds||facts.created_task_ids;
+  if(Array.isArray(ids)&&ids.length) return ids.filter(Boolean);
+  if(Array.isArray(facts.tasks)) return facts.tasks.map(task=>task&&task.taskId).filter(Boolean);
+  return [];
+}
+function workflowSyntheticMaterializationSuccessFixture(){
+  return {facts:{workflowId:'synthetic-workflow',status:'materialized',tasks:[{nodeId:'plan',taskId:'synthetic-task-plan'},{nodeId:'build',taskId:'synthetic-task-build'}]},insights:null};
+}
+async function executeWorkflowControlAction(workflowId,endpoint,status,verdict,label){
+  if(!workflowId||!endpoint) return;
+  const statusEl=$('workflowControlStatus');
+  if(statusEl) statusEl.textContent=`Running ${label||'workflow action'}...`;
+  const body={actorId:'webui'};
+  if(status) body.status=status;
+  if(verdict) body.verdict=verdict;
+  try{
+    await api(endpoint,{method:'POST',body:JSON.stringify(body)});
+    if(statusEl) statusEl.textContent=`Completed ${label||'workflow action'}.`;
+    await Promise.all([loadWorkflows(true),loadWorkflowDag(workflowId,{silent:true})]);
+  }catch(err){
+    if(statusEl) statusEl.textContent=`Could not run workflow action: ${((err&&err.message)||'Unknown error')}`;
+  }
+}
+function _workflowControlActionButton(workflowId,action){
+  const label=action.label||action.type||'Workflow action';
+  if(action.type==='materialize_workflow') return `<button class="btn secondary workflow-control-action" type="button" onclick="materializeWorkflowToKanban('${esc(workflowId)}')">${esc(label)}</button>`;
+  return `<button class="btn secondary workflow-control-action" type="button" onclick="executeWorkflowControlAction('${esc(workflowId)}','${esc(action.endpoint||'')}','${esc(action.status||'')}','${esc(action.verdict||'')}','${esc(label)}')">${esc(label)}</button>`;
+}
+function _workflowControlActionsHtml(workflowId,facts){
+  const actions=(facts&&facts.controlActions)||[];
+  if(!actions.length) return '<span class="workflow-inspector-empty">No Core workflow actions available.</span>';
+  return actions.filter(action=>action&&action.enabled!==false&&action.endpoint).map(action=>_workflowControlActionButton(workflowId,action)).join('')||'<span class="workflow-inspector-empty">No Core workflow actions available.</span>';
+}
 async function materializeWorkflowToKanban(workflowId){
   const status=$('workflowMaterializeStatus');
   if(status) status.textContent='Materializing workflow into Kanban tasks...';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/materialize`,{method:'POST',body:JSON.stringify({actorId:'webui'})});
     const facts=_workflowFacts(payload);
-    const ids=facts.createdTaskIds||facts.created_task_ids||[];
+    const ids=_workflowMaterializedTaskIds(facts);
     const created=ids.length;
     if(status){
       status.innerHTML=created
@@ -6850,9 +6885,9 @@ function renderWorkflowDagCanvas(workflowId,facts){
   const height=Math.max(360,(layout.maxRow+1)*132+80);
   detail.innerHTML=`<div class="workflow-dag-summary">
     <h3>${esc(_workflowTitle(workflow))}</h3>
-    <p>Read-only DAG facts from Hermes Core. Select a node to inspect gates, artifacts, and recent events.</p>
+    <p>Canonical DAG facts and available controls from Hermes Core. Select a node to inspect gates, artifacts, and recent events.</p>
     <div class="workflow-dag-stats"><span>${nodes.length} nodes</span><span>${edges.length} edges</span></div>
-    <div class="workflow-materialize-actions"><button class="btn secondary" onclick="materializeWorkflowToKanban('${esc(workflowId)}')">Materialize to Kanban</button><span id="workflowMaterializeStatus" class="workflow-inspector-empty">Creates canonical Kanban tasks for ready workflow nodes.</span></div>
+    <div class="workflow-materialize-actions"><span class="workflow-control-actions">${_workflowControlActionsHtml(workflowId,facts)}</span><span id="workflowControlStatus" class="workflow-inspector-empty">Approve workflow for materialization or materialize only when Core exposes the action.</span><span id="workflowMaterializeStatus" class="workflow-inspector-empty"></span></div>
   </div>
   <div class="workflow-dag-layout">
     <div class="workflow-dag-canvas" style="min-width:${width}px;min-height:${height}px">
