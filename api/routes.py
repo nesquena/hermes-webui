@@ -826,6 +826,7 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    PENDING_PROCESS_COMPLETIONS,
 )
 from api.helpers import (
     require,
@@ -4717,6 +4718,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
 
+    if parsed.path == "/api/process-complete-ack":
+        return _handle_process_complete_ack(handler, body)
+
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
 
@@ -7092,6 +7096,16 @@ def _start_chat_stream_for_session(
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
+    # process_complete wakeup: if this session has a pending process_complete
+    # marker (set by api/background_process.py drain), discard it atomically
+    # here. Mirrors the goal_continue pattern (#1932). The marker is server-
+    # internal telemetry; the actual wakeup_prompt is delivered as a normal
+    # user message via the frontend's re-POST to /api/chat/start.
+    process_completion_related = False
+    if s.session_id in PENDING_PROCESS_COMPLETIONS:
+        PENDING_PROCESS_COMPLETIONS.discard(s.session_id)
+        process_completion_related = True
+
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -7155,6 +7169,37 @@ def _start_chat_stream_for_session(
     if model_provider:
         response["effective_model_provider"] = model_provider
     return response
+
+
+def _handle_process_complete_ack(handler, body):
+    """Acknowledge a process_complete SSE event.
+
+    The frontend posts here as a lightweight diagnostic after receiving a
+    process_complete event. The actual agent wakeup is delivered by re-POSTing
+    ``wakeup_prompt`` to /api/chat/start as a normal user-role turn, which
+    consumes ``PENDING_PROCESS_COMPLETIONS`` atomically in
+    ``_start_chat_stream_for_session``. This endpoint is therefore a no-op for
+    state — it exists so the frontend can confirm receipt and so a future
+    follow-up (e.g. analytics, telemetry) has a stable hook.
+    """
+    from api.helpers import j
+
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    pid = str(body.get("process_id") or "").strip()
+    return j(handler, {
+        "ok": True,
+        "session_id": s.session_id,
+        "process_id": pid,
+        "pending_consumed": False,  # frontend re-POSTs /api/chat/start to actually consume
+    })
 
 
 def _handle_goal_command(handler, body):

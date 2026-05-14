@@ -552,6 +552,13 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_EXEC_ASK': '1',
         'HERMES_SESSION_KEY': session_id,
         'HERMES_HOME': profile_home,
+        # process_complete agent-wakeup wiring: terminal_tool reads these to
+        # decide whether to populate watcher routing metadata (terminal_tool.py
+        # line ~1940 gates pending_watchers on HERMES_SESSION_PLATFORM). Without
+        # them, notify_on_complete events never enqueue and the agent can't be
+        # woken up when a background process exits.
+        'HERMES_SESSION_PLATFORM': 'webui',
+        'HERMES_SESSION_CHAT_ID': str(session_id),
     })
     return env
 
@@ -2459,6 +2466,14 @@ def _run_agent_streaming(
             _profile_home,
         )
         _set_thread_env(**_thread_env)
+        # process_complete agent-wakeup wiring: bind this session's
+        # HERMES_SESSION_KEY to its WebUI session_id so the drain thread can
+        # route notify_on_complete events back to the right SSE channel.
+        try:
+            from api.background_process import register_process_session
+            register_process_session(session_id, session_id)
+        except Exception:
+            logger.debug("register_process_session failed", exc_info=True)
         # Prewarm skill-tool imports *before* acquiring the lock so that
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
@@ -2473,10 +2488,15 @@ def _run_agent_streaming(
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
+            old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
+            # process_complete wiring (see _build_agent_thread_env above)
+            os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
+            os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Patch module-level caches to match the active profile.
@@ -4153,6 +4173,10 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_KEY'] = old_session_key
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+                if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
+                else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
