@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2225** by @franksong2702 (refs #2224) — Adds an Extra Large option to Settings → Appearance → Font size for tablet and large-desktop readability. The new `xlarge` value is accepted by the persisted settings contract, appears alongside the existing Small / Default / Large picker options, and scales the same key UI text surfaces already covered by the font-size preference: sidebar session rows, chat message bodies/headings/code/tables, the composer textarea, workspace file rows, and app-level em/rem text.
+
 ### Fixed
 
 - **PR #2217** by @franksong2702 (refs #2215 Fix B) — Drops the leftover `re.MULTILINE` flag from the "the user is asking" pre-amble strip pattern in `api/streaming.py:695`. PR #2213 removed `re.MULTILINE` from the three sibling wrapper-strip patterns (`<think>`, MiniMax, Gemma) but missed this one instance. With `re.MULTILINE`, `^` matched the start of any line in the response, so a mid-response line that legitimately started with "The user is asking us to wait" could be stripped silently. Now the pattern only matches when the entire response leads with that wrapper, consistent with the other strips. One-flag, two-character change + regression test pinning the new behavior.

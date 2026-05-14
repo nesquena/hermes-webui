@@ -858,7 +858,7 @@
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
-              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <span style="font-size:10px;font-weight:600;color:var(--muted)">Aa</span>
@@ -876,6 +876,12 @@
                     <span style="font-size:17px;font-weight:600;color:var(--muted)">Aa</span>
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_large">Large</span>
+                </button>
+                <button type="button" data-font-size-val="xlarge" onclick="_pickFontSize('xlarge')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <span style="font-size:20px;font-weight:600;color:var(--muted)">Aa</span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_xlarge">Extra Large</span>
                 </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">

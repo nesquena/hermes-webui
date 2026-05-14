@@ -19,7 +19,7 @@
   }
   /* ── Font size modifiers ── */
   /* ── Font size preference: scale key UI text elements ── */
-  /* Default is 14px (no attribute needed). Small=12px, Large=16px.            */
+  /* Default is 14px (no attribute needed). Small=12px, Large=16px, Extra Large=18px. */
   /* We override the px values directly on key containers since most of the     */
   /* stylesheet uses hardcoded px — changing :root font-size alone only affects */
   /* the small number of em/rem values.                                         */
@@ -27,44 +27,60 @@
   /* Sidebar session list */
   :root[data-font-size="small"] .session-item { font-size: 11px; }
   :root[data-font-size="large"] .session-item { font-size: 15px; }
+  :root[data-font-size="xlarge"] .session-item { font-size: 17px; }
   :root[data-font-size="small"] .session-meta { font-size: 10px; }
   :root[data-font-size="large"] .session-meta { font-size: 13px; }
+  :root[data-font-size="xlarge"] .session-meta { font-size: 15px; }
   :root[data-font-size="small"] .session-title-input { font-size: 11px; }
   :root[data-font-size="large"] .session-title-input { font-size: 15px; }
+  :root[data-font-size="xlarge"] .session-title-input { font-size: 17px; }
 
   /* Chat message body */
   :root[data-font-size="small"] .msg-body { font-size: 12px; }
   :root[data-font-size="large"] .msg-body { font-size: 16px; }
+  :root[data-font-size="xlarge"] .msg-body { font-size: 18px; }
   :root[data-font-size="small"] .msg-body h1 { font-size: 21px; }
   :root[data-font-size="large"] .msg-body h1 { font-size: 27px; }
+  :root[data-font-size="xlarge"] .msg-body h1 { font-size: 30px; }
   :root[data-font-size="small"] .msg-body h2 { font-size: 17px; }
   :root[data-font-size="large"] .msg-body h2 { font-size: 23px; }
+  :root[data-font-size="xlarge"] .msg-body h2 { font-size: 26px; }
   :root[data-font-size="small"] .msg-body h3 { font-size: 15px; }
   :root[data-font-size="large"] .msg-body h3 { font-size: 20px; }
+  :root[data-font-size="xlarge"] .msg-body h3 { font-size: 22px; }
   :root[data-font-size="small"] .msg-body h4 { font-size: 13px; }
   :root[data-font-size="large"] .msg-body h4 { font-size: 17px; }
+  :root[data-font-size="xlarge"] .msg-body h4 { font-size: 19px; }
   :root[data-font-size="small"] .msg-body h5 { font-size: 12px; }
   :root[data-font-size="large"] .msg-body h5 { font-size: 16px; }
+  :root[data-font-size="xlarge"] .msg-body h5 { font-size: 18px; }
   :root[data-font-size="small"] .msg-body h6 { font-size: 11px; }
   :root[data-font-size="large"] .msg-body h6 { font-size: 15px; }
+  :root[data-font-size="xlarge"] .msg-body h6 { font-size: 17px; }
   :root[data-font-size="small"] .msg-body code { font-size: 10.5px; }
   :root[data-font-size="large"] .msg-body code { font-size: 14.5px; }
+  :root[data-font-size="xlarge"] .msg-body code { font-size: 16px; }
   :root[data-font-size="small"] .msg-body pre code { font-size: 11px; }
   :root[data-font-size="large"] .msg-body pre code { font-size: 15px; }
+  :root[data-font-size="xlarge"] .msg-body pre code { font-size: 16.5px; }
   :root[data-font-size="small"] .msg-body table { font-size: 11px; }
   :root[data-font-size="large"] .msg-body table { font-size: 14px; }
+  :root[data-font-size="xlarge"] .msg-body table { font-size: 16px; }
 
   /* Composer textarea (default is 16px in stylesheet) */
   :root[data-font-size="small"] #msg { font-size: 14px; }
   :root[data-font-size="large"] #msg { font-size: 18px; }
+  :root[data-font-size="xlarge"] #msg { font-size: 20px; }
 
   /* Workspace file tree */
   :root[data-font-size="small"] .file-item { font-size: 11px; }
   :root[data-font-size="large"] .file-item { font-size: 14px; }
+  :root[data-font-size="xlarge"] .file-item { font-size: 16px; }
 
   /* App-level base — keeps em/rem values scaling correctly */
   :root[data-font-size="small"] { font-size: 12px; }
   :root[data-font-size="large"] { font-size: 16px; }
+  :root[data-font-size="xlarge"] { font-size: 18px; }
   /* ── Dark mode — navy-black + gold accent matching Hermes terminal ── */
   :root.dark {
     --bg:#0D0D1A;--sidebar:#141425;--border:#2A2A45;--border2:rgba(255,255,255,0.14);
