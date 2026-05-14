@@ -875,6 +875,55 @@ class TestWhatsNewSummaryToggle:
         assert result['summary'].count(duplicate_menu_item) == 1
         assert result['summary'].count(duplicate_quality_item) == 1
 
+    def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
+        import api.updates as upd
+
+        subjects = [f'Commit subject {idx}' for idx in range(1, 25)]
+        monkeypatch.setattr(
+            upd,
+            '_commit_subjects_for_update_with_limit',
+            lambda _info, *, limit=24: (subjects[:limit], True),
+        )
+        prompts = []
+
+        def fake_llm(_system, prompt):
+            prompts.append(prompt)
+            return '\n'.join([
+                'Several user-facing fixes are ready.',
+                'Settings and update messaging should be easier to understand.',
+                'The update flow should feel safer and clearer.',
+            ])
+
+        result = upd.summarize_update_payload(
+            {
+                'webui': {
+                    'behind': 57,
+                    'current_sha': 'abc',
+                    'latest_sha': 'def',
+                    'compare_url': 'https://example.test/webui',
+                }
+            },
+            target='webui',
+            llm_callback=fake_llm,
+            use_cache=False,
+        )
+
+        assert len(subjects) == 24
+        assert prompts
+        assert 'Showing latest 24 of 57 commit subjects; summarize trends, not every commit.' in prompts[0]
+        assert 'Commit subject 24' in prompts[0]
+        assert 'Commit subject 25' not in prompts[0]
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+        assert sections["What you'll notice"] == [
+            'Several user-facing fixes are ready.',
+            'Settings and update messaging should be easier to understand.',
+            'The update flow should feel safer and clearer.',
+        ]
+        assert sections['Worth knowing'] == [
+            'WebUI has 57 updates; this summary uses the latest 24 commit subjects, with the full comparison still available in the diff link.'
+        ]
+        assert result['targets'][0]['commits_truncated'] is True
+
     def test_update_summary_cache_reuses_same_update_summary(self):
         import api.updates as upd
 

@@ -8,6 +8,8 @@
 
 - **PR #2222** by @franksong2702 — Settings → Appearance now wraps the "Load older messages while scrolling up" checkbox in its own `<label>` AND moves it into its own `settings-field` div instead of leaving it orphaned after the session-jump description with a stray closing `</label>`. Stage-353 maintainer resolution adopted PR #2227's stronger structural variant (each preference in its own `settings-field`) over PR #2222's smaller in-place wrap. Regression test `test_session_endless_scroll.py` pins the new per-label per-settings-field contract.
 - Update summaries no longer repeat the same bullet under both “What you’ll notice” and “Worth knowing”; visible notice items keep priority, and the secondary section is omitted when there is no distinct detail to show.
+- Update summaries now cap large commit lists before sending them to the summarizer and disclose when the summary uses only the latest commit subjects, while keeping the full comparison link available.
+- Update banners now wrap generated-summary links and long update text on narrow/mobile screens instead of overflowing off-screen.
 
 ### Added
 
@@ -30,7 +32,6 @@
 ## [v0.51.58] — 2026-05-13 — Release AH (stage-351 — 6-PR net-positive ready batch — perf CLI scan cache + thinking-tag leading-only + MCP tools pagination + per-target update summaries + sweep animation tune + cron badge)
 
 ### Fixed
-
 
 - **PR #2210** by @Jordan-SkyLF — MCP Tools list in Settings → System no longer renders an unbounded inventory that makes the settings panel scroll-trapping. Added a toolbar (result-count summary, page-size 5/10/20/50/all, search input), bounded scroll area with consistent height, paginated rendering, and focused regression coverage for the large-inventory case. Existing WebUI-only/runtime-only contract preserved (no MCP server probing, no agent-side changes). Visual before/after evidence shipped under `docs/pr-media/2210/`.
 
