@@ -3075,13 +3075,23 @@ def _space_tool_module_id(payload: dict[str, Any]) -> str:
     return str(payload.get("module_id") or payload.get("moduleId") or payload.get("id") or "").strip()
 
 
-def _space_tool_event_id(payload: dict[str, Any]) -> str:
+def _space_tool_event_id(payload: dict[str, Any], *, positional_event_index: int | None = None) -> str:
     """Return a revision event id from Hermes or Space Agent-style payloads."""
+    positional_values = ()
+    if positional_event_index is not None:
+        positional_values = (_space_tool_arg(payload, positional_event_index),)
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("event_id", "eventId", "revision_event_id", "revisionEventId"),
+        "Conflicting revision event selector aliases",
+        *positional_values,
+    )
     raw = (
         payload.get("event_id")
         or payload.get("eventId")
         or payload.get("revision_event_id")
         or payload.get("revisionEventId")
+        or (_space_tool_arg(payload, positional_event_index) if positional_event_index is not None else "")
         or _space_tool_arg(payload, 2)
         or _space_tool_arg(payload, 1)
         or ""
@@ -3819,7 +3829,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_current_id(data) or data.get("space_id"))
-        event_id = _space_tool_event_id(data)
+        event_id = _space_tool_event_id(data, positional_event_index=1)
         result = restore_revision(space_id, event_id)
         if is_current:
             result["active_space_id"] = space_id
@@ -3854,7 +3864,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             event_id = str(_space_tool_arg(data, 1) or "").strip()
             widget_id = validate_widget_id(_space_tool_arg(data, 2))
         else:
-            event_id = _space_tool_event_id(data)
+            event_id = _space_tool_event_id(data, positional_event_index=1)
             widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = restore_widget_revision(space_id, event_id, widget_id)
         if is_current:

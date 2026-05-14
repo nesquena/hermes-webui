@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 01:18 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 02:28 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces safe recovery now redacts unsafe Space-level display metadata (`name`/`description`) in the recovery/admin panel while preserving safe Space IDs and repair/disable/export/rollback actions. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces recovery/admin rollback tool adapters now reject conflicting revision event selector aliases before rollback side effects, preserving the current manifest when callers send inconsistent Space-Agent-style event fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting rollback event aliases`
+  - Added RED/GREEN backend coverage proving `space.admin.rollback` rejects conflicting `event_id` / `revisionEventId` and named-vs-positional revision-event selector aliases before restoring an older revision, leaves the current Space manifest unchanged, and does not expose generated renderer/API-auth/secret-looking markers in public details.
+  - Hardened the shared `_space_tool_event_id(...)` resolver so recovery/admin/current rollback and widget-restore tool branches treat named plus positional revision-event aliases as a consistency set before side effects, while preserving pure positional widget restore.
+  - Validation at completion: focused RED failed before implementation (`1 failed`), follow-up positional RED failed for named-vs-`args[1]` conflicts (`2 failed`); focused GREEN passed (`3 passed`); rollback/admin/widget-restore regressions passed (`11 passed, 256 deselected`); full Spaces foundation suite passed (`267 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` backend recovery/admin rollback browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/rollback-event-alias-qa.png`.
 
 - `fix(spaces): redact recovery space display metadata`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the safe recovery panel redacts unsafe standalone Space `name`/`description` display metadata such as `source Space` and `data panel`, preserves the safe `Space ID: broken` operational anchor, and keeps recovery actions visible.
