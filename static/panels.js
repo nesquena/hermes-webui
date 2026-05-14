@@ -244,6 +244,16 @@ async function switchPanel(name, opts = {}) {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }
+  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    if (nextPanel === 'chat') {
+      if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+    } else {
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.getElementById('mobileOverlay');
+      if (sidebar) sidebar.classList.add('mobile-open');
+      if (overlay) overlay.classList.add('visible');
+    }
+  }
   syncAppTitlebar();
   return true;
 }

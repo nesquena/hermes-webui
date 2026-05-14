@@ -8,6 +8,8 @@
 
 - **PR #2222** by @franksong2702 — Settings → Appearance now wraps the "Load older messages while scrolling up" checkbox in its own `<label>` AND moves it into its own `settings-field` div instead of leaving it orphaned after the session-jump description with a stray closing `</label>`. Stage-353 maintainer resolution adopted PR #2227's stronger structural variant (each preference in its own `settings-field`) over PR #2222's smaller in-place wrap. Regression test `test_session_endless_scroll.py` pins the new per-label per-settings-field contract.
 
+- **Issue #2231** by @franksong2702 — Phone panel navigation now uses the tablet-like vertical rail instead of cramming the panel icons into a horizontal top tab row. The phone rail keeps 44×44px icon targets available at the left edge, reserves matching main-content space, slides the sidebar panel out beside the rail, and keeps `.panel-icon-btn` controls at 44×44px minimum touch targets.
+
 ### Added
 
 - **PR #2225** by @franksong2702 (refs #2224) — Adds an Extra Large option to Settings → Appearance → Font size for tablet and large-desktop readability. The new `xlarge` value is accepted by the persisted settings contract, appears alongside the existing Small / Default / Large picker options, and scales the same key UI text surfaces already covered by the font-size preference: sidebar session rows, chat message bodies/headings/code/tables, the composer textarea, workspace file rows, and app-level em/rem text. The picker grid now uses `repeat(auto-fit, minmax(96px,1fr))` instead of a fixed 3-column grid so the fourth option doesn't crowd narrow viewports.

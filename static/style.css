@@ -1522,6 +1522,19 @@
     .composer-terminal-action{padding:5px 7px;font-size:10px;white-space:nowrap;}
     #terminalWorkspaceLabel{max-width:110px;}
     #terminalDockWorkspaceLabel{max-width:96px;}
+    /* Phone navigation uses the same vertical rail model as tablet/desktop,
+       keeping primary panel icons reachable without a cramped top tab row. */
+    .rail{display:flex;position:fixed;left:0;top:calc(38px + var(--app-titlebar-safe-top));bottom:0;width:52px;z-index:201;padding:8px 4px;}
+    .rail-btn{width:44px;height:44px;border-radius:10px;}
+    .sidebar > .sidebar-nav{display:none;}
+    .main{margin-left:52px;}
+    .app-titlebar{justify-content:center;}
+    .app-titlebar-hamburger,.app-titlebar-spacer{display:none;}
+    .app-titlebar-inner{flex:0 1 auto;}
+    .sidebar{--mobile-sidebar-width:min(280px, calc(100vw - 52px));left:calc(-1 * var(--mobile-sidebar-width));top:calc(38px + var(--app-titlebar-safe-top));width:var(--mobile-sidebar-width);}
+    .sidebar.mobile-open{left:52px;}
+    .mobile-overlay{left:52px;top:calc(38px + var(--app-titlebar-safe-top));}
+    .panel-icon-btn{min-width:44px;min-height:44px;width:auto;height:auto;}
     /* Touch targets — minimum 44px */
     .icon-btn,.mic-btn,.voice-mode-btn{min-width:44px;min-height:44px;}
     .session-item{min-height:44px;padding:10px 40px 10px 12px;}

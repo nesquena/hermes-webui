@@ -391,12 +391,75 @@ def test_sidebar_nav_present():
         ".sidebar-nav CSS rule missing from style.css"
 
 
-def test_mobile_does_not_hide_sidebar_nav():
-    """Phone breakpoint must keep the sidebar top navigation visible."""
+def test_mobile_keeps_panel_navigation_available():
+    """Phone breakpoint must keep panel navigation available via the rail."""
     mobile_css = "\n".join(_max_width_media_blocks(640))
     assert mobile_css, "Missing @media(max-width:640px) block in style.css"
-    assert ".sidebar-nav{display:none" not in mobile_css.replace(" ", ""), \
-        ".sidebar-nav must stay visible on mobile"
+    assert re.search(r'\.rail\{[^}]*display:\s*flex', mobile_css), \
+        "Phone panel navigation must remain available through the vertical rail"
+
+
+def test_mobile_uses_vertical_rail_navigation_with_44px_targets():
+    """Phone panel navigation should use the tablet-like vertical rail.
+
+    The old phone-only sidebar top tab row cramped 10+ icons into one row.
+    Phones should expose the same rail model as tablet/desktop, with 44px
+    touch targets and the sidebar panel sliding out beside the rail.
+    """
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    assert re.search(r'\.rail\{[^}]*display:\s*flex', mobile_css), (
+        "Phone breakpoint must display the primary vertical rail"
+    )
+    assert re.search(r'\.rail\{[^}]*position:\s*fixed', mobile_css), (
+        "Phone rail should be fixed so it stays available while panels scroll"
+    )
+    assert re.search(r'\.rail\{[^}]*width:\s*52px', mobile_css), (
+        "Phone rail should reserve stable side space for 44px icon targets"
+    )
+    assert re.search(r'\.rail-btn\{[^}]*width:\s*44px', mobile_css), (
+        ".rail-btn must be 44px wide on phone"
+    )
+    assert re.search(r'\.rail-btn\{[^}]*height:\s*44px', mobile_css), (
+        ".rail-btn must be 44px tall on phone"
+    )
+    assert re.search(r'\.sidebar\s*>\s*\.sidebar-nav\{[^}]*display:\s*none', mobile_css), (
+        "Phone breakpoint should hide the cramped horizontal sidebar tab row"
+    )
+    assert re.search(r'\.main\{[^}]*margin-left:\s*52px', mobile_css), (
+        "Main content should reserve room for the fixed phone rail"
+    )
+    assert re.search(r'\.sidebar\.mobile-open\{[^}]*left:\s*52px', mobile_css), (
+        "Open phone sidebar should slide out beside the rail, not cover it"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
+        ".panel-icon-btn must min-width:44px on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*min-height:\s*44px', mobile_css), (
+        ".panel-icon-btn must min-height:44px on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*width:\s*auto', mobile_css), (
+        ".panel-icon-btn must override its base 24px width on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*height:\s*auto', mobile_css), (
+        ".panel-icon-btn must override its base 24px height on phone"
+    )
+
+
+def test_mobile_rail_click_opens_sidebar_for_non_chat_panels():
+    """Rail clicks on phone must reveal the selected sidebar panel."""
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "opts.fromRailClick" in panels_js, (
+        "switchPanel() should distinguish rail clicks from programmatic switches"
+    )
+    assert "!_isDesktopWidth()" in panels_js, (
+        "Rail-click sidebar opening must be limited to mobile widths"
+    )
+    assert "sidebar.classList.add('mobile-open')" in panels_js, (
+        "Phone rail clicks on non-chat panels should open the sidebar panel"
+    )
+    assert "overlay.classList.add('visible')" in panels_js, (
+        "Phone rail clicks should show the overlay behind the opened sidebar"
+    )
 
 
 def test_mobile_files_button_present():
