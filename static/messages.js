@@ -1016,6 +1016,73 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    // process_complete: terminal(notify_on_complete=true) background process
+    // exited. The server pushed a synthetic [IMPORTANT: …] wakeup_prompt as
+    // payload; we re-POST it to /api/chat/start so the agent takes its next
+    // turn with the completion context, mirroring how the CLI and gateway
+    // hosts inject the same message into their main loops.
+    //
+    // Idempotency: dedupe by (session_id, process_id). The server-side
+    // process_registry already guards against double-_move_to_finished, so a
+    // second event is almost always a stale buffered replay after reconnect.
+    if(typeof _seenProcessCompleteIds==='undefined'){var _seenProcessCompleteIds=new Set();}
+    source.addEventListener('process_complete',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        if(sid!==activeSid)return;
+        const pid=String(d.process_id||'');
+        const dedupeKey=sid+'|'+pid;
+        if(pid && _seenProcessCompleteIds.has(dedupeKey))return;
+        if(pid)_seenProcessCompleteIds.add(dedupeKey);
+        const wakeup=String(d.wakeup_prompt||'').trim();
+        if(!wakeup)return;
+        // Optional toast — short, non-blocking
+        try{
+          const cmd=String(d.command||'').slice(0,80);
+          const exit=(d.exit_code===undefined||d.exit_code===null)?'?':String(d.exit_code);
+          showToast(`Background process exited (exit_code=${exit}): ${cmd}`,2600);
+        }catch(_){}
+        // Fire-and-forget ack (diagnostic — server marker is consumed by
+        // /api/chat/start below).
+        try{
+          fetch(new URL('api/process-complete-ack',document.baseURI||location.href).href,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            credentials:'include',
+            body:JSON.stringify({session_id:sid,process_id:pid}),
+          }).catch(()=>{});
+        }catch(_){}
+        // Re-POST the wakeup_prompt as the next user turn. This is the actual
+        // agent wakeup; the server discards PENDING_PROCESS_COMPLETIONS
+        // atomically when this stream starts.
+        try{
+          const payload={
+            session_id:sid,
+            msg:wakeup,
+            model:S.session&&S.session.model||'',
+            model_provider:S.session&&S.session.model_provider||null,
+            profile:S.activeProfile||'default',
+            workspace:S.session&&S.session.workspace||'',
+          };
+          fetch(new URL('api/chat/start',document.baseURI||location.href).href,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            credentials:'include',
+            body:JSON.stringify(payload),
+          }).then(r=>r.ok?r.json():null).then(resp=>{
+            // The new stream's stream_id will be wired by the existing
+            // chat/start polling/wiring path used elsewhere in the UI.
+            if(resp && resp.stream_id && typeof _wireSSE==='function'){
+              try{
+                _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(resp.stream_id)}`,document.baseURI||location.href).href,{withCredentials:true}));
+              }catch(_){}
+            }
+          }).catch(()=>{});
+        }catch(_){}
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}

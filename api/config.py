@@ -3797,6 +3797,22 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
+# ── notify_on_complete agent-wakeup wiring ─────────────────────────────────
+# When terminal(notify_on_complete=true, background=true) fires, the process
+# registry pushes a completion event onto tools.process_registry.completion_queue.
+# A drain task spawned at WebUI startup (api/background_process.py) reads that
+# queue and emits an SSE `process_complete` event to the matching session.
+# PROCESS_SESSION_INDEX maps the per-process "session_key" (set in the spawned
+# subprocess via HERMES_SESSION_KEY) back to the WebUI session_id that owns it,
+# so the drain task can route the event to the right SSE channel.
+# PENDING_PROCESS_COMPLETIONS mirrors PENDING_GOAL_CONTINUATION: server-side
+# marker discarded atomically by routes.py when the frontend re-POSTs the
+# wakeup_prompt as the next user turn. (process_complete event, agent wakeup fix)
+PROCESS_SESSION_INDEX: dict = {}  # process_registry session_key -> WebUI session_id
+PROCESS_SESSION_INDEX_LOCK = threading.Lock()
+PENDING_PROCESS_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
+PROCESS_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
+
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
 # still unwinding, blocked in a provider call, or waiting for delegated work.
