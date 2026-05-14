@@ -179,7 +179,7 @@
       <div class="panel-head">
         <span>Workflows</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadWorkflows(true)" data-tooltip="Refresh" aria-label="Refresh workflows"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="refreshWorkflows()" data-tooltip="Refresh" aria-label="Refresh workflows"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
       <div class="workflow-list" id="workflowList"><div style="padding:12px;color:var(--muted);font-size:12px">Loading...</div></div>
@@ -760,7 +760,7 @@
           <div class="main-view-subtitle">Read-only workflow state from Hermes Core.</div>
         </div>
         <div class="main-view-actions">
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="loadWorkflows(true)" data-tooltip="Refresh" aria-label="Refresh workflows"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="refreshWorkflows()" data-tooltip="Refresh" aria-label="Refresh workflows"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
       <div class="main-view-body workflow-dag-shell" id="workflowDetailBody">

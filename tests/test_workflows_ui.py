@@ -104,3 +104,45 @@ def test_workflow_node_inspector_renders_canonical_fact_sections():
     ):
         assert helper in PANELS_JS
     assert "LLM insight" in PANELS_JS
+
+
+def test_workflow_detail_renders_workflow_level_events_and_artifacts_panes():
+    for label in (
+        "Workflow Events",
+        "Workflow Artifacts",
+        "Loading workflow events",
+        "Loading workflow artifacts",
+    ):
+        assert label in PANELS_JS
+    for helper in (
+        "loadWorkflowEvents",
+        "loadWorkflowArtifacts",
+        "_workflowEventRows",
+        "_workflowArtifactRows",
+    ):
+        assert helper in PANELS_JS
+    assert "workflowEventsPane" in PANELS_JS
+    assert "workflowArtifactsPane" in PANELS_JS
+    assert "`/api/workflows/${encodeURIComponent(workflowId)}/events`" in PANELS_JS
+    assert "`/api/workflows/${encodeURIComponent(workflowId)}/artifacts`" in PANELS_JS
+
+
+def test_workflow_detail_has_workflow_level_pane_styles():
+    for selector in (
+        ".workflow-detail-panes",
+        ".workflow-events-pane",
+        ".workflow-artifacts-pane",
+    ):
+        assert selector in STYLE_CSS
+
+
+def test_workflow_refresh_reloads_selected_detail_panes():
+    assert "async function refreshWorkflows" in PANELS_JS
+    assert "await loadWorkflows(true)" in PANELS_JS
+    assert "if(_currentWorkflowId) await loadWorkflowDag(_currentWorkflowId)" in PANELS_JS
+    assert 'onclick="refreshWorkflows()"' in INDEX_HTML
+
+
+def test_loading_workflow_dag_also_loads_workflow_level_panes():
+    assert "loadWorkflowEvents(workflowId)" in PANELS_JS
+    assert "loadWorkflowArtifacts(workflowId)" in PANELS_JS

@@ -3897,10 +3897,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-dag-node.status-publish .workflow-status-dot{background:#14b8a6;}
 .workflow-dag-node.status-done .workflow-status-dot{background:#22c55e;}
 .workflow-dag-node.status-cancelled .workflow-status-dot{background:#6b7280;}
+.workflow-detail-panes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px;}
+.workflow-events-pane,.workflow-artifacts-pane{display:flex;flex-direction:column;gap:8px;border:1px solid var(--border);border-radius:16px;background:var(--surface);padding:14px;color:var(--muted);font-size:12px;}
+.workflow-events-pane h4,.workflow-artifacts-pane h4{margin:0;color:var(--text);font-size:12px;text-transform:uppercase;letter-spacing:.05em;}
+.workflow-events-pane .btn,.workflow-artifacts-pane .btn{align-self:flex-start;margin-top:2px;}
 .workflow-dag-node-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}
 .workflow-node-pill{border:1px solid var(--border);border-radius:12px;padding:10px;background:var(--panel);display:flex;flex-direction:column;gap:4px;}
 .workflow-node-pill span{color:var(--muted);font-size:12px;}
 .workflow-node-pill.status-running{border-color:rgba(245,158,11,.55);}
 .workflow-node-pill.status-blocked,.workflow-node-pill.status-failed{border-color:rgba(239,68,68,.55);}
 .workflow-node-pill.status-done{border-color:rgba(34,197,94,.55);}
-@media (max-width:980px){.workflow-dag-layout{grid-template-columns:1fr}.workflow-node-inspector{position:relative;top:auto}}
+@media (max-width:980px){.workflow-dag-layout{grid-template-columns:1fr}.workflow-node-inspector{position:relative;top:auto}.workflow-detail-panes{grid-template-columns:1fr}}

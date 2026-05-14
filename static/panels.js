@@ -6641,6 +6641,10 @@ async function loadWorkflows(force=false){
     renderWorkflowUnavailable(err);
   }
 }
+async function refreshWorkflows(){
+  await loadWorkflows(true);
+  if(_currentWorkflowId) await loadWorkflowDag(_currentWorkflowId);
+}
 function renderWorkflowUnavailable(err){
   const list=$('workflowList');
   const detail=$('workflowDetailBody');
@@ -6683,6 +6687,10 @@ async function loadWorkflowDag(workflowId){
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/dag`);
     const facts=_workflowFacts(payload);
     renderWorkflowDagCanvas(workflowId,facts);
+    await Promise.all([
+      loadWorkflowEvents(workflowId),
+      loadWorkflowArtifacts(workflowId),
+    ]);
   }catch(err){
     detail.innerHTML=`<div class="workflow-unavailable"><strong>Could not load workflow DAG</strong><span>${esc((err&&err.message)||'Unknown workflow error')}</span><button class="btn secondary" onclick="loadWorkflowDag('${esc(workflowId)}')">Retry</button></div>`;
   }
@@ -6710,6 +6718,16 @@ function renderWorkflowDagCanvas(workflowId,facts){
       <strong>Node inspector</strong>
       <span>Select a DAG node to load canonical node facts from Hermes Core.</span>
     </aside>
+  </div>
+  <div class="workflow-detail-panes">
+    <section class="workflow-events-pane" id="workflowEventsPane">
+      <h4>Workflow Events</h4>
+      <span class="workflow-inspector-empty">Loading workflow events...</span>
+    </section>
+    <section class="workflow-artifacts-pane" id="workflowArtifactsPane">
+      <h4>Workflow Artifacts</h4>
+      <span class="workflow-inspector-empty">Loading workflow artifacts...</span>
+    </section>
   </div>`;
 }
 function _workflowDagLayout(nodes,edges){
@@ -6787,6 +6805,38 @@ function _workflowNodeArtifactRows(artifacts){
 function _workflowNodeEventRows(events){
   if(!events||!events.length) return '<span class="workflow-inspector-empty">No audit events reported.</span>';
   return events.map(event=>`<div class="workflow-inspector-row"><b>${esc(event.eventType||event.event_type||event.type||'event')}</b><span>${esc(event.message||event.createdAt||event.created_at||'No message')}</span></div>`).join('');
+}
+function _workflowArtifactRows(artifacts){
+  return _workflowNodeArtifactRows(artifacts);
+}
+function _workflowEventRows(events){
+  return _workflowNodeEventRows(events);
+}
+async function loadWorkflowEvents(workflowId){
+  const pane=$('workflowEventsPane');
+  if(!pane) return;
+  pane.innerHTML='<h4>Workflow Events</h4><span class="workflow-inspector-empty">Loading workflow events...</span>';
+  try{
+    const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/events`);
+    const facts=_workflowFacts(payload);
+    const events=facts.events||payload.events||[];
+    pane.innerHTML=`<h4>Workflow Events</h4>${_workflowEventRows(events)}`;
+  }catch(err){
+    pane.innerHTML=`<h4>Workflow Events</h4><span class="workflow-inspector-empty">Could not load workflow events: ${esc((err&&err.message)||'Unknown error')}</span><button class="btn secondary" onclick="loadWorkflowEvents('${esc(workflowId)}')">Retry</button>`;
+  }
+}
+async function loadWorkflowArtifacts(workflowId){
+  const pane=$('workflowArtifactsPane');
+  if(!pane) return;
+  pane.innerHTML='<h4>Workflow Artifacts</h4><span class="workflow-inspector-empty">Loading workflow artifacts...</span>';
+  try{
+    const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/artifacts`);
+    const facts=_workflowFacts(payload);
+    const artifacts=facts.artifacts||payload.artifacts||[];
+    pane.innerHTML=`<h4>Workflow Artifacts</h4>${_workflowArtifactRows(artifacts)}`;
+  }catch(err){
+    pane.innerHTML=`<h4>Workflow Artifacts</h4><span class="workflow-inspector-empty">Could not load workflow artifacts: ${esc((err&&err.message)||'Unknown error')}</span><button class="btn secondary" onclick="loadWorkflowArtifacts('${esc(workflowId)}')">Retry</button>`;
+  }
 }
 async function loadWorkflowNode(workflowId,nodeId){
   const inspector=$('workflowNodeInspector');
