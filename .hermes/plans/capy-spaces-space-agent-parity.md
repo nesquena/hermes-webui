@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 04:03 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 05:14 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces recovery/admin widget-restore tool adapters now reject conflicting widget selector aliases before rollback side effects, preserving the current widget manifest when callers send inconsistent Space-Agent-style widget fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces direct HTTP widget-restore rollback route now rejects conflicting `id` / `widgetId` selector aliases before restore side effects, matching the Space-tool adapter safety envelope. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting restore-widget route ids`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/revision/restore-widget` rejects conflicting top-level `id` / `widgetId` aliases before restoring widget metadata, leaves both candidate widgets unchanged, and keeps public route responses/details free of generated renderer/source/API-auth/secret-looking markers.
+  - Hardened the direct HTTP restore-widget route to resolve `widget_id`, `widgetId`, and `id` as one consistency set through the shared route-alias helper, aligning it with the recently hardened Space-tool rollback adapter behavior.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); related route/tool alias regressions passed (`6 passed, 264 deselected`); full Spaces foundation suite passed (`270 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static recovery route-alias browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/restore-widget-route-id-alias-qa.png`.
 
 - `fix(spaces): reject conflicting widget restore aliases`
   - Added RED/GREEN backend coverage proving `space.recovery.restore_widget` rejects conflicting `widget_id` / `widgetId` selectors and `id` / positional widget selector conflicts before restoring a widget revision, leaving current widget metadata unchanged and keeping public detail reads free of generated renderer/API-auth/secret-looking markers.

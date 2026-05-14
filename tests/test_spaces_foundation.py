@@ -9807,6 +9807,47 @@ def test_revision_restore_routes_reject_conflicting_camelcase_aliases_metadata_o
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_revision_restore_widget_route_rejects_conflicting_id_alias_before_restore(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-widget-id-conflict", "name": "Route Widget ID Conflict"})
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "route-widget",
+            "kind": "html",
+            "title": "Route widget original",
+            "renderer": "<script>idConflictLeak()</script>",
+            "source": "api_key = 'SECRET_VALUE_DO_NOT_LEAK'",
+        },
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "other-widget", "kind": "markdown", "title": "Other current"})
+    spaces.patch_widget(created["space_id"], "route-widget", {"title": "Route widget patched"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/revision/restore-widget",
+        {
+            "spaceId": created["space_id"],
+            "eventId": upserted["revision_event_id"],
+            "widgetId": "route-widget",
+            "id": "other-widget",
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+    route_widget = spaces.read_widget_detail(created["space_id"], "route-widget")
+    other_widget = spaces.read_widget_detail(created["space_id"], "other-widget")
+    serialized = json.dumps({"body": body, "route_widget": route_widget, "other_widget": other_widget}).lower()
+    assert route_widget["title"] == "Route widget patched"
+    assert other_widget["title"] == "Other current"
+    assert "idconflictleak" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
 
 def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)

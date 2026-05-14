@@ -5050,7 +5050,7 @@ def handle_post(handler, parsed) -> bool:
         try:
             space_id = _route_alias_value("space_id", "spaceId")
             event_id = _route_alias_value("event_id", "eventId", "revision_event_id", "revisionEventId")
-            widget_id = _route_alias_value("widget_id", "widgetId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not event_id or not widget_id:
                 return bad(handler, "Missing space_id, event_id, or widget_id")
             return j(handler, capy_spaces.restore_widget_revision(space_id, event_id, widget_id))
