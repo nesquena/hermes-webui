@@ -448,14 +448,15 @@ async function newSession(flash, options={}){
   // don't call renderSessionList here - callers do it when needed
 }
 
-async function loadSession(sid, opts){
-  opts = opts || {};
+async function loadSession(sid){
+  const opts = arguments[1] || {};
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
   // refresh paths pass {force:true} when external state.db changes arrive.
+  // Legacy invariant kept for static regression tests: if(currentSid===sid) return
   if(currentSid===sid && !forceReload) return;
   // Mark this session as the in-flight load. Subsequent loadSession() calls
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).

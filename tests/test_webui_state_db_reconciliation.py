@@ -72,15 +72,20 @@ def _make_state_db(path: Path, sid: str, rows):
 def _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages):
     import api.config as config
     import api.models as models
-
+    import api.routes as routes
     import api.profiles as profiles
 
     monkeypatch.setattr(config, "STATE_DIR", tmp_path, raising=False)
-    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions", raising=False)
-    monkeypatch.setattr(models, "SESSION_DIR", tmp_path / "sessions", raising=False)
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
     monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
-    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    monkeypatch.setattr(routes, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
+    session_dir.mkdir(parents=True, exist_ok=True)
 
     session = models.Session(
         session_id=sid,

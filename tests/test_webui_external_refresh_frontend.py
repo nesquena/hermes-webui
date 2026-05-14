@@ -5,7 +5,8 @@ SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
 
 
 def test_load_session_supports_force_reload_for_external_refresh():
-    assert "async function loadSession(sid, opts)" in SESSIONS_JS
+    assert "async function loadSession(sid)" in SESSIONS_JS
+    assert "const opts = arguments[1] || {};" in SESSIONS_JS
     assert "const forceReload = !!opts.force" in SESSIONS_JS
     assert "if(currentSid===sid && !forceReload) return;" in SESSIONS_JS
     assert "loadSession(sid, {force:true" in SESSIONS_JS

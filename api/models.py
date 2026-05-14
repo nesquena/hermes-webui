@@ -1703,12 +1703,7 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) ->
     except ImportError:
         return []
 
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
-    db_path = hermes_home / 'state.db'
+    db_path = _active_state_db_path()
     if not db_path.exists():
         return []
 
@@ -1868,9 +1863,12 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         merged_messages.append(msg)
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
-        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
-            continue
         key = _session_message_merge_key(msg)
+        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+            if key in seen_message_keys:
+                continue
+            if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
+                continue
         if key in seen_message_keys:
             continue
         seen_message_keys.add(key)

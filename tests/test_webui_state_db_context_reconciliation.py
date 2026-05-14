@@ -47,6 +47,7 @@ def test_next_webui_turn_context_includes_state_db_external_messages(monkeypatch
     monkeypatch.setattr(config, "SESSION_INDEX_FILE", index_file, raising=False)
     monkeypatch.setattr(streaming, "SESSION_DIR", session_dir, raising=False)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "state.db", raising=False)
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
