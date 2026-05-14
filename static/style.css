@@ -2589,6 +2589,8 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .msg-row[data-role="assistant"]:hover .msg-foot,
 .assistant-turn:hover .msg-foot,
 .assistant-turn:focus-within .msg-foot { opacity: 1; }
+body.tts-enabled .msg-row[data-role="assistant"] .msg-foot,
+body.tts-enabled .assistant-turn .msg-foot { opacity: .85; }
 .assistant-turn .msg-foot-with-usage,
 .msg-row[data-role="assistant"] .msg-foot-with-usage {
   opacity: 1;

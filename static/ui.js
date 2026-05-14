@@ -2210,6 +2210,12 @@ function speakMessage(btn){
   if(savedVoice&&voices.length){
     const match=voices.find(v=>v.name===savedVoice);
     if(match) utter.voice=match;
+  } else if(voices.length){
+    // Auto-select a masculine pt-BR voice when no preference is saved
+    const ptMale=voices.find(v=>/pt[-_]BR/i.test(v.lang)&&/male|masculin|daniel|ricardo|marcos/i.test(v.name));
+    const ptAny=voices.find(v=>/pt[-_]BR/i.test(v.lang));
+    const pick=ptMale||ptAny;
+    if(pick) utter.voice=pick;
   }
 
   // Apply saved rate/pitch
@@ -3125,7 +3131,8 @@ function renderMessages(){
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
-    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
+    const ttsIcon  = li('volume-2',13) || '<span aria-hidden="true">🔊</span>';
+    const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${ttsIcon}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
     // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
@@ -3401,6 +3408,11 @@ function renderMessages(){
       targetFoot.insertBefore(usage, targetFoot.firstChild);
       ai++;
     }
+  }
+  // Re-apply TTS visibility after rebuilding the message DOM. Without this,
+  // newly-rendered assistant messages can ignore the saved localStorage state.
+  if(typeof _applyTtsEnabled==='function'){
+    _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
@@ -3764,15 +3776,9 @@ function initTreeViews(){
       }
     }
     if(!parsed || typeof parsed!=='object'){
-      if(parseFailed){
-        const hint=wrap.querySelector('.tree-raw-view');
-        if(hint&&!hint.querySelector('.tree-parse-note')){
-          const note=document.createElement('div');
-          note.className='tree-parse-note';
-          note.textContent=t('parse_failed_note')||'parse failed';
-          hint.parentNode.insertBefore(note,hint.nextSibling);
-        }
-      }
+      // Leave the raw code block visible without adding a "parse failed" note.
+      // That note looked like a failed agent/tool response in chat, even when
+      // only the optional JSON/YAML tree-view enhancement had failed.
       return; // leave as raw view
     }
     const lineCount=rawText.split('\n').length;

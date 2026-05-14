@@ -863,15 +863,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const prevIn=_prevIn;
             const prevOut=_prevOut;
             const prevCost=_prevCost;
-            const curIn=d.usage.input_tokens||0;
-            const curOut=d.usage.output_tokens||0;
-            const curCost=d.usage.estimated_cost||0;
+            // d.usage contains per-turn tokens from the agent; d.session has the
+            // new cumulative totals. Compare new cumulative vs old cumulative to
+            // detect whether tokens actually increased this turn (#1159).
+            const newCumulIn=(S.session&&S.session.input_tokens)||0;
+            const newCumulOut=(S.session&&S.session.output_tokens)||0;
+            const newCumulCost=(S.session&&S.session.estimated_cost)||0;
             // Only set delta if values actually increased (skip no-op turns)
-            if(curIn>prevIn||curOut>prevOut){
+            if(newCumulIn>prevIn||newCumulOut>prevOut){
               lastAsst._turnUsage={
-                input_tokens:Math.max(0,curIn-prevIn),
-                output_tokens:Math.max(0,curOut-prevOut),
-                estimated_cost:Math.max(0,curCost-prevCost),
+                input_tokens:Math.max(0,newCumulIn-prevIn),
+                output_tokens:Math.max(0,newCumulOut-prevOut),
+                estimated_cost:Math.max(0,newCumulCost-prevCost),
               };
             }
           }

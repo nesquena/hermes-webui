@@ -2649,6 +2649,7 @@ function _markSettingsDirty(){
 
 // Apply TTS enabled state: show/hide TTS buttons on all assistant messages
 function _applyTtsEnabled(enabled){
+  document.body.classList.toggle('tts-enabled', !!enabled);
   document.querySelectorAll('.msg-tts-btn').forEach(btn=>{
     btn.style.display=enabled?'':'none';
   });

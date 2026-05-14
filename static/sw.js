@@ -59,7 +59,7 @@ self.addEventListener('activate', (event) => {
 
 // Fetch strategy:
 // - API calls (/api/*, /stream) → always network (never cache)
-// - Shell assets → cache-first with network fallback
+// - Shell assets → network-first with cache fallback so local patches/releases are not hidden by stale PWA cache
 // - Everything else → network-first, fall back to offline page
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
@@ -84,27 +84,23 @@ self.addEventListener('fetch', (event) => {
     return; // let browser handle normally
   }
 
-  // Shell assets: cache-first
+  // Shell assets and other same-origin GETs: network-first, cache fallback.
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache successful GET responses for shell assets
-        if (
-          event.request.method === 'GET' &&
-          response.status === 200
-        ) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => {
+    fetch(event.request).then((response) => {
+      if (
+        event.request.method === 'GET' &&
+        response.status === 200
+      ) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => {
+      return caches.match(event.request).then((cached) => {
+        if (cached) return cached;
         // Offline fallback for navigation requests.
-        // Note: caches.match() returns a Promise (always truthy in a `||` check),
-        // so we must await/then to unwrap it — otherwise the `new Response(...)`
-        // branch is dead code and the browser falls back to its default offline page.
         if (event.request.mode === 'navigate') {
-          return caches.match('./').then((cached) => cached || new Response(
+          return caches.match('./').then((home) => home || new Response(
             '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
             '<h2>You are offline</h2>' +
             '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
@@ -112,6 +108,7 @@ self.addEventListener('fetch', (event) => {
             { headers: { 'Content-Type': 'text/html' } }
           ));
         }
+        return new Response('', { status: 504, statusText: 'Offline' });
       });
     })
   );
