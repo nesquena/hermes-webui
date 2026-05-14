@@ -168,7 +168,34 @@ def test_workflow_polling_runs_only_while_workflows_panel_visible():
 def test_workflow_polling_is_synced_from_panel_switch_and_visibility_events():
     assert "_syncWorkflowPolling();" in PANELS_JS
     assert "document.addEventListener('visibilitychange',_syncWorkflowPolling)" in PANELS_JS
-    assert "if (nextPanel === 'workflows') await loadWorkflows();" in PANELS_JS
+    assert "if (nextPanel === 'workflows') { await loadWorkflows(); loadWorkflowInbox(); }" in PANELS_JS
+
+
+def test_workflow_inbox_intake_shell_lists_and_creates_raw_items():
+    for symbol in (
+        "workflowInboxList",
+        "workflowInboxTitle",
+        "workflowInboxBody",
+        "loadWorkflowInbox",
+        "renderWorkflowInbox",
+        "createWorkflowInboxItem",
+        "api('/api/workflows/inbox')",
+        "method:'POST'",
+        "Inbox",
+        "Capture raw work",
+    ):
+        assert symbol in PANELS_JS or symbol in INDEX_HTML
+    for selector in (
+        ".workflow-inbox",
+        ".workflow-inbox-item",
+        ".workflow-inbox-form",
+    ):
+        assert selector in STYLE_CSS
+
+
+def test_workflow_refresh_reloads_inbox_items_too():
+    assert "await loadWorkflowInbox(true)" in PANELS_JS
+    assert "loadWorkflowInbox();" in PANELS_JS
 
 
 def test_workflow_unavailable_ui_surfaces_capability_reason_and_recovery_hint():

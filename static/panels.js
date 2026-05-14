@@ -231,7 +231,7 @@ async function switchPanel(name, opts = {}) {
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
-  if (nextPanel === 'workflows') await loadWorkflows();
+  if (nextPanel === 'workflows') { await loadWorkflows(); loadWorkflowInbox(); }
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
@@ -6610,6 +6610,7 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 
 // ── Workflows panel (read-only Hermes Core proxy) ────────────────────────────
 let _workflowListLoaded=false;
+let _workflowInboxLoaded=false;
 let _currentWorkflowId=null;
 let _workflowListPollInterval=null;
 let _workflowDetailPollInterval=null;
@@ -6627,6 +6628,51 @@ function _workflowCounts(workflow){
     if(counts[key]!=null) parts.push(`${key}: ${counts[key]}`);
   });
   return parts.join(' · ');
+}
+async function loadWorkflowInbox(force=false){
+  const list=$('workflowInboxList');
+  if(!list) return;
+  if(_workflowInboxLoaded&&!force) return;
+  list.innerHTML='<div style="padding:12px;color:var(--muted);font-size:12px">Loading inbox...</div>';
+  try{
+    const payload=await api('/api/workflows/inbox');
+    const facts=_workflowFacts(payload);
+    const items=facts.inboxItems||payload.inboxItems||[];
+    _workflowInboxLoaded=true;
+    renderWorkflowInbox(items);
+  }catch(err){
+    _workflowInboxLoaded=false;
+    list.innerHTML=`<div class="workflow-unavailable"><strong>Inbox unavailable</strong><span>${esc((err&&err.message)||'Workflow inbox could not load.')}</span>${_workflowErrorDetails(err)}<button class="btn secondary" onclick="loadWorkflowInbox(true)">Retry</button></div>`;
+  }
+}
+function renderWorkflowInbox(items){
+  const list=$('workflowInboxList');
+  if(!list) return;
+  if(!items.length){
+    list.innerHTML='<div class="workflow-inbox-empty">No inbox items yet.</div>';
+    return;
+  }
+  list.innerHTML=items.map(item=>{
+    const meta=[item.status,item.classification,item.source].filter(Boolean).join(' · ');
+    return `<div class="workflow-inbox-item"><strong>${esc(item.title||item.id||'Untitled intake')}</strong>${meta?`<span>${esc(meta)}</span>`:''}</div>`;
+  }).join('');
+}
+async function createWorkflowInboxItem(event){
+  if(event) event.preventDefault();
+  const title=$('workflowInboxTitle');
+  const body=$('workflowInboxBody');
+  const value=(title&&title.value||'').trim();
+  if(!value){ showToast('Workflow inbox title is required','error'); return; }
+  try{
+    await api('/api/workflows/inbox',{method:'POST',body:JSON.stringify({title:value,body:(body&&body.value)||'',source:'webui_chat'})});
+    if(title) title.value='';
+    if(body) body.value='';
+    _workflowInboxLoaded=false;
+    await loadWorkflowInbox(true);
+    showToast('Added workflow inbox item');
+  }catch(err){
+    showToast(((err&&err.message)||'Could not add workflow inbox item'),'error');
+  }
 }
 async function loadWorkflows(force=false){
   const list=$('workflowList');
@@ -6646,6 +6692,7 @@ async function loadWorkflows(force=false){
 }
 async function refreshWorkflows(){
   await loadWorkflows(true);
+  await loadWorkflowInbox(true);
   if(_currentWorkflowId) await loadWorkflowDag(_currentWorkflowId);
 }
 async function _refreshSelectedWorkflowDetail(){

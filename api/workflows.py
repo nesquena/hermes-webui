@@ -21,8 +21,9 @@ logger = logging.getLogger(__name__)
 
 _WORKFLOW_TIMEOUT_SECONDS = 2.0
 _WORKFLOW_PROXY_RE = re.compile(
-    r"^/api/workflows(?:$|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
+    r"^/api/workflows(?:$|/inbox$|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
 )
+_WORKFLOW_POST_RE = re.compile(r"^/api/workflows/inbox$")
 
 
 def is_workflow_proxy_path(path: str) -> bool:
@@ -37,7 +38,19 @@ def handle_workflow_get(handler, parsed) -> bool:
     """Proxy a canonical workflow GET request to Hermes Core/dashboard."""
     if not is_workflow_proxy_path(parsed.path):
         return bad(handler, f"unknown workflow endpoint: GET {parsed.path}", status=404) or True
+    return _proxy_workflow_request(handler, parsed, method="GET")
 
+
+def handle_workflow_post(handler, parsed, body: dict | None = None) -> bool:
+    """Proxy canonical workflow mutation requests to Hermes Core/dashboard."""
+    value = str(parsed.path or "")
+    if ".." in value or not _WORKFLOW_POST_RE.fullmatch(value):
+        return bad(handler, f"unknown workflow endpoint: POST {parsed.path}", status=404) or True
+    data = json.dumps(body or {}, separators=(",", ":")).encode("utf-8")
+    return _proxy_workflow_request(handler, parsed, method="POST", data=data)
+
+
+def _proxy_workflow_request(handler, parsed, *, method: str, data: bytes | None = None) -> bool:
     from api import dashboard_probe
 
     status = dashboard_probe.get_dashboard_status()
@@ -64,7 +77,7 @@ def handle_workflow_get(handler, parsed) -> bool:
     token = _dashboard_session_token(safe_base)
     if token:
         headers["X-Hermes-Session-Token"] = token
-    request = urllib.request.Request(upstream_url, headers=headers)
+    request = urllib.request.Request(upstream_url, headers=headers, data=data, method=method)
     try:
         with urllib.request.urlopen(request, timeout=_WORKFLOW_TIMEOUT_SECONDS) as response:
             payload = _read_json_response(response)

@@ -182,6 +182,15 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="refreshWorkflows()" data-tooltip="Refresh" aria-label="Refresh workflows"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
+      <div class="workflow-inbox" id="workflowInbox">
+        <div class="workflow-inbox-head"><strong>Inbox</strong><span>Capture raw work before shaping a DAG.</span></div>
+        <form class="workflow-inbox-form" onsubmit="createWorkflowInboxItem(event)">
+          <input id="workflowInboxTitle" type="text" placeholder="Capture raw work" aria-label="Workflow inbox title">
+          <textarea id="workflowInboxBody" rows="3" placeholder="Notes, links, constraints" aria-label="Workflow inbox body"></textarea>
+          <button class="btn primary" type="submit">Add to inbox</button>
+        </form>
+        <div class="workflow-inbox-list" id="workflowInboxList"><div style="padding:12px;color:var(--muted);font-size:12px">Loading inbox...</div></div>
+      </div>
       <div class="workflow-list" id="workflowList"><div style="padding:12px;color:var(--muted);font-size:12px">Loading...</div></div>
     </div>
     <!-- Skills panel -->

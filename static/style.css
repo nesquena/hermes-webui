@@ -3843,6 +3843,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .logs-hint.warn{color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);}
 
 .workflow-list{display:flex;flex-direction:column;gap:8px;padding:10px 12px;overflow-y:auto;}
+.workflow-inbox{display:flex;flex-direction:column;gap:10px;margin:10px 12px 0;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--panel);}
+.workflow-inbox-head{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);}
+.workflow-inbox-head strong{color:var(--text);font-size:13px;}
+.workflow-inbox-form{display:flex;flex-direction:column;gap:8px;}
+.workflow-inbox-form input,.workflow-inbox-form textarea{width:100%;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);padding:8px;font:inherit;font-size:12px;}
+.workflow-inbox-list{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;}
+.workflow-inbox-item{display:flex;flex-direction:column;gap:3px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:12px;}
+.workflow-inbox-item span,.workflow-inbox-empty{color:var(--muted);font-size:12px;}
 .workflow-card{display:flex;flex-direction:column;gap:4px;width:100%;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text);text-align:left;cursor:pointer;}
 .workflow-card:hover,.workflow-card:focus{border-color:var(--accent);background:var(--panel-2);outline:none;}
 .workflow-card-title{font-weight:700;font-size:13px;}

@@ -4087,6 +4087,11 @@ def handle_post(handler, parsed) -> bool:
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
 
+    if parsed.path == "/api/workflows/inbox":
+        from api.workflows import handle_workflow_post
+
+        return handle_workflow_post(handler, parsed, body)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
