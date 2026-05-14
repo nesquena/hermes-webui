@@ -6268,7 +6268,7 @@ def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
         "scope": _public_display_text_summary(module.get("scope") or "global", 80),
         "disabled": bool(recovery.get("disabled")),
         "disabled_reason": _recovery_reason_summary(recovery.get("disabled_reason"), 300),
-        "revision_event_id": module.get("revision_event_id"),
+        "revision_event_id": _public_revision_event_id(module.get("revision_event_id")),
     }
     return summary
 

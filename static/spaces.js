@@ -2820,7 +2820,7 @@
       const scope = safeCreatorSummaryText(module && module.scope || 'global');
       const disabled = !!(module && module.disabled);
       const disabledReason = safeCreatorSummaryText(module && module.disabled_reason || '');
-      const revision = safeCreatorSummaryText(module && module.revision_event_id || '');
+      const revision = safeSpaceRevisionLabel(module && module.revision_event_id || '', '');
       const actionModuleId = safeCreatorIdText(rawModuleId);
       const moduleAction = actionModuleId ? (disabled
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryModule" data-module-id="'+escapeHtml(actionModuleId)+'">Enable module</button>'

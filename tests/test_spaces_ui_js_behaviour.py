@@ -589,8 +589,8 @@ global.fetch = async function(path, opts = {}) {
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
       modules: [
-        { module_id: 'safe-module', name: 'Safe Module', description: 'Metadata-only module descriptor', scope: 'space', disabled: false, source: 'SECRET_SOURCE', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
-        { module_id: 'unsafe-module', name: '[REDACTED]', description: '[REDACTED]', scope: 'global', disabled: true, disabled_reason: '[REDACTED]', revision_event_id: 'module-rev', source: 'SECRET_SOURCE', script: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        { module_id: 'safe-module', name: 'Safe Module', description: 'Metadata-only module descriptor', scope: 'space', disabled: false, revision_event_id: scenario === 'recoveryModuleUnsafeRevisionEventId' ? 'module-rev' : undefined, source: 'SECRET_SOURCE', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        { module_id: 'unsafe-module', name: '[REDACTED]', description: '[REDACTED]', scope: 'global', disabled: true, disabled_reason: '[REDACTED]', revision_event_id: scenario === 'recoveryModuleUnsafeRevisionEventId' ? '0123456789abcdef0123456789abcdef' : 'module-rev', source: 'SECRET_SOURCE', script: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { module_id: 'api_key', name: 'Safe blocked module', description: 'Unsafe id should not become an action target', scope: 'space', disabled: false, revision_event_id: 'unsafe-id-rev' },
       ],
       spaces: [
@@ -2102,7 +2102,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId') {
+  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -4742,6 +4742,23 @@ def test_spaces_ui_recovery_panel_redacts_unsafe_current_revision_id(driver_path
     assert "Space ID: broken" in recovery_html
     assert "Revision: [REDACTED]" in recovery_html
     assert "source/../api_key-SECRET_VALUE_DO_NOT_LEAK" not in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html
+    assert "api_key" not in recovery_html.lower()
+    assert "SECRET" not in recovery_html
+
+
+def test_spaces_ui_recovery_module_redacts_unsafe_revision_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryModuleUnsafeRevisionEventId")
+
+    recovery_html = out["recoveryHtml"]
+    assert "Quarantined modules" in recovery_html
+    assert "Safe Module" in recovery_html
+    assert "Revision: 0123456789ab" in recovery_html
+    assert "Revision: [REDACTED]" in recovery_html
+    assert "module-rev" not in recovery_html
+    assert "rev/../escape" not in recovery_html
+    assert "unsafe-id-rev" not in recovery_html
     assert "<script>" not in recovery_html
     assert "renderer" not in recovery_html
     assert "api_key" not in recovery_html.lower()

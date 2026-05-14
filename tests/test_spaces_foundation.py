@@ -7087,6 +7087,48 @@ def test_recovery_module_public_summaries_redact_unsafe_module_ids(monkeypatch, 
     assert "<script" not in serialized
 
 
+def test_recovery_module_public_summaries_redact_unsafe_revision_event_id(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    module = spaces.upsert_recovery_module(
+        {
+            "module_id": "module-revision-gap",
+            "name": "Module Revision Gap",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+        }
+    )
+    safe_revision = module["revision_event_id"]
+    unsafe_revision = "rev/../escape"
+    module_path = spaces.recovery_modules_dir() / "module-revision-gap.json"
+    stored = json.loads(module_path.read_text(encoding="utf-8"))
+    stored["revision_event_id"] = unsafe_revision
+    module_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    listed = spaces.list_recovery_modules()
+    recovery = spaces.recovery_snapshot()
+    tool_snapshot = spaces.run_space_tool("space.recovery.snapshot", {})
+    serialized = json.dumps(
+        {
+            "listed": listed,
+            "recovery": recovery,
+            "tool_snapshot": tool_snapshot,
+        }
+    ).lower()
+
+    assert safe_revision
+    assert listed[0]["revision_event_id"] is None
+    assert recovery["modules"][0]["revision_event_id"] is None
+    assert tool_snapshot["recovery"]["modules"][0]["revision_event_id"] is None
+    assert unsafe_revision not in serialized
+    assert "../" not in serialized
+    assert "escape" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
