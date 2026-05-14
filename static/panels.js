@@ -240,6 +240,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
+  _syncWorkflowPolling();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
@@ -6610,6 +6611,8 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
 // ── Workflows panel (read-only Hermes Core proxy) ────────────────────────────
 let _workflowListLoaded=false;
 let _currentWorkflowId=null;
+let _workflowListPollInterval=null;
+let _workflowDetailPollInterval=null;
 
 function _workflowFacts(payload){
   return (payload&&payload.facts)||payload||{};
@@ -6645,6 +6648,23 @@ async function refreshWorkflows(){
   await loadWorkflows(true);
   if(_currentWorkflowId) await loadWorkflowDag(_currentWorkflowId);
 }
+async function _refreshSelectedWorkflowDetail(){
+  if(_currentWorkflowId) await loadWorkflowDag(_currentWorkflowId,{silent:true});
+}
+function _workflowStopPolling(){
+  if(_workflowListPollInterval){ clearInterval(_workflowListPollInterval); _workflowListPollInterval=null; }
+  if(_workflowDetailPollInterval){ clearInterval(_workflowDetailPollInterval); _workflowDetailPollInterval=null; }
+}
+function _workflowStartPolling(){
+  if(_currentPanel !== 'workflows' || document.hidden){ _workflowStopPolling(); return; }
+  if(!_workflowListPollInterval) _workflowListPollInterval=setInterval(refreshWorkflows,30000);
+  if(!_workflowDetailPollInterval) _workflowDetailPollInterval=setInterval(_refreshSelectedWorkflowDetail,10000);
+}
+function _syncWorkflowPolling(){
+  if(_currentPanel !== 'workflows' || document.hidden) _workflowStopPolling();
+  else _workflowStartPolling();
+}
+if(typeof document !== 'undefined') document.addEventListener('visibilitychange',_syncWorkflowPolling);
 function renderWorkflowUnavailable(err){
   const list=$('workflowList');
   const detail=$('workflowDetailBody');
@@ -6678,11 +6698,11 @@ function renderWorkflowList(workflows){
     </button>`;
   }).join('');
 }
-async function loadWorkflowDag(workflowId){
+async function loadWorkflowDag(workflowId,opts={}){
   _currentWorkflowId=workflowId;
   const detail=$('workflowDetailBody');
   if(!detail) return;
-  detail.innerHTML='<div class="workflow-dag-placeholder">Loading workflow DAG...</div>';
+  if(!opts.silent) detail.innerHTML='<div class="workflow-dag-placeholder">Loading workflow DAG...</div>';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/dag`);
     const facts=_workflowFacts(payload);

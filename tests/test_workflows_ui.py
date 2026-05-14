@@ -146,3 +146,26 @@ def test_workflow_refresh_reloads_selected_detail_panes():
 def test_loading_workflow_dag_also_loads_workflow_level_panes():
     assert "loadWorkflowEvents(workflowId)" in PANELS_JS
     assert "loadWorkflowArtifacts(workflowId)" in PANELS_JS
+
+
+def test_workflow_polling_runs_only_while_workflows_panel_visible():
+    for symbol in (
+        "_workflowListPollInterval",
+        "_workflowDetailPollInterval",
+        "function _workflowStartPolling",
+        "function _workflowStopPolling",
+        "function _syncWorkflowPolling",
+    ):
+        assert symbol in PANELS_JS
+    assert "setInterval(refreshWorkflows,30000)" in PANELS_JS
+    assert "setInterval(_refreshSelectedWorkflowDetail,10000)" in PANELS_JS
+    assert "document.hidden" in PANELS_JS
+    assert "_currentPanel !== 'workflows'" in PANELS_JS
+    assert "clearInterval(_workflowListPollInterval)" in PANELS_JS
+    assert "clearInterval(_workflowDetailPollInterval)" in PANELS_JS
+
+
+def test_workflow_polling_is_synced_from_panel_switch_and_visibility_events():
+    assert "_syncWorkflowPolling();" in PANELS_JS
+    assert "document.addEventListener('visibilitychange',_syncWorkflowPolling)" in PANELS_JS
+    assert "if (nextPanel === 'workflows') await loadWorkflows();" in PANELS_JS
