@@ -27,6 +27,8 @@ def test_webui_loads_core_workflow_api_contract_fixture():
     assert dag_facts["nodes"][0]["workspace"]["worktreePath"] == "/tmp/worktrees/wf_contract-shape-plan"
     assert dag_facts["controlActions"][0]["endpoint"] == "/api/workflows/wf_contract/gates/gate_contract_review/resolve"
     assert fixtures["inboxShape"]["facts"]["draftWorkflow"]["sourceInboxItemId"] == "inbox_contract"
+    assert fixtures["inboxShape"]["facts"]["draftWorkflow"]["shapeIntent"]["profileHints"]["engineer"] == "contract-engineer"
+    assert fixtures["inboxShape"]["facts"]["draftDag"]["nodes"][-1]["role"] == "integrator"
     assert fixtures["inboxPromote"]["facts"]["dag"]["workflow_id"] == "wf_contract"
 
 

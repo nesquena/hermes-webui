@@ -57,34 +57,96 @@
             {
               "kind": "depends_on",
               "source": "shape-plan",
-              "target": "build-slice"
+              "target": "design-architecture"
+            },
+            {
+              "kind": "depends_on",
+              "source": "design-architecture",
+              "target": "build-foundation"
+            },
+            {
+              "kind": "depends_on",
+              "source": "design-architecture",
+              "target": "build-integration"
+            },
+            {
+              "kind": "depends_on",
+              "source": "build-foundation",
+              "target": "integrate-workflow"
+            },
+            {
+              "kind": "depends_on",
+              "source": "build-integration",
+              "target": "integrate-workflow"
             }
           ],
           "name": "Workflow Contract Fixture",
           "nodes": [
             {
               "id": "shape-plan",
-              "profile": "planner",
+              "profile": "contract-planner",
               "role": "planner",
               "scope": {
-                "summary": "Shape the contract request."
+                "summary": "Shape inbox request: Confirm contract fields before implementation."
               },
-              "title": "Shape implementation plan"
+              "title": "Shape plan"
             },
             {
-              "definition_of_done": [
-                "Targeted tests pass."
-              ],
-              "id": "build-slice",
+              "id": "design-architecture",
               "parents": [
                 "shape-plan"
               ],
-              "profile": "engineer",
+              "profile": "contract-architect",
+              "role": "architect",
+              "scope": {
+                "summary": "Design the workflow architecture for: Confirm contract fields before implementation."
+              },
+              "title": "Design architecture"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass.",
+                "Core behavior is covered by regression tests."
+              ],
+              "id": "build-foundation",
+              "parents": [
+                "design-architecture"
+              ],
+              "profile": "contract-engineer",
               "role": "engineer",
               "scope": {
-                "summary": "Build the contract request."
+                "summary": "Build the foundation for: Workflow Contract Fixture"
               },
-              "title": "Build first slice"
+              "title": "Build foundation"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass.",
+                "Integration behavior is covered by regression tests."
+              ],
+              "id": "build-integration",
+              "parents": [
+                "design-architecture"
+              ],
+              "profile": "contract-engineer",
+              "role": "engineer",
+              "scope": {
+                "summary": "Build the integration path for: Workflow Contract Fixture"
+              },
+              "title": "Build integration"
+            },
+            {
+              "id": "integrate-workflow",
+              "parents": [
+                "build-foundation",
+                "build-integration"
+              ],
+              "profile": "contract-integrator",
+              "role": "integrator",
+              "scope": {
+                "summary": "Integrate and verify the shaped workflow: Shape this inbox item into a workflow."
+              },
+              "title": "Integrate workflow"
             }
           ],
           "scale": "large",
@@ -137,34 +199,96 @@
             {
               "kind": "depends_on",
               "source": "shape-plan",
-              "target": "build-slice"
+              "target": "design-architecture"
+            },
+            {
+              "kind": "depends_on",
+              "source": "design-architecture",
+              "target": "build-foundation"
+            },
+            {
+              "kind": "depends_on",
+              "source": "design-architecture",
+              "target": "build-integration"
+            },
+            {
+              "kind": "depends_on",
+              "source": "build-foundation",
+              "target": "integrate-workflow"
+            },
+            {
+              "kind": "depends_on",
+              "source": "build-integration",
+              "target": "integrate-workflow"
             }
           ],
           "name": "Workflow Contract Fixture",
           "nodes": [
             {
               "id": "shape-plan",
-              "profile": "planner",
+              "profile": "contract-planner",
               "role": "planner",
               "scope": {
-                "summary": "Shape the contract request."
+                "summary": "Shape inbox request: Confirm contract fields before implementation."
               },
-              "title": "Shape implementation plan"
+              "title": "Shape plan"
             },
             {
-              "definition_of_done": [
-                "Targeted tests pass."
-              ],
-              "id": "build-slice",
+              "id": "design-architecture",
               "parents": [
                 "shape-plan"
               ],
-              "profile": "engineer",
+              "profile": "contract-architect",
+              "role": "architect",
+              "scope": {
+                "summary": "Design the workflow architecture for: Confirm contract fields before implementation."
+              },
+              "title": "Design architecture"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass.",
+                "Core behavior is covered by regression tests."
+              ],
+              "id": "build-foundation",
+              "parents": [
+                "design-architecture"
+              ],
+              "profile": "contract-engineer",
               "role": "engineer",
               "scope": {
-                "summary": "Build the contract request."
+                "summary": "Build the foundation for: Workflow Contract Fixture"
               },
-              "title": "Build first slice"
+              "title": "Build foundation"
+            },
+            {
+              "definition_of_done": [
+                "Targeted tests pass.",
+                "Integration behavior is covered by regression tests."
+              ],
+              "id": "build-integration",
+              "parents": [
+                "design-architecture"
+              ],
+              "profile": "contract-engineer",
+              "role": "engineer",
+              "scope": {
+                "summary": "Build the integration path for: Workflow Contract Fixture"
+              },
+              "title": "Build integration"
+            },
+            {
+              "id": "integrate-workflow",
+              "parents": [
+                "build-foundation",
+                "build-integration"
+              ],
+              "profile": "contract-integrator",
+              "role": "integrator",
+              "scope": {
+                "summary": "Integrate and verify the shaped workflow: Shape this inbox item into a workflow."
+              },
+              "title": "Integrate workflow"
             }
           ],
           "scale": "large",
@@ -176,6 +300,15 @@
           "description": "Shape this inbox item into a workflow.",
           "id": "wf_contract",
           "scale": "large",
+          "shapeIntent": {
+            "profileHints": {
+              "architect": "contract-architect",
+              "engineer": "contract-engineer",
+              "integrator": "contract-integrator",
+              "planner": "contract-planner"
+            },
+            "userIntent": "Confirm contract fields before implementation."
+          },
           "sourceInboxItemId": "inbox_contract",
           "title": "Workflow Contract Fixture",
           "workspacePath": "/tmp/workflow-contract"
