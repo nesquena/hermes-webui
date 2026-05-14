@@ -721,12 +721,12 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({ widgets });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-notes-app') {
+  if (path === 'api/spaces/widget/events?space_id=demo-notes-app&limit=10') {
     return response({ events: [
       { event_id: 'evt-notes-save', event_name: 'notes.save', widget_id: 'notes-editor', status: 'queued', created_at: 1710000200, payload_summary: { action: 'save-note', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-kanban-board') {
+  if (path === 'api/spaces/widget/events?space_id=demo-kanban-board&limit=10') {
     return response({ events: [
       { event_id: 'evt-kanban-card', event_name: 'kanban.card.move', widget_id: 'kanban-doing', status: 'queued', created_at: 1710000300, payload_summary: { action: 'move-card', card: 'token placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -738,7 +738,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'game-repair-notes', kind: 'markdown', title: 'Repair notes', layout: { x: 16, y: 4, w: 8, h: 6, minimized: false }, metadata: { notes: { status: 'repair-queued', summary: 'Agent repair queued for keyboard focus and collision checks.', source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-snake-iterative-repair') {
+  if (path === 'api/spaces/widget/events?space_id=demo-snake-iterative-repair&limit=10') {
     return response({ events: [
       { event_id: 'evt-snake-repair', event_name: 'agent.repair', widget_id: 'game-repair-notes', status: 'queued', created_at: 1710000350, payload_summary: { action: 'repair-snake', issue: 'keyboard-focus-and-collision', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -751,7 +751,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'dashboard-brief', kind: 'markdown', title: 'Daily brief', layout: { x: 0, y: 5, w: 24, h: 4, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Daily dashboard metadata persisted.' } } },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-daily-dashboard') {
+  if (path === 'api/spaces/widget/events?space_id=demo-daily-dashboard&limit=10') {
     return response({ events: [
       { event_id: 'evt-dashboard-refresh', event_name: 'dashboard.refresh', widget_id: 'dashboard-prices', status: 'queued', created_at: 1710000500, payload_summary: { action: 'refresh-dashboard', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -763,7 +763,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'camera-incidents', kind: 'table', title: 'Incident notes', layout: { x: 16, y: 4, w: 8, h: 4, minimized: false }, metadata: { incidents: { status: 'empty', rows: [], source: 'SECRET_SOURCE' } }, source: 'SECRET_SOURCE' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-camera-dashboard') {
+  if (path === 'api/spaces/widget/events?space_id=demo-camera-dashboard&limit=10') {
     return response({ events: [] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-stock-chart') {
@@ -773,7 +773,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'stock-notes', kind: 'markdown', title: 'Market notes', layout: { x: 0, y: 8, w: 24, h: 4, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Demo market snapshot is agent-mediated.' } }, source: 'SECRET_SOURCE' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-stock-chart') {
+  if (path === 'api/spaces/widget/events?space_id=demo-stock-chart&limit=10') {
     return response({ events: [
       { event_id: 'evt-stock-refresh', event_name: 'stock.refresh', widget_id: 'stock-chart', status: 'queued', created_at: 1710000700, payload_summary: { action: 'refresh-market-snapshot', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -786,7 +786,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'music-notes', kind: 'markdown', title: 'Music notes', metadata: { notes: { status: 'safe-metadata', summary: 'Piano-roll resize cleanup remains planned.' } } },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll') {
+  if (path === 'api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll&limit=10') {
     return response({ events: [
       { event_id: 'evt-music-pattern', event_name: 'audio.pattern.save', widget_id: 'music-sequencer-grid', status: 'queued', created_at: 1710000750, payload_summary: { demo: 'demo_step_sequencer_piano_roll', pattern_steps: 16, target: 'sequencer-and-piano-roll', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -799,7 +799,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'model-next-steps', kind: 'checklist', title: 'Next steps', metadata: { checklist: { items: ['Choose provider', 'Validate model', 'Start first Space'], renderer: '<script>bad()</script>' } } },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-provider-setup') {
+  if (path === 'api/spaces/widget/events?space_id=demo-provider-setup&limit=10') {
     return response({ events: [
       { event_id: 'evt-provider-review', event_name: 'provider.setup.review', widget_id: 'model-provider-status', status: 'queued', created_at: 1710000850, payload_summary: { action: 'review-provider-setup', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -812,7 +812,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps', layout: { x: 12, y: 5, w: 12, h: 4, minimized: false }, metadata: { checklist: { items: ['Use this space in chat', 'Ask Capy to customize widgets'], renderer: '<script>bad()</script>' } } },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-big-bang-onboarding') {
+  if (path === 'api/spaces/widget/events?space_id=demo-big-bang-onboarding&limit=10') {
     return response({ events: [] });
   }
   if (path === 'api/spaces/widgets?space_id=demo-local-agent-control-dashboard') {
@@ -823,7 +823,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'service-settings-review', kind: 'table', title: 'Settings review', layout: { x: 18, y: 3, w: 6, h: 3, minimized: false }, metadata: { settings: { status: 'review-only', fields: ['provider', 'network', 'auth'], renderer: '<script>bad()</script>' } } },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-local-agent-control-dashboard') {
+  if (path === 'api/spaces/widget/events?space_id=demo-local-agent-control-dashboard&limit=10') {
     return response({ events: [
       { event_id: 'evt-service-status', event_name: 'service.status.check', widget_id: 'service-health', status: 'queued', created_at: 1710000800, payload_summary: { action: 'check-local-service', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -835,7 +835,7 @@ global.fetch = async function(path, opts = {}) {
       { id: 'browser-notes', kind: 'markdown', title: 'Browser notes', layout: { x: 16, y: 5, w: 8, h: 5, minimized: false }, metadata: { notes: { status: 'ready', summary: 'Shared browser co-control remains metadata-only.' } }, source: 'SECRET_SOURCE' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site') {
+  if (path === 'api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site&limit=10') {
     return response({ events: [
       { event_id: 'evt-browser-open', event_name: 'browser.open_url', widget_id: 'browser-panel', status: 'queued', created_at: 1710000600, payload_summary: { action: 'open-test-site', authorization: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
@@ -849,12 +849,12 @@ global.fetch = async function(path, opts = {}) {
       { id: 'research-summary', kind: 'markdown', title: 'Summary report', layout: { x: 12, y: 4, w: 12, h: 6, minimized: false }, metadata: { export: { pdf: 'queued', event: 'widget.export.pdf', token: 'SECRET_VALUE_DO_NOT_LEAK' }, research: { status: 'summary-ready' } }, renderer: '<script>bad()</script>' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=demo-research-harness-pdf-export') {
+  if (path === 'api/spaces/widget/events?space_id=demo-research-harness-pdf-export&limit=10') {
     return response({ events: [
       { event_id: 'evt-research-pdf', event_name: 'widget.export.pdf', widget_id: 'research-summary', status: 'queued', created_at: 1710000400, payload_summary: { action: 'export-pdf', note: 'bearer placeholder' }, prompt_preview: 'Export research markdown without leaking SECRET values', renderer: '<script>bad()</script>', api_key: 'SECRET' },
     ] });
   }
-  if (path === 'api/spaces/widget/events?space_id=lab&limit=10' || path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget' || path === 'api/spaces/widget/events?space_id=demo-time-travel-restore' || path === 'api/spaces/widget/events?space_id=demo-safe-admin-recovery') {
+  if (path === 'api/spaces/widget/events?space_id=lab&limit=10' || path === 'api/spaces/widget/events?space_id=lab' || path === 'api/spaces/widget/events?space_id=demo-weather-widget&limit=10' || path === 'api/spaces/widget/events?space_id=demo-time-travel-restore&limit=10' || path === 'api/spaces/widget/events?space_id=demo-safe-admin-recovery&limit=10') {
     const isDemoWeather = path.indexOf('demo-weather-widget') !== -1;
     const isTimeTravelRestore = path.indexOf('demo-time-travel-restore') !== -1;
     const isRecovery = path.indexOf('demo-safe-admin-recovery') !== -1;
@@ -4043,7 +4043,8 @@ def test_spaces_ui_weather_walkthrough_is_visible_and_runs_prompt_to_widget_flow
     assert "Weather demo checklist" in out["rootHtml"]
     assert "Current weather observation" in out["rootHtml"]
     assert "Manage weather widget" in out["rootHtml"]
-    assert {"path": "api/spaces/widget/events?space_id=demo-weather-widget", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-weather-widget&limit=10", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-weather-widget", "method": "GET", "body": ""} not in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-weather-widget", "method": "GET", "body": ""} in out["calls"]
     assert "Widgets for demo-weather-widget" in out["rootHtml"]
     assert "Weather in Prague" in out["rootHtml"]
@@ -4066,7 +4067,7 @@ def test_spaces_ui_notes_walkthrough_is_visible_and_opens_widget_manager_metadat
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_notes_app"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-notes-app", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-notes-app&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-notes-app", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Notes app checklist" in out["rootHtml"]
@@ -4092,7 +4093,7 @@ def test_spaces_ui_kanban_walkthrough_is_visible_and_opens_widget_manager_metada
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_kanban_board"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-kanban-board", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-kanban-board&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-kanban-board", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Kanban board preview" in out["rootHtml"]
@@ -4117,7 +4118,7 @@ def test_spaces_ui_snake_walkthrough_is_visible_and_opens_repair_metadata_only(d
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_snake_iterative_repair"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-snake-iterative-repair", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-snake-iterative-repair&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-snake-iterative-repair", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Snake Repair Smoke" in out["rootHtml"]
@@ -4148,7 +4149,7 @@ def test_spaces_ui_dashboard_walkthrough_is_visible_and_opens_widget_manager_met
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_daily_dashboard"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-daily-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-daily-dashboard&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-daily-dashboard", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Daily Dashboard Smoke" in out["rootHtml"]
@@ -4175,7 +4176,7 @@ def test_spaces_ui_camera_walkthrough_is_visible_and_opens_widget_manager_metada
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_camera_dashboard"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-camera-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-camera-dashboard&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-camera-dashboard", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Camera Dashboard Smoke" in out["rootHtml"]
@@ -4198,7 +4199,7 @@ def test_spaces_ui_stock_walkthrough_is_visible_and_opens_market_snapshot_metada
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_stock_chart"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-stock-chart", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-stock-chart&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-stock-chart", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Stock Chart Smoke" in out["rootHtml"]
@@ -4230,7 +4231,7 @@ def test_spaces_ui_local_service_walkthrough_is_visible_and_opens_widget_manager
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_local_agent_control_dashboard"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-local-agent-control-dashboard", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-local-agent-control-dashboard&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-local-agent-control-dashboard", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Local Service Dashboard Smoke" in out["rootHtml"]
@@ -4259,7 +4260,7 @@ def test_spaces_ui_music_walkthrough_is_visible_and_opens_sequencer_metadata_onl
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_step_sequencer_piano_roll"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-step-sequencer-piano-roll&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-step-sequencer-piano-roll", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Music Sequencer Smoke" in out["rootHtml"]
@@ -4291,7 +4292,7 @@ def test_spaces_ui_provider_setup_walkthrough_is_visible_and_opens_model_setup_m
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_provider_setup"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-provider-setup", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-provider-setup&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-provider-setup", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Provider Setup Smoke" in out["rootHtml"]
@@ -4319,7 +4320,7 @@ def test_spaces_ui_big_bang_walkthrough_is_visible_and_opens_widget_manager_meta
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_big_bang_onboarding"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-big-bang-onboarding", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-big-bang-onboarding&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-big-bang-onboarding", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Big Bang Onboarding Smoke" in out["rootHtml"]
@@ -4343,7 +4344,7 @@ def test_spaces_ui_time_travel_walkthrough_is_visible_and_opens_widget_manager_m
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_time_travel_restore"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-time-travel-restore", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-time-travel-restore&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-time-travel-restore", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "demo_time_travel_restore" in out["rootHtml"]
@@ -4365,7 +4366,7 @@ def test_spaces_ui_admin_recovery_walkthrough_is_visible_and_opens_recovery_widg
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_safe_admin_recovery"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-safe-admin-recovery", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-safe-admin-recovery&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-safe-admin-recovery", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "demo_safe_admin_recovery" in out["rootHtml"]
@@ -4388,7 +4389,7 @@ def test_spaces_ui_browser_walkthrough_is_visible_and_opens_widget_manager_metad
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_browser_cocontrol_google_or_test_site"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-browser-cocontrol-google-or-test-site&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-browser-cocontrol-google-or-test-site", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Browser Co-control Smoke" in out["rootHtml"]
@@ -4414,7 +4415,7 @@ def test_spaces_ui_research_walkthrough_is_visible_and_opens_widget_manager_meta
     run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
     assert run_post["method"] == "POST"
     assert json.loads(run_post["body"]) == {"demo": "demo_research_harness_pdf_export"}
-    assert {"path": "api/spaces/widget/events?space_id=demo-research-harness-pdf-export", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/widget/events?space_id=demo-research-harness-pdf-export&limit=10", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/widgets?space_id=demo-research-harness-pdf-export", "method": "GET", "body": ""} in out["calls"]
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "Research Harness" in out["rootHtml"]
