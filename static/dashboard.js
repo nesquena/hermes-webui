@@ -645,20 +645,24 @@ function closeAgentInfo() {
   }
 }
 
-// Initialize 2D workspace when dashboard loads
+// Initialize gamified workspace when dashboard loads
 function loadOffice() {
-  console.log('[dashboard] Loading 2D office workspace...');
+  console.log('[dashboard] Loading gamified office workspace...');
   
-  if (!window.workspace2d) {
-    window.workspace2d = new Workspace2D();
+  // Clean up existing 2D workspace
+  if (window.workspace2d) {
+    window.workspace2d = null;
   }
   
-  // Update status every 30 seconds
-  setInterval(() => {
-    if (window.workspace2d) {
-      window.workspace2d.updateWorkspaceStatus();
+  // Initialize the gamified workspace
+  if (typeof initGamifiedWorkspace === 'function') {
+    initGamifiedWorkspace();
+  } else {
+    console.warn('[dashboard] Gamified workspace not available, falling back to basic 2D');
+    if (!window.workspace2d) {
+      window.workspace2d = new Workspace2D();
     }
-  }, 30000);
+  }
 }
 
 // Load office when the panel is switched to
