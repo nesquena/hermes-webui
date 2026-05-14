@@ -10938,6 +10938,125 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     assert spaces.list_widgets(space_id) == []
 
 
+def test_widget_patch_and_delete_routes_accept_camelcase_selector_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Widget Aliases"})
+    space_id = created["space_id"]
+    spaces.upsert_widget(
+        space_id,
+        {
+            "id": "card",
+            "kind": "html",
+            "title": "Card",
+            "renderer": "<script>storedSource()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.upsert_widget(space_id, {"id": "delete-card", "kind": "markdown", "title": "Delete Card"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/patch",
+        {
+            "spaceId": space_id,
+            "widgetId": "card",
+            "patch": {
+                "title": "Card patched through alias",
+                "layout": {"x": 2, "y": 1, "w": 7, "h": 3},
+                "source": "SECRET_SOURCE",
+            },
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "card",
+        "kind": "html",
+        "title": "Card patched through alias",
+        "layout": {"x": 2, "y": 1, "w": 7, "h": 3, "minimized": False},
+    }
+    assert spaces.read_widget(space_id, "card")["renderer"] == "<script>storedSource()</script>"
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/delete",
+        {"spaceId": space_id, "id": "delete-card", "renderer": "<script>ignore()</script>"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["deleted"] is True
+    assert body["widget_id"] == "delete-card"
+    assert [widget["id"] for widget in spaces.list_widgets(space_id)] == ["card"]
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "source" not in serialized
+
+
+def test_widget_patch_and_delete_routes_reject_conflicting_camelcase_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-widget-conflict", "name": "Route Widget Conflict"})
+    other = spaces.create_space({"space_id": "route-widget-conflict-other", "name": "Other Route Widget Conflict"})
+    spaces.upsert_widget(created["space_id"], {"id": "card", "kind": "markdown", "title": "Card"})
+    spaces.upsert_widget(created["space_id"], {"id": "other-card", "kind": "markdown", "title": "Other Card"})
+
+    conflict_cases = [
+        (
+            "/api/spaces/widget/patch",
+            {
+                "space_id": created["space_id"],
+                "spaceId": other["space_id"],
+                "widgetId": "card",
+                "patch": {"title": "Should not patch", "renderer": "<script>bad()</script>"},
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        ),
+        (
+            "/api/spaces/widget/patch",
+            {
+                "spaceId": created["space_id"],
+                "widget_id": "card",
+                "widgetId": "other-card",
+                "patch": {"title": "Should not patch", "source": "SECRET_SOURCE"},
+            },
+        ),
+        (
+            "/api/spaces/widget/delete",
+            {
+                "space_id": created["space_id"],
+                "spaceId": other["space_id"],
+                "widgetId": "card",
+                "source": "SECRET_SOURCE",
+            },
+        ),
+        (
+            "/api/spaces/widget/delete",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "card",
+                "id": "other-card",
+                "token": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        ),
+    ]
+
+    for path, payload in conflict_cases:
+        handled, status, body = _route_post(path, payload)
+        assert handled is None
+        assert status == 400
+        assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+        serialized = json.dumps(body).lower()
+        assert "renderer" not in serialized
+        assert "<script" not in serialized
+        assert "api_key" not in serialized
+        assert "secret" not in serialized
+        assert "source" not in serialized
+        assert spaces.read_widget_detail(created["space_id"], "card")["title"] == "Card"
+        assert spaces.read_widget_detail(created["space_id"], "other-card")["title"] == "Other Card"
+
+
 def test_widget_routes_return_metadata_only_even_when_widget_stores_generated_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Unsafe Route Widget"})

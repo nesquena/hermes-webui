@@ -5095,12 +5095,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/widget/patch":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        widget_id = body.get("widget_id")
-        patch = body.get("patch") or body.get("fields") or {}
-        if not space_id or not widget_id:
-            return bad(handler, "Missing space_id or widget_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
+            patch = body.get("patch") or body.get("fields") or {}
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
             return j(handler, capy_spaces.patch_widget(space_id, widget_id, patch))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
@@ -5111,11 +5111,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/widget/delete":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        widget_id = body.get("widget_id")
-        if not space_id or not widget_id:
-            return bad(handler, "Missing space_id or widget_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
             return j(handler, capy_spaces.delete_widget(space_id, widget_id))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
