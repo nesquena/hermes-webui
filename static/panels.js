@@ -3244,6 +3244,21 @@ function _renderSkillDetail(name, content, linkedFiles) {
   _setSkillHeaderButtons('read');
 }
 
+function _renderSkillError(name, message) {
+  const title = $('skillDetailTitle');
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  if (title) title.textContent = name;
+  if (body) {
+    body.innerHTML = `<div class="main-view-content"><div class="detail-form-error" style="display:block">${esc(message || t('skill_load_failed'))}</div></div>`;
+    body.style.display = '';
+  }
+  if (empty) empty.style.display = 'none';
+  _currentSkillDetail = null;
+  _skillMode = 'empty';
+  _setSkillHeaderButtons('empty');
+}
+
 function _setSkillHeaderButtons(mode) {
   const editBtn = $('btnEditSkillDetail');
   const delBtn = $('btnDeleteSkillDetail');
@@ -3264,6 +3279,12 @@ async function openSkill(name, el) {
   _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    if (data && (data.success === false || data.error)) {
+      const message = data.error || t('skill_load_failed');
+      _renderSkillError(name, message);
+      setStatus(t('skill_load_failed') + message);
+      return;
+    }
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
     _renderSkillDetail(name, data.content || '', data.linked_files || {});
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
@@ -3272,6 +3293,11 @@ async function openSkill(name, el) {
 async function openSkillFile(skillName, filePath) {
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`);
+    if (data && data.error) {
+      _renderSkillError(skillName, data.error);
+      setStatus(t('skill_file_load_failed') + data.error);
+      return;
+    }
     const body = $('skillDetailBody');
     if (!body) return;
     const ext = (filePath.split('.').pop() || '').toLowerCase();
