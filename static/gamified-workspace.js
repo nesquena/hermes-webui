@@ -180,22 +180,26 @@ class GamifiedWorkspace {
   }
 
   positionAgentInZone(agent, container) {
-    // Calculate random position within zone bounds
-    const containerRect = container.getBoundingClientRect();
-    const agentSize = 40; // Agent diameter
-    const padding = 20;
+    // Get zone dimensions for absolute positioning
+    const zone = container.closest('.workspace-zone');
+    const zoneRect = zone.getBoundingClientRect();
     
-    // Generate position with some randomness but avoid overlaps
-    const maxX = Math.max(0, containerRect.width - agentSize - padding);
-    const maxY = Math.max(0, containerRect.height - agentSize - padding);
+    // Agent size
+    const agentSize = 32;
+    const padding = 15;
+    
+    // Calculate safe area (avoiding furniture)
+    const safeWidth = zoneRect.width - (padding * 2) - agentSize;
+    const safeHeight = zoneRect.height - (padding * 2) - agentSize - 50; // Account for header
     
     let attempts = 0;
     let validPosition = false;
     let x, y;
 
-    while (!validPosition && attempts < 10) {
-      x = padding + Math.random() * maxX;
-      y = padding + Math.random() * maxY;
+    while (!validPosition && attempts < 15) {
+      // Generate random position within safe bounds
+      x = padding + Math.random() * Math.max(0, safeWidth);
+      y = 50 + padding + Math.random() * Math.max(0, safeHeight); // Start below header
       
       // Check for overlaps with other agents in the same zone
       const otherAgents = this.agents.filter(a => 
@@ -209,21 +213,41 @@ class GamifiedWorkspace {
           Math.pow(x - other.position.x, 2) + 
           Math.pow(y - other.position.y, 2)
         );
-        return distance > agentSize + 10; // Minimum separation
+        return distance > agentSize + 8; // Minimum separation
       });
       
       attempts++;
     }
 
-    agent.position = { x: x || padding, y: y || padding };
+    // Fallback positioning if no valid position found
+    if (!validPosition) {
+      const agentsInZone = this.agents.filter(a => a.zone === agent.zone).length;
+      const angle = (agentsInZone * 60) % 360; // Spread agents in circle
+      const radius = Math.min(safeWidth, safeHeight) * 0.3;
+      const centerX = zoneRect.width / 2;
+      const centerY = (zoneRect.height / 2) + 25; // Offset for header
+      
+      x = centerX + Math.cos(angle * Math.PI / 180) * radius;
+      y = centerY + Math.sin(angle * Math.PI / 180) * radius;
+      
+      // Ensure within bounds
+      x = Math.max(padding, Math.min(x, zoneRect.width - agentSize - padding));
+      y = Math.max(50 + padding, Math.min(y, zoneRect.height - agentSize - padding));
+    }
+
+    agent.position = { x, y };
   }
 
   createAgentElement(agent) {
     const agentDiv = document.createElement('div');
     agentDiv.className = `workspace-agent ${agent.role} status-${agent.status}`;
-    agentDiv.textContent = agent.avatar;
+    
+    // Use initials or emoji for avatar
+    const avatarText = this.getAgentAvatar(agent);
+    agentDiv.textContent = avatarText;
     agentDiv.title = `${agent.name} - ${agent.status}`;
     agentDiv.dataset.agentId = agent.id;
+    agentDiv.dataset.name = agent.name; // For label display
     agentDiv.tabIndex = 0; // Make keyboard accessible
 
     // Position the agent
@@ -246,22 +270,57 @@ class GamifiedWorkspace {
       }
     });
 
-    // Touch handling for mobile
+    // Enhanced touch handling for mobile
     if ('ontouchstart' in window) {
       let touchStartTime;
-      agentDiv.addEventListener('touchstart', () => {
+      let touchMoved = false;
+      
+      agentDiv.addEventListener('touchstart', (e) => {
         touchStartTime = Date.now();
+        touchMoved = false;
+        // Add visual feedback
+        agentDiv.style.transform = 'scale(1.1)';
+      });
+      
+      agentDiv.addEventListener('touchmove', () => {
+        touchMoved = true;
+        agentDiv.style.transform = '';
       });
       
       agentDiv.addEventListener('touchend', (e) => {
-        if (Date.now() - touchStartTime < 300) { // Quick tap
+        agentDiv.style.transform = '';
+        if (!touchMoved && Date.now() - touchStartTime < 300) { // Quick tap
           e.preventDefault();
           this.selectAgent(agent);
         }
       });
+      
+      agentDiv.addEventListener('touchcancel', () => {
+        agentDiv.style.transform = '';
+      });
     }
 
     return agentDiv;
+  }
+
+  getAgentAvatar(agent) {
+    // Create more meaningful avatars based on role and name
+    const roleEmojis = {
+      coordinator: '👑',
+      developer: '👨‍💻', 
+      devops: '⚙️',
+      researcher: '🔬',
+      analyst: '📊',
+      security: '🛡️'
+    };
+
+    // Use emoji if available, otherwise use initials
+    if (roleEmojis[agent.role]) {
+      return roleEmojis[agent.role];
+    }
+
+    // Fallback to initials
+    return agent.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
   }
 
   selectAgent(agent) {
@@ -360,14 +419,14 @@ class GamifiedWorkspace {
     if (agentElement) {
       agentElement.classList.add('moving');
       
-      // Add trail effect
+      // Enhanced trail effect for movement
       agentElement.classList.add('agent-trail');
       setTimeout(() => {
         agentElement.classList.remove('agent-trail');
-      }, 800);
+      }, 1200);
     }
 
-    // Re-render after animation delay
+    // Smoother re-render with better timing
     setTimeout(() => {
       this.renderAgents();
       this.movingAgents.delete(agent.id);
@@ -377,7 +436,30 @@ class GamifiedWorkspace {
       }
       
       console.log(`[GamifiedWorkspace] ${agent.name} moved from ${oldZone} to ${newZone}`);
-    }, 2000);
+    }, 1500);
+  }
+
+  // Enhanced zoom functionality with mobile considerations
+  applyZoom() {
+    const map = document.getElementById('workspaceMap');
+    if (!map) return;
+
+    // Disable zoom on mobile to prevent layout issues
+    if (window.innerWidth <= 768) {
+      map.style.transform = 'none';
+      return;
+    }
+
+    map.style.transform = `scale(${this.zoomLevel})`;
+    map.style.transformOrigin = 'center';
+    
+    // Adjust container scrolling if needed
+    const container = map.closest('.workspace-2d-container');
+    if (container && this.zoomLevel > 1) {
+      container.style.overflow = 'auto';
+    } else if (container) {
+      container.style.overflow = 'hidden';
+    }
   }
 
   startSimulation() {
