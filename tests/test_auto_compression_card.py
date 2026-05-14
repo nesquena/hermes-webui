@@ -274,6 +274,24 @@ def test_reference_message_uses_raw_transcript_position_before_anchor_fallback()
     assert "else _insertCompressionLikeNode(referenceNode);" in src
 
 
+def test_backend_auto_anchor_count_excludes_compaction_marker_cards():
+    src = _read("api/compression_anchor.py")
+
+    assert "def _is_context_compression_marker" in src
+    assert "if _is_context_compression_marker(message):" in src
+    assert "continue" in src[src.find("if _is_context_compression_marker(message):"):src.find("content = message.get", src.find("if _is_context_compression_marker(message):"))]
+
+def test_frontend_reference_insertion_skips_when_reference_is_before_render_window():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode=", start)
+    assert end != -1, "raw-index insertion helper end not found"
+    helper = src[start:end]
+
+    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
+
+
 def test_reference_message_selection_prefers_latest_matching_marker():
     src = _read("static/ui.js")
     start = src.find("function _latestCompressionReferenceMessage")

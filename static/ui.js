@@ -5486,6 +5486,7 @@ function renderMessages(options){
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
     if(!node) return;
+    if(rawIdx<firstRenderedRawIdx) return;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
       return;
