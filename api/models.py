@@ -1802,6 +1802,60 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) ->
     return msgs
 
 
+def get_state_db_session_summary(sid) -> dict:
+    """Return cheap message count/max timestamp for one state.db session.
+
+    This is intentionally narrower than ``get_state_db_session_messages`` for
+    metadata-only WebUI polling: callers only need a staleness signal, not a
+    fully materialized transcript with tool/reasoning metadata.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return {}
+
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not sid or not db_path.exists():
+        return {}
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return {}
+            cur.execute(
+                """
+                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (str(sid),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            count = int(row['message_count'] or 0)
+            last_message_at = row['last_message_at']
+            result = {'message_count': count}
+            if last_message_at not in (None, ''):
+                try:
+                    result['last_message_at'] = float(last_message_at)
+                except (TypeError, ValueError):
+                    pass
+            return result
+    except Exception:
+        return {}
+
+
 def _normalized_message_timestamp_for_key(value):
     if value is None or value == "":
         return ""
@@ -1871,12 +1925,27 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
                 continue
         if key in seen_message_keys:
             continue
+        # State rows at or before the newest sidecar timestamp are normally
+        # assumed to have already been observed by the sidecar. The <= gate
+        # preserves sidecar-only ordering/metadata for equal timestamps and
+        # prevents duplicate legacy rows when timestamp precision differs
+        # between stores. Explicit message ids are authoritative, though: two
+        # equal-timestamp messages with different ids are distinct retries.
+        if (
+            key[0] != "message_id"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            continue
         seen_message_keys.add(key)
         merged_messages.append(msg)
     return merged_messages
 
 
-def reconciled_state_db_messages_for_session(session, *, prefer_context: bool = False) -> list:
+def reconciled_state_db_messages_for_session(
+    session, *, prefer_context: bool = False, state_messages: list | None = None
+) -> list:
     """Return append-only messages reconciled with state.db for a WebUI session."""
     if session is None:
         return []
@@ -1887,7 +1956,8 @@ def reconciled_state_db_messages_for_session(session, *, prefer_context: bool = 
             local_messages = context_messages
     if not local_messages:
         local_messages = getattr(session, 'messages', None) or []
-    state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    if state_messages is None:
+        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     return merge_session_messages_append_only(local_messages, state_messages)
 
 

@@ -1864,6 +1864,7 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
+    get_state_db_session_summary,
     merge_session_messages_append_only,
     ensure_cron_project,
     is_cron_session,
@@ -3258,15 +3259,16 @@ def handle_get(handler, parsed) -> bool:
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
+            state_db_summary = {}
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
                 state_db_messages = get_state_db_session_messages(sid)
             elif not is_messaging_session:
-                # Metadata-only callers (frontend refresh polling) still need a
-                # reconciled count/timestamp so externally appended state.db
-                # messages can be detected without fetching the full transcript.
-                state_db_messages = get_state_db_session_messages(sid)
+                # Metadata-only callers (frontend refresh polling) only need a
+                # cheap staleness signal. Avoid full transcript materialization
+                # on the steady-state polling path.
+                state_db_summary = get_state_db_session_summary(sid)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3301,6 +3303,25 @@ def handle_get(handler, parsed) -> bool:
                     _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
                 else:
                     _all_msgs = merge_session_messages_append_only(getattr(s, "messages", []) or [], state_db_messages)
+            if not load_messages and state_db_summary:
+                sidecar_messages = getattr(s, "messages", []) or []
+                sidecar_count = len(sidecar_messages)
+                try:
+                    sidecar_last = max(
+                        float((m or {}).get("timestamp") or 0)
+                        for m in sidecar_messages
+                        if isinstance(m, dict)
+                    ) if sidecar_messages else 0
+                except (TypeError, ValueError):
+                    sidecar_last = 0
+                state_count = int(state_db_summary.get("message_count") or 0)
+                state_last = float(state_db_summary.get("last_message_at") or 0)
+                _all_msgs = sidecar_messages
+                _summary_message_count = max(sidecar_count, state_count)
+                _summary_last_message_at = max(sidecar_last, state_last)
+            else:
+                _summary_message_count = None
+                _summary_last_message_at = None
             if load_messages:
                 if msg_before is not None:
                     # Scroll-to-top paging: msg_before is a 0-based index into
@@ -3382,9 +3403,9 @@ def handle_get(handler, parsed) -> bool:
                 # messages already carry per-message tool metadata. Avoid sending
                 # the full historical list with a small tail window.
                 _session_tool_calls = []
-            _merged_message_count = len(_all_msgs)
-            _merged_last_message_at = 0
-            if _all_msgs:
+            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
+            if _summary_last_message_at is None and _all_msgs:
                 try:
                     _merged_last_message_at = max(
                         float((m or {}).get("timestamp") or 0)
