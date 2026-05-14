@@ -2172,6 +2172,31 @@ def test_creator_preview_ignores_ambient_current_space_id_for_new_drafts(monkeyp
     assert spaces.read_space("ambient-existing-lab")["name"] == "Ambient Existing Lab"
 
 
+def test_creator_commit_rejects_string_gate_values_without_creating_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "String Gate Lab",
+            "widgets": [{"widgetId": "safe-panel", "title": "Safe Panel", "kind": "markdown"}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="Creator commit requires sandbox preview, visual QA, and explicit approval"):
+        spaces.run_space_tool(
+            "space.creator.commit",
+            {
+                "preview_id": preview["preview_id"],
+                "sandbox_previewed": "true",
+                "visual_qa_passed": "true",
+                "approve_commit": "true",
+            },
+        )
+
+    assert spaces.list_spaces() == []
+
+
 def test_creator_commit_with_preview_id_commits_exact_previewed_sanitized_spec(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

@@ -2741,11 +2741,23 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     return response
 
 
+def _space_creator_commit_gate(payload: dict[str, Any], *aliases: str) -> bool:
+    """Return true only when an explicit creator-commit gate is JSON boolean true."""
+    saw_alias = False
+    for alias in aliases:
+        if alias not in payload:
+            continue
+        saw_alias = True
+        if payload.get(alias) is not True:
+            return False
+    return saw_alias
+
+
 def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Persist a creator-loop draft only after sandbox, visual-QA, and approval gates."""
-    sandbox_previewed = _truthy_bool(payload.get("sandbox_previewed") or payload.get("sandboxPreviewed"))
-    visual_qa_passed = _truthy_bool(payload.get("visual_qa_passed") or payload.get("visualQaPassed"))
-    approve_commit = _truthy_bool(payload.get("approve_commit") or payload.get("approveCommit") or payload.get("commit_approved"))
+    sandbox_previewed = _space_creator_commit_gate(payload, "sandbox_previewed", "sandboxPreviewed")
+    visual_qa_passed = _space_creator_commit_gate(payload, "visual_qa_passed", "visualQaPassed")
+    approve_commit = _space_creator_commit_gate(payload, "approve_commit", "approveCommit", "commit_approved")
     if not (sandbox_previewed and visual_qa_passed and approve_commit):
         raise ValueError("Creator commit requires sandbox preview, visual QA, and explicit approval")
 
