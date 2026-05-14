@@ -232,6 +232,19 @@ def test_workflow_detail_can_materialize_dag_to_kanban():
     assert ".workflow-materialize-actions" in STYLE_CSS
 
 
+def test_workflow_materialize_result_links_created_kanban_tasks():
+    for symbol in (
+        "openWorkflowMaterializedKanbanTask",
+        "workflow-materialized-task-list",
+        "createdTaskIds",
+        "created_task_ids",
+        "Open Kanban task",
+        "switchPanel('kanban')",
+        "loadKanbanTask(taskId)",
+    ):
+        assert symbol in PANELS_JS
+
+
 def test_workflow_unavailable_ui_surfaces_capability_reason_and_recovery_hint():
     for symbol in (
         "_workflowErrorDetails",

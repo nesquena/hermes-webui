@@ -6815,14 +6815,25 @@ async function loadWorkflowDag(workflowId,opts={}){
     detail.innerHTML=`<div class="workflow-unavailable"><strong>Could not load workflow DAG</strong><span>${esc((err&&err.message)||'Unknown workflow error')}</span><button class="btn secondary" onclick="loadWorkflowDag('${esc(workflowId)}')">Retry</button></div>`;
   }
 }
+async function openWorkflowMaterializedKanbanTask(taskId){
+  if(!taskId) return;
+  if(typeof switchPanel==='function' && _currentPanel !== 'kanban') await switchPanel('kanban');
+  await loadKanban(true);
+  await loadKanbanTask(taskId);
+}
 async function materializeWorkflowToKanban(workflowId){
   const status=$('workflowMaterializeStatus');
   if(status) status.textContent='Materializing workflow into Kanban tasks...';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/materialize`,{method:'POST',body:JSON.stringify({actorId:'webui'})});
     const facts=_workflowFacts(payload);
-    const created=(facts.createdTaskIds||facts.created_task_ids||[]).length;
-    if(status) status.textContent=created?`Materialized ${created} Kanban task${created===1?'':'s'}.`:'Workflow already materialized; no new Kanban tasks created.';
+    const ids=facts.createdTaskIds||facts.created_task_ids||[];
+    const created=ids.length;
+    if(status){
+      status.innerHTML=created
+        ? `Materialized ${created} Kanban task${created===1?'':'s'}. <span class="workflow-materialized-task-list">${ids.map(taskId=>`<button class="btn secondary" type="button" onclick="openWorkflowMaterializedKanbanTask('${esc(taskId)}')">Open Kanban task ${esc(taskId)}</button>`).join('')}</span>`
+        : 'Workflow already materialized; no new Kanban tasks created.';
+    }
     await Promise.all([loadWorkflows(true),loadWorkflowDag(workflowId,{silent:true})]);
   }catch(err){
     if(status) status.textContent=`Could not materialize workflow: ${((err&&err.message)||'Unknown error')}`;
