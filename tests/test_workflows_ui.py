@@ -64,3 +64,43 @@ def test_workflow_dag_nodes_are_opaque_over_graph_background():
     node_rule = STYLE_CSS[node_rule_start : STYLE_CSS.index("}", node_rule_start)]
     assert "background:var(--surface);" in node_rule
     assert "transparent" not in node_rule
+
+
+def test_workflow_dag_status_semantics_are_visible_for_all_canonical_states():
+    for status in (
+        "waiting",
+        "ready",
+        "running",
+        "blocked",
+        "failed",
+        "review",
+        "publish",
+        "done",
+        "cancelled",
+    ):
+        assert f".workflow-dag-node.status-{status}" in STYLE_CSS
+    assert "workflow-status-dot" in PANELS_JS
+    assert "workflow-dag-status" in PANELS_JS
+
+
+def test_workflow_node_inspector_renders_canonical_fact_sections():
+    for label in (
+        "Summary",
+        "Dependencies",
+        "Definition of Done",
+        "Execution",
+        "Gate",
+        "Evidence",
+        "Artifacts",
+        "Audit Events",
+        "Insights",
+    ):
+        assert label in PANELS_JS
+    for helper in (
+        "_workflowNodeInspectorSection",
+        "_workflowNodeList",
+        "_workflowNodeEventRows",
+        "_workflowNodeArtifactRows",
+    ):
+        assert helper in PANELS_JS
+    assert "LLM insight" in PANELS_JS

@@ -3863,18 +3863,40 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-dag-node{position:absolute;width:180px;min-height:76px;display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);text-align:left;cursor:pointer;box-shadow:0 10px 28px rgba(0,0,0,.18);}
 .workflow-dag-node:hover,.workflow-dag-node:focus{outline:none;border-color:var(--accent);transform:translateY(-1px);}
 .workflow-dag-node-title{font-weight:750;font-size:13px;line-height:1.25;}
-.workflow-dag-node-meta,.workflow-dag-gate{font-size:11px;color:var(--muted);line-height:1.25;}
+.workflow-dag-node-meta,.workflow-dag-gate,.workflow-dag-status{font-size:11px;color:var(--muted);line-height:1.25;}
+.workflow-dag-status{display:inline-flex;align-items:center;gap:6px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
+.workflow-status-dot{width:8px;height:8px;border-radius:999px;background:var(--muted);box-shadow:0 0 0 3px rgba(148,163,184,.12);flex-shrink:0;}
 .workflow-dag-gate{display:inline-flex;width:max-content;max-width:100%;border:1px solid var(--border);border-radius:999px;padding:2px 6px;}
-.workflow-node-inspector{position:sticky;top:12px;display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--border);border-radius:16px;background:var(--panel);color:var(--muted);font-size:12px;}
+.workflow-node-inspector{position:sticky;top:12px;display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--muted);font-size:12px;}
 .workflow-node-inspector strong{color:var(--text);font-size:14px;}
 .workflow-node-facts{display:grid;grid-template-columns:92px 1fr;gap:6px 10px;margin:0;}
 .workflow-node-facts dt{color:var(--muted);}
 .workflow-node-facts dd{margin:0;color:var(--text);overflow-wrap:anywhere;}
 .workflow-inspector-section{display:flex;flex-direction:column;gap:5px;border-top:1px solid var(--border);padding-top:10px;}
+.workflow-inspector-section h4{margin:0;color:var(--text);font-size:12px;text-transform:uppercase;letter-spacing:.05em;}
 .workflow-inspector-section b{color:var(--text);}
+.workflow-inspector-section p{margin:0;color:var(--text);line-height:1.45;}
+.workflow-inspector-section ul{margin:0;padding-left:18px;color:var(--text);}
+.workflow-inspector-section pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text);font-family:var(--font-mono);font-size:11px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px;}
+.workflow-inspector-row{display:flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:8px;background:var(--surface-2);}
+.workflow-inspector-row span,.workflow-inspector-empty{color:var(--muted);overflow-wrap:anywhere;}
+.workflow-inspector-insights{background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:10px;padding:10px;}
+.workflow-dag-node.status-waiting{border-color:rgba(148,163,184,.55);}
+.workflow-dag-node.status-ready{border-color:rgba(59,130,246,.65);}
 .workflow-dag-node.status-running{border-color:rgba(245,158,11,.65);}
 .workflow-dag-node.status-blocked,.workflow-dag-node.status-failed{border-color:rgba(239,68,68,.65);}
+.workflow-dag-node.status-review{border-color:rgba(168,85,247,.65);}
+.workflow-dag-node.status-publish{border-color:rgba(20,184,166,.65);}
 .workflow-dag-node.status-done{border-color:rgba(34,197,94,.65);}
+.workflow-dag-node.status-cancelled{border-color:rgba(107,114,128,.65);opacity:.78;}
+.workflow-dag-node.status-waiting .workflow-status-dot{background:#94a3b8;}
+.workflow-dag-node.status-ready .workflow-status-dot{background:#3b82f6;}
+.workflow-dag-node.status-running .workflow-status-dot{background:#f59e0b;}
+.workflow-dag-node.status-blocked .workflow-status-dot,.workflow-dag-node.status-failed .workflow-status-dot{background:#ef4444;}
+.workflow-dag-node.status-review .workflow-status-dot{background:#a855f7;}
+.workflow-dag-node.status-publish .workflow-status-dot{background:#14b8a6;}
+.workflow-dag-node.status-done .workflow-status-dot{background:#22c55e;}
+.workflow-dag-node.status-cancelled .workflow-status-dot{background:#6b7280;}
 .workflow-dag-node-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}
 .workflow-node-pill{border:1px solid var(--border);border-radius:12px;padding:10px;background:var(--panel);display:flex;flex-direction:column;gap:4px;}
 .workflow-node-pill span{color:var(--muted);font-size:12px;}

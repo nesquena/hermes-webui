@@ -6759,12 +6759,34 @@ function _workflowDagEdges(edges,positions){
 function _workflowDagNode(node,pos,workflowId){
   const status=node.status||'waiting';
   const gate=node.gateType||node.gateLevel;
-  const meta=[node.role,node.profile,status].filter(Boolean).join(' · ');
+  const meta=[node.role,node.profile].filter(Boolean).join(' · ');
   return `<button class="workflow-dag-node status-${esc(status)}" style="left:${pos.x}px;top:${pos.y}px" onclick="loadWorkflowNode('${esc(workflowId)}','${esc(node.id)}')">
     <span class="workflow-dag-node-title">${esc(node.title||node.id)}</span>
     ${meta?`<span class="workflow-dag-node-meta">${esc(meta)}</span>`:''}
+    <span class="workflow-dag-status"><i class="workflow-status-dot" aria-hidden="true"></i>${esc(status)}</span>
     ${gate?`<span class="workflow-dag-gate">Gate: ${esc(gate)}</span>`:''}
   </button>`;
+}
+function _workflowNodeText(value,fallback='Unavailable'){
+  if(value==null||value==='') return fallback;
+  if(Array.isArray(value)) return value.length?value.join(', '):fallback;
+  if(typeof value==='object') return Object.keys(value).length?JSON.stringify(value):fallback;
+  return String(value);
+}
+function _workflowNodeList(items,empty='Unavailable'){
+  if(!items||!items.length) return `<span class="workflow-inspector-empty">${esc(empty)}</span>`;
+  return `<ul>${items.map(item=>`<li>${esc(_workflowNodeText(item))}</li>`).join('')}</ul>`;
+}
+function _workflowNodeInspectorSection(title,body,extraClass=''){
+  return `<section class="workflow-inspector-section ${esc(extraClass)}"><h4>${esc(title)}</h4>${body}</section>`;
+}
+function _workflowNodeArtifactRows(artifacts){
+  if(!artifacts||!artifacts.length) return '<span class="workflow-inspector-empty">No artifacts reported.</span>';
+  return artifacts.map(artifact=>`<div class="workflow-inspector-row"><b>${esc(artifact.kind||artifact.type||artifact.id||'artifact')}</b><span>${esc(artifact.path||artifact.url||artifact.status||'metadata only')}</span></div>`).join('');
+}
+function _workflowNodeEventRows(events){
+  if(!events||!events.length) return '<span class="workflow-inspector-empty">No audit events reported.</span>';
+  return events.map(event=>`<div class="workflow-inspector-row"><b>${esc(event.eventType||event.event_type||event.type||'event')}</b><span>${esc(event.message||event.createdAt||event.created_at||'No message')}</span></div>`).join('');
 }
 async function loadWorkflowNode(workflowId,nodeId){
   const inspector=$('workflowNodeInspector');
@@ -6774,19 +6796,25 @@ async function loadWorkflowNode(workflowId,nodeId){
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/nodes/${encodeURIComponent(nodeId)}`);
     const facts=_workflowFacts(payload);
     const node=facts.node||{id:nodeId};
-    const gates=facts.gates||[];
-    const events=facts.events||[];
-    const artifacts=facts.artifacts||[];
+    const gates=facts.gates||node.gates||[];
+    const events=facts.events||node.events||[];
+    const artifacts=facts.artifacts||node.artifacts||[];
+    const evidence=node.evidence||facts.evidence||{};
+    const execution=node.execution||{};
+    const workspace=node.workspace||{};
+    const insights=facts.insights||node.insights||payload.insights||null;
+    const activeGate=node.gate||gates[0]||{};
     inspector.innerHTML=`<strong>${esc(node.title||node.id)}</strong>
       <span>${esc([node.role,node.profile,node.status].filter(Boolean).join(' · ')||'No node metadata')}</span>
-      <dl class="workflow-node-facts">
-        <dt>Kanban task</dt><dd>${esc(node.kanbanTaskId||'—')}</dd>
-        <dt>Workspace</dt><dd>${esc((node.workspace&&node.workspace.worktreePath)||'scratch')}</dd>
-        <dt>Gates</dt><dd>${gates.length}</dd>
-        <dt>Artifacts</dt><dd>${artifacts.length}</dd>
-        <dt>Recent events</dt><dd>${events.length}</dd>
-      </dl>
-      ${gates.length?`<div class="workflow-inspector-section"><b>Gate status</b>${gates.map(gate=>`<span>${esc([gate.gateType,gate.status,gate.requiredActor].filter(Boolean).join(' · '))}</span>`).join('')}</div>`:''}`;
+      ${_workflowNodeInspectorSection('Summary',`<p>${esc(_workflowNodeText(node.scope&&node.scope.summary,'No summary provided.'))}</p>`)}
+      ${_workflowNodeInspectorSection('Dependencies',`<dl class="workflow-node-facts"><dt>Parents</dt><dd>${esc(_workflowNodeText(node.parents,'None'))}</dd><dt>Children</dt><dd>${esc(_workflowNodeText(node.children,'None'))}</dd></dl>`)}
+      ${_workflowNodeInspectorSection('Definition of Done',_workflowNodeList(node.definitionOfDone||node.definition_of_done,'No definition of done reported.'))}
+      ${_workflowNodeInspectorSection('Execution',`<dl class="workflow-node-facts"><dt>Kanban task</dt><dd>${esc(node.kanbanTaskId||execution.kanban_task_id||'—')}</dd><dt>Workspace</dt><dd>${esc(workspace.worktreePath||execution.worktree_path||workspace.kind||'scratch')}</dd><dt>Branch</dt><dd>${esc(workspace.branch||execution.branch||'—')}</dd></dl>`)}
+      ${_workflowNodeInspectorSection('Gate',`<dl class="workflow-node-facts"><dt>Type</dt><dd>${esc(activeGate.gateType||activeGate.type||node.gateType||'—')}</dd><dt>Level</dt><dd>${esc(activeGate.level||node.gateLevel||'—')}</dd><dt>Status</dt><dd>${esc(activeGate.status||'—')}</dd></dl>`)}
+      ${_workflowNodeInspectorSection('Evidence',`<pre>${esc(_workflowNodeText(evidence,'No evidence reported.'))}</pre>`)}
+      ${_workflowNodeInspectorSection('Artifacts',_workflowNodeArtifactRows(artifacts))}
+      ${_workflowNodeInspectorSection('Audit Events',_workflowNodeEventRows(events))}
+      ${insights?_workflowNodeInspectorSection('Insights',`<p><b>LLM insight</b>: ${esc(_workflowNodeText(insights.summary||insights))}</p>`,'workflow-inspector-insights'):''}`;
   }catch(err){
     inspector.innerHTML=`<strong>Could not load node</strong><span>${esc((err&&err.message)||'Unknown workflow node error')}</span><button class="btn secondary" onclick="loadWorkflowNode('${esc(workflowId)}','${esc(nodeId)}')">Retry</button>`;
   }
