@@ -79,86 +79,143 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
-/* OFFICE LAYOUT - SPATIAL POSITIONING */
-/* Engineering Room - Top Left */
+/* OFFICE LAYOUT - REALISTIC SPATIAL POSITIONING WITH HALLWAYS */
+/* Engineering Room - Top Left with proper spacing */
 .workspace-zone.engineering {
-  top: 60px;
-  left: 60px;
-  width: 320px;
-  height: 240px;
+  top: 80px;
+  left: 80px;
+  width: 340px;
+  height: 260px;
   border-color: var(--color-primary);
   background: linear-gradient(135deg, 
     var(--bg-secondary) 0%, 
     rgba(var(--color-primary-rgb), 0.08) 100%);
   box-shadow: 
-    0 4px 16px rgba(0, 0, 0, 0.1),
-    0 0 20px rgba(var(--color-primary-rgb), 0.15),
+    0 6px 20px rgba(0, 0, 0, 0.12),
+    0 0 24px rgba(var(--color-primary-rgb), 0.15),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  /* Add wall effect */
+  border-width: 4px;
+  border-style: solid;
 }
 
-/* Research Room - Top Right */
+/* Research Room - Top Right with hallway space */
 .workspace-zone.research {
-  top: 60px;
-  right: 60px;
-  width: 320px;
-  height: 240px;
+  top: 80px;
+  right: 80px;
+  width: 340px;
+  height: 260px;
   border-color: var(--color-success);
   background: linear-gradient(135deg, 
     var(--bg-secondary) 0%, 
     rgba(16, 185, 129, 0.08) 100%);
   box-shadow: 
-    0 4px 16px rgba(0, 0, 0, 0.1),
-    0 0 20px rgba(16, 185, 129, 0.15),
+    0 6px 20px rgba(0, 0, 0, 0.12),
+    0 0 24px rgba(16, 185, 129, 0.15),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-width: 4px;
+  border-style: solid;
 }
 
-/* Operations Room - Bottom Left */
+/* Operations Room - Bottom Left with hallway space */
 .workspace-zone.operations {
-  bottom: 180px;
-  left: 60px;
-  width: 320px;
-  height: 240px;
+  bottom: 200px;
+  left: 80px;
+  width: 340px;
+  height: 260px;
   border-color: var(--color-warning);
   background: linear-gradient(135deg, 
     var(--bg-secondary) 0%, 
     rgba(245, 158, 11, 0.08) 100%);
   box-shadow: 
-    0 4px 16px rgba(0, 0, 0, 0.1),
-    0 0 20px rgba(245, 158, 11, 0.15),
+    0 6px 20px rgba(0, 0, 0, 0.12),
+    0 0 24px rgba(245, 158, 11, 0.15),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-width: 4px;
+  border-style: solid;
 }
 
-/* Meeting Room - Bottom Right */
+/* Meeting Room - Bottom Right with hallway space */
 .workspace-zone.meeting {
-  bottom: 180px;
-  right: 60px;
-  width: 320px;
-  height: 240px;
+  bottom: 200px;
+  right: 80px;
+  width: 340px;
+  height: 260px;
   border-color: var(--color-purple);
   background: linear-gradient(135deg, 
     var(--bg-secondary) 0%, 
     rgba(139, 92, 246, 0.08) 100%);
   box-shadow: 
-    0 4px 16px rgba(0, 0, 0, 0.1),
-    0 0 20px rgba(139, 92, 246, 0.15),
+    0 6px 20px rgba(0, 0, 0, 0.12),
+    0 0 24px rgba(139, 92, 246, 0.15),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-width: 4px;
+  border-style: solid;
 }
 
-/* Lounge - Center */
+/* Lounge - Center with proper clearance */
 .workspace-zone.lounge {
-  bottom: 60px;
+  bottom: 80px;
   left: 50%;
   transform: translateX(-50%);
-  width: 400px;
-  height: 100px;
+  width: 420px;
+  height: 120px;
   border-color: var(--color-pink);
   background: linear-gradient(135deg, 
     var(--bg-secondary) 0%, 
     rgba(236, 72, 153, 0.08) 100%);
   box-shadow: 
-    0 4px 16px rgba(0, 0, 0, 0.1),
-    0 0 20px rgba(236, 72, 153, 0.15),
+    0 6px 20px rgba(0, 0, 0, 0.12),
+    0 0 24px rgba(236, 72, 153, 0.15),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  border-width: 4px;
+  border-style: solid;
+}
+
+/* Add hallway indicators */
+.workspace-map::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80px;
+  height: 80px;
+  background: 
+    radial-gradient(circle, 
+      rgba(255, 255, 255, 0.04) 0%, 
+      transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Add corner hallway connections */
+.workspace-map::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: 
+    /* Vertical hallway */
+    linear-gradient(90deg, 
+      transparent 0%, 
+      transparent calc(50% - 40px), 
+      rgba(255, 255, 255, 0.02) calc(50% - 40px),
+      rgba(255, 255, 255, 0.02) calc(50% + 40px),
+      transparent calc(50% + 40px),
+      transparent 100%
+    ),
+    /* Horizontal hallway */
+    linear-gradient(180deg, 
+      transparent 0%, 
+      transparent calc(50% - 40px), 
+      rgba(255, 255, 255, 0.02) calc(50% - 40px),
+      rgba(255, 255, 255, 0.02) calc(50% + 40px),
+      transparent calc(50% + 40px),
+      transparent 100%
+    );
+  pointer-events: none;
+  z-index: 1;
 }
   border-color: var(--color-pink);
   background: linear-gradient(135deg, 
@@ -389,7 +446,7 @@
   z-index: 5;
 }
 
-/* ===== AGENT AVATARS ===== */
+/* ===== AGENT AVATARS - SPRITE BASED ===== */
 .workspace-agent {
   position: absolute;
   width: 32px;
@@ -409,12 +466,97 @@
     0 1px 4px rgba(0, 0, 0, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.2);
   animation: gentle-float 3s ease-in-out infinite;
-  /* Avatar improvements */
-  border: 2px solid rgba(255, 255, 255, 0.3);
+  /* Enhanced sprite styling */
+  border: 3px solid rgba(255, 255, 255, 0.3);
   backdrop-filter: blur(2px);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   letter-spacing: 0.5px;
+  /* Sprite image support */
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  position: absolute;
+  overflow: hidden;
 }
+
+/* Sprite image overlays for different agent roles */
+.workspace-agent.coordinator::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGNpcmNsZSBjeD0iMTYiIGN5PSIxNiIgcj0iMTYiIGZpbGw9IiMzQjgyRjYiLz4KPHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB4PSI2IiB5PSI2Ij4KPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiB4PSI0IiB5PSI0Ij4KPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPHN2ZyB3aWR0aD0iMTQiIGhlaWdodD0iMTQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iMTAiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiBzdHJva2U9IiNGRkZGRkYiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj4KPC9zdmc+') center/80% no-repeat;
+  border-radius: 50%;
+  z-index: 1;
+}
+
+.workspace-agent.developer::before {
+  content: '💻';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  z-index: 1;
+}
+
+.workspace-agent.devops::before {
+  content: '⚙️';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  z-index: 1;
+}
+
+.workspace-agent.researcher::before {
+  content: '🔬';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  z-index: 1;
+}
+
+.workspace-agent.analyst::before {
+  content: '📊';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  z-index: 1;
+}
+
+.workspace-agent.security::before {
+  content: '🛡️';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  z-index: 1;
+}
+
+/* Hide text when sprite is shown */
+.workspace-agent.coordinator,
+.workspace-agent.developer,
+.workspace-agent.devops,
+.workspace-agent.researcher,
+.workspace-agent.analyst,
+.workspace-agent.security {
+  color: transparent;
+  text-indent: -9999px;
+}
+
+/* Agent positioning - render directly in workspace-map, NOT inside room divs */
+/* Agents are now positioned dynamically via JavaScript */
 
 /* Agent name labels */
 .workspace-agent::after {
@@ -805,65 +947,106 @@
   }
 }
 
-@media (max-width: 768px) {
+/* ===== CRITICAL MOBILE FIX ===== */
+@media (max-width: 767px) {
+  /* Hide sidebar on mobile to prevent overlap */
+  .sidebar {
+    display: none;
+  }
+  
+  /* Ensure main content uses full width */
+  .layout {
+    grid-template-columns: 64px 1fr;
+  }
+  
   .workspace-2d-container {
-    min-height: calc(100vh - 120px);
+    min-height: calc(100vh - 60px);
     overflow-x: auto;
     overflow-y: auto;
   }
 
   .workspace-map {
-    /* Mobile: Stack vertically */
-    min-height: calc(100vh - 140px);
+    /* Enable horizontal scrolling */
+    overflow-x: auto;
+    min-width: 100%;
+    min-height: calc(100vh - 80px);
     padding: var(--space-4);
-    transform: none !important; /* Disable zoom transforms on mobile */
+    /* Scale down on mobile */
+    transform: scale(0.85);
+    transform-origin: top left;
+    /* Ensure map is wide enough for scaled content */
+    width: calc(100% / 0.85);
   }
 
-  /* Mobile: Reposition rooms in vertical stack */
+  /* Mobile: Adjust room positions for scaled view */
   .workspace-zone.engineering {
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% - 40px);
-    max-width: 300px;
-    height: 140px;
+    top: 40px;
+    left: 40px;
+    width: 260px;
+    height: 180px;
   }
 
   .workspace-zone.research {
-    top: 180px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% - 40px);
-    max-width: 300px;
-    height: 140px;
+    top: 40px;
+    right: 40px;
+    left: auto;
+    width: 260px;
+    height: 180px;
   }
 
   .workspace-zone.operations {
-    top: 340px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% - 40px);
-    max-width: 300px;
-    height: 140px;
+    bottom: 140px;
+    left: 40px;
+    width: 260px;
+    height: 180px;
   }
 
   .workspace-zone.meeting {
-    top: 500px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% - 40px);
-    max-width: 300px;
-    height: 140px;
+    bottom: 140px;
+    right: 40px;
+    left: auto;
+    width: 260px;
+    height: 180px;
   }
 
   .workspace-zone.lounge {
-    top: 660px;
+    bottom: 30px;
     left: 50%;
     transform: translateX(-50%);
-    width: calc(100% - 40px);
-    max-width: 300px;
-    height: 100px;
-    bottom: auto;
+    width: 320px;
+    height: 80px;
+  }
+
+  /* Mobile agent positioning - update CSS selectors */
+  .workspace-agent[data-zone="engineering"] {
+    top: calc(40px + 40px + 20px) !important;
+    left: calc(40px + 40px + 20px) !important;
+  }
+
+  .workspace-agent[data-zone="research"] {
+    top: calc(40px + 40px + 30px) !important;
+    right: calc(40px + 40px + 30px) !important;
+    left: auto !important;
+  }
+
+  .workspace-agent[data-zone="operations"] {
+    bottom: calc(140px + 40px + 40px) !important;
+    left: calc(40px + 50px + 20px) !important;
+    top: auto !important;
+  }
+
+  .workspace-agent[data-zone="meeting"] {
+    bottom: calc(140px + 40px + 50px) !important;
+    right: calc(40px + 50px + 40px) !important;
+    left: auto !important;
+    top: auto !important;
+  }
+
+  .workspace-agent[data-zone="lounge"] {
+    bottom: calc(30px + 30px + 15px) !important;
+    left: 50% !important;
+    transform: translateX(-50%) translateX(20px) !important;
+    top: auto !important;
   }
 
   /* Mobile workspace controls */
@@ -874,22 +1057,24 @@
     top: auto;
     flex-direction: column;
     gap: var(--space-2);
+    z-index: 50;
   }
 
   .workspace-btn {
-    width: 44px;
-    height: 44px;
-    touch-action: manipulation; /* Improve touch response */
+    width: 40px;
+    height: 40px;
+    touch-action: manipulation;
   }
 
   /* Mobile agent info panel */
   .agent-info-panel {
     position: fixed;
-    width: calc(100% - var(--space-8));
-    bottom: var(--space-4);
-    left: var(--space-4);
-    right: var(--space-4);
+    width: calc(100% - var(--space-6));
+    bottom: var(--space-3);
+    left: var(--space-3);
+    right: var(--space-3);
     max-width: none;
+    z-index: 45;
   }
 
   .agent-info-metrics {
@@ -901,12 +1086,6 @@
     width: 28px;
     height: 28px;
     font-size: 10px;
-    /* Better touch targets */
-    min-width: 44px;
-    min-height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
   }
 
   .workspace-agent::before {
@@ -917,17 +1096,17 @@
 
   /* Simplified furniture on mobile */
   .zone-furniture > * {
-    opacity: 0.2;
-    transform: scale(0.7);
+    opacity: 0.3;
+    transform: scale(0.8);
   }
 
-  /* Mobile hover states (touch) */
+  /* Prevent zone transforms on mobile */
   .workspace-zone:hover {
-    transform: translateX(-50%) translateY(-2px) scale(1.01);
+    transform: translateY(-1px) scale(1.005);
   }
 
   .workspace-zone.lounge:hover {
-    transform: translateX(-50%) translateY(-2px) scale(1.01);
+    transform: translateX(-50%) translateY(-1px) scale(1.005);
   }
 }
 

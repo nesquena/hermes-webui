@@ -158,104 +158,121 @@ class GamifiedWorkspace {
         this.closeAgentInfo();
       }
     });
+
+    // Responsive positioning on window resize
+    let resizeTimeout;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        this.renderAgents(); // Re-position agents on resize
+        this.applyZoom(); // Adjust zoom for new screen size
+      }, 150);
+    });
   }
 
   renderAgents() {
-    // Clear existing agents
-    document.querySelectorAll('.agent-container').forEach(container => {
-      container.innerHTML = '';
-    });
+    // Clear existing agents from workspace-map
+    const workspaceMap = document.getElementById('workspaceMap');
+    if (!workspaceMap) return;
+    
+    // Remove any existing agent elements
+    workspaceMap.querySelectorAll('.workspace-agent').forEach(el => el.remove());
 
-    // Position and render each agent in their zone
+    // Position and render each agent directly in workspace-map
     this.agents.forEach(agent => {
       const agentElement = this.createAgentElement(agent);
-      const container = document.getElementById(`agents-${agent.zone}`);
-      if (container) {
-        this.positionAgentInZone(agent, container);
-        container.appendChild(agentElement);
-      }
+      this.positionAgentInWorkspace(agent, agentElement);
+      workspaceMap.appendChild(agentElement);
     });
 
-    console.log(`[GamifiedWorkspace] Rendered ${this.agents.length} agents`);
+    console.log(`[GamifiedWorkspace] Rendered ${this.agents.length} agents in workspace-map`);
   }
 
-  positionAgentInZone(agent, container) {
-    // Get zone dimensions for absolute positioning
-    const zone = container.closest('.workspace-zone');
-    const zoneRect = zone.getBoundingClientRect();
-    
-    // Agent size
-    const agentSize = 32;
-    const padding = 15;
-    
-    // Calculate safe area (avoiding furniture)
-    const safeWidth = zoneRect.width - (padding * 2) - agentSize;
-    const safeHeight = zoneRect.height - (padding * 2) - agentSize - 50; // Account for header
-    
-    let attempts = 0;
-    let validPosition = false;
-    let x, y;
+  positionAgentInWorkspace(agent, agentElement) {
+    // Get workspace map dimensions for responsive positioning
+    const workspaceMap = document.getElementById('workspaceMap');
+    if (!workspaceMap) return;
 
-    while (!validPosition && attempts < 15) {
-      // Generate random position within safe bounds
-      x = padding + Math.random() * Math.max(0, safeWidth);
-      y = 50 + padding + Math.random() * Math.max(0, safeHeight); // Start below header
-      
-      // Check for overlaps with other agents in the same zone
-      const otherAgents = this.agents.filter(a => 
-        a.id !== agent.id && 
-        a.zone === agent.zone && 
-        a.position
-      );
-      
-      validPosition = otherAgents.every(other => {
-        const distance = Math.sqrt(
-          Math.pow(x - other.position.x, 2) + 
-          Math.pow(y - other.position.y, 2)
-        );
-        return distance > agentSize + 8; // Minimum separation
-      });
-      
-      attempts++;
+    const mapRect = workspaceMap.getBoundingClientRect();
+    const mapWidth = mapRect.width;
+    const mapHeight = mapRect.height;
+
+    // Position agents directly in workspace-map based on their zone
+    // with small random offsets inside room boundaries
+    
+    const zonePositions = {
+      engineering: { 
+        baseX: 80 + 50, // room left + offset from wall
+        baseY: 80 + 60, // room top + header + offset
+        maxX: 80 + 340 - 50, // room left + width - offset
+        maxY: 80 + 260 - 50  // room top + height - offset
+      },
+      research: { 
+        baseX: Math.max(mapWidth - 80 - 340 + 50, 450), // right side
+        baseY: 80 + 60,
+        maxX: Math.max(mapWidth - 80 - 50, 500),
+        maxY: 80 + 260 - 50
+      },
+      operations: { 
+        baseX: 80 + 50,
+        baseY: Math.max(mapHeight - 200 - 260 + 60, 400), // bottom side
+        maxX: 80 + 340 - 50,
+        maxY: Math.max(mapHeight - 200 - 50, 450)
+      },
+      meeting: { 
+        baseX: Math.max(mapWidth - 80 - 340 + 50, 450),
+        baseY: Math.max(mapHeight - 200 - 260 + 60, 400),
+        maxX: Math.max(mapWidth - 80 - 50, 500),
+        maxY: Math.max(mapHeight - 200 - 50, 450)
+      },
+      lounge: { 
+        baseX: Math.max((mapWidth / 2) - 210 + 50, 150), // center - half width + offset
+        baseY: Math.max(mapHeight - 80 - 120 + 40, 500),
+        maxX: Math.max((mapWidth / 2) + 210 - 50, 300),
+        maxY: Math.max(mapHeight - 80 - 40, 550)
+      }
+    };
+
+    const zonePos = zonePositions[agent.zone];
+    if (!zonePos) {
+      console.warn(`No position defined for zone: ${agent.zone}`);
+      return;
     }
 
-    // Fallback positioning if no valid position found
-    if (!validPosition) {
-      const agentsInZone = this.agents.filter(a => a.zone === agent.zone).length;
-      const angle = (agentsInZone * 60) % 360; // Spread agents in circle
-      const radius = Math.min(safeWidth, safeHeight) * 0.3;
-      const centerX = zoneRect.width / 2;
-      const centerY = (zoneRect.height / 2) + 25; // Offset for header
-      
-      x = centerX + Math.cos(angle * Math.PI / 180) * radius;
-      y = centerY + Math.sin(angle * Math.PI / 180) * radius;
-      
-      // Ensure within bounds
-      x = Math.max(padding, Math.min(x, zoneRect.width - agentSize - padding));
-      y = Math.max(50 + padding, Math.min(y, zoneRect.height - agentSize - padding));
-    }
+    // Add small random offset within room boundaries (±20px)
+    const randomOffsetX = (Math.random() - 0.5) * 40; // -20 to +20
+    const randomOffsetY = (Math.random() - 0.5) * 40; // -20 to +20
+    
+    // Calculate final position
+    let finalX = zonePos.baseX + randomOffsetX;
+    let finalY = zonePos.baseY + randomOffsetY;
+    
+    // Ensure agent stays within room boundaries
+    finalX = Math.max(zonePos.baseX, Math.min(finalX, zonePos.maxX - 32));
+    finalY = Math.max(zonePos.baseY, Math.min(finalY, zonePos.maxY - 32));
 
-    agent.position = { x, y };
+    // Apply positioning with CSS attributes for sprite rendering
+    agentElement.style.position = 'absolute';
+    agentElement.style.left = `${finalX}px`;
+    agentElement.style.top = `${finalY}px`;
+    agentElement.setAttribute('data-zone', agent.zone);
+
+    // Store position for future reference
+    agent.position = { x: finalX, y: finalY };
   }
 
   createAgentElement(agent) {
     const agentDiv = document.createElement('div');
     agentDiv.className = `workspace-agent ${agent.role} status-${agent.status}`;
     
-    // Use initials or emoji for avatar
+    // Use sprite-based rendering - text will be hidden by CSS for sprite roles
     const avatarText = this.getAgentAvatar(agent);
     agentDiv.textContent = avatarText;
     agentDiv.title = `${agent.name} - ${agent.status}`;
     agentDiv.dataset.agentId = agent.id;
     agentDiv.dataset.name = agent.name; // For label display
+    agentDiv.dataset.zone = agent.zone; // For CSS positioning
     agentDiv.tabIndex = 0; // Make keyboard accessible
-
-    // Position the agent
-    if (agent.position) {
-      agentDiv.style.position = 'absolute';
-      agentDiv.style.left = `${agent.position.x}px`;
-      agentDiv.style.top = `${agent.position.y}px`;
-    }
 
     // Event handlers
     agentDiv.addEventListener('click', (e) => {
@@ -304,23 +321,33 @@ class GamifiedWorkspace {
   }
 
   getAgentAvatar(agent) {
-    // Create more meaningful avatars based on role and name
+    // For sprite-based agents, we still need fallback text
+    // The CSS will handle showing sprites and hiding text
     const roleEmojis = {
       coordinator: '👑',
-      developer: '👨‍💻', 
+      developer: '💻', 
       devops: '⚙️',
       researcher: '🔬',
       analyst: '📊',
       security: '🛡️'
     };
 
-    // Use emoji if available, otherwise use initials
+    // Use emoji if available, otherwise use meaningful initials
     if (roleEmojis[agent.role]) {
       return roleEmojis[agent.role];
     }
 
-    // Fallback to initials
-    return agent.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+    // Enhanced fallback to role-based initials
+    const roleInitials = {
+      coordinator: 'CO',
+      developer: agent.name.includes('Alpha') ? 'D1' : 'D2',
+      devops: 'DO',
+      researcher: 'RS',
+      analyst: 'AN',
+      security: 'SC'
+    };
+
+    return roleInitials[agent.role] || agent.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
   }
 
   selectAgent(agent) {
@@ -414,7 +441,7 @@ class GamifiedWorkspace {
     // Update agent data
     agent.zone = newZone;
     
-    // Add movement animation class
+    // Get agent element
     const agentElement = document.querySelector(`[data-agent-id="${agent.id}"]`);
     if (agentElement) {
       agentElement.classList.add('moving');
@@ -426,17 +453,21 @@ class GamifiedWorkspace {
       }, 1200);
     }
 
-    // Smoother re-render with better timing
+    // Re-position agent with smooth transition
     setTimeout(() => {
-      this.renderAgents();
-      this.movingAgents.delete(agent.id);
-      
       if (agentElement) {
+        // Calculate new position
+        this.positionAgentInWorkspace(agent, agentElement);
+        
+        // Update zone data attribute
+        agentElement.setAttribute('data-zone', newZone);
+        
+        this.movingAgents.delete(agent.id);
         agentElement.classList.remove('moving');
+        
+        console.log(`[GamifiedWorkspace] ${agent.name} moved from ${oldZone} to ${newZone}`);
       }
-      
-      console.log(`[GamifiedWorkspace] ${agent.name} moved from ${oldZone} to ${newZone}`);
-    }, 1500);
+    }, 600);
   }
 
   // Enhanced zoom functionality with mobile considerations
