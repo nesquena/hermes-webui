@@ -596,8 +596,8 @@ global.fetch = async function(path, opts = {}) {
       spaces: [
         {
           space_id: 'broken',
-          name: 'Broken <Space>',
-          description: 'Recover without <script>running</script>',
+          name: scenario === 'recoveryUnsafeSpaceDisplayMetadata' ? 'source Space' : 'Broken <Space>',
+          description: scenario === 'recoveryUnsafeSpaceDisplayMetadata' ? 'data panel' : 'Recover without <script>running</script>',
           widget_count: 2,
           revision_event_id: scenario === 'recoveryUnsafeTopRevisionEventId' ? 'source/../api_key-SECRET_VALUE_DO_NOT_LEAK' : 'rev-broken',
           disabled: false,
@@ -2102,7 +2102,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId') {
+  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId' || scenario === 'recoveryUnsafeSpaceDisplayMetadata') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -4745,6 +4745,26 @@ def test_spaces_ui_recovery_panel_redacts_unsafe_current_revision_id(driver_path
     assert "<script>" not in recovery_html
     assert "renderer" not in recovery_html
     assert "api_key" not in recovery_html.lower()
+    assert "SECRET" not in recovery_html
+
+
+def test_spaces_ui_recovery_panel_redacts_unsafe_space_display_metadata(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryUnsafeSpaceDisplayMetadata")
+
+    recovery_html = out["recoveryHtml"]
+    assert "Safe recovery" in recovery_html
+    assert "Space ID: broken" in recovery_html
+    assert "[REDACTED]" in recovery_html
+    assert "Disable space" in recovery_html
+    assert "Ask Capy to repair Space" in recovery_html
+    assert "source Space" not in recovery_html
+    assert "data panel" not in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html
+    assert "source" not in recovery_html
+    assert "api_key" not in recovery_html.lower()
+    assert "raw prompt" not in recovery_html.lower()
+    assert "data panel" not in recovery_html.lower()
     assert "SECRET" not in recovery_html
 
 

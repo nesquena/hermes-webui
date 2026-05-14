@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-13 20:11 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 01:18 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces history/event HTTP routes now honor bounded `limit` query parameters for revision timelines and widget event inboxes while preserving metadata-only route responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces safe recovery now redacts unsafe Space-level display metadata (`name`/`description`) in the recovery/admin panel while preserving safe Space IDs and repair/disable/export/rollback actions. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): redact recovery space display metadata`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the safe recovery panel redacts unsafe standalone Space `name`/`description` display metadata such as `source Space` and `data panel`, preserves the safe `Space ID: broken` operational anchor, and keeps recovery actions visible.
+  - Hardened `renderRecoverySnapshot(...)` with a recovery-specific display sanitizer layered on the existing display-metadata redactor so recovery/admin Space cards omit standalone generated-body/source/html/script/data markers without broadening public product-home redaction.
+  - Validation at completion: focused RED failed before implementation (`1 failed`), expanded review-gap RED failed for standalone `source`/`data` display markers (`1 failed`), focused GREEN passed (`1 passed`), Spaces UI behavior + demo parity suites passed (`182 passed`), full Spaces foundation suite passed (`265 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery display metadata browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-space-display-metadata-qa.png`.
 
 - `fix(spaces): honor bounded route history limits`
   - Added RED/GREEN route coverage proving `/api/spaces/revisions?limit=2` and `/api/spaces/widget/events?limit=1` return bounded newest-first metadata windows instead of overfetching entire rollback/event histories.

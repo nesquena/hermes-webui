@@ -612,6 +612,13 @@
     return unsafeDisplayPattern.test(text) ? '[REDACTED]' : text;
   }
 
+  function safeRecoverySpaceDisplayText(value, fallback){
+    const text = safeDisplayMetadataText(value, fallback);
+    if (!text || text === '[REDACTED]') return text;
+    const unsafeRecoveryDisplayPattern = /(^|[^a-z0-9])(?:source|render|body|html|script|data)($|[^a-z0-9])/i;
+    return unsafeRecoveryDisplayPattern.test(text) ? '[REDACTED]' : text;
+  }
+
   function renderCreatorSpecSummary(spec){
     const safeSpec = spec && typeof spec === 'object' && !Array.isArray(spec) ? spec : {};
     const space = safeSpec.space && typeof safeSpec.space === 'object' && !Array.isArray(safeSpec.space) ? safeSpec.space : {};
@@ -2848,8 +2855,8 @@
       const rawSpaceId = s.space_id || '';
       const spaceId = safePathIdText(rawSpaceId);
       const spaceIdLabel = spaceId || '[REDACTED]';
-      const name = s.name || spaceId || 'Untitled';
-      const description = s.description || '';
+      const name = safeRecoverySpaceDisplayText(s.name || spaceId || 'Untitled', '[REDACTED]') || '[REDACTED]';
+      const description = s.description ? safeRecoverySpaceDisplayText(s.description, '[REDACTED]') : '';
       const widgets = Array.isArray(s.widgets) ? s.widgets : [];
       const spaceDisabled = !!s.disabled;
       const spaceDisabledReason = s.disabled_reason ? safeDisplayMetadataText(String(s.disabled_reason), '[REDACTED]') : '';
