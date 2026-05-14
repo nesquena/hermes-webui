@@ -7,7 +7,7 @@ class NixonWorkspace {
                 id: 'coordinator',
                 name: 'Coordinator',
                 role: 'Coordinator',
-                status: 'online',
+                status: 'working',
                 currentTask: 'Managing workflows',
                 room: 'command-center',
                 tasks: ['Workflow optimization', 'Team coordination', 'Performance monitoring'],
@@ -17,7 +17,7 @@ class NixonWorkspace {
                 id: 'developer',
                 name: 'Developer',
                 role: 'Developer',
-                status: 'busy',
+                status: 'working',
                 currentTask: 'Building features',
                 room: 'developer-zone',
                 tasks: ['API development', 'Feature implementation', 'Code review'],
@@ -27,7 +27,7 @@ class NixonWorkspace {
                 id: 'developer-2',
                 name: 'Developer 2',
                 role: 'Developer',
-                status: 'online',
+                status: 'working',
                 currentTask: 'Bug fixing',
                 room: 'developer-zone',
                 tasks: ['Bug fixes', 'Testing', 'Documentation'],
@@ -47,7 +47,7 @@ class NixonWorkspace {
                 id: 'researcher',
                 name: 'Researcher',
                 role: 'Researcher',
-                status: 'online',
+                status: 'researching',
                 currentTask: 'Data analysis',
                 room: 'research-lab',
                 tasks: ['Market research', 'Data mining', 'Trend analysis'],
@@ -57,7 +57,7 @@ class NixonWorkspace {
                 id: 'analyst',
                 name: 'Analyst',
                 role: 'Analyst',
-                status: 'busy',
+                status: 'researching',
                 currentTask: 'Performance review',
                 room: 'research-lab',
                 tasks: ['Performance metrics', 'Usage analytics', 'Report generation'],
@@ -67,7 +67,7 @@ class NixonWorkspace {
                 id: 'security',
                 name: 'Security',
                 role: 'Security',
-                status: 'online',
+                status: 'idle',
                 currentTask: 'Security audit',
                 room: 'deployment-hub',
                 tasks: ['Security scanning', 'Vulnerability assessment', 'Compliance check'],
@@ -331,12 +331,14 @@ class NixonWorkspace {
                     }
                     
                     if (Math.random() < 0.05) { // 5% chance to change status
-                        const statuses = ['online', 'busy'];
-                        const currentIndex = statuses.indexOf(agent.status);
-                        agent.status = statuses[1 - currentIndex];
+                        const statuses = ['working', 'researching', 'meeting', 'idle', 'online'];
+                        agent.status = statuses[Math.floor(Math.random() * statuses.length)];
                         this.updateAgentStatus(agent.id, agent.status);
                     }
                 });
+                
+                // Update 2D workspace with current agent data
+                renderAgents(this.agents);
                 
                 // Update task progress
                 this.tasks.forEach(task => {
@@ -360,6 +362,9 @@ class NixonWorkspace {
                 statusIndicator.className = statusIndicator.className.replace(/(online|busy|offline)/, status);
             }
         });
+        
+        // Update 2D workspace
+        renderAgents(this.agents);
     }
 
     updateAgentInSidebar(agent) {
@@ -608,6 +613,9 @@ class NixonWorkspace {
         if (notificationBadge) {
             notificationBadge.textContent = '3';
         }
+        
+        // Initial render of 2D workspace
+        renderAgents(this.agents);
     }
 
     showNotification(message) {
@@ -646,6 +654,46 @@ class NixonWorkspace {
             clearInterval(this.simulationInterval);
         }
     }
+}
+
+// 2D Workspace Functions
+function mapStatusToZone(status) {
+    if (status === 'researching') return 'zone-research';
+    if (status === 'working') return 'zone-engineering';
+    if (status === 'meeting') return 'zone-meeting';
+    if (status === 'idle') return 'zone-lounge';
+    return 'zone-operations';
+}
+
+function renderAgents(agents) {
+    const map = document.getElementById('workspace-map');
+    if (!map || !Array.isArray(agents)) return;
+
+    agents.forEach(agent => {
+        let el = document.querySelector(`[data-id="${agent.id}"]`);
+
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'agent';
+            el.dataset.id = agent.id;
+            map.appendChild(el);
+        }
+
+        const zoneId = mapStatusToZone(agent.status);
+        const zone = document.getElementById(zoneId);
+        if (!zone) return;
+
+        // Get zone position relative to map
+        const mapRect = map.getBoundingClientRect();
+        const zoneRect = zone.getBoundingClientRect();
+        
+        // Calculate relative position within the map
+        const relativeX = zoneRect.left - mapRect.left + (zoneRect.width / 2) - 9; // Center agent (18px / 2)
+        const relativeY = zoneRect.top - mapRect.top + (zoneRect.height / 2) - 9;
+
+        el.style.left = relativeX + 'px';
+        el.style.top = relativeY + 'px';
+    });
 }
 
 // Initialize the workspace when DOM is loaded

@@ -1299,3 +1299,36 @@ input, textarea, select {
   white-space: nowrap;
   border: 0;
 }
+
+/* ===== 2D WORKSPACE MAP ===== */
+#workspace-map {
+  position: relative;
+  width: 100%;
+  height: 500px;
+  background: #0f172a;
+  border-radius: 10px;
+  margin-top: 12px;
+}
+
+.zone {
+  position: absolute;
+  color: #fff;
+  font-size: 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 4px;
+}
+
+#zone-engineering { top:10%; left:10%; width:30%; height:30%; }
+#zone-research { top:10%; right:10%; width:30%; height:30%; }
+#zone-operations { bottom:10%; left:10%; width:30%; height:30%; }
+#zone-meeting { bottom:10%; right:10%; width:30%; height:30%; }
+#zone-lounge { top:40%; left:40%; width:20%; height:20%; }
+
+.agent {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background: #22c55e;
+  border-radius: 50%;
+  transition: all 0.6s ease;
+}
