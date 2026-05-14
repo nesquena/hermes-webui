@@ -36,7 +36,7 @@
 
 ### Fixed
 
-- MCP Tools in Settings → System now uses a bounded scroll region with 5-item default pages, a per-page selector up to 40 tools, and a visible result summary, so large MCP tool inventories no longer make the settings panel balloon indefinitely.
+- MCP Tools in Settings → System now uses a bounded scroll region with 5-item default pages, a remembered per-page selector up to 40 tools, and a visible result summary, so large MCP tool inventories no longer make the settings panel balloon indefinitely.
 
 - **PR #2201** by @MrFant — Multi-turn conversations with thinking-mode providers (MiMo/Xiaomi, DeepSeek, Kimi/Moonshot) no longer 400 with `Param Incorrect: reasoning_content must be passed back`. WebUI's `_sanitize_messages_for_api()` strips fields not in `_API_SAFE_MSG_KEYS` before sending conversation history to the LLM; `reasoning_content` was missing from the whitelist, so when history was replayed on the second turn, the assistant message with `tool_calls` arrived without `reasoning_content` and providers enforcing thinking-mode echo-back rejected it. One-line fix: adds `'reasoning_content'` to `_API_SAFE_MSG_KEYS`. CLI was unaffected because `run_agent.py` has its own `_copy_reasoning_content_for_api()` that doesn't go through this filter.
 

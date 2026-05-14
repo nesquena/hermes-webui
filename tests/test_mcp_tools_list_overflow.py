@@ -28,11 +28,20 @@ def test_mcp_tool_rendering_is_paginated_not_full_list_rendered():
     assert "list.innerHTML=filtered.map(tool=>" not in PANELS_JS
 
 
-def test_mcp_tool_page_size_selector_resets_to_first_page():
+def test_mcp_tool_page_size_selector_persists_and_resets_to_first_page():
     assert "function setMcpToolsPageSize(size){" in PANELS_JS
+    assert "const MCP_TOOLS_PAGE_SIZE_STORAGE_KEY='hermes-webui-mcp-tools-page-size'" in PANELS_JS
     assert "if(!MCP_TOOLS_PAGE_SIZE_OPTIONS.includes(next)) return;" in PANELS_JS
-    assert "_mcpToolsPageSize=next;\n  _mcpToolsPage=1;" in PANELS_JS
+    assert "_mcpToolsPageSize=next;\n  _persistMcpToolsPageSize(next);\n  _mcpToolsPage=1;" in PANELS_JS
+    assert "function _restoreMcpToolsPageSize(){" in PANELS_JS
+    assert "_restoreMcpToolsPageSize();\n  const list=$('mcpToolList');" in PANELS_JS
     assert "mcp_tools_per_page_aria" in PANELS_JS
+
+
+def test_mcp_tool_page_setter_clamps_public_onclick_input():
+    assert "function setMcpToolsPage(page){" in PANELS_JS
+    assert "const next=Number(page);\n  if(!Number.isFinite(next)) return;" in PANELS_JS
+    assert "_mcpToolsPage=Math.max(1,Math.floor(next));" in PANELS_JS
 
 
 def test_mcp_tool_search_respects_selected_page_size():
@@ -87,4 +96,4 @@ def test_mcp_tool_pagination_strings_are_i18n_backed():
 def test_changelog_mentions_large_mcp_tool_inventory_fix():
     assert "large MCP tool inventories" in CHANGELOG
     assert "5-item default pages" in CHANGELOG
-    assert "per-page selector up to 40 tools" in CHANGELOG
+    assert "remembered per-page selector up to 40 tools" in CHANGELOG

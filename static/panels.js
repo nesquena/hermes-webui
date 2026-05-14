@@ -6289,6 +6289,16 @@ let _mcpToolsMeta={};
 let _mcpToolsPage=1;
 let _mcpToolsPageSize=5;
 const MCP_TOOLS_PAGE_SIZE_OPTIONS=[5,10,20,40];
+const MCP_TOOLS_PAGE_SIZE_STORAGE_KEY='hermes-webui-mcp-tools-page-size';
+function _restoreMcpToolsPageSize(){
+  try{
+    const stored=Number(localStorage.getItem(MCP_TOOLS_PAGE_SIZE_STORAGE_KEY));
+    if(MCP_TOOLS_PAGE_SIZE_OPTIONS.includes(stored)) _mcpToolsPageSize=stored;
+  }catch(_){/* ignore unavailable storage */}
+}
+function _persistMcpToolsPageSize(size){
+  try{ localStorage.setItem(MCP_TOOLS_PAGE_SIZE_STORAGE_KEY,String(size)); }catch(_){/* ignore unavailable storage */}
+}
 function _filterMcpToolsForSearch(tools, query){
   const q=(query||'').trim().toLowerCase();
   if(!q) return Array.isArray(tools)?tools:[];
@@ -6370,7 +6380,9 @@ function _renderMcpTools(tools, query){
   }).join('');
 }
 function setMcpToolsPage(page){
-  _mcpToolsPage=page;
+  const next=Number(page);
+  if(!Number.isFinite(next)) return;
+  _mcpToolsPage=Math.max(1,Math.floor(next));
   const input=$('mcpToolSearch');
   _renderMcpTools(_mcpToolsCache,input?input.value:'');
   const list=$('mcpToolList');
@@ -6380,6 +6392,7 @@ function setMcpToolsPageSize(size){
   const next=Number(size);
   if(!MCP_TOOLS_PAGE_SIZE_OPTIONS.includes(next)) return;
   _mcpToolsPageSize=next;
+  _persistMcpToolsPageSize(next);
   _mcpToolsPage=1;
   const input=$('mcpToolSearch');
   _renderMcpTools(_mcpToolsCache,input?input.value:'');
@@ -6394,6 +6407,7 @@ function filterMcpTools(){
   if(list) list.scrollTop=0;
 }
 function loadMcpTools(){
+  _restoreMcpToolsPageSize();
   const list=$('mcpToolList');
   const toolbar=$('mcpToolToolbar');
   const pager=$('mcpToolPager');
