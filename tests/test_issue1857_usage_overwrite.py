@@ -98,8 +98,10 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
             self._last_error = None
 
         def run_conversation(self, **kwargs):
+            # Return full history + new reply (matches real agent behavior)
+            history = kwargs.get("conversation_history", [])
             return {
-                "messages": [
+                "messages": history + [
                     {"role": "user", "content": kwargs["persist_user_message"]},
                     {"role": "assistant", "content": "new answer"},
                 ]

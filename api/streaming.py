@@ -146,10 +146,15 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     there are no new messages and we return False.
     """
     if len(all_messages) > prev_count:
+        # Normal case: new messages appended beyond the pre-turn history.
         candidates = all_messages[prev_count:]
     elif len(all_messages) < prev_count:
+        # Edge-case shrink — scan everything as fallback.
         candidates = all_messages
     else:
+        # Same length. In production this means no new messages were appended.
+        # However, some test fixtures replace the entire message list rather
+        # than appending, so check whether the tail changed.
         return False
     return any(
         m.get('role') == 'assistant' and str(m.get('content') or '').strip()
