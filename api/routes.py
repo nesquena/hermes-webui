@@ -5085,11 +5085,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/system-widget/upsert":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        panel = body.get("panel")
-        if not space_id or not panel:
-            return bad(handler, "Missing space_id or panel")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            panel = body.get("panel")
+            if not space_id or not panel:
+                return bad(handler, "Missing space_id or panel")
             return j(handler, capy_spaces.upsert_system_widget(space_id, panel, body.get("layout") or {}))
         except RuntimeError as e:
             return bad(handler, str(e), 403)

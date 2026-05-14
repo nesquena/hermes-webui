@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 07:46 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 12:49 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces recovery disable/enable-widget HTTP routes now reject conflicting top-level `id` / `widgetId` selector aliases before recovery quarantine side effects, matching the rollback/restore adapter safety envelope. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces system-widget upsert HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before any trusted system-widget mutation side effects. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): harden system widget route aliases`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/system-widget/upsert` accepts camelCase `spaceId`, keeps trusted system-widget receipts metadata-only, and rejects conflicting `space_id` / `spaceId` selectors before adding a system widget to either candidate Space.
+  - Hardened the direct HTTP system-widget upsert route to use the shared Capy route selector alias resolver, aligning the trusted system-panel route with recently hardened widget upsert/patch/delete, restore, and recovery routes.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); full Spaces foundation suite passed (`277 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static route-alias browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/system-widget-route-alias-qa.png`.
 
 - `fix(spaces): reject conflicting recovery widget route ids`
   - Added RED/GREEN route coverage proving `POST /api/spaces/recovery/disable-widget` and `POST /api/spaces/recovery/enable-widget` reject conflicting top-level `id` / `widgetId` aliases before recovery state changes, preserve metadata-only public responses, and keep generated renderer/source/API-auth/secret-looking markers out of recovery summaries.

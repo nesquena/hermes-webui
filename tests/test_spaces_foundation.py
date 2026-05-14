@@ -10545,6 +10545,56 @@ def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monke
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_system_widget_route_accepts_camelcase_space_id_and_rejects_conflicts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "system-widget-camel", "name": "System Widget Camel"})
+    other = spaces.create_space({"space_id": "system-widget-other", "name": "System Widget Other"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/system-widget/upsert",
+        {
+            "spaceId": created["space_id"],
+            "panel": "settings",
+            "layout": {"x": 1, "y": 2, "w": 8, "h": 4},
+            "renderer": "<script>camelLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"]["id"] == "system-settings"
+    assert body["widget"]["system_panel"] == "settings"
+    assert spaces.read_space_detail(created["space_id"])["widgets"][0]["id"] == "system-settings"
+    serialized = json.dumps(body).lower()
+    assert "camelleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, conflict_body = _route_post(
+        "/api/spaces/system-widget/upsert",
+        {
+            "space_id": created["space_id"],
+            "spaceId": other["space_id"],
+            "panel": "terminal",
+            "layout": {"x": 0, "y": 0, "w": 12, "h": 6},
+            "source": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert conflict_body["error"] == "Conflicting Capy Spaces route selector aliases"
+    assert [widget["id"] for widget in spaces.read_space_detail(created["space_id"])["widgets"]] == ["system-settings"]
+    assert spaces.read_space_detail(other["space_id"])["widgets"] == []
+    conflict_serialized = json.dumps(conflict_body).lower()
+    assert "terminal" not in conflict_serialized
+    assert "source" not in conflict_serialized
+    assert "secret_value_do_not_leak" not in conflict_serialized
+
+
 def test_system_widget_route_rejects_unknown_panels(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "System Widget Reject"})
