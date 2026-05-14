@@ -4417,7 +4417,7 @@ def handle_post(handler, parsed) -> bool:
             if files is not None:
                 draft["files"] = files
             s.composer_draft = draft
-            s.save()
+            s.save(touch_updated_at=False)
         return j(handler, {"ok": True, "draft": s.composer_draft})
 
     if parsed.path == "/api/session/update":

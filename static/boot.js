@@ -926,6 +926,7 @@ $('modelSelect').onchange=async()=>{
   }
 };
 $('msg').addEventListener('input',()=>{
+  if(typeof markComposerEditedNow==='function') markComposerEditedNow();
   autoResize();
   updateSendBtn();
   // Persist composer draft to server (debounced in _saveComposerDraft).

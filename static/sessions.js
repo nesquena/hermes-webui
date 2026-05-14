@@ -22,6 +22,15 @@ let _loadingSessionId = null;
 // Debounced save — prevents hammering the server on every keystroke.
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
+let _composerLastInputAt = 0;
+
+function markComposerEditedNow() {
+  _composerLastInputAt = Date.now();
+}
+
+function _composerHasRecentLocalEdit(windowMs=3000) {
+  return !!(_composerLastInputAt && (Date.now() - _composerLastInputAt < windowMs));
+}
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
@@ -689,7 +698,15 @@ async function loadSession(sid){
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid);
+    const ta=$('msg');
+    const sameSessionForceReload=currentSid===sid&&forceReload;
+    const composerFocused=!!(ta&&document.activeElement===ta);
+    const hasLocalComposerText=!!(ta&&ta.value);
+    const recentLocalEdit=(typeof _composerHasRecentLocalEdit==='function')&&_composerHasRecentLocalEdit();
+    const shouldSkipDraftRestore=sameSessionForceReload&&(
+      composerFocused||recentLocalEdit||hasLocalComposerText
+    );
+    if(!shouldSkipDraftRestore) _restoreComposerDraft(_draft, sid);
   }
 
   _resolveSessionModelForDisplaySoon(sid);
