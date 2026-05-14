@@ -229,6 +229,19 @@ def test_workflow_inbox_items_use_core_shaping_before_promote():
     assert "_workflowDraftDagFromInboxItem" not in PANELS_JS
 
 
+def test_workflow_inbox_promote_ignores_stale_selection_after_async_shape_or_promote():
+    assert "const selectedItemId=itemId;" in PANELS_JS
+    assert "if(_currentWorkflowInboxItemId!==selectedItemId) return;" in PANELS_JS
+    assert "if(promotedFacts.workflow&&promotedFacts.workflow.id&&_currentWorkflowInboxItemId===selectedItemId)" in PANELS_JS
+
+
+def test_workflow_dag_load_ignores_stale_selection_after_async_fetches():
+    assert "const selectedWorkflowId=workflowId;" in PANELS_JS
+    assert "if(_currentWorkflowId!==selectedWorkflowId) return;" in PANELS_JS
+    assert "if(_currentWorkflowId!==selectedWorkflowId || opts.silent) return;" in PANELS_JS
+    assert "if(_currentWorkflowId!==workflowId) return;" in PANELS_JS
+
+
 def test_workflow_refresh_reloads_inbox_items_too():
     assert "await loadWorkflowInbox(true)" in PANELS_JS
     assert "loadWorkflowInbox();" in PANELS_JS

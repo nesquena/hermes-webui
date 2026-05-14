@@ -6680,26 +6680,30 @@ function renderWorkflowInboxDetail(item){
 async function promoteWorkflowInboxItem(){
   const itemId=_currentWorkflowInboxItemId;
   if(!itemId){ showToast('Select an inbox item first','error'); return; }
+  const selectedItemId=itemId;
   try{
     const current=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}`);
+    if(_currentWorkflowInboxItemId!==selectedItemId) return;
     const item=_workflowFacts(current).inboxItem||current.inboxItem||{};
     const assigned=$('workflowInboxAssignedWorkflowId');
     const workflowId=(assigned&&assigned.value.trim())||item.assignedWorkflowId||`wf_${String(itemId).replace(/[^a-zA-Z0-9]+/g,'_')}`;
     const workspacePath=$('workflowInboxWorkspacePath');
     const shapeBody={workflowId,title:item.title||workflowId,description:item.body||'',board:'default',scale:'medium'};
     const shaped=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}/shape`,{method:'POST',body:JSON.stringify(shapeBody)});
+    if(_currentWorkflowInboxItemId!==selectedItemId) return;
     const facts=_workflowFacts(shaped);
     const draftWorkflow=facts.draftWorkflow||{};
     const body={workflowId:draftWorkflow.id||workflowId,title:draftWorkflow.title||item.title||workflowId,description:draftWorkflow.description||item.body||'',board:draftWorkflow.board||'default',scale:draftWorkflow.scale||'medium',actorId:'webui',draftDag:facts.draftDag};
     if(workspacePath&&workspacePath.value.trim()) body.workspacePath=workspacePath.value.trim();
     const payload=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}/promote`,{method:'POST',body:JSON.stringify(body)});
+    if(_currentWorkflowInboxItemId!==selectedItemId) return;
     const promotedFacts=_workflowFacts(payload);
     renderWorkflowInboxDetail(promotedFacts.inboxItem||payload.inboxItem||{});
     _workflowInboxLoaded=false;
     _workflowListLoaded=false;
     await loadWorkflowInbox(true);
     await loadWorkflows(true);
-    if(promotedFacts.workflow&&promotedFacts.workflow.id) await loadWorkflowDag(promotedFacts.workflow.id);
+    if(promotedFacts.workflow&&promotedFacts.workflow.id&&_currentWorkflowInboxItemId===selectedItemId) await loadWorkflowDag(promotedFacts.workflow.id);
     showToast('Workflow inbox item promoted');
   }catch(err){
     showToast(((err&&err.message)||'Could not promote workflow inbox item'),'error');
@@ -6828,18 +6832,22 @@ function renderWorkflowList(workflows){
 }
 async function loadWorkflowDag(workflowId,opts={}){
   _currentWorkflowId=workflowId;
+  const selectedWorkflowId=workflowId;
   const detail=$('workflowDetailBody');
   if(!detail) return;
   if(!opts.silent) detail.innerHTML='<div class="workflow-dag-placeholder">Loading workflow DAG...</div>';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/dag`);
+    if(_currentWorkflowId!==selectedWorkflowId) return;
     const facts=_workflowFacts(payload);
     renderWorkflowDagCanvas(workflowId,facts);
     await Promise.all([
       loadWorkflowEvents(workflowId),
       loadWorkflowArtifacts(workflowId),
     ]);
+    if(_currentWorkflowId!==selectedWorkflowId) return;
   }catch(err){
+    if(_currentWorkflowId!==selectedWorkflowId || opts.silent) return;
     detail.innerHTML=`<div class="workflow-unavailable"><strong>Could not load workflow DAG</strong><span>${esc((err&&err.message)||'Unknown workflow error')}</span><button class="btn secondary" onclick="loadWorkflowDag('${esc(workflowId)}')">Retry</button></div>`;
   }
 }
@@ -7026,10 +7034,12 @@ async function loadWorkflowEvents(workflowId){
   pane.innerHTML='<h4>Workflow Events</h4><span class="workflow-inspector-empty">Loading workflow events...</span>';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/events`);
+    if(_currentWorkflowId!==workflowId) return;
     const facts=_workflowFacts(payload);
     const events=facts.events||payload.events||[];
     pane.innerHTML=`<h4>Workflow Events</h4>${_workflowEventRows(events)}`;
   }catch(err){
+    if(_currentWorkflowId!==workflowId) return;
     pane.innerHTML=`<h4>Workflow Events</h4><span class="workflow-inspector-empty">Could not load workflow events: ${esc((err&&err.message)||'Unknown error')}</span><button class="btn secondary" onclick="loadWorkflowEvents('${esc(workflowId)}')">Retry</button>`;
   }
 }
@@ -7039,10 +7049,12 @@ async function loadWorkflowArtifacts(workflowId){
   pane.innerHTML='<h4>Workflow Artifacts</h4><span class="workflow-inspector-empty">Loading workflow artifacts...</span>';
   try{
     const payload=await api(`/api/workflows/${encodeURIComponent(workflowId)}/artifacts`);
+    if(_currentWorkflowId!==workflowId) return;
     const facts=_workflowFacts(payload);
     const artifacts=facts.artifacts||payload.artifacts||[];
     pane.innerHTML=`<h4>Workflow Artifacts</h4>${_workflowArtifactRows(artifacts)}`;
   }catch(err){
+    if(_currentWorkflowId!==workflowId) return;
     pane.innerHTML=`<h4>Workflow Artifacts</h4><span class="workflow-inspector-empty">Could not load workflow artifacts: ${esc((err&&err.message)||'Unknown error')}</span><button class="btn secondary" onclick="loadWorkflowArtifacts('${esc(workflowId)}')">Retry</button>`;
   }
 }
