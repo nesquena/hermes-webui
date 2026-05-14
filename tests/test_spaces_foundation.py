@@ -9714,6 +9714,50 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert body["generated_widgets_rendered"] is False
 
 
+def test_space_delete_route_accepts_camelcase_id_and_rejects_conflicts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    camel = spaces.create_space({"space_id": "delete-camel-route", "name": "Delete Camel Route"})
+    conflict = spaces.create_space({"space_id": "delete-conflict-route", "name": "Delete Conflict Route"})
+    other = spaces.create_space({"space_id": "delete-other-route", "name": "Delete Other Route"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/delete",
+        {
+            "spaceId": camel["space_id"],
+            "renderer": "<script>deleteLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["deleted"] is True
+    assert body["space_id"] == camel["space_id"]
+    with pytest.raises(FileNotFoundError):
+        spaces.read_space_detail(camel["space_id"])
+
+    handled, status, body = _route_post(
+        "/api/spaces/delete",
+        {
+            "space_id": conflict["space_id"],
+            "spaceId": other["space_id"],
+            "renderer": "<script>conflictDeleteLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert spaces.read_space_detail(conflict["space_id"])["space_id"] == conflict["space_id"]
+    assert spaces.read_space_detail(other["space_id"])["space_id"] == other["space_id"]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_revision_restore_routes_accept_camelcase_ids_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "camel-route-restore", "name": "Camel Route Restore"})

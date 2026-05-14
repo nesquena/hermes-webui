@@ -4911,10 +4911,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/delete":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(handler, capy_spaces.delete_space(space_id))
         except RuntimeError as e:
             return bad(handler, str(e), 403)

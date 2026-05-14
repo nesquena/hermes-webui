@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 12:49 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 14:07 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces system-widget upsert HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before any trusted system-widget mutation side effects. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces delete HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before destructive Space deletion side effects. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): harden delete route aliases`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/delete` accepts camelCase `spaceId`, deletes only the selected Space, and rejects conflicting `space_id` / `spaceId` selectors before deleting either candidate Space.
+  - Hardened the direct HTTP Space delete route to use the shared Capy route selector alias resolver, aligning this destructive route with recovery/rollback/widget mutation route alias consistency.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); full Spaces foundation suite passed (`278 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static delete-route browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/delete-route-alias-qa.png`.
 
 - `fix(spaces): harden system widget route aliases`
   - Added RED/GREEN route coverage proving `POST /api/spaces/system-widget/upsert` accepts camelCase `spaceId`, keeps trusted system-widget receipts metadata-only, and rejects conflicting `space_id` / `spaceId` selectors before adding a system widget to either candidate Space.
