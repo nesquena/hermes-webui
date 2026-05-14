@@ -25,7 +25,8 @@ export ENV_OBFUSCATE_PART="TOKEN API KEY"
 if [ -z "${ENV_IGNORELIST+x}" ]; then error_exit "ENV_IGNORELIST not set"; fi
 if [ -z "${ENV_OBFUSCATE_PART+x}" ]; then error_exit "ENV_OBFUSCATE_PART not set"; fi
 
-whoami=`whoami`
+# whoami fails under set -e if the UID has no /etc/passwd entry (k8s runAsUser).
+whoami=$(whoami 2>/dev/null || echo "uid-$(id -u)")
 script_dir=$(dirname $0)
 script_name=$(basename $0)
 echo ""; echo ""
