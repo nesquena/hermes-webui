@@ -711,7 +711,7 @@
     try {
       let eventsData = {events: []};
       try {
-        eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(safeSpaceId));
+        eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(safeSpaceId)+'&limit=10');
       } catch (eventErr) {
         eventsData = {events: []};
       }
@@ -732,7 +732,7 @@
     try {
       const results = await Promise.all([
         fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId)),
-        fetchSpacesJson('api/spaces/revisions?space_id='+encodeURIComponent(safeSpaceId)),
+        fetchSpacesJson('api/spaces/revisions?space_id='+encodeURIComponent(safeSpaceId)+'&limit=10'),
       ]);
       root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || []);
     } catch (err) {
