@@ -269,6 +269,11 @@ if [ -f $tmp_root_env ]; then
 fi
 
 ##
+if [ ! -f /app/server.py ] && [ -d /apptoo ]; then
+  echo ""; echo "-- Seeding /app from /apptoo (rootless startup)"
+  cp -a /apptoo/. /app/ || error_exit "Failed to seed /app from /apptoo (is /app writable by the runtime user?)"
+fi
+
 echo ""; echo "-- Verifying /app is writable by the hermeswebui runtime user"
 if [ ! -d /app ]; then error_exit "/app directory does not exist"; fi
 it=/app/.testfile; touch $it || error_exit "Failed to verify /app directory"
