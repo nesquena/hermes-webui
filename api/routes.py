@@ -4089,7 +4089,10 @@ def handle_post(handler, parsed) -> bool:
 
     if (
         parsed.path == "/api/workflows/inbox"
-        or (parsed.path.startswith("/api/workflows/inbox/") and parsed.path.endswith("/promote"))
+        or (
+            parsed.path.startswith("/api/workflows/inbox/")
+            and (parsed.path.endswith("/shape") or parsed.path.endswith("/promote"))
+        )
         or (
             parsed.path.startswith("/api/workflows/")
             and (

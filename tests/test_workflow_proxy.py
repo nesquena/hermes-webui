@@ -266,6 +266,35 @@ def test_workflow_proxy_posts_control_actions_to_core_dashboard(monkeypatch):
     assert calls[3][3] == raw
 
 
+def test_workflow_proxy_posts_inbox_shape_to_core_dashboard(monkeypatch):
+    from api import dashboard_probe, workflows
+    from api.routes import handle_post
+
+    monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": True, "url": "http://127.0.0.1:9119"})
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.get_method(), dict(request.header_items()), request.data))
+        if request.full_url == "http://127.0.0.1:9119/workflows":
+            return _FakeResponse('<script>window.__HERMES_SESSION_TOKEN__="token-123";</script>')
+        return _FakeResponse({"facts": {"draftWorkflow": {"id": "wf_1"}, "draftDag": {"workflow_id": "wf_1"}}, "insights": None})
+
+    monkeypatch.setattr(workflows.urllib.request, "urlopen", fake_urlopen)
+    raw = b'{"workflowId":"wf_1","title":"Draft"}'
+    handler = _FakeHandler()
+    handler.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
+    handler.rfile = __import__("io").BytesIO(raw)
+
+    assert handle_post(handler, urlparse("http://example.com/api/workflows/inbox/inbox_1/shape")) is True
+
+    assert handler.status == 200
+    assert handler.json_body()["facts"]["draftWorkflow"]["id"] == "wf_1"
+    assert calls[1][0] == "http://127.0.0.1:9119/api/workflows/inbox/inbox_1/shape"
+    assert calls[1][1] == "POST"
+    assert calls[1][2]["X-hermes-session-token"] == "token-123"
+    assert calls[1][3] == raw
+
+
 def test_workflow_proxy_posts_inbox_promote_to_core_dashboard(monkeypatch):
     from api import dashboard_probe, workflows
     from api.routes import handle_post
