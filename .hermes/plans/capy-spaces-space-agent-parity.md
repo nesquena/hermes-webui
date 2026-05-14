@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 14:07 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 15:23 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces delete HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before destructive Space deletion side effects. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces Research Harness HTTP routes now accept Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before metadata-only progress/artifact side effects. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): harden research route aliases`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/research/progress` and `POST /api/spaces/research/artifact` accept camelCase `spaceId`, preserve metadata-only sanitized progress/export receipts, and reject conflicting `space_id` / `spaceId` selectors before mutating either candidate Research Space.
+  - Hardened both direct HTTP Research Harness routes to use the shared Capy route selector alias resolver, aligning Research E2E adapter entrypoints with the recent rollback/recovery/widget/delete alias consistency work.
+  - Validation at completion: focused RED failed before implementation (`2 failed`); focused GREEN passed (`2 passed`); full Spaces foundation suite passed (`280 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static research route-alias browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/research-route-alias-qa.png`.
 
 - `fix(spaces): harden delete route aliases`
   - Added RED/GREEN route coverage proving `POST /api/spaces/delete` accepts camelCase `spaceId`, deletes only the selected Space, and rejects conflicting `space_id` / `spaceId` selectors before deleting either candidate Space.

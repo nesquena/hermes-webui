@@ -4773,6 +4773,95 @@ def test_spaces_research_artifact_route_marks_summary_export_ready_metadata_only
     assert "password" not in serialized
 
 
+def test_spaces_research_routes_accept_space_id_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-camel-route")
+
+    handled, status, progress = _route_post(
+        "/api/spaces/research/progress",
+        {
+            "spaceId": installed["space"]["space_id"],
+            "phase": "camel source review",
+            "message": "Checking public references",
+            "sources": [{"title": "Safe source", "url": "https://example.com/source"}],
+            "notes": ["safe route note", "api_key=SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    handled_artifact, status_artifact, artifact = _route_post(
+        "/api/spaces/research/artifact",
+        {
+            "spaceId": installed["space"]["space_id"],
+            "title": "Camel exportable brief",
+            "markdown": "# Brief\nPublic facts only.\nsource=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"progress": progress, "artifact": artifact}).lower()
+
+    assert handled is None
+    assert status == 200
+    assert progress["space_id"] == installed["space"]["space_id"]
+    assert progress["widgets"]["plan"]["metadata"]["status"]["phase"] == "camel source review"
+    assert handled_artifact is None
+    assert status_artifact == 200
+    assert artifact["space_id"] == installed["space"]["space_id"]
+    assert artifact["artifact"]["value_summary"]["title"] == "Camel exportable brief"
+    assert "public facts only" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "source=" not in serialized
+
+
+def test_spaces_research_routes_reject_conflicting_space_aliases_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    first = spaces.install_template("research", space_id="research-conflict-first")
+    second = spaces.install_template("research", space_id="research-conflict-second")
+
+    handled, status, progress = _route_post(
+        "/api/spaces/research/progress",
+        {
+            "space_id": first["space"]["space_id"],
+            "spaceId": second["space"]["space_id"],
+            "phase": "conflicting source review",
+            "message": "Do not mutate either research Space",
+            "notes": ["api_key=SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"],
+        },
+    )
+    handled_artifact, status_artifact, artifact = _route_post(
+        "/api/spaces/research/artifact",
+        {
+            "space_id": first["space"]["space_id"],
+            "spaceId": second["space"]["space_id"],
+            "title": "Conflicting export",
+            "markdown": "# Leak\nrenderer source SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        },
+    )
+    first_plan = spaces.read_widget_detail(first["space"]["space_id"], "research-plan")
+    second_plan = spaces.read_widget_detail(second["space"]["space_id"], "research-plan")
+    serialized = json.dumps({"progress": progress, "artifact": artifact, "first": first_plan, "second": second_plan}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert handled_artifact is None
+    assert status_artifact == 400
+    assert "conflict" in progress["error"].lower()
+    assert "conflict" in artifact["error"].lower()
+    assert first_plan["metadata"].get("status", {}).get("phase") != "conflicting source review"
+    assert second_plan["metadata"].get("status", {}).get("phase") != "conflicting source review"
+    with pytest.raises(FileNotFoundError):
+        spaces.read_shared_data_slot(first["space"]["space_id"], "research-summary")
+    with pytest.raises(FileNotFoundError):
+        spaces.read_shared_data_slot(second["space"]["space_id"], "research-summary")
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer source" not in serialized
+
+
 def test_space_tool_adapter_deletes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-delete-lab", "name": "Shared Data Delete Lab"})

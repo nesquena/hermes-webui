@@ -4988,10 +4988,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/research/progress":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(
                 handler,
                 capy_spaces.set_research_progress(
@@ -5011,10 +5011,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/research/artifact":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(
                 handler,
                 capy_spaces.set_research_artifact(
