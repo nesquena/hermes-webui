@@ -4892,6 +4892,8 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Invalid clone_from name")
         base_url = body.get("base_url", "").strip() if body.get("base_url") else None
         api_key = body.get("api_key", "").strip() if body.get("api_key") else None
+        default_model = body.get("default_model", "").strip() if body.get("default_model") else None
+        model_provider = body.get("model_provider", "").strip() if body.get("model_provider") else None
         if base_url and not base_url.startswith(("http://", "https://")):
             return bad(handler, "base_url must start with http:// or https://")
         try:
@@ -4903,6 +4905,8 @@ def handle_post(handler, parsed) -> bool:
                 clone_config=bool(body.get("clone_config", False)),
                 base_url=base_url,
                 api_key=api_key,
+                default_model=default_model,
+                model_provider=model_provider,
             )
             return j(handler, {"ok": True, "profile": result})
         except (ValueError, FileExistsError, RuntimeError) as e:

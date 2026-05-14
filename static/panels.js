@@ -4721,6 +4721,11 @@ function _renderProfileForm(){
           </label>
         </div>
         <div class="detail-form-row">
+          <label for="profileFormModel">${esc(t('profile_model_label') || 'Model / provider')}</label>
+          <select id="profileFormModel"></select>
+          <div class="detail-form-hint">${esc(t('profile_model_hint') || 'Choose from configured providers and models for this new profile.')}</div>
+        </div>
+        <div class="detail-form-row">
           <label for="profileFormBaseUrl">${esc(t('profile_base_url_label') || 'Base URL')}</label>
           <input type="text" id="profileFormBaseUrl" placeholder="${esc(t('profile_base_url_placeholder') || 'Optional, e.g. http://localhost:11434')}" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
         </div>
@@ -4736,6 +4741,35 @@ function _renderProfileForm(){
   _setProfileHeaderButtons('create');
   const n = $('profileFormName');
   if (n) n.focus();
+  _populateProfileFormModelSelect();
+}
+
+async function _populateProfileFormModelSelect(){
+  const sel = $('profileFormModel');
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${esc(t('profile_model_use_default') || 'Use active profile default')}</option>`;
+  try {
+    const data = await api('/api/models');
+    const groups = (Array.isArray(data && data.groups) && data.groups.length) ? data.groups : [];
+    for (const g of groups) {
+      const og = document.createElement('optgroup');
+      og.label = g.provider || g.provider_id || 'Configured';
+      if (g.provider_id) og.dataset.provider = g.provider_id;
+      for (const m of (Array.isArray(g.models) ? g.models : [])) {
+        if (!m || !m.id) continue;
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label || m.id;
+        og.appendChild(opt);
+      }
+      if (og.children.length) sel.appendChild(og);
+    }
+    if (data && data.default_model && typeof _applyModelToDropdown === 'function') {
+      _applyModelToDropdown(data.default_model, sel, data.active_provider || window._activeProvider || null);
+    }
+  } catch (e) {
+    console.warn('Failed to load profile model picker:', e.message);
+  }
 }
 
 function cancelProfileForm(){
@@ -4752,6 +4786,7 @@ function cancelProfileForm(){
 async function saveProfileForm(){
   const nameEl = $('profileFormName');
   const cloneEl = $('profileFormClone');
+  const modelEl = $('profileFormModel');
   const baseEl = $('profileFormBaseUrl');
   const apiKeyEl = $('profileFormApiKey');
   const errEl = $('profileFormError');
@@ -4766,6 +4801,14 @@ async function saveProfileForm(){
   if (baseUrl && !/^https?:\/\//.test(baseUrl)) { errEl.textContent = t('profile_base_url_rule'); errEl.style.display = ''; return; }
   try {
     const payload = { name, clone_config: cloneConfig };
+    const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
+    if (selectedModel) {
+      const modelState = (typeof _modelStateForSelect === 'function')
+        ? _modelStateForSelect(modelEl, selectedModel)
+        : { model: selectedModel, model_provider: null };
+      if (modelState.model) payload.default_model = modelState.model;
+      if (modelState.model_provider) payload.model_provider = modelState.model_provider;
+    }
     if (baseUrl) payload.base_url = baseUrl;
     if (apiKey) payload.api_key = apiKey;
     await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
