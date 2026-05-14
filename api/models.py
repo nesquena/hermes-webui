@@ -1815,12 +1815,7 @@ def get_state_db_session_summary(sid) -> dict:
     except ImportError:
         return {}
 
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
-    db_path = hermes_home / 'state.db'
+    db_path = _active_state_db_path()
     if not sid or not db_path.exists():
         return {}
 
