@@ -33,21 +33,42 @@ def test_session_model_persists_context_engine_metadata():
     assert "self.context_engine_state =" in src
 
 
-def test_manual_compress_records_engine_aware_metadata():
+def test_context_engine_metadata_reports_lcm_runtime_shape():
+    from api import routes
+
+    class FakeLcmEngine:
+        name = "lcm"
+        compression_count = 3
+
+    meta = routes._context_engine_metadata(FakeLcmEngine())
+
+    assert meta == {
+        "engine": "lcm",
+        "mode": "lossless_retrieval",
+        "details": {
+            "engine": "lcm",
+            "retrieval_tools": ["lcm_grep", "lcm_expand", "lcm_describe"],
+            "compression_count": 3,
+        },
+    }
+
+
+def test_manual_compression_metadata_is_read_after_compress():
     src = _read("api/routes.py")
     start = src.find("def _handle_session_compress(handler, body)")
     assert start != -1, "manual compression handler not found"
     block = src[start:start + 15000]
 
-    assert "_context_engine_metadata(" in block
-    assert "agent.context_compressor" in block
+    compress_idx = block.find("compressed = agent.context_compressor.compress(")
+    metadata_idx = block.find("engine_meta = _context_engine_metadata(agent.context_compressor)")
+    assert compress_idx != -1
+    assert metadata_idx != -1
+    assert compress_idx < metadata_idx
+
     assert "s.context_engine" in block
     assert "s.compression_anchor_engine" in block
     assert "s.compression_anchor_mode" in block
     assert "s.compression_anchor_details" in block
-    assert "lossless_retrieval" in src
-    assert "lcm_grep" in block
-    assert "lcm_expand" in block
 
 
 def test_auto_compression_sse_payload_includes_engine_metadata():
@@ -63,14 +84,17 @@ def test_auto_compression_sse_payload_includes_engine_metadata():
     assert "_context_engine_metadata(" in src
 
 
-def test_frontend_renders_lcm_compression_card_copy_from_metadata():
+def test_frontend_renders_retrieval_compression_card_copy_from_i18n_metadata():
     src = _read("static/ui.js")
+    i18n = _read("static/i18n.js")
 
     assert "function _compressionEngineForSession" in src
     assert "function _compressionModeForSession" in src
-    assert "LCM indexed context" in src
-    assert "retrievable with LCM tools" in src
+    assert "t('retrieval_context_label')" in src
+    assert "t('retrieval_context_preview')" in src
     assert "lossless_retrieval" in src
+    assert "retrieval_context_label" in i18n
+    assert "retrieval_context_preview" in i18n
     # Legacy text-marker support should remain for old built-in compressor sessions.
     assert "function _isContextCompactionMessage" in src
     assert "[context compaction" in src.lower()
@@ -89,33 +113,105 @@ def test_compressed_sse_preserves_engine_metadata_for_live_card():
     assert "details:d.details" in block
 
 
-def test_duplicate_session_invokes_context_engine_clone_hook():
-    block = _route_block("/api/session/duplicate", lines=120)
+def test_context_engine_clone_helper_calls_fake_agent_hook(monkeypatch):
+    from api import routes
 
-    assert "_clone_context_engine_session_state(" in block
-    assert "mode=\"duplicate\"" in block
-    assert "old_session_id=session.session_id" in block
-    assert "new_session_id=copied_session.session_id" in block
-    assert "copied_session.context_engine_state" in block
-    assert "copied_session.context_engine" in block
+    calls = []
+
+    class FakeEngine:
+        name = "lcm"
+        compression_count = 4
+
+        def clone_session_state(self, old_session_id, new_session_id, **kwargs):
+            calls.append((old_session_id, new_session_id, kwargs))
+            return {"ok": True, "copied_sidecar": True}
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.context_compressor = FakeEngine()
+
+    monkeypatch.setattr(routes, "AIAgent", FakeAIAgent, raising=False)
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: ["web"])
+    monkeypatch.setattr(routes, "get_config", lambda: {"context": {"engine": "lcm"}})
+
+    result = routes._clone_context_engine_session_state(
+        old_session_id="old-session",
+        new_session_id="new-session",
+        mode="branch",
+        keep_count=2,
+        messages=[{"role": "user", "content": "kept"}],
+        context_messages=[{"role": "system", "content": "ctx"}],
+        model="gpt-test",
+        model_provider="test-provider",
+    )
+
+    assert result == {
+        "ok": True,
+        "copied_sidecar": True,
+        "engine": "lcm",
+        "mode": "branch",
+        "fork_semantics": "independent_fork",
+    }
+    assert calls == [
+        (
+            "old-session",
+            "new-session",
+            {
+                "mode": "branch",
+                "keep_count": 2,
+                "messages": [{"role": "user", "content": "kept"}],
+                "context_messages": [{"role": "system", "content": "ctx"}],
+            },
+        )
+    ]
 
 
-def test_branch_session_invokes_context_engine_clone_hook_as_independent_fork():
-    block = _route_block("/api/session/branch", lines=130)
+def test_default_compressor_clone_path_does_not_instantiate_agent(monkeypatch):
+    from api import routes
 
-    assert "_clone_context_engine_session_state(" in block
-    assert "mode=\"branch\"" in block
-    assert "keep_count=keep_count" in block
-    assert "old_session_id=source.session_id" in block
-    assert "new_session_id=branch.session_id" in block
-    assert "branch.context_engine_state" in block
-    assert "independent_fork" in block
+    class ExplodingAIAgent:
+        def __init__(self, **kwargs):
+            raise AssertionError("default compressor should not instantiate AIAgent")
+
+    monkeypatch.setattr(routes, "AIAgent", ExplodingAIAgent, raising=False)
+
+    result = routes._clone_context_engine_session_state(
+        old_session_id="old-session",
+        new_session_id="new-session",
+        mode="duplicate",
+    )
+
+    assert result == {
+        "ok": True,
+        "engine": "compressor",
+        "mode": "duplicate",
+        "copied_sidecar": True,
+        "warning": None,
+    }
 
 
-def test_context_engine_clone_hook_failure_has_explicit_warning():
-    src = _read("api/routes.py")
+def test_context_engine_clone_hook_failure_has_explicit_warning(monkeypatch):
+    from api import routes
 
-    assert "def _clone_context_engine_session_state" in src
-    assert "copied_sidecar" in src
-    assert "visible transcript only" in src
-    assert "Context engine clone hook unavailable" in src
+    class FakeEngineWithoutHook:
+        name = "lcm"
+
+    class FakeAIAgent:
+        def __init__(self, **kwargs):
+            self.context_compressor = FakeEngineWithoutHook()
+
+    monkeypatch.setattr(routes, "AIAgent", FakeAIAgent, raising=False)
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: ["web"])
+    monkeypatch.setattr(routes, "get_config", lambda: {"context": {"engine": "lcm"}})
+
+    result = routes._clone_context_engine_session_state(
+        old_session_id="old-session",
+        new_session_id="new-session",
+        mode="duplicate",
+    )
+
+    assert result["ok"] is False
+    assert result["copied_sidecar"] is False
+    assert result["engine"] == "lcm"
+    assert "visible transcript only" in result["warning"]

@@ -4917,8 +4917,8 @@ function _compressionModeForSession(){
 function _engineAwareCompressionCopy(engine=_compressionEngineForSession(), mode=_compressionModeForSession()){
   if(engine==='lcm'||mode==='lossless_retrieval'){
     return {
-      label:'LCM indexed context',
-      preview:'Earlier messages are stored and retrievable with LCM tools',
+      label:t('retrieval_context_label'),
+      preview:t('retrieval_context_preview'),
     };
   }
   return {

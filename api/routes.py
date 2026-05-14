@@ -1105,8 +1105,7 @@ def _clone_context_engine_session_state(
     that LCM's sidecar was copied.
     """
     try:
-        from api.config import get_config as _get_cfg
-        cfg = _get_cfg() or {}
+        cfg = get_config() or {}
         context_cfg = cfg.get("context") if isinstance(cfg.get("context"), dict) else {}
         configured_engine = str(context_cfg.get("engine") or "compressor").strip().lower() or "compressor"
     except Exception:
@@ -1116,9 +1115,11 @@ def _clone_context_engine_session_state(
         return _context_engine_clone_fallback("compressor", mode)
 
     try:
-        from run_agent import AIAgent
+        agent_cls = globals().get("AIAgent")
+        if agent_cls is None:
+            from run_agent import AIAgent as agent_cls
 
-        agent = AIAgent(
+        agent = agent_cls(
             model=model,
             provider=model_provider,
             platform="webui",
@@ -8713,12 +8714,12 @@ def _handle_session_compress(handler, body):
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,
         )
-        engine_meta = _context_engine_metadata(agent.context_compressor)
         compressed = agent.context_compressor.compress(
             original_messages,
             current_tokens=approx_tokens,
             focus_topic=focus_topic,
         )
+        engine_meta = _context_engine_metadata(agent.context_compressor)
         new_tokens = _estimate_messages_tokens_rough(compressed)
         summary = _summarize_manual_compression(
             original_messages,
@@ -8727,13 +8728,6 @@ def _handle_session_compress(handler, body):
             new_tokens,
             focus_topic=focus_topic,
         )
-        if engine_meta.get("engine") == "lcm":
-            summary = dict(summary or {})
-            summary.setdefault("headline", "LCM indexed context")
-            summary.setdefault(
-                "reference_message",
-                "LCM indexed this session. Earlier raw messages are preserved in the LCM store and can be retrieved with lcm_grep/lcm_expand.",
-            )
 
         with _cfg._get_session_agent_lock(sid):
             # Re-read messages to detect concurrent edits during the LLM call.
