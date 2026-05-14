@@ -134,6 +134,7 @@ def test_workflow_proxy_rejects_noncanonical_workflow_paths():
     assert is_workflow_proxy_path("/api/workflows/wf_1/events")
     assert is_workflow_proxy_path("/api/workflows/wf_1/artifacts")
     assert not is_workflow_proxy_path("/api/workflows/wf_1/delete")
+    assert not is_workflow_proxy_path("/api/workflows/wf_1/materialize")
     assert not is_workflow_proxy_path("/api/workflows/../../secrets")
 
 
@@ -194,6 +195,35 @@ def test_workflow_proxy_posts_inbox_items_to_core_dashboard(monkeypatch):
     assert handler.json_body()["facts"]["inboxItem"]["id"] == "inbox_1"
     assert calls[1][0] == "http://127.0.0.1:9119/api/workflows/inbox"
     assert calls[1][1] == "POST"
+    assert calls[1][3] == raw
+
+
+def test_workflow_proxy_posts_materialize_action_to_core_dashboard(monkeypatch):
+    from api import dashboard_probe, workflows
+    from api.routes import handle_post
+
+    monkeypatch.setattr(dashboard_probe, "get_dashboard_status", lambda: {"running": True, "url": "http://127.0.0.1:9119"})
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, request.get_method(), dict(request.header_items()), request.data))
+        if request.full_url == "http://127.0.0.1:9119/workflows":
+            return _FakeResponse('<script>window.__HERMES_SESSION_TOKEN__="token-123";</script>')
+        return _FakeResponse({"facts": {"workflowId": "wf_1", "status": "materialized"}, "insights": None})
+
+    monkeypatch.setattr(workflows.urllib.request, "urlopen", fake_urlopen)
+    raw = b'{"actorId":"webui"}'
+    handler = _FakeHandler()
+    handler.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
+    handler.rfile = __import__("io").BytesIO(raw)
+
+    assert handle_post(handler, urlparse("http://example.com/api/workflows/wf_1/materialize")) is True
+
+    assert handler.status == 200
+    assert handler.json_body()["facts"]["status"] == "materialized"
+    assert calls[1][0] == "http://127.0.0.1:9119/api/workflows/wf_1/materialize"
+    assert calls[1][1] == "POST"
+    assert calls[1][2]["X-hermes-session-token"] == "token-123"
     assert calls[1][3] == raw
 
 

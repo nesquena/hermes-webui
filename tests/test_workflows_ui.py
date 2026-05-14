@@ -219,6 +219,19 @@ def test_workflow_refresh_reloads_inbox_items_too():
     assert "loadWorkflowInbox();" in PANELS_JS
 
 
+def test_workflow_detail_can_materialize_dag_to_kanban():
+    for symbol in (
+        "materializeWorkflowToKanban",
+        "Materialize to Kanban",
+        "workflow-materialize-actions",
+        "`/api/workflows/${encodeURIComponent(workflowId)}/materialize`",
+        "method:'POST'",
+        "actorId:'webui'",
+    ):
+        assert symbol in PANELS_JS
+    assert ".workflow-materialize-actions" in STYLE_CSS
+
+
 def test_workflow_unavailable_ui_surfaces_capability_reason_and_recovery_hint():
     for symbol in (
         "_workflowErrorDetails",
