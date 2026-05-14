@@ -4087,12 +4087,16 @@ def handle_post(handler, parsed) -> bool:
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
 
-    if parsed.path == "/api/workflows/inbox" or (
-        parsed.path.startswith("/api/workflows/")
-        and (
-            parsed.path.endswith("/approve")
-            or parsed.path.endswith("/materialize")
-            or parsed.path.endswith("/resolve")
+    if (
+        parsed.path == "/api/workflows/inbox"
+        or (parsed.path.startswith("/api/workflows/inbox/") and parsed.path.endswith("/promote"))
+        or (
+            parsed.path.startswith("/api/workflows/")
+            and (
+                parsed.path.endswith("/approve")
+                or parsed.path.endswith("/materialize")
+                or parsed.path.endswith("/resolve")
+            )
         )
     ):
         from api.workflows import handle_workflow_post

@@ -6675,7 +6675,39 @@ async function loadWorkflowInboxItem(itemId){
 function renderWorkflowInboxDetail(item){
   const detail=$('workflowInboxDetail');
   if(!detail) return;
-  detail.innerHTML=`<div><strong>${esc(item.title||item.id||'Inbox item')}</strong><div class="workflow-inbox-empty">${esc(item.body||'No body.')}</div></div><form class="workflow-inbox-triage-form" onsubmit="triageWorkflowInboxItem(event)"><select id="workflowInboxClassification" aria-label="Workflow inbox classification"><option value="needs_shaping" ${item.classification==='needs_shaping'?'selected':''}>Needs shaping</option><option value="one_off" ${item.classification==='one_off'?'selected':''}>One-off</option><option value="decomposition_worthy" ${item.classification==='decomposition_worthy'?'selected':''}>Decomposition-worthy</option></select><input id="workflowInboxWorkspacePath" value="${esc(item.workspacePath||'')}" placeholder="Workspace path"><input id="workflowInboxAssignedWorkflowId" value="${esc(item.assignedWorkflowId||'')}" placeholder="Assigned workflow id"><button class="btn primary" type="submit">Mark triaged</button></form>`;
+  detail.innerHTML=`<div><strong>${esc(item.title||item.id||'Inbox item')}</strong><div class="workflow-inbox-empty">${esc(item.body||'No body.')}</div></div><form class="workflow-inbox-triage-form" onsubmit="triageWorkflowInboxItem(event)"><select id="workflowInboxClassification" aria-label="Workflow inbox classification"><option value="needs_shaping" ${item.classification==='needs_shaping'?'selected':''}>Needs shaping</option><option value="one_off" ${item.classification==='one_off'?'selected':''}>One-off</option><option value="decomposition_worthy" ${item.classification==='decomposition_worthy'?'selected':''}>Decomposition-worthy</option></select><input id="workflowInboxWorkspacePath" value="${esc(item.workspacePath||'')}" placeholder="Workspace path"><input id="workflowInboxAssignedWorkflowId" value="${esc(item.assignedWorkflowId||'')}" placeholder="Assigned workflow id"><button class="btn primary" type="submit">Mark triaged</button><button class="btn secondary" type="button" onclick="promoteWorkflowInboxItem()">Promote to draft workflow</button></form>`;
+}
+function _workflowDraftDagFromInboxItem(item,workflowId){
+  const title=item&&item.title?item.title:'Workflow from inbox';
+  const body=item&&item.body?item.body:'Shape and implement the selected inbox item.';
+  return {schema_version:1,workflow_id:workflowId,name:title,scale:'medium',nodes:[
+    {id:'shape-plan',title:'Shape plan',role:'planner',profile:'planner',scope:{summary:`Shape inbox request: ${body}`}},
+    {id:'build-slice',title:'Build first slice',role:'engineer',profile:'engineer',parents:['shape-plan'],definition_of_done:['Targeted tests pass.'],scope:{summary:`Implement the first useful slice for: ${title}`}}
+  ]};
+}
+async function promoteWorkflowInboxItem(){
+  const itemId=_currentWorkflowInboxItemId;
+  if(!itemId){ showToast('Select an inbox item first','error'); return; }
+  try{
+    const current=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}`);
+    const item=_workflowFacts(current).inboxItem||current.inboxItem||{};
+    const assigned=$('workflowInboxAssignedWorkflowId');
+    const workflowId=(assigned&&assigned.value.trim())||item.assignedWorkflowId||`wf_${String(itemId).replace(/[^a-zA-Z0-9]+/g,'_')}`;
+    const workspacePath=$('workflowInboxWorkspacePath');
+    const body={workflowId,title:item.title||workflowId,description:item.body||'',board:'default',scale:'medium',actorId:'webui',draftDag:_workflowDraftDagFromInboxItem(item,workflowId)};
+    if(workspacePath&&workspacePath.value.trim()) body.workspacePath=workspacePath.value.trim();
+    const payload=await api(`/api/workflows/inbox/${encodeURIComponent(itemId)}/promote`,{method:'POST',body:JSON.stringify(body)});
+    const facts=_workflowFacts(payload);
+    renderWorkflowInboxDetail(facts.inboxItem||payload.inboxItem||{});
+    _workflowInboxLoaded=false;
+    _workflowListLoaded=false;
+    await loadWorkflowInbox(true);
+    await loadWorkflows(true);
+    if(facts.workflow&&facts.workflow.id) await loadWorkflowDag(facts.workflow.id);
+    showToast('Workflow inbox item promoted');
+  }catch(err){
+    showToast(((err&&err.message)||'Could not promote workflow inbox item'),'error');
+  }
 }
 async function triageWorkflowInboxItem(event){
   if(event) event.preventDefault();

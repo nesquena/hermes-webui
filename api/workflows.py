@@ -23,7 +23,7 @@ _WORKFLOW_TIMEOUT_SECONDS = 2.0
 _WORKFLOW_PROXY_RE = re.compile(
     r"^/api/workflows(?:$|/inbox(?:$|/[^/]+$)|/[^/]+(?:$|/dag$|/events$|/artifacts$|/nodes/[^/]+$))"
 )
-_WORKFLOW_POST_RE = re.compile(r"^/api/workflows(?:/inbox|/[^/]+/(?:approve|materialize|gates/[^/]+/resolve))$")
+_WORKFLOW_POST_RE = re.compile(r"^/api/workflows(?:/inbox(?:$|/[^/]+/promote$)|/[^/]+/(?:approve|materialize|gates/[^/]+/resolve))$")
 _WORKFLOW_PATCH_RE = re.compile(r"^/api/workflows/inbox/[^/]+$")
 
 

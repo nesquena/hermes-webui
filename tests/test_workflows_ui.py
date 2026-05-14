@@ -214,6 +214,19 @@ def test_workflow_inbox_items_can_be_selected_and_triaged():
         assert selector in STYLE_CSS
 
 
+def test_workflow_inbox_items_can_be_promoted_to_draft_workflow():
+    for symbol in (
+        "promoteWorkflowInboxItem",
+        "_workflowDraftDagFromInboxItem",
+        "`/api/workflows/inbox/${encodeURIComponent(itemId)}/promote`",
+        "draftDag",
+        "workflowId",
+        "Promote to draft workflow",
+        "Workflow inbox item promoted",
+    ):
+        assert symbol in PANELS_JS
+
+
 def test_workflow_refresh_reloads_inbox_items_too():
     assert "await loadWorkflowInbox(true)" in PANELS_JS
     assert "loadWorkflowInbox();" in PANELS_JS
