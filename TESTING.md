@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: 3648 tests collected via `pytest tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 9 languages, and ~700 issue/PR-pinned regression tests.
+> Automated coverage: 5303 tests collected via `pytest tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -533,7 +533,8 @@ FAIL: Sidebar causes layout overflow or blocks chat.
 ### T11.3: Structured Log Output
 SETUP: SSH access to the server.
 STEPS:
-  1. In a terminal: tail -f /tmp/webui-mvp.log
+  1. In a terminal: tail -f ~/.hermes/webui/bootstrap-8787.log
+     (or tail -f ~/.hermes/webui.log when launched through `ctl.sh`)
   2. In browser: perform any action (load page, send message, click file)
 EXPECT:
   - Log entries appear in terminal as JSON: {"ts":"...","method":"GET","path":"/health","status":200,"ms":0.1}
@@ -577,7 +578,7 @@ FAIL: Browser freezes, crash, or security issue.
 
 ## Automated Test Coverage Reference
 
-These behaviors are verified by pytest (run: venv/bin/python -m pytest webui-mvp/tests/ -v):
+These behaviors are verified by pytest (run: venv/bin/python -m pytest tests/ -v):
 
 Sprint 1 tests (test_sprint1.py):
   - Server health, session CRUD (create/load/update/delete/sort)
@@ -1835,8 +1836,8 @@ Bridged CLI sessions:
 
 ---
 
-*Last updated: v0.51.31, May 9, 2026*
-*Total automated tests collected: 4977*
+*Last updated: v0.51.54, May 13, 2026*
+*Total automated tests collected: 5303*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*

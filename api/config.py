@@ -1587,10 +1587,25 @@ def resolve_model_provider(model_id: str) -> tuple:
         and not config_provider.startswith('custom:')
     )
     _default_model = model_cfg.get('default') if isinstance(model_cfg, dict) else None
+    # Owns model if it appears in the static catalog for the configured provider.
+    _provider_models_set: set[str] = set()
+    if (
+        config_provider is not None
+        and config_provider in _PROVIDER_MODELS
+        and isinstance(_PROVIDER_MODELS[config_provider], list)
+    ):
+        _provider_models_set = {
+            m.get('id', '') for m in _PROVIDER_MODELS[config_provider]
+            if isinstance(m, dict) and isinstance(m.get('id'), str)
+        }
     _skip_custom_providers = (
         _is_explicit_non_custom_provider
-        and _default_model is not None
-        and model_id == _default_model
+        and (
+            # Guard 1: model is the configured default (existing behaviour).
+            (_default_model is not None and model_id == _default_model)
+            # Guard 2: model is owned by the configured non-custom provider.
+            or model_id in _provider_models_set
+        )
     )
     custom_providers = cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
@@ -3907,6 +3922,7 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     # HermesOS Cloud default. The upstream "default" gold skin still exists as
     # an explicit user choice, but fresh / pre-rebrand settings must boot into
@@ -3914,7 +3930,7 @@ _SETTINGS_DEFAULTS = {
     # migration back to upstream default.
     "skin": "hermesos",  # accent color skin: hermesos | default | ares | mono | slate | poseidon | sisyphus | charizard
     "skin_rebrand_version": _HERMESOS_SKIN_REBRAND_VERSION,
-    "font_size": "default",  # small | default | large
+    "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
@@ -4044,7 +4060,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
     "sidebar_density": {"compact", "detailed"},
-    "font_size": {"small", "default", "large"},
+    "font_size": {"small", "default", "large", "xlarge"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }
@@ -4055,6 +4071,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_cli_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "whats_new_summary_enabled",
     "sound_enabled",
     "notifications_enabled",
     "show_thinking",
@@ -4075,15 +4092,18 @@ def save_settings(settings: dict) -> dict:
     theme_was_explicit = False
     skin_was_explicit = False
     # Handle _set_password: hash and store as password_hash
+    _password_changed = False
     raw_pw = settings.pop("_set_password", None)
     if raw_pw and isinstance(raw_pw, str) and raw_pw.strip():
         # Use PBKDF2 from auth module (600k iterations) -- never raw SHA-256
         from api.auth import _hash_password
 
         current["password_hash"] = _hash_password(raw_pw.strip())
+        _password_changed = True
     # Handle _clear_password: explicitly disable auth
     if settings.pop("_clear_password", False):
         current["password_hash"] = None
+        _password_changed = True
     for k, v in settings.items():
         if k in _SETTINGS_ALLOWED_KEYS:
             if k == "theme":
@@ -4125,6 +4145,12 @@ def save_settings(settings: dict) -> dict:
         json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # Invalidate the in-memory password hash cache so the next call to
+    # get_password_hash() picks up the new value from disk immediately.
+    if _password_changed:
+        from api.auth import _invalidate_password_hash_cache
+
+        _invalidate_password_hash_cache()
     # Update runtime defaults so new sessions use them immediately
     global DEFAULT_WORKSPACE
     if "default_workspace" in current:

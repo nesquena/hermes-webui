@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -18,6 +19,25 @@ def test_endless_scroll_is_opt_in_setting():
     assert "session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked" in PANELS_JS
     assert "window._sessionEndlessScrollEnabled=!!s.session_endless_scroll" in BOOT_JS
     assert "window._sessionEndlessScrollEnabled=false" in BOOT_JS
+
+
+def test_endless_scroll_setting_has_its_own_label():
+    match = re.search(
+        r"<label[^>]*>\s*"
+        r'<input type="checkbox" id="settingsSessionEndlessScroll"[^>]*>\s*'
+        r'<span data-i18n="settings_label_session_endless_scroll">[^<]+</span>\s*'
+        r"</label>\s*"
+        r'<div[^>]*data-i18n="settings_desc_session_endless_scroll"',
+        INDEX_HTML,
+    )
+    assert match, "endless-scroll checkbox must be wrapped by its own label before its description"
+
+
+def test_session_jump_and_endless_scroll_labels_are_separate():
+    jump_label_end = INDEX_HTML.index('data-i18n="settings_desc_session_jump_buttons"')
+    endless_label_start = INDEX_HTML.index('id="settingsSessionEndlessScroll"')
+    between = INDEX_HTML[jump_label_end:endless_label_start]
+    assert "<label" in between, "endless-scroll checkbox must not share the session-jump label"
 
 
 def test_scroll_listener_prefetches_older_messages_only_when_enabled():

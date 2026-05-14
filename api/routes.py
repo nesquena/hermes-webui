@@ -1531,18 +1531,6 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
     return {}
 
 
-def _needs_cli_session_metadata(session) -> bool:
-    """Return true when /api/session should pay for Agent/CLI metadata lookup."""
-    if not session:
-        return False
-    is_cli = (
-        bool(session.get("is_cli_session"))
-        if isinstance(session, dict)
-        else bool(getattr(session, "is_cli_session", False))
-    )
-    return is_cli or _is_messaging_session_record(session)
-
-
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
@@ -1670,6 +1658,61 @@ def _is_messaging_session_record(session) -> bool:
         session.get("source_label") if isinstance(session, dict) else None,
     )
     return _is_known_messaging_source(raw)
+
+
+def _messages_include_tool_metadata(messages) -> bool:
+    """Return true when returned messages can reconstruct their own tool cards."""
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if isinstance(msg.get("tool_calls"), list) and msg.get("tool_calls"):
+            return True
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "tool_use"
+            for part in content
+        ):
+            return True
+    return False
+
+
+def _session_requires_cli_metadata_lookup(session) -> bool:
+    """Return True when a sidecar/session row still needs CLI metadata.
+
+    Legacy imported sidecars may predate the ``read_only`` field and therefore
+    load with ``read_only=False``. They still persist ``is_cli_session`` and/or
+    source metadata from import time, so those markers intentionally keep them
+    on the CLI lookup path while ordinary WebUI-native sessions take the fast
+    path.
+
+    Supersedes the simpler is-cli-or-messaging gate from PR #1822 — the new
+    gate is strictly more inclusive (also covers ``read_only=True`` sidecars,
+    ``session_source`` markers, and source_tag/raw_source/platform metadata)
+    so all sessions that previously took the slow path still do, plus a few
+    more legacy shapes.
+    """
+    if not session:
+        return False
+
+    def _field(name):
+        return session.get(name) if isinstance(session, dict) else getattr(session, name, None)
+
+    if _is_messaging_session_record(session):
+        return True
+    if bool(_field("is_cli_session")) or bool(_field("read_only")):
+        return True
+    session_source = _normalize_messaging_source(_safe_first(_field("session_source")))
+    if session_source in {"messaging", "external_agent", "external-agent"}:
+        return True
+    return bool(_safe_first(
+        _field("source_tag"),
+        _field("raw_source"),
+        _field("source"),
+        _field("source_label"),
+        _field("platform"),
+    ))
 
 
 def _is_messaging_session_id(sid: str) -> bool:
@@ -3201,7 +3244,8 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/compress/status":
         query = parse_qs(parsed.query)
-        return _handle_session_compress_status(handler, query.get("session_id", [""])[0])
+        _handle_session_compress_status(handler, query.get("session_id", [""])[0])
+        return True
 
     if parsed.path == "/api/session":
         import time as _time
@@ -3239,7 +3283,7 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _clear_stale_stream_state(s)
-            cli_meta = _lookup_cli_session_metadata(sid) if _needs_cli_session_metadata(s) else {}
+            cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             if is_messaging_session:
@@ -3368,9 +3412,19 @@ def handle_get(handler, parsed) -> bool:
                             _persisted_cl = _fb_cl
                     except Exception:
                         pass
+            _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+            if (
+                load_messages
+                and msg_limit is not None
+                and _messages_include_tool_metadata(_truncated_msgs)
+            ):
+                # The browser ignores session-level tool_calls when the returned
+                # messages already carry per-message tool metadata. Avoid sending
+                # the full historical list with a small tail window.
+                _session_tool_calls = []
             raw = s.compact() | {
                 "messages": _truncated_msgs,
-                "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
+                "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
@@ -3695,6 +3749,8 @@ def handle_get(handler, parsed) -> bool:
                         "current_sha": "abc1234",
                         "latest_sha": "def5678",
                         "branch": "master",
+                        "repo_url": "https://github.com/nesquena/hermes-webui",
+                        "compare_url": "https://github.com/nesquena/hermes-webui/compare/abc1234...def5678",
                     },
                     "agent": {
                         "name": "agent",
@@ -3702,6 +3758,8 @@ def handle_get(handler, parsed) -> bool:
                         "current_sha": "aaa0001",
                         "latest_sha": "bbb0002",
                         "branch": "master",
+                        "repo_url": "https://github.com/NousResearch/hermes-agent",
+                        "compare_url": "https://github.com/NousResearch/hermes-agent/compare/aaa0001...bbb0002",
                     },
                     "checked_at": 0,
                 },
@@ -4894,6 +4952,8 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Invalid clone_from name")
         base_url = body.get("base_url", "").strip() if body.get("base_url") else None
         api_key = body.get("api_key", "").strip() if body.get("api_key") else None
+        default_model = body.get("default_model", "").strip() if body.get("default_model") else None
+        model_provider = body.get("model_provider", "").strip() if body.get("model_provider") else None
         if base_url and not base_url.startswith(("http://", "https://")):
             return bad(handler, "base_url must start with http:// or https://")
         try:
@@ -4905,6 +4965,8 @@ def handle_post(handler, parsed) -> bool:
                 clone_config=bool(body.get("clone_config", False)),
                 base_url=base_url,
                 api_key=api_key,
+                default_model=default_model,
+                model_provider=model_provider,
             )
             return j(handler, {"ok": True, "profile": result})
         except (ValueError, FileExistsError, RuntimeError) as e:
@@ -5302,6 +5364,63 @@ def handle_post(handler, parsed) -> bool:
         from api.updates import apply_force_update
 
         return j(handler, apply_force_update(target))
+
+    if parsed.path == "/api/updates/summary":
+        from api.updates import summarize_update_payload
+
+        updates = body.get("updates") if isinstance(body, dict) else {}
+        target = body.get("target") if isinstance(body, dict) else None
+
+        def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
+            from run_agent import AIAgent
+            from api.config import (
+                get_effective_default_model,
+                resolve_model_provider,
+                resolve_custom_provider_connection,
+            )
+
+            _model, _provider, _base_url = resolve_model_provider(get_effective_default_model())
+            _api_key = None
+            try:
+                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                    resolve_runtime_provider,
+                    requested=_provider,
+                )
+                _api_key = _rt.get("api_key")
+                if not _provider:
+                    _provider = _rt.get("provider")
+                if not _base_url:
+                    _base_url = _rt.get("base_url")
+            except Exception as _e:
+                logger.debug("update summary runtime provider resolution failed: %s", _e)
+            if isinstance(_provider, str) and _provider.startswith("custom:"):
+                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
+                if not _api_key and _cp_key:
+                    _api_key = _cp_key
+                if not _base_url and _cp_base:
+                    _base_url = _cp_base
+            agent = AIAgent(
+                model=_model,
+                provider=_provider,
+                base_url=_base_url,
+                api_key=_api_key,
+                platform="webui",
+                quiet_mode=True,
+                enabled_toolsets=[],
+                session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+            )
+            result = agent.run_conversation(
+                user_message=user_prompt,
+                system_message=system_prompt,
+                conversation_history=[],
+                task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+            )
+            return str(result.get("final_response") or "").strip()
+
+        return j(handler, summarize_update_payload(updates, llm_callback=_llm_update_summary, target=target))
 
     # ── CLI session import (POST) ──
     if parsed.path == "/api/session/import_cli":
@@ -6943,6 +7062,17 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     s.messages.append(user_msg)
 
 
+def _is_default_or_empty_session_title(title) -> bool:
+    return str(title or "").strip() in ("", "Untitled", "New Chat")
+
+
+def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> str:
+    text = str(prompt or "").strip()
+    if not text:
+        return fallback
+    return title_from([{"role": "user", "content": text}], fallback) or fallback
+
+
 def _prepare_chat_start_session_for_stream(
     s,
     *,
@@ -6970,6 +7100,11 @@ def _prepare_chat_start_session_for_stream(
     s.pending_user_message = msg
     s.pending_attachments = attachments
     s.pending_started_at = started_at if started_at is not None else time.time()
+    current_title = getattr(s, "title", None)
+    if _is_default_or_empty_session_title(current_title):
+        provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
+        if provisional_title and not _is_default_or_empty_session_title(provisional_title):
+            s.title = provisional_title
     if get_webui_session_save_mode() == "eager":
         _checkpoint_user_message_for_eager_session_save(
             s,
@@ -7077,6 +7212,7 @@ def _start_chat_stream_for_session(
         "session_id": s.session_id,
         "pending_started_at": s.pending_started_at,
         "turn_id": journal_event.get("turn_id"),
+        "title": s.title,
     }
     if normalized_model:
         response["effective_model"] = model

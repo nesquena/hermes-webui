@@ -19,7 +19,7 @@
   }
   /* ── Font size modifiers ── */
   /* ── Font size preference: scale key UI text elements ── */
-  /* Default is 14px (no attribute needed). Small=12px, Large=16px.            */
+  /* Default is 14px (no attribute needed). Small=12px, Large=16px, Extra Large=18px. */
   /* We override the px values directly on key containers since most of the     */
   /* stylesheet uses hardcoded px — changing :root font-size alone only affects */
   /* the small number of em/rem values.                                         */
@@ -27,44 +27,60 @@
   /* Sidebar session list */
   :root[data-font-size="small"] .session-item { font-size: 11px; }
   :root[data-font-size="large"] .session-item { font-size: 15px; }
+  :root[data-font-size="xlarge"] .session-item { font-size: 17px; }
   :root[data-font-size="small"] .session-meta { font-size: 10px; }
   :root[data-font-size="large"] .session-meta { font-size: 13px; }
+  :root[data-font-size="xlarge"] .session-meta { font-size: 15px; }
   :root[data-font-size="small"] .session-title-input { font-size: 11px; }
   :root[data-font-size="large"] .session-title-input { font-size: 15px; }
+  :root[data-font-size="xlarge"] .session-title-input { font-size: 17px; }
 
   /* Chat message body */
   :root[data-font-size="small"] .msg-body { font-size: 12px; }
   :root[data-font-size="large"] .msg-body { font-size: 16px; }
+  :root[data-font-size="xlarge"] .msg-body { font-size: 18px; }
   :root[data-font-size="small"] .msg-body h1 { font-size: 21px; }
   :root[data-font-size="large"] .msg-body h1 { font-size: 27px; }
+  :root[data-font-size="xlarge"] .msg-body h1 { font-size: 30px; }
   :root[data-font-size="small"] .msg-body h2 { font-size: 17px; }
   :root[data-font-size="large"] .msg-body h2 { font-size: 23px; }
+  :root[data-font-size="xlarge"] .msg-body h2 { font-size: 26px; }
   :root[data-font-size="small"] .msg-body h3 { font-size: 15px; }
   :root[data-font-size="large"] .msg-body h3 { font-size: 20px; }
+  :root[data-font-size="xlarge"] .msg-body h3 { font-size: 22px; }
   :root[data-font-size="small"] .msg-body h4 { font-size: 13px; }
   :root[data-font-size="large"] .msg-body h4 { font-size: 17px; }
+  :root[data-font-size="xlarge"] .msg-body h4 { font-size: 19px; }
   :root[data-font-size="small"] .msg-body h5 { font-size: 12px; }
   :root[data-font-size="large"] .msg-body h5 { font-size: 16px; }
+  :root[data-font-size="xlarge"] .msg-body h5 { font-size: 18px; }
   :root[data-font-size="small"] .msg-body h6 { font-size: 11px; }
   :root[data-font-size="large"] .msg-body h6 { font-size: 15px; }
+  :root[data-font-size="xlarge"] .msg-body h6 { font-size: 17px; }
   :root[data-font-size="small"] .msg-body code { font-size: 10.5px; }
   :root[data-font-size="large"] .msg-body code { font-size: 14.5px; }
+  :root[data-font-size="xlarge"] .msg-body code { font-size: 16px; }
   :root[data-font-size="small"] .msg-body pre code { font-size: 11px; }
   :root[data-font-size="large"] .msg-body pre code { font-size: 15px; }
+  :root[data-font-size="xlarge"] .msg-body pre code { font-size: 16.5px; }
   :root[data-font-size="small"] .msg-body table { font-size: 11px; }
   :root[data-font-size="large"] .msg-body table { font-size: 14px; }
+  :root[data-font-size="xlarge"] .msg-body table { font-size: 16px; }
 
   /* Composer textarea (default is 16px in stylesheet) */
   :root[data-font-size="small"] #msg { font-size: 14px; }
   :root[data-font-size="large"] #msg { font-size: 18px; }
+  :root[data-font-size="xlarge"] #msg { font-size: 20px; }
 
   /* Workspace file tree */
   :root[data-font-size="small"] .file-item { font-size: 11px; }
   :root[data-font-size="large"] .file-item { font-size: 14px; }
+  :root[data-font-size="xlarge"] .file-item { font-size: 16px; }
 
   /* App-level base — keeps em/rem values scaling correctly */
   :root[data-font-size="small"] { font-size: 12px; }
   :root[data-font-size="large"] { font-size: 16px; }
+  :root[data-font-size="xlarge"] { font-size: 18px; }
   /* ── Dark mode — navy-black + gold accent matching Hermes terminal ── */
   :root.dark {
     --bg:#0D0D1A;--sidebar:#141425;--border:#2A2A45;--border2:rgba(255,255,255,0.14);
@@ -467,7 +483,7 @@
   .sidebar-section{padding:14px 14px 8px;}
   .new-chat-btn{width:100%;padding:9px 12px;border-radius:9px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all .15s;margin-bottom:8px;font-weight:500;}
   .new-chat-btn:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
-  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;}
+  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;overflow-anchor:none;}
   .sidebar-search{position:relative;padding:8px 12px;flex-shrink:0;}
   .sidebar-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px 7px 32px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s;box-sizing:border-box;}
   .sidebar-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
@@ -698,8 +714,12 @@
   .agent-health-dismiss{flex-shrink:0;padding:6px 12px;border-radius:8px;border:1px solid color-mix(in srgb,var(--error) 45%,var(--surface));background:color-mix(in srgb,var(--error) 10%,var(--surface));color:var(--error);font-size:12px;font-weight:600;cursor:pointer;}
   .agent-health-dismiss:hover{background:color-mix(in srgb,var(--error) 18%,var(--surface));}
   /* ── Update banner ── */
-  .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);align-items:center;justify-content:space-between;gap:12px;}
+  .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;width:calc(100% - 24px);box-sizing:border-box;font-size:13px;color:var(--accent-text);align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;overflow-wrap:anywhere;}
   .update-banner.visible{display:flex;}
+  #updateMsg,#updateWhatsNewLinks,#updateSummaryPanel,#updateSummaryDiffLinks{max-width:100%;overflow-wrap:anywhere;word-break:break-word;}
+  #updateWhatsNewLinks{white-space:normal!important;margin-left:0!important;}
+  .update-banner>div:last-child{margin-left:auto;}
+  @media (max-width:600px){.update-banner{width:calc(100% - 16px);padding:10px 12px;gap:10px;}.update-banner>div:last-child{width:100%;justify-content:flex-end;}}
   .update-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;transition:background .15s;}
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
@@ -942,6 +962,10 @@
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
+  /* Steer indicator: transient banner below messages, removed on renderMessages rebuild */
+  .steer-indicator{display:flex;align-items:baseline;gap:8px;padding:10px 0;opacity:.65;font-style:italic;color:var(--accent-text);}
+  .steer-indicator .steer-body{white-space:pre-wrap;word-break:break-word;}
+  .steer-badge{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:4px;padding:1px 6px;vertical-align:middle;line-height:1.6;font-style:normal;flex-shrink:0;}
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}
@@ -2022,12 +2046,50 @@ body.resizing .sidebar{transition:none!important;}
 .tool-call-group{margin:4px 0 4px var(--msg-rail);max-width:var(--msg-max);border-left:1px solid var(--border-subtle);}
 .tool-call-group-summary{width:100%;display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);border:0;background:transparent;color:var(--muted);cursor:pointer;text-align:left;font:inherit;font-size:var(--font-size-xs);line-height:1.4;border-radius:var(--radius-card);}
 .tool-call-group-summary:hover{background:var(--surface-subtle-hover);color:var(--text);}
-.tool-call-group-label{font-weight:600;color:var(--muted);}
 .tool-call-group-duration{margin-left:auto;opacity:.62;font-variant-numeric:tabular-nums;white-space:nowrap;}
 .tool-call-group-chevron{opacity:.45;display:inline-flex;transition:transform .16s ease;}
 .tool-call-group:not(.tool-call-group-collapsed) .tool-call-group-chevron{transform:rotate(90deg);}
 .tool-call-group-body{display:block;padding-left:var(--space-3);}
 .tool-call-group.tool-call-group-collapsed .tool-call-group-body{display:none;}
+.tool-call-group-label{font-weight:600;color:var(--muted);position:relative;display:inline-block;overflow:hidden;}
+.tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label{
+  color:var(--muted);
+}
+@keyframes _tool-shimmer-sweep{
+  0%{-webkit-mask-position:150% 0;mask-position:150% 0;}
+  100%{-webkit-mask-position:-150% 0;mask-position:-150% 0;}
+}
+.tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label::after{
+  --activity-sweep-highlight:linear-gradient(90deg,var(--accent) 0%,var(--accent) 40.4%,color-mix(in srgb,var(--accent) 90%,#000) 43%,color-mix(in srgb,var(--accent) 90%,#000) 57%,var(--accent) 60%,var(--accent) 100%);
+  --activity-sweep-mask:linear-gradient(90deg,rgba(0,0,0,0) 0%,rgba(0,0,0,0) 26%,rgba(0,0,0,.18) 31.6%,rgba(0,0,0,.46) 37.2%,rgba(0,0,0,.72) 43%,rgba(0,0,0,.9) 57%,rgba(0,0,0,.52) 61.6%,rgba(0,0,0,.28) 66.4%,rgba(0,0,0,.1) 70.8%,rgba(0,0,0,0) 74%,rgba(0,0,0,0) 100%);
+  content:attr(data-sweep-label);
+  position:absolute;inset:0;
+  color:var(--accent);
+  background-image:var(--activity-sweep-highlight);
+  -webkit-background-clip:text;
+          background-clip:text;
+  -webkit-text-fill-color:transparent;
+  pointer-events:none;
+  -webkit-mask-image:var(--activity-sweep-mask);
+          mask-image:var(--activity-sweep-mask);
+  -webkit-mask-size:250% 100%;
+          mask-size:250% 100%;
+  -webkit-mask-repeat:no-repeat;
+          mask-repeat:no-repeat;
+  animation:_tool-shimmer-sweep 3.0s cubic-bezier(.45,0,.55,1) infinite;
+}
+@media (prefers-reduced-motion: reduce){
+  .tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label::after{
+    animation:none;
+    display:none;
+  }
+}
+/* Fallback for browsers without CSS mask support */
+@supports not ((mask-image:linear-gradient(#000,#000)) or (-webkit-mask-image:linear-gradient(#000,#000))){
+  .tool-call-group[data-live-tool-call-group="1"] .tool-call-group-label::after{
+    display:none;
+  }
+}
 .tool-card{background:var(--surface-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-card);margin:2px 0;overflow:hidden;transition:border-color .15s,background-color .15s;}
 .tool-card:hover{border-color:var(--border-muted);background:var(--surface-subtle-hover);}
 .tool-card-running{border-color:var(--accent-bg-strong);background:var(--accent-bg);}
@@ -2596,10 +2658,21 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .mcp-readonly-note,.mcp-restart-hint{margin-top:8px;color:var(--muted);font-size:11px;line-height:1.45;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;padding:8px 10px;}
 .mcp-tool-search{width:100%;margin:0 0 8px 0;padding:8px 10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:12px;outline:none;}
 .mcp-tool-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-soft);}
+.mcp-tool-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 8px;color:var(--muted);font-size:11px;line-height:1.35;flex-wrap:wrap;}
+.mcp-tool-summary{min-width:0;}
+.mcp-tool-page-size{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted);font-size:11px;}
+.mcp-tool-page-size select{appearance:none;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:7px;padding:4px 22px 4px 8px;font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;}
+.mcp-tool-empty-detail{display:inline-block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.35;}
+.mcp-tool-list{max-height:min(52vh,560px);overflow:auto;padding-right:3px;scrollbar-gutter:stable;}
 .mcp-tool-row{display:flex;flex-direction:column;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;background:var(--surface);}
 .mcp-tool-name{font-weight:600;color:var(--text);overflow-wrap:anywhere;}
 .mcp-tool-server{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:999px;padding:2px 6px;}
 .mcp-tool-schema{margin:2px 0 0 0;padding:7px 8px;white-space:pre-wrap;max-height:140px;overflow:auto;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--muted);font-size:11px;line-height:1.45;}
+.mcp-tool-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:8px;}
+.mcp-tool-page-label{color:var(--muted);font-size:11px;min-width:44px;text-align:center;}
+.mcp-tool-page-btn{border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600;cursor:pointer;}
+.mcp-tool-page-btn:hover:not(:disabled){border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.mcp-tool-page-btn:disabled{opacity:.45;cursor:not-allowed;}
 
 /* Picker grids (theme / skin / font-size): make the card chrome use
    tokens so all skins flip correctly. */
@@ -2894,6 +2967,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
+.cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
 .has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
 

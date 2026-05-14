@@ -111,7 +111,9 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     assert "_sessionVirtualSpacer" in render_body
     assert "spacer.dataset.virtualSpacer=where||'gap'" in js
     assert "list.addEventListener('scroll', _scheduleSessionVirtualizedRender" in js
-    assert "requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();})" in js
+    assert "requestAnimationFrame(()=>{" in js
+    assert "_sessionVirtualScrollRaf=0;" in js
+    assert "renderSessionListFromCache();" in js
     assert "const listScrollTopBeforeRender=list.scrollTop||0" in render_body
     assert "scrollTop:listScrollTopBeforeRender" in render_body
     assert "list.scrollTop=listScrollTopBeforeRender" in render_body

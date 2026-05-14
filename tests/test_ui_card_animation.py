@@ -44,6 +44,13 @@ def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
     assert "<div class=\"thinking-card\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
 
 
+def test_live_thinking_updates_existing_card_body_in_place():
+    assert "function _renderThinkingInto(row,text='')" in UI_JS
+    assert "row.querySelector('.thinking-card-body pre')" in UI_JS
+    assert "pre.textContent=clean" in UI_JS
+    assert "_renderThinkingInto(row,text);" in UI_JS
+
+
 def test_thinking_card_uses_panel_chrome_with_gold_palette():
     # Canonical thinking-card rule lives in the consolidated block (border-radius
     # tightened from 10px → 8px as part of the "quieter card" design pass).

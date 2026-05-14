@@ -87,6 +87,28 @@ def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
     assert guard in block
     assert block.index(guard) < block.index("setCompressionUi")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
+    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+
+
+def test_auto_compression_done_sse_refreshes_context_indicator_usage():
+    block = _compressed_listener_block()
+
+    assert "if(d.usage&&typeof _syncCtxIndicator==='function')" in block
+    assert "S.lastUsage={...(S.lastUsage||{}),...d.usage};" in block
+    assert "_syncCtxIndicator(S.lastUsage);" in block
+    assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("setCompressionUi")
+
+
+def test_auto_compression_done_payload_includes_live_usage_snapshot():
+    src = _read("api/streaming.py")
+    start = src.find("put('compressed'")
+    assert start != -1, "compressed SSE payload not found"
+    end = src.find("})", start)
+    assert end != -1, "compressed SSE payload end not found"
+    block = src[start:end]
+
+    assert "'session_id': s.session_id" in block
+    assert "'usage': _live_usage_snapshot()" in block
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
@@ -215,6 +237,66 @@ def test_context_anchor_reference_uses_session_summary_fallback():
     assert "referenceText=referenceMessage" in src
     assert ": sessionCompressionSummary" in src
     assert "!!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary)" in src
+
+
+def test_compression_anchor_matching_tolerates_legacy_missing_timestamp():
+    src = _read("static/ui.js")
+    start = src.find("function _compressionAnchorIndex")
+    assert start != -1, "compression anchor matcher not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after anchor matcher"
+    helper = src[start:end]
+
+    assert "const anchorTs=String(anchorKey.ts??'');" in helper
+    assert "const candidateTs=String(candidate.ts??'');" in helper
+    assert "(!anchorTs||!candidateTs||candidateTs===anchorTs)" in helper
+
+
+def test_compression_anchor_index_is_translated_into_render_window():
+    src = _read("static/ui.js")
+    start = src.find("const insertionAnchorFull=_compressionAnchorIndex")
+    assert start != -1, "full compression anchor lookup not found"
+    end = src.find("let _prevSepKey=null", start)
+    assert end != -1, "message render loop marker not found after anchor lookup"
+    block = src[start:end]
+
+    assert "_compressionAnchorIndex(\n    visWithIdx," in block
+    assert "insertionAnchorFull<windowStart" in block
+    assert "insertionAnchorFull-windowStart" in block
+    assert "windowStart+renderVisWithIdx.length" in block
+
+
+def test_reference_message_uses_raw_transcript_position_before_anchor_fallback():
+    src = _read("static/ui.js")
+
+    assert "const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(" in src
+    assert "if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);" in src
+    assert "else _insertCompressionLikeNode(referenceNode);" in src
+
+
+def test_reference_message_selection_prefers_latest_matching_marker():
+    src = _read("static/ui.js")
+    start = src.find("function _latestCompressionReferenceMessage")
+    assert start != -1, "compression reference selection helper not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after selection helper"
+    helper = src[start:end]
+
+    assert "for(let i=messages.length-1;i>=0;i--)" in helper
+    assert "if(!summaryNorm) return {message:m, rawIdx:i};" in helper
+    assert "if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};" in helper
+
+
+def test_reference_message_falls_back_to_current_summary_when_only_stale_markers_exist():
+    src = _read("static/ui.js")
+    start = src.find("function _latestCompressionReferenceMessage")
+    assert start != -1, "compression reference selection helper not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after selection helper"
+    helper = src[start:end]
+
+    assert "const summaryNorm=String(summaryText||'').replace(/\\s+/g,' ').trim();" in helper
+    assert "return {message:null, rawIdx:-1};" in helper
 
 
 def test_preserved_task_list_attaches_once_per_render():

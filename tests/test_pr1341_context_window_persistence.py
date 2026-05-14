@@ -38,11 +38,12 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # Save call follows shortly after
     save_call = src.find("\n                s.save()", block_start)
     assert save_call != -1, "s.save() not found after the post-merge marker"
-    # Limit bumped to 8200 by turn-journal lifecycle events: the block now also
-    # records `assistant_started` immediately before the durable final save.
+    # Limit bumped to 9000 by cancellation finalization guards: the block now also
+    # checks for a late user cancel immediately before the durable final save,
+    # preventing a race that would otherwise save/emit a completed turn after Stop.
     # The context_length fallback is still a single focused resolver call with
     # arg-prep scaffold and commentary explaining the failure mode it prevents.
-    assert save_call - block_start < 8200, (
+    assert save_call - block_start < 9000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

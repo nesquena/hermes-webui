@@ -135,6 +135,7 @@ The bootstrap will:
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 For a step-by-step walkthrough of the wizard, provider choices, local model server Base URLs, and safe re-runs, see [`docs/onboarding.md`](docs/onboarding.md).
+If an AI assistant is helping with install, reinstall, bootstrap, provider setup, or first-run support, have it read [`docs/onboarding-agent-checklist.md`](docs/onboarding-agent-checklist.md) before running commands or inspecting logs.
 
 ---
 
@@ -267,7 +268,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_PORT` | `8787` | Port |
 | `HERMES_WEBUI_STATE_DIR` | `~/.hermes/webui` | Where sessions and state are stored |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
-| `HERMES_WEBUI_DEFAULT_MODEL` | `openai/gpt-5.4-mini` | Default model |
+| `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
@@ -367,9 +368,9 @@ Or using the agent venv explicitly:
 /path/to/hermes-agent/venv/bin/python -m pytest tests/ -v
 ```
 
-Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **3309 tests**
-across 100+ test files.
+Tests run against an isolated server with a separate state directory.
+Production data and real cron jobs are never touched. Current snapshot:
+**5303 tests collected** across **488 test files**.
 
 ---
 
@@ -491,33 +492,33 @@ across 100+ test files.
 ## Architecture
 
 ```
-server.py               HTTP routing shell + auth middleware (~154 lines)
+server.py               HTTP routing shell + auth middleware (~446 lines)
 api/
-  auth.py               Optional password authentication, signed cookies (~201 lines)
-  config.py             Discovery, globals, model detection, reloadable config (~1110 lines)
-  helpers.py            HTTP helpers, security headers (~175 lines)
-  models.py             Session model + CRUD + CLI bridge (~377 lines)
-  onboarding.py         First-run onboarding wizard, OAuth provider support (~507 lines)
-  profiles.py           Profile state management, hermes_cli wrapper (~411 lines)
-  routes.py             All GET + POST route handlers (~2250 lines)
-  state_sync.py         /insights sync — message_count to state.db (~113 lines)
-  streaming.py          SSE engine, run_agent, cancel support (~660 lines)
-  updates.py            Self-update check and release notes (~257 lines)
-  upload.py             Multipart parser, file upload handler (~82 lines)
-  workspace.py          File ops, workspace helpers, git detection (~288 lines)
+  auth.py               Optional password authentication, signed cookies (~366 lines)
+  config.py             Discovery, globals, model detection, reloadable config (~4139 lines)
+  helpers.py            HTTP helpers, security headers (~302 lines)
+  models.py             Session model + CRUD + CLI bridge (~1927 lines)
+  onboarding.py         First-run onboarding wizard, OAuth provider support (~1002 lines)
+  profiles.py           Profile state management, hermes_cli wrapper (~1056 lines)
+  routes.py             All GET + POST route handlers (~9772 lines)
+  state_sync.py         /insights sync — message_count to state.db (~118 lines)
+  streaming.py          SSE engine, run_agent, cancel support (~4420 lines)
+  updates.py            Self-update check and release notes (~545 lines)
+  upload.py             Multipart parser, file upload handler (~284 lines)
+  workspace.py          File ops, workspace helpers, git detection (~810 lines)
 static/
-  index.html            HTML template (~600 lines)
-  style.css             All CSS incl. mobile responsive, themes (~1050 lines)
-  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1740 lines)
-  workspace.js          File preview, file ops, git badge (~286 lines)
-  sessions.js           Session CRUD, collapsible groups, search, reload recovery (~800 lines)
-  messages.js           send(), SSE handlers, live streaming, session recovery (~655 lines)
-  panels.js             Cron, skills, memory, profiles, settings (~1438 lines)
-  commands.js           Slash command autocomplete (~267 lines)
-  boot.js               Mobile nav, voice input, boot IIFE (~524 lines)
+  index.html            HTML template (~1323 lines)
+  style.css             All CSS incl. mobile responsive, themes (~3767 lines)
+  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~7216 lines)
+  workspace.js          File preview, file ops, git badge (~369 lines)
+  sessions.js           Session CRUD, collapsible groups, search, reload recovery (~3517 lines)
+  messages.js           send(), SSE handlers, live streaming, session recovery (~2301 lines)
+  panels.js             Cron, skills, memory, profiles, settings (~6480 lines)
+  commands.js           Slash command autocomplete (~1302 lines)
+  boot.js               Mobile nav, voice input, boot IIFE (~1607 lines)
 tests/
-  conftest.py           Isolated test server (port 8788)
-  61 test files          961 test functions
+  conftest.py           Isolated test server/state fixtures
+  488 test files         5303 tests collected
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag
@@ -537,51 +538,60 @@ State lives outside the repo at `~/.hermes/webui/` by default
 - `CHANGELOG.md` -- release notes per sprint
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
 - `THEMES.md` -- theme system documentation, custom theme guide
+- `docs/docker.md` -- Docker compose setup, common failures, and bind-mount migration
+- `docs/supervisor.md` -- launchd, systemd, supervisord, runit, and s6 process-supervisor setup
 - `docs/onboarding.md` -- first-run wizard, provider setup, local model server Base URLs, and safe re-runs
+- `docs/onboarding-agent-checklist.md` -- safety rules, evidence commands, and pass/fail checks for assistant-led install or reinstall support
 - `docs/troubleshooting.md` -- diagnostic flows for common failures (e.g. "AIAgent not available")
+- `docs/wsl-autostart.md` -- WSL2 auto-start at Windows login
+- `docs/EXTENSIONS.md` -- administrator-controlled WebUI extension injection
+- `docs/rfcs/README.md` -- RFC index for larger architecture and durability proposals
 
 ## Contributors
 
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
-**130 contributors have shipped code that landed in a release tag** as of v0.51.44. The full credit roll lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). The highlights:
+**137 contributors have shipped code that landed in a release tag** as of v0.51.58. The full credit roll lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). The highlights:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 92 | `v0.49.3` → `v0.51.44` |
-| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 81 | `v0.50.240` → `v0.51.40` |
-| 3 | [@bergeouss](https://github.com/bergeouss) | 61 | `v0.48.0` → `v0.51.18` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 49 | `v0.50.279` → `v0.51.44` |
-| 5 | [@dso2ng](https://github.com/dso2ng) | 21 | `v0.50.227` → `v0.51.37` |
-| 6 | [@jasonjcwu](https://github.com/jasonjcwu) | 13 | `v0.50.227` → `v0.51.43` |
-| 7 | [@aronprins](https://github.com/aronprins) | 10 | `v0.44.0` → `v0.50.233` |
-| 8 | [@JKJameson](https://github.com/JKJameson) | 10 | `v0.50.233` → `v0.51.31` |
-| 9 | [@ccqqlo](https://github.com/ccqqlo) | 9 | `v0.44.0` → `v0.50.270` |
-| 10 | [@24601](https://github.com/24601) | 8 | `v0.50.233` → `v0.51.5` |
+| 1 | [@franksong2702](https://github.com/franksong2702) | 117 | `v0.49.3` → `v0.51.58` |
+| 2 | [@Michaelyklam](https://github.com/Michaelyklam) | 92 | `v0.50.240` → `v0.51.57` |
+| 3 | [@bergeouss](https://github.com/bergeouss) | 62 | `v0.48.0` → `v0.51.46` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 55 | `v0.50.279` → `v0.51.47` |
+| 5 | [@dso2ng](https://github.com/dso2ng) | 23 | `v0.50.227` → `v0.51.51` |
+| 6 | [@jasonjcwu](https://github.com/jasonjcwu) | 16 | `v0.50.227` → `v0.51.55` |
+| 7 | [@Jordan-SkyLF](https://github.com/Jordan-SkyLF) | 12 | `v0.50.18` → `v0.51.58` |
+| 8 | [@aronprins](https://github.com/aronprins) | 10 | `v0.44.0` → `v0.50.233` |
+| 9 | [@JKJameson](https://github.com/JKJameson) | 10 | `v0.50.233` → `v0.51.31` |
+| 10 | [@starship-s](https://github.com/starship-s) | 10 | `v0.50.128` → `v0.51.58` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 130 contributors, including everyone with one or two PRs and the special-thanks roll for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 137 contributors, including everyone with one or two PRs and the special-thanks roll for design and architectural contributions.
 
 ### Notable contributions
 
-**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (92 PRs, `v0.49.3` → `v0.51.44`)
-Across the longest tenure of any external contributor: the session title guard (#301), breadcrumb workspace navigation (#302), embedded workspace terminal (#1099), worktree-backed session creation (#2053), onboarding documentation (#2052), composer footer container queries, streaming-session sidebar exemption (#1327), session sidecar repair, cron output preservation (#1295), profile default workspace persistence, and a long tail of polish across mobile/responsive, the session sidebar, and the workspace state machine.
+**[@franksong2702](https://github.com/franksong2702)** — Most prolific external contributor (117 PRs, `v0.49.3` → `v0.51.58`)
+Across the longest tenure of any external contributor: the session title guard (#301), breadcrumb workspace navigation (#302), embedded workspace terminal (#1099), worktree-backed session creation (#2053), onboarding documentation (#2052), composer footer container queries, streaming-session sidebar exemption (#1327), session sidecar repair, cron output preservation (#1295), profile default workspace persistence, manual `/compress` async start/status endpoints (#2128), worktree status surface (#2109) + guarded remove (#2156) for the lifecycle umbrella #2057, session post-render dedup (#2166), native-WebUI fast path (#2170), tail-window response trim (#2171), stale-stream guard extension (#2158), CSP report collector (#2160), and a long tail of polish across mobile/responsive, the session sidebar, and the workspace state machine.
 
-**[@Michaelyklam](https://github.com/Michaelyklam)** — Most prolific contributor of recent releases (81 PRs, `v0.50.240` → `v0.51.40`)
-Production Docker hardening (#1921, drops sudo-capable staging user), profile-scoped skills endpoints (#1903), gateway PID resolution under profile-scoped HERMES_HOME (#1901), profile-aware AIAgent cache (#1898/#1904), backslash LaTeX delimiters (#1848), Codex quota error surfacing (#1770), shell-route HTML 503 (#1836), stale Kanban client recovery (#1828), context auto-compression toast lifetime (#1988), `/goal` command (#1866), Kanban detail-view scrolling (#1916), CLI session tool metadata preservation (#1778), Traditional Chinese kanban locale backfill (#1979).
+**[@Michaelyklam](https://github.com/Michaelyklam)** — Most prolific contributor of recent releases (92 PRs, `v0.50.240` → `v0.51.57`)
+Production Docker hardening (#1921, drops sudo-capable staging user), profile-scoped skills endpoints (#1903), gateway PID resolution under profile-scoped HERMES_HOME (#1901), profile-aware AIAgent cache (#1898/#1904), backslash LaTeX delimiters (#1848), Codex quota error surfacing (#1770), shell-route HTML 503 (#1836), stale Kanban client recovery (#1828), context auto-compression toast lifetime (#1988), `/goal` command (#1866), Kanban detail-view scrolling (#1916), CLI session tool metadata preservation (#1778), Traditional Chinese kanban locale backfill (#1979), v0.51.51 mobile Insights bucketing/layout (#2120/#2121), Hermes run adapter RFC (#2105 for #1925), fork-from-here absolute index (#2198 for #2184), opencode-go custom-provider overlap routing (#2204 for #1894).
 
-**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + Docker hardening (61 PRs, `v0.48.0` → `v0.51.18`)
+**[@bergeouss](https://github.com/bergeouss)** — Provider management UI + Docker hardening (62 PRs, `v0.48.0` → `v0.51.46`)
 Provider management UI for adding/editing custom providers from Settings, OAuth provider status detection (#1552), two-container Docker setup, profile isolation hardening (per-profile `.env` secrets), the bulk of what users see when they touch Settings → Providers, Reveal-in-Finder context menu (#1551), gateway status card (#1552), auto-assign session to active project filter (#1550), "What's new?" link in update banner (#1549), OpenRouter free-tier live fetch (#1548), credential pool 401 self-heal (#1553), inline provider chip + group model count in model picker (#1644).
 
-**[@ai-ag2026](https://github.com/ai-ag2026)** — Session recovery + audit infrastructure (49 PRs, `v0.50.279` → `v0.51.44`)
-Autonomous-AI contributor (Hermes Agent-driven) focused on durability: `state.db`-backed sidecar reconciliation (#2041), orphan `.json.bak` recovery on startup (#2035), read-only session recovery audit endpoints (#2036, #2040), active run lifecycle in `/health` (#2039), crash-safe turn-journal RFC at `docs/rfcs/turn-journal.md` (#2042), fork-session compression lineage isolation (#2014).
+**[@ai-ag2026](https://github.com/ai-ag2026)** — Session recovery + audit infrastructure (55 PRs, `v0.50.279` → `v0.51.47`)
+Autonomous-AI contributor (Hermes Agent-driven) focused on durability: `state.db`-backed sidecar reconciliation (#2041), orphan `.json.bak` recovery on startup (#2035), read-only session recovery audit endpoints (#2036, #2040), active run lifecycle in `/health` (#2039), crash-safe turn-journal RFC at `docs/rfcs/turn-journal.md` (#2042), append-only turn-journal helper (#2059), lifecycle events layer (#2062), `Content-Security-Policy-Report-Only` header (#2084), per-cron toast toggle (#2100), fork-session compression lineage isolation (#2014).
 
-**[@dso2ng](https://github.com/dso2ng)** — Session lineage + diagnostics (21 PRs, `v0.50.227` → `v0.51.37`)
-`/api/session/lineage-report/<sid>` endpoint for bounded session graph diagnostics (#2012), stale Mermaid render error cleanup (#1337), and a long tail of frontend reliability fixes around session loading.
+**[@dso2ng](https://github.com/dso2ng)** — Session lineage + diagnostics (23 PRs, `v0.50.227` → `v0.51.51`)
+`/api/session/lineage-report/<sid>` endpoint for bounded session graph diagnostics (#2012), stale Mermaid render error cleanup (#1337), `session_source="fork"` continuation-chain isolation (#2063), lazy lineage-report fetch on sidebar badge expand (#2130), and a long tail of frontend reliability fixes around session loading.
 
-**[@jasonjcwu](https://github.com/jasonjcwu)** — Composer + transcript polish (13 PRs, `v0.50.227` → `v0.51.43`)
-Sidebar collapse via active-rail click (#2054, fuses #1884 + #1924), composer chip lightbox (#1758), title fixes for tool-heavy first turns, and a string of frontend polish fixes.
+**[@jasonjcwu](https://github.com/jasonjcwu)** — Composer + transcript polish (16 PRs, `v0.50.227` → `v0.51.55`)
+Sidebar collapse via active-rail click (#2054, fuses #1884 + #1924), composer chip lightbox (#1758), title fixes for tool-heavy first turns, silent compress-status during session switch (#2185), concurrent-send loss fix (#2186), in-transcript steer message badges (#2187), and a string of frontend polish fixes.
+
+**[@Jordan-SkyLF](https://github.com/Jordan-SkyLF)** — Live streaming + UX polish (12 PRs, `v0.50.18` → `v0.51.58`)
+Original sprint of workspace fallback resolution, live reasoning cards (#366, #367, #394–#397), then a recent burst: manual "Refresh usage" button on the Provider quota card (#2150), cancelled-turn status classification (#2151), Firefox sidebar scroll stabilization (#2200), early provisional session titles (#2202), target-aware "What's new?" update-banner links (#2207), and MCP tools overflow fix in Settings (#2210).
 
 **[@aronprins](https://github.com/aronprins)** — `v0.50.0` UI overhaul (PR #242, plus 9 follow-ups)
 The biggest single contribution to the project: a complete UI redesign that moved model/profile/workspace controls into the composer footer, replaced the gear-icon settings panel with the Hermes Control Center (tabbed modal), removed the activity bar in favor of inline composer status, redesigned the session list with a `⋯` action dropdown, and added the workspace panel state machine. Plus chat transcript redesign (#587), sidebar declutter (#584), three-column layout refactor (#899), light/dark theme + accent skins (#627), and shared `confirm()`/`prompt()` dialog replacement (PR #251 extracted from #242).
@@ -589,8 +599,14 @@ The biggest single contribution to the project: a complete UI redesign that move
 **[@iRonin](https://github.com/iRonin)** — Security hardening sprint (PRs #196–#204)
 Six consecutive, focused security PRs: session memory leak fix (expired token pruning), CSP + Permissions-Policy headers, 30-second slow-client connection timeout, optional HTTPS/TLS support via environment variables, upstream branch tracking fix for self-update, and CLI session support in the file-browser API. The kind of focused, high-quality security work that makes a self-hosted tool trustworthy.
 
-**[@Jordan-SkyLF](https://github.com/Jordan-SkyLF)** — Live streaming + session recovery (PRs #366, #367, #394–#397)
-Six interlocking improvements: workspace fallback resolution, live reasoning cards that upgrade the generic thinking spinner to a real-time reasoning display, durable session state recovery via `localStorage` so in-flight tool cards survive a page reload, plus relative time labels and imported-session timestamp preservation.
+**[@lucasrc](https://github.com/lucasrc)** — Auth-hardening trilogy (PRs #2191, #2192, #2193)
+Three coordinated security PRs that all landed in v0.51.57: thread-safe login rate limiter with PBKDF2 key separation, password-hash cache invalidation on Settings save, and the full 64-char HMAC-SHA256 session signature with a backwards-compatible migration bridge. The kind of cleanly-decomposed security work that's reviewable as three independent pieces.
+
+**[@LumenYoung](https://github.com/LumenYoung)** — Streaming hot-path correctness (4 PRs, `v0.51.47` → `v0.51.55`)
+The original stale-stream writeback guard (#2136 — the bug class the next two releases extended), gateway-state alive-null classification (#2075), compression-banner anchor alignment (#2182), and context-progress ring auto-refresh on compression complete (#2188). Each PR opened a small surgical fix in one of the most fragile subsystems in the codebase.
+
+**[@dobby-d-elf](https://github.com/dobby-d-elf)** — Frontend reliability + motion polish (6 PRs, `v0.51.38` → `v0.51.58`)
+Workspace fallback on deleted directories (#2138), iPhone PWA bottom-scroll fix (#2143), the new "Activity: X tools" composer footer shimmer animation (#2203), and follow-up animation tuning (#2212).
 
 **[@JKJameson](https://github.com/JKJameson)** — Composer + session polish (10 PRs)
 Persistent composer draft per session (#1956), and a long tail of polish across the composer and session sidebar.

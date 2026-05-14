@@ -3,6 +3,11 @@
 This guide explains what happens the first time Hermes WebUI starts, which
 setup path to choose, and how to recover when the wizard cannot finish.
 
+If an AI assistant is helping with install, reinstall, bootstrap, provider
+setup, or first-run support, read
+[`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md) before
+running commands or inspecting logs.
+
 The short version: run the bootstrap, open the WebUI, choose a provider, choose
 a workspace, optionally set a password, then start a chat. If you are using a
 local model server from Docker, pay special attention to the Base URL section
@@ -54,6 +59,10 @@ python3 bootstrap.py
 ```
 
 Then open `http://127.0.0.1:8789`.
+
+For an assistant-led trial run, follow the safety rules, evidence commands, and
+pass/fail criteria in
+[`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md).
 
 If your repo has a `.env` file, remember that the bootstrap loads it. Remove or
 adjust any `HERMES_HOME`, `HERMES_WEBUI_STATE_DIR`, or `HERMES_WEBUI_PORT`

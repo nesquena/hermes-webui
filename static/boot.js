@@ -1532,6 +1532,10 @@ function applyBotName(){
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
@@ -1539,9 +1543,6 @@ function applyBotName(){
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
-    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
@@ -1568,6 +1569,7 @@ function applyBotName(){
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
+    window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
     window._sessionJumpButtonsEnabled=false;

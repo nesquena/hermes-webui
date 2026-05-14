@@ -40,9 +40,14 @@ def test_get_model_label_formats_bare_ollama_ids():
         "to avoid reformatting generic bare model IDs."
     )
     assert "const ollamaLabel = _fmtOllamaLabel(_last);" in src
-    assert "if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {" in src, (
+    assert "if (allowOllamaFormat && (modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {" in src, (
         "Ollama-tagged ids like 'kimi-k2.6:3b' should still pass through _fmtOllamaLabel() "
-        "when the formatter produces a friendlier label."
+        "when the formatter produces a friendlier label, but ONLY when the resolved "
+        "atProvider is empty or starts with 'ollama' (allowOllamaFormat guard added in "
+        "PR #2178 to stop reformatting non-ollama custom-provider models like "
+        "'custom:ai_gateway/Qwen3.6-35B-A3B'). The guard fixes the bug where bare "
+        "custom-provider model IDs containing dashes had their hyphens stripped to "
+        "spaces and their last letter lowercased by the ollama formatter."
     )
 
 

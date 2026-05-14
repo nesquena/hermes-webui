@@ -20,6 +20,12 @@ def test_new_top_level_markdown_docs_are_trackable():
     assert _git_check_ignore("docs/example-new-guide.md").returncode == 1
 
 
+def test_root_agents_entrypoint_is_trackable():
+    """AGENTS.md is the shared repo entrypoint; local overrides stay ignored."""
+    assert _git_check_ignore("AGENTS.md").returncode == 1
+    assert _git_check_ignore("AGENTS.local.md").returncode == 0
+
+
 def test_docs_scratch_files_remain_ignored():
     """The broad docs/* ignore rule should still keep arbitrary scratch files out."""
     assert _git_check_ignore("docs/local-scratch.tmp").returncode == 0

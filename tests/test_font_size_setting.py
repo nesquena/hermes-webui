@@ -1,4 +1,4 @@
-"""Tests for font size setting (#833) — 3-toggle Small/Default/Large in Appearance."""
+"""Tests for font size setting (#833) — Small/Default/Large/Extra Large in Appearance."""
 import os
 import re
 
@@ -9,7 +9,7 @@ def _read(name):
 
 
 class TestFontSizeCssModifiers:
-    """CSS must define font-size overrides for small and large via data attribute."""
+    """CSS must define font-size overrides via data attribute."""
 
     def test_small_font_size_rule_exists(self):
         css = _read("static/style.css")
@@ -23,14 +23,26 @@ class TestFontSizeCssModifiers:
             "style.css must have :root[data-font-size=\"large\"] font-size rule"
         )
 
-    def test_small_is_smaller_than_default(self):
+    def test_extra_large_font_size_rule_exists(self):
+        css = _read("static/style.css")
+        assert 'data-font-size="xlarge"' in css, (
+            "style.css must have :root[data-font-size=\"xlarge\"] font-size rule"
+        )
+
+    def test_small_large_and_xlarge_scale_from_default(self):
         css = _read("static/style.css")
         # Match both compact {font-size:12px} and spaced { font-size: 12px; } formats
         m_small = re.search(r':root\[data-font-size="small"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
         m_large = re.search(r':root\[data-font-size="large"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
-        assert m_small and m_large, "Both small and large font-size rules must set px values"
+        m_xlarge = re.search(r':root\[data-font-size="xlarge"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
+        assert m_small and m_large and m_xlarge, (
+            "Small, large, and extra-large font-size rules must set px values"
+        )
         assert int(m_small.group(1)) < 14, "Small font size must be < 14px (default)"
         assert int(m_large.group(1)) > 14, "Large font size must be > 14px (default)"
+        assert int(m_xlarge.group(1)) > int(m_large.group(1)), (
+            "Extra Large font size must be larger than Large"
+        )
 
 
 class TestFontSizeBootScript:
@@ -57,11 +69,15 @@ class TestFontSizeBootScript:
             "Font size picker buttons must have font-size-pick-btn class"
         )
 
-    def test_three_font_size_values_present(self):
+    def test_font_size_values_present(self):
         html = _read("static/index.html")
         assert 'data-font-size-val="small"' in html, "Small button must exist"
         assert 'data-font-size-val="default"' in html, "Default button must exist"
         assert 'data-font-size-val="large"' in html, "Large button must exist"
+        assert 'data-font-size-val="xlarge"' in html, "Extra Large button must exist"
+        assert 'data-i18n="font_size_xlarge"' in html, (
+            "Extra Large button must use the font_size_xlarge i18n key"
+        )
 
     def test_font_size_picker_not_duplicated(self):
         """Regression guard: the font size picker grid must appear exactly once
@@ -153,7 +169,13 @@ class TestFontSizeI18nCoverage:
         block = src[start:end if end > 0 else start + 20000]
         return set(re.findall(r"(\w[\w_]+):", block))
 
-    REQUIRED_KEYS = {"settings_label_font_size", "font_size_small", "font_size_default", "font_size_large"}
+    REQUIRED_KEYS = {
+        "settings_label_font_size",
+        "font_size_small",
+        "font_size_default",
+        "font_size_large",
+        "font_size_xlarge",
+    }
 
     def test_all_locales_have_font_size_keys(self):
         src = _read("static/i18n.js")
@@ -172,6 +194,21 @@ class TestFontSizeI18nCoverage:
         src = _read("static/i18n.js")
         count = src.count("font_size_large")
         assert count >= 6, f"font_size_large must appear in all 6 locales, found {count}"
+
+    def test_font_size_extra_large_key_in_all_locales(self):
+        src = _read("static/i18n.js")
+        count = src.count("font_size_xlarge")
+        assert count >= 6, f"font_size_xlarge must appear in all locales, found {count}"
+
+
+class TestFontSizeSettingsValidation:
+    """The backend settings contract must accept the persisted xlarge value."""
+
+    def test_config_allows_extra_large_font_size(self):
+        config = _read("api/config.py")
+        assert '"font_size": {"small", "default", "large", "xlarge"}' in config, (
+            "api/config.py must accept xlarge as a persisted font_size value"
+        )
 
 
 class TestFontSizeCssTargetedOverrides:
@@ -192,6 +229,11 @@ class TestFontSizeCssTargetedOverrides:
         assert ':root[data-font-size="large"] .msg-body' in css, \
             "Chat message text must be explicitly scaled for large"
 
+    def test_msg_body_overridden_for_extra_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="xlarge"] .msg-body' in css, \
+            "Chat message text must be explicitly scaled for extra large"
+
     def test_session_item_overridden_for_small(self):
         css = _read("static/style.css")
         assert ':root[data-font-size="small"] .session-item' in css, \
@@ -201,6 +243,11 @@ class TestFontSizeCssTargetedOverrides:
         css = _read("static/style.css")
         assert ':root[data-font-size="large"] .session-item' in css, \
             "Sidebar session list text must be explicitly scaled for large"
+
+    def test_session_item_overridden_for_extra_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="xlarge"] .session-item' in css, \
+            "Sidebar session list text must be explicitly scaled for extra large"
 
     def test_composer_overridden_for_small(self):
         css = _read("static/style.css")
@@ -217,6 +264,15 @@ class TestFontSizeCssTargetedOverrides:
         assert m and int(m.group(1)) != 16, \
             "Large composer font-size must differ from default (16px) to have visible effect"
 
+    def test_composer_overridden_for_extra_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="xlarge"] #msg' in css, \
+            "Composer textarea must be explicitly scaled for extra large"
+        m_large = re.search(r':root\[data-font-size="large"\] #msg \{ font-size: (\d+)px', css)
+        m_xlarge = re.search(r':root\[data-font-size="xlarge"\] #msg \{ font-size: (\d+)px', css)
+        assert m_large and m_xlarge and int(m_xlarge.group(1)) > int(m_large.group(1)), \
+            "Extra Large composer font-size must be larger than Large"
+
     def test_file_item_overridden_for_small(self):
         css = _read("static/style.css")
         assert ':root[data-font-size="small"] .file-item' in css, \
@@ -226,3 +282,8 @@ class TestFontSizeCssTargetedOverrides:
         css = _read("static/style.css")
         assert ':root[data-font-size="large"] .file-item' in css, \
             "Workspace file tree text must be explicitly scaled for large"
+
+    def test_file_item_overridden_for_extra_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="xlarge"] .file-item' in css, \
+            "Workspace file tree text must be explicitly scaled for extra large"

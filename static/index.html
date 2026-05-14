@@ -378,7 +378,11 @@
     <div class="update-banner" id="updateBanner">
       <div style="display:flex;flex-direction:column;flex:1;min-width:0">
         <span id="updateMsg"></span>
-        <a id="updateWhatsNew" href="#" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);text-decoration:underline;display:none;margin-left:8px;white-space:nowrap">What's new?</a>
+        <div id="updateWhatsNewLinks" style="display:none;font-size:11px;margin-left:8px;white-space:nowrap"></div>
+        <div id="updateSummaryPanel" style="display:none;font-size:12px;line-height:1.45;margin-top:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.04);max-width:720px;white-space:normal">
+          <div id="updateSummaryText"></div>
+          <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+        </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
@@ -898,7 +902,7 @@
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
-              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <span style="font-size:10px;font-weight:600;color:var(--muted)">Aa</span>
@@ -917,6 +921,12 @@
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_large">Large</span>
                 </button>
+                <button type="button" data-font-size-val="xlarge" onclick="_pickFontSize('xlarge')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <span style="font-size:20px;font-weight:600;color:var(--muted)">Aa</span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_xlarge">Extra Large</span>
+                </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
             </div>
@@ -933,6 +943,9 @@
                 <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_jump_buttons">Show floating Start and End buttons while reading long session histories.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSessionEndlessScroll" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_session_endless_scroll">Load older messages while scrolling up</span>
               </label>
@@ -1096,6 +1109,13 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
             </div>
             <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWhatsNewSummary" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_whats_new_summary">Summarize What's New with AI</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
@@ -1194,7 +1214,9 @@
               <label data-i18n="mcp_tools_title">MCP Tools</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_tools_desc">Search known tools across active MCP servers.</div>
               <input type="search" id="mcpToolSearch" class="mcp-tool-search" data-i18n-placeholder="mcp_tools_search_placeholder" placeholder="Search tools by name, server, or description…" oninput="filterMcpTools()" autocomplete="off">
-              <div id="mcpToolList"></div>
+              <div class="mcp-tool-toolbar" id="mcpToolToolbar" aria-live="polite"></div>
+              <div id="mcpToolList" class="mcp-tool-list"></div>
+              <div id="mcpToolPager" class="mcp-tool-pager" aria-label="MCP tools pagination" data-i18n-aria-label="mcp_tools_pagination_label"></div>
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>

@@ -442,3 +442,75 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
         f"found {sites_with_helper}. PR #1760 / #1361 regression — re-wire the "
         f"helper at the error-branch clear sites in api/streaming.py."
     )
+
+
+
+class TestCancelStreamIdempotentWithWorkerFinalizer:
+    """The worker and explicit cancel endpoint can both finalize the same turn."""
+
+    def test_cancel_stream_does_not_duplicate_existing_worker_cancel_marker(self):
+        sid = "test_1361_idempotent"
+        stream_id = "stream_idempotent"
+        _make_session(
+            session_id=sid,
+            messages=[
+                {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
+                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
+            ],
+        )
+        _setup_cancel_state(sid, stream_id)
+        config.STREAM_PARTIAL_TEXT[stream_id] = "partial text before cancel"
+
+        cancel_stream(stream_id)
+
+        msgs = models.SESSIONS[sid].messages
+        cancel_markers = [
+            m for m in msgs
+            if isinstance(m, dict)
+            and m.get('role') == 'assistant'
+            and 'task cancelled' in str(m.get('content') or '').lower()
+        ]
+        partial_idx = next(
+            i for i, m in enumerate(msgs)
+            if isinstance(m, dict) and m.get('_partial') and m.get('content') == 'partial text before cancel'
+        )
+        marker_idx = next(i for i, m in enumerate(msgs) if m in cancel_markers)
+
+        assert len(cancel_markers) == 1
+        assert partial_idx < marker_idx
+
+    def test_late_cancel_after_worker_finalized_does_not_add_cancel_marker(self):
+        sid = "test_1361_late_done"
+        stream_id = "stream_late_done"
+        s = Session(
+            session_id=sid,
+            title="Done Session",
+            messages=[
+                {'role': 'user', 'content': 'finish normally', 'timestamp': 100},
+                {'role': 'assistant', 'content': 'done normally', 'timestamp': 101},
+            ],
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+        s.pending_started_at = None
+        s.save()
+        models.SESSIONS[sid] = s
+
+        q = queue.Queue()
+        config.STREAMS[stream_id] = q
+        config.CANCEL_FLAGS[stream_id] = threading.Event()
+        mock_agent = Mock()
+        mock_agent.session_id = sid
+        mock_agent.interrupt = Mock()
+        config.AGENT_INSTANCES[stream_id] = mock_agent
+        config.STREAM_PARTIAL_TEXT[stream_id] = 'stale partial snapshot'
+
+        assert cancel_stream(stream_id) is True
+
+        msgs = models.SESSIONS[sid].messages
+        assert msgs == [
+            {'role': 'user', 'content': 'finish normally', 'timestamp': 100},
+            {'role': 'assistant', 'content': 'done normally', 'timestamp': 101},
+        ]
+        assert q.empty(), "late cancel must not emit a terminal cancel event after done"

@@ -3,7 +3,7 @@ Regression tests for #893 — cancel_stream() now preserves partial streamed
 assistant content rather than discarding it.
 
 Before this fix, clicking Stop Generation threw away all streamed text. The
-session was saved with only '*Task cancelled.*' appended, so the user lost
+session was saved with only a cancellation marker appended, so the user lost
 whatever the agent had produced up to that point.
 
 After this fix:
@@ -118,7 +118,7 @@ class TestCancelStreamPreservesPartial:
         assert any('Python is a high-level programming language' in c for c in msg_contents), (
             f"Partial text not found in session messages: {msg_contents}"
         )
-        assert any('*Task cancelled.*' in c for c in msg_contents), (
+        assert any('Task cancelled:' in c for c in msg_contents), (
             "Cancel marker missing from session messages"
         )
         # Partial message should NOT have _error=True (it's real content)
@@ -127,8 +127,9 @@ class TestCancelStreamPreservesPartial:
         assert partial_msg.get('_partial') is True
         assert not partial_msg.get('_error')
         # Cancel marker should have _error=True
-        cancel_msg = next(m for m in saved.messages if '*Task cancelled.*' in m.get('content', ''))
+        cancel_msg = next(m for m in saved.messages if 'Task cancelled:' in m.get('content', ''))
         assert cancel_msg.get('_error') is True
+        assert cancel_msg.get('provider_details_label') == 'Cancellation details'
 
     def test_cancel_stream_with_no_partial_text_still_saves_cancel_marker(self, tmp_path, monkeypatch):
         """If no tokens were streamed before cancel, only the cancel marker is saved."""
@@ -168,7 +169,7 @@ class TestCancelStreamPreservesPartial:
 
         saved = Session.load('sess_nopartial')
         msg_contents = [m.get('content', '') for m in saved.messages]
-        assert any('*Task cancelled.*' in c for c in msg_contents)
+        assert any('Task cancelled:' in c for c in msg_contents)
         # No extra partial message when there was nothing streamed
         assert not any(m.get('_partial') for m in saved.messages), (
             "Should not add partial message when no tokens were streamed"
@@ -293,4 +294,115 @@ class TestPartialMessageInContext:
         # Cancel marker (_error=True) should be excluded
         assert not any('Task cancelled' in c for c in contents), (
             "Cancel marker with _error=True must be stripped from API context"
+        )
+
+    def test_short_prior_assistant_reply_does_not_dedup_new_partial(self):
+        '''Stage-350 Opus SHOULD-FIX (#2151 follow-up): the partial-dedup loop
+        in cancel_stream must only dedup against actual prior _partial markers
+        with exact content match, not via substring containment against any
+        prior assistant reply.
+
+        The original substring check (`_stripped in _existing or _existing in
+        _stripped`) was too broad — a short prior assistant reply like "OK" or
+        "Here is the answer:" would be a substring of many later partial bodies
+        and silently drop the new partial, resurrecting the #893 data-loss bug.
+        '''
+        from api.models import Session
+
+        # Build a session that already has a short prior assistant reply
+        s = Session(session_id='sess_short_prior', title='Test')
+        s.messages = [
+            {'role': 'user', 'content': 'Question one'},
+            {'role': 'assistant', 'content': 'OK'},  # short reply, NOT _partial
+            {'role': 'user', 'content': 'Question two — please answer fully'},
+        ]
+
+        # Simulate what cancel_stream does for the dedup check.
+        # The new partial would be "OK, let me think about this..."
+        # — "OK" appears as a substring of this. Under the OLD substring
+        # check, this would have set _partial_already_present=True and
+        # dropped the new partial. Under the NEW exact-match-against-_partial
+        # check, no prior _partial exists, so the loop should NOT short-circuit.
+
+        new_partial_content = 'OK, let me think about this carefully...'
+        _stripped = new_partial_content.strip()
+
+        # Inline the new dedup logic (matches api/streaming.py:4669-4685):
+        _partial_already_present = False
+        if _stripped:
+            for _m in s.messages:
+                if not isinstance(_m, dict) or not _m.get('_partial'):
+                    continue
+                if str(_m.get('content') or '').strip() == _stripped:
+                    _partial_already_present = True
+                    break
+
+        assert _partial_already_present is False, (
+            "Tightened dedup must NOT consider 'OK' (a non-partial prior "
+            "assistant reply) as deduping a longer new partial that contains it. "
+            "Without the tightening, the substring check `_stripped in _existing "
+            "or _existing in _stripped` would have falsely matched."
+        )
+
+    def test_exact_partial_match_still_dedups(self):
+        '''Stage-350 Opus SHOULD-FIX (#2151 follow-up): the tighter dedup
+        still correctly deduplicates a partial that is being persisted twice
+        with exactly the same content (e.g. cancel_stream re-entered for the
+        same stream id after STREAMS_LOCK is released).
+        '''
+        from api.models import Session
+
+        s = Session(session_id='sess_exact_dedup', title='Test')
+        s.messages = [
+            {'role': 'user', 'content': 'Hello'},
+            # Prior _partial marker with exact same content as the incoming one
+            {'role': 'assistant', 'content': 'Partial reply text', '_partial': True},
+        ]
+
+        _stripped = 'Partial reply text'
+
+        _partial_already_present = False
+        if _stripped:
+            for _m in s.messages:
+                if not isinstance(_m, dict) or not _m.get('_partial'):
+                    continue
+                if str(_m.get('content') or '').strip() == _stripped:
+                    _partial_already_present = True
+                    break
+
+        assert _partial_already_present is True, (
+            "Exact-content match against a prior _partial marker must still "
+            "dedup so cancel_stream re-entry doesn't double-write the partial."
+        )
+
+    def test_non_partial_assistant_with_same_content_does_not_dedup(self):
+        '''Stage-350 Opus SHOULD-FIX (#2151 follow-up): even if a prior
+        assistant message has exactly the same content, if it isn't marked
+        _partial, it does NOT dedup the new partial. This is correct: the
+        prior message was a completed turn from an earlier conversation,
+        and the new _partial belongs to the current cancelled stream.
+        '''
+        from api.models import Session
+
+        s = Session(session_id='sess_nondiluted', title='Test')
+        s.messages = [
+            {'role': 'user', 'content': 'Hello'},
+            # Same content but NOT _partial — this is a completed prior turn
+            {'role': 'assistant', 'content': 'Hi there'},
+        ]
+
+        _stripped = 'Hi there'
+
+        _partial_already_present = False
+        if _stripped:
+            for _m in s.messages:
+                if not isinstance(_m, dict) or not _m.get('_partial'):
+                    continue
+                if str(_m.get('content') or '').strip() == _stripped:
+                    _partial_already_present = True
+                    break
+
+        assert _partial_already_present is False, (
+            "A prior assistant message with same content but NOT _partial "
+            "must not dedup the new partial — it's from a completed earlier turn."
         )

@@ -2,8 +2,8 @@
 Shared pytest fixtures for webui-mvp tests.
 
 TEST ISOLATION:
-  Tests run against a SEPARATE server instance on port 8788 with a
-  completely separate state directory. Production data is never touched.
+  Tests run against a SEPARATE server instance on an auto-derived test port
+  with a completely separate state directory. Production data is never touched.
   The test state dir is wiped before each full test run and again on teardown.
 
 PATH DISCOVERY:
@@ -32,7 +32,7 @@ HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
 # ── Test server config ────────────────────────────────────────────────────
 # Port and state dir auto-derive from the repo path when no env var is set,
-# giving every worktree its own isolated port (8800-8899) and state directory.
+# giving every worktree its own isolated port (20000-29999) and state directory.
 # Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin.
 
 def _auto_test_port(repo_root) -> int:

@@ -324,11 +324,16 @@ console.log(JSON.stringify(cases));
     assert json.loads(_run_node(source)) == [3, 25, 3, 0, 0]
 
 
-def test_sidebar_lineage_segment_badge_is_localized():
+def test_sidebar_lineage_segment_badge_is_detailed_density_only_and_localized():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
     assert "session-lineage-count" in js
-    assert "const segmentCount=_sessionSegmentCount(s);" in js
+    assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in js
+    assert "const showLineageMetadata=density==='detailed';" in js
+    assert "const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;" in js
+    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];" in js
+    assert "const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;" in js
+    assert "const canExpandLineageSegments=showLineageMetadata&&Boolean(" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
     assert ".session-lineage-count{" in css

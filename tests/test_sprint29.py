@@ -472,13 +472,13 @@ class TestSecureCookieFlag:
 
 
 class TestHMACLength:
-    def test_session_token_sig_is_32_chars(self):
-        """Session cookie signature must be 32 hex chars (128-bit), not 16."""
+    def test_session_token_sig_is_64_chars(self):
+        """Session cookie signature must be 64 hex chars (256-bit), not 32."""
         from api.auth import create_session
         cookie = create_session()
         token, sig = cookie.rsplit('.', 1)
-        assert len(sig) == 32, \
-            f"Expected 32-char signature (128-bit), got {len(sig)}: {sig}"
+        assert len(sig) == 64, \
+            f"Expected 64-char signature (SHA-256), got {len(sig)}: {sig}"
 
     def test_verify_session_rejects_old_16char_sig(self):
         """A cookie with a 16-char sig must fail verification."""

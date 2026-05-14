@@ -64,6 +64,50 @@ class TestGemma4ThinkingTokenStrip:
         result = _strip_thinking_markup(raw)
         assert result == "Answer"
 
+    def test_mid_sentence_think_tags_are_preserved(self):
+        """Literal discussion of <think> tags in visible prose must survive (#2152)."""
+        raw = "The literal tags <think> and </think> describe reasoning markup."
+        result = _strip_thinking_markup(raw)
+        assert result == raw
+
+    def test_mid_sentence_closed_think_block_is_preserved(self):
+        """Only leading provider wrappers are stripped; later tag-looking text stays visible."""
+        raw = "Use <think>scratchpad</think> as an example in the answer."
+        result = _strip_thinking_markup(raw)
+        assert result == raw
+
+    def test_mid_sentence_channel_tokens_are_preserved(self):
+        """MiniMax-style channel markers later in prose are visible content, not metadata."""
+        raw = "Use <|channel>thought to start reasoning and <channel|> to finish."
+        result = _strip_thinking_markup(raw)
+        assert result == raw
+
+    def test_mid_sentence_gemma4_tokens_are_preserved(self):
+        """Gemma 4 thinking markers later in prose are visible content, not metadata."""
+        raw = "Use <|turn|>thinking to start reasoning and <turn|> to finish."
+        result = _strip_thinking_markup(raw)
+        assert result == raw
+
+    def test_leading_the_user_is_asking_wrapper_line_is_stripped(self):
+        """A leading title-wrapper line is metadata; the visible answer should remain."""
+        raw = "The user is asking about Python imports.\nUse importlib for dynamic imports."
+        result = _strip_thinking_markup(raw)
+        assert result == "Use importlib for dynamic imports."
+
+    def test_mid_response_the_user_is_asking_line_is_preserved(self):
+        """Only the leading wrapper line is stripped; normal mid-response prose survives."""
+        raw = "First, define the context.\nThe user is asking us to be patient.\nThen answer."
+        result = _strip_thinking_markup(raw)
+        assert "First, define the context." in result
+        assert "The user is asking us to be patient." in result
+        assert "Then answer." in result
+
+    def test_minimax_channel_without_second_pipe_still_stripped_at_start(self):
+        """The client-facing MiniMax <|channel>thought shape is stripped when leading."""
+        raw = "<|channel>thought\nSome reasoning<channel|>Answer"
+        result = _strip_thinking_markup(raw)
+        assert result == "Answer"
+
 
 class TestGemma4TitleLeakDetection:
     """Verify _looks_invalid_generated_title catches Gemma 4 leak."""

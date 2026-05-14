@@ -52,7 +52,70 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+// Guard against concurrent send() calls.  Without this, two rapid sends
+// (e.g. queue drain + user click) can both pass the S.busy check because
+// setBusy(true) is only called after the first await inside send().
+let _sendInProgress = false;
+const _sessionTitleProvisionalBySid = new Map();
+
+function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
+  const title=String(titleText||'').replace(/\s+/g,' ').trim();
+  if(!title||title==='Untitled'||title==='New Chat')return true;
+  const provisional=String(provisionalText||'').replace(/\s+/g,' ').trim().slice(0,64);
+  return !!provisional&&title===provisional;
+}
+
+function _firstUserMessageTitleCandidate(){
+  const first=(S.messages||[]).find(m=>m&&m.role==='user'&&m.content);
+  return first?String(first.content||'').trim().slice(0,64):'';
+}
+
+function applySessionTitleUpdate(sid, titleText, options={}){
+  const newTitle=String(titleText||'').trim();
+  if(!sid||!newTitle)return false;
+  const row=(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions))
+    ? _allSessions.find(s=>s&&s.session_id===sid)
+    : null;
+  const currentTitle=S.session&&S.session.session_id===sid
+    ? S.session.title
+    : row&&row.title;
+  if(!options.force){
+    const expected=String(options.expectedCurrent||'').trim();
+    const remembered=_sessionTitleProvisionalBySid.get(sid)||'';
+    const provisionalCandidates=[options.provisionalText,remembered,_firstUserMessageTitleCandidate()];
+    const allowed=(expected&&String(currentTitle||'').trim()===expected)
+      || String(currentTitle||'').trim()===newTitle
+      || provisionalCandidates.some(p=>_sessionTitleLooksDefaultOrProvisional(currentTitle, p));
+    if(!allowed)return false;
+  }
+  if(S.session&&S.session.session_id===sid){
+    S.session.title=newTitle;
+    if(typeof syncTopbar==='function') syncTopbar();
+  }
+  if(row) row.title=newTitle;
+  if(options.rememberProvisional) _sessionTitleProvisionalBySid.set(sid,newTitle);
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  else if(typeof renderSessionList==='function') renderSessionList();
+  return true;
+}
+
 async function send(){
+  // Reject concurrent invocations early — before any await yields control.
+  // If a send is already in-flight (e.g. queue drain), re-queue the message
+  // instead of silently dropping it.
+  if (_sendInProgress) {
+    const _text=$('msg').value.trim();
+    if(_text && S.session && S.session.session_id){
+      queueSessionMessage(S.session.session_id,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      $('msg').value='';autoResize();
+      S.pendingFiles=[];renderTray();
+      updateQueueBadge(S.session.session_id);
+      showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
+    }
+    return;
+  }
+  _sendInProgress = true;
+  try{
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
   // Don't send while an inline message edit is active
@@ -228,21 +291,16 @@ async function send(){
   if(typeof updateSendBtn==='function') updateSendBtn();
 
   // Set provisional title from user message immediately so session appears
-  // in the sidebar right away with a meaningful name (server may refine later)
+  // in the sidebar right away with a meaningful name. /api/chat/start persists
+  // the server-side provisional title and may refine this optimistic text.
   if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
     const provisionalTitle=displayText.slice(0,64);
-    S.session.title=provisionalTitle;
-    syncTopbar();
-    // Persist it in the background; keep the optimistic sidebar cache as the
-    // immediate source of truth until /api/chat/start saves pending state.
-    api('/api/session/rename',{method:'POST',body:JSON.stringify({
-      session_id:activeSid, title:provisionalTitle
-    })}).catch(()=>{});  // fire-and-forget, server refines on done
+    applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Second optimistic pass: carry the provisional title into the cached row
       // without re-fetching /api/sessions before pending state exists server-side.
       upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
-    }else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    }
   } else if(typeof upsertActiveSessionForLocalTurn==='function'){
     upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
   } else {
@@ -259,6 +317,8 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
+    if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
@@ -337,6 +397,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
+  }finally{ _sendInProgress=false; }
 }
 
 const LIVE_STREAMS={};
@@ -887,18 +948,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
-      const newTitle=String(d.title||'').trim();
-      if(!newTitle) return;
-      if(S.session&&S.session.session_id===activeSid){
-        S.session.title=newTitle;
-        syncTopbar();
-      }
-      if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)){
-        const row=_allSessions.find(s=>s&&s.session_id===activeSid);
-        if(row) row.title=newTitle;
-      }
-      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-      else if(typeof renderSessionList==='function') renderSessionList();
+      applySessionTitleUpdate(activeSid, d.title);
     });
 
     source.addEventListener('title_status',e=>{
@@ -1175,7 +1225,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      if(d.session_id&&d.session_id!==activeSid) return;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      if(d.usage&&typeof _syncCtxIndicator==='function'){
+        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        _syncCtxIndicator(S.lastUsage);
+      }
       if(typeof setCompressionUi==='function'){
         setCompressionUi({
           sessionId:activeSid,
@@ -1195,8 +1250,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
         if(d.usage&&typeof _syncCtxIndicator==='function'){
-          S.lastUsage={...(S.lastUsage||{}),...d.usage};
-          _syncCtxIndicator(S.lastUsage);
+          if(S.session&&S.session.session_id===activeSid){
+            S.lastUsage={...(S.lastUsage||{}),...d.usage};
+            _syncCtxIndicator(S.lastUsage);
+          }
         }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
           if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
@@ -1228,11 +1285,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
           const isModelNotFound=d.type==='model_not_found';
+          const isCancelled=d.type==='cancelled';
+          const isInterrupted=d.type==='interrupted';
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details});
+          const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
+          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
@@ -1323,7 +1383,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages({preserveScroll:true});
+            S.messages.push({role:'assistant',content:'**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*',provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
         }

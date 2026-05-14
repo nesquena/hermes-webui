@@ -212,16 +212,14 @@ def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
     _error: True so _sanitize_messages_for_api() strips it from the
     conversation_history sent to the agent on the next user message.
 
-    Without this flag, the LLM sees "*Task cancelled.*" as a prior assistant
+    Without this flag, the LLM sees "Task cancelled" as a prior assistant
     turn and may reference it in subsequent responses ("As I mentioned, I was
     cancelled...") — a behavioral regression introduced when this PR started
     persisting the marker to the session.
     """
     src = read("api/streaming.py")
-    idx = src.find("'content': '*Task cancelled.*'")
-    if idx == -1:
-        idx = src.find('"content": "*Task cancelled.*"')
-    assert idx != -1, "cancel marker content string not found in cancel_stream()"
+    idx = src.find("'content': _cancelled_turn_content(message)")
+    assert idx != -1, "cancel marker content writer not found in cancel_stream()"
 
     # Walk back to the start of the dict literal (opening brace)
     brace_open = src.rfind("{", 0, idx)

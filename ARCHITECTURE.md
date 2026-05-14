@@ -7,10 +7,10 @@
 >
 > Keep this document updated as architecture changes are made.
 
-> Current shipped build: `v0.50.245` (April 30, 2026).
-> Automated coverage: 3309 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
+> Current shipped build: `v0.51.54` (May 13, 2026).
+> Automated coverage: 5303 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
 >
-> Notable architecture state as of v0.50.245: workspace panel closed/open state is preloaded via a `documentElement` dataset marker before `style.css` paints to avoid first-load flash; transcript disclosure cards animate via transitionable `max-height`/`opacity` states; thinking cards share rounded bordered card chrome with tool cards (gold palette); incremental streaming-markdown via vendored `streaming-markdown@0.2.15` (no CDN); HTTP byte-range streaming for large media; SSE-driven session sidebar with `pending_user_message` + `active_stream_id` lifecycle tracking; configurable model badges (`primary` / `fallback N`) computed in `_build_configured_model_badges()` and provider-aware in the dropdown picker.
+> Notable architecture state as of v0.51.54: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping.
 
 ---
 
@@ -43,42 +43,42 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 ## 2. File Inventory
 
     <repo>/
-    server.py              Thin routing shell + HTTP Handler + auth middleware. ~81 lines.
+    server.py              Thin routing shell + HTTP Handler + auth middleware. ~446 lines.
                            Delegates all route handling to api/routes.py.
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
-    Dockerfile             python:3.12-slim container image (~23 lines)
-    docker-compose.yml     Compose config with named volume and optional auth (~22 lines)
+    Dockerfile             python:3.12-slim container image (~89 lines)
+    docker-compose.yml     Compose config with named volume and optional auth (~57 lines)
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
       __init__.py          Package marker
-      auth.py              Optional password authentication, signed cookies (~149 lines)
-      config.py            Discovery, globals, model detection, reloadable config (~701 lines)
-      helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~71 lines)
-      models.py            Session model + CRUD, per-session profile tracking (~137 lines)
-      profiles.py          Profile state management, hermes_cli wrapper (~246 lines)
-      onboarding.py        First-run onboarding status, real provider config writes, and readiness detection.
-      routes.py            All GET + POST route handlers (~1180 lines)
-      startup.py           Startup helpers: auto_install_agent_deps() (~50 lines)
-      streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~236 lines)
-      upload.py            Multipart parser, file upload handler (~78 lines)
-      workspace.py         File ops: list_dir, read_file_content, workspace helpers (~77 lines)
+      auth.py              Optional password authentication, signed cookies (~366 lines)
+      config.py            Discovery, globals, model detection, reloadable config (~4139 lines)
+      helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~302 lines)
+      models.py            Session model + CRUD, per-session profile tracking (~1927 lines)
+      profiles.py          Profile state management, hermes_cli wrapper (~1056 lines)
+      onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, and readiness detection (~1002 lines)
+      routes.py            All GET + POST route handlers (~9772 lines)
+      startup.py           Startup helpers: auto_install_agent_deps() (~128 lines)
+      streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~4420 lines)
+      upload.py            Multipart parser, file upload handler (~284 lines)
+      workspace.py         File ops: list_dir, read_file_content, workspace helpers (~810 lines)
     static/
-      index.html           HTML template (~364 lines)
-      style.css            All CSS incl. mobile responsive (~670 lines)
-      ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~977 lines)
-      workspace.js         File preview, file ops, loadDir, clearPreview (~185 lines)
-      sessions.js          Session CRUD, list rendering, search, SVG icons, dropdown actions (~533 lines)
-      messages.js          send(), SSE event handlers, approval, transcript (~297 lines)
-      panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
-      commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
+      index.html           HTML template (~1323 lines)
+      style.css            All CSS incl. mobile responsive (~3767 lines)
+      ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~7216 lines)
+      workspace.js         File preview, file ops, loadDir, clearPreview (~369 lines)
+      sessions.js          Session CRUD, list rendering, search, SVG icons, dropdown actions (~3517 lines)
+      messages.js          send(), SSE event handlers, approval, transcript (~2301 lines)
+      panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~6480 lines)
+      commands.js          Slash command registry, parser, autocomplete dropdown (~1302 lines)
       onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
-      boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~338 lines)
+      boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~1607 lines)
     tests/
-      conftest.py          Isolated test server (port 8788, separate HERMES_HOME) (~240 lines)
-      test_sprint{1-20b}.py Feature tests per sprint (21 files, 415 test functions)
-      test_regressions.py  Permanent regression gate (23 tests)
-    AGENTS.md              Instruction file for agents working in this directory.
+      conftest.py          Isolated test server/state fixtures (~644 lines)
+      488 test files       5303 tests collected via pytest
+      test_regressions.py  Permanent regression gate (~976 lines)
+    CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
     SPRINTS.md             Forward sprint plan with CLI + Claude parity targets.
     ARCHITECTURE.md        THIS FILE.
@@ -90,7 +90,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 State directory (runtime data, separate from source):
 
-    ~/.hermes/webui-mvp/
+    ~/.hermes/webui/
     sessions/          One JSON file per session: {session_id}.json
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
@@ -99,7 +99,8 @@ State directory (runtime data, separate from source):
 
 Log file:
 
-    /tmp/webui-mvp.log   stdout/stderr from the background server process
+    ~/.hermes/webui/bootstrap-8787.log   start.sh/bootstrap background server log
+    ~/.hermes/webui.log                  ctl.sh daemon log
 
 ---
 
@@ -118,15 +119,16 @@ Environment variables controlling behavior:
     HERMES_WEBUI_DEFAULT_WORKSPACE Default workspace path for new sessions
     HERMES_WEBUI_STATE_DIR         Where sessions/ folder lives
     HERMES_CONFIG_PATH             Path to ~/.hermes/config.yaml
-    HERMES_WEBUI_DEFAULT_MODEL     Default LLM model string
+    HERMES_WEBUI_DEFAULT_MODEL     Optional model override; unset means provider default
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)
+    HERMES_WEBUI_SKIP_ONBOARDING   Optional: bypass the first-run onboarding wizard
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
 
 Test isolation environment variables (set by conftest.py):
 
-    HERMES_WEBUI_PORT=8788                           Isolated test port
-    HERMES_WEBUI_STATE_DIR=~/.hermes/webui-mvp-test  Isolated test state
-    HERMES_WEBUI_DEFAULT_WORKSPACE=.../test-workspace Isolated test workspace
+    HERMES_WEBUI_TEST_PORT=...                         Optional pinned test port
+    HERMES_WEBUI_TEST_STATE_DIR=~/.hermes/webui-test-* Optional pinned test state
+    HERMES_WEBUI_DEFAULT_WORKSPACE=.../test-workspace  Isolated test workspace
 
 Tests NEVER talk to the production server (port 8787).
 The test state dir is wiped before each test session and deleted after.
@@ -363,16 +365,18 @@ read_file_content(workspace, rel):
 ### 5.1 Structure
 
 The frontend is served from static/ as separate files: one HTML template, one CSS file,
-and six JavaScript modules (~2,786 lines total). External dependencies: Prism.js (syntax
-highlighting) and Mermaid.js (diagrams) from CDN, both loaded async/deferred with SRI hashes.
+and multiple JavaScript modules. External dependencies include Prism.js (syntax
+highlighting), Mermaid.js (diagrams), xterm.js, and KaTeX assets loaded with the
+current static template's integrity/CSP assumptions.
 
-Six JS modules loaded in order at end of <body>:
-  1. ui.js       (~846 lines) DOM helpers, renderMd, tool card rendering, global state
-  2. workspace.js (~169 lines) File tree, preview, file operations
-  3. sessions.js  (~532 lines) Session CRUD, list rendering, search, SVG icons, dropdown actions, project picker
-  4. messages.js  (~293 lines) send(), SSE event handlers, approval, transcript
-  5. panels.js    (~771 lines) Cron, skills, memory, workspace, todo, switchPanel
-  6. boot.js      (~175 lines) Event wiring + boot IIFE
+Core JS modules loaded by the app include:
+  1. ui.js         (~7216 lines) DOM helpers, renderMd, tool card rendering, global state
+  2. workspace.js  (~369 lines) File tree, preview, file operations
+  3. sessions.js  (~3517 lines) Session CRUD, list rendering, search, SVG icons, dropdown actions, project picker
+  4. messages.js  (~2301 lines) send(), SSE event handlers, approval, transcript
+  5. panels.js    (~6480 lines) Cron, skills, memory, workspace, profiles, todo, settings
+  6. commands.js  (~1302 lines) Slash command registry, parser, autocomplete dropdown
+  7. boot.js      (~1607 lines) Event wiring + boot IIFE
 
 sessions.js defines an `ICONS` constant at module level with hardcoded SVG strings for all
 session action buttons (pin, unpin, folder, archive, unarchive, duplicate, trash). All icons
@@ -680,27 +684,28 @@ Split server.py into a proper package. Completed across Sprints 4-10.
 Current structure:
 
     <repo>/
-      server.py               Entry point + HTTP Handler dispatch (~76 lines)
+      server.py               Entry point + HTTP Handler dispatch (~446 lines)
       api/
         __init__.py
-        routes.py             All GET + POST route handlers (~1016 lines)
-        config.py             Configuration, constants, global state, model discovery (~640 lines)
-        helpers.py            HTTP helpers: j(), bad(), require(), safe_resolve() (~57 lines)
-        models.py             Session model + CRUD (~132 lines)
-        workspace.py          File ops, workspace management (~77 lines)
-        upload.py             Multipart parser, file upload handler (~77 lines)
-        streaming.py          SSE engine, run_agent, cancel support (~222 lines)
+        routes.py             All GET + POST route handlers (~9772 lines)
+        config.py             Configuration, constants, global state, model discovery (~4139 lines)
+        helpers.py            HTTP helpers: j(), bad(), require(), safe_resolve() (~302 lines)
+        models.py             Session model + CRUD (~1927 lines)
+        workspace.py          File ops, workspace management (~810 lines)
+        upload.py             Multipart parser, file upload handler (~284 lines)
+        streaming.py          SSE engine, run_agent, cancel support (~4420 lines)
       static/
         index.html            HTML document (served from disk)
-        style.css             All CSS (~560 lines)
-        ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
+        style.css             All CSS (~3767 lines)
+        ui.js, workspace.js, sessions.js, messages.js, panels.js, commands.js, boot.js
       tests/
-        conftest.py           Isolated test server on port 8788
-        test_sprint1-16.py    Feature tests per sprint (14 files)
+        conftest.py           Isolated test server/state fixtures
+        488 test files        5303 tests collected
         test_regressions.py   Permanent regression gate
 
-Route extraction to api/routes.py completed in Sprint 11. server.py is now a ~76-line
-thin shell: Handler class with structured logging, dispatch to routes, and main().
+Route extraction to api/routes.py completed in Sprint 11. server.py remains a
+thin shell relative to the rest of the app: Handler class with headers,
+structured logging, dispatch to routes, TLS wrapping, and main().
 
 ### Phase B: Thread-Safe Request Context (Priority: Critical, Effort: Medium)
 
@@ -779,7 +784,7 @@ Replacing with marked.js + DOMPurify is a future improvement (not blocking).
 
 ### Phase G: Observability -- MOSTLY COMPLETE
 
-1. Structured JSON logging: COMPLETE (Sprint 1). Per-request JSON to /tmp/webui-mvp.log.
+1. Structured JSON logging: COMPLETE (Sprint 1). Per-request JSON is printed to the active launcher log (`~/.hermes/webui/bootstrap-8787.log` for `start.sh`, `~/.hermes/webui.log` for `ctl.sh`).
 2. Enhanced /health: COMPLETE (Sprint 7). Returns `active_streams`, `uptime_seconds`.
 3. GET /api/debug/stats: NOT YET IMPLEMENTED. Low priority.
 
@@ -795,13 +800,13 @@ Optional password gate for non-SSH-tunnel deployments.
 
 ### Phase I: Test Infrastructure -- COMPLETE
 
-289 tests across 14 test files + regression gate. Isolated test server on port 8788
-with separate HERMES_HOME, wiped per run. Production data never touched.
+5303 tests across 488 test files + regression gates. The pytest fixture derives
+an isolated port and state directory from the repo path unless
+`HERMES_WEBUI_TEST_PORT` / `HERMES_WEBUI_TEST_STATE_DIR` pin them explicitly.
+Production data never touched.
 
-Test files: `test_sprint1.py` through `test_sprint11.py`, `test_sprint16.py`, `test_regressions.py`.
-Fixtures in `conftest.py`: auto-cleanup, cron isolation, workspace reset.
-
-Remaining: no CI (GitHub Actions), no frontend tests (browser-based).
+Fixtures in `conftest.py`: auto-cleanup, profile/config isolation, cron
+isolation, workspace reset, and test-server lifecycle.
 
 ### Phase J: Performance (Priority: Low, Effort: High)
 
@@ -889,7 +894,8 @@ The api() helper:
     curl -s http://127.0.0.1:8787/health | python3 -m json.tool
 
     # Tail the server log live
-    tail -f /tmp/webui-mvp.log
+    tail -f ~/.hermes/webui/bootstrap-8787.log
+    tail -f ~/.hermes/webui.log  # when launched through ctl.sh
 
     # List all sessions (metadata only)
     curl -s http://127.0.0.1:8787/api/sessions | python3 -m json.tool
@@ -899,15 +905,15 @@ The api() helper:
     curl -s "http://127.0.0.1:8787/api/session?session_id=$SID" | python3 -m json.tool
 
     # Kill and restart server cleanly
-    pkill -f "python.*webui-mvp/server.py"
-    <agent-dir>/webui-mvp/start.sh
+    pkill -f "python.*server.py"
+    <repo>/start.sh
 
     # Check if server process is running
-    ps aux | grep "webui-mvp/server.py"
+    ps aux | grep "server.py"
 
     # Inspect session files on disk
-    ls -lt ~/.hermes/webui-mvp/sessions/
-    cat ~/.hermes/webui-mvp/sessions/SESSION_ID.json | python3 -m json.tool
+    ls -lt ~/.hermes/webui/sessions/
+    cat ~/.hermes/webui/sessions/SESSION_ID.json | python3 -m json.tool
 
     # Count messages in a session
     python3 -c "import json; d=json.load(open('sessions/SID.json')); print(len(d['messages']))"
@@ -920,9 +926,9 @@ The api() helper:
     curl -s http://127.0.0.1:8787/health  # streams not exposed yet, add in Phase G
 
     # Find all sessions with messages (not Untitled empty)
-    ls ~/.hermes/webui-mvp/sessions/ | xargs -I{} python3 -c "
+    ls ~/.hermes/webui/sessions/ | xargs -I{} python3 -c "
     import json, sys
-    d = json.load(open('~/.hermes/webui-mvp/sessions/{}'))
+    d = json.load(open('~/.hermes/webui/sessions/{}'))
     if d['messages']: print('{}', d['title'][:50])
     " 2>/dev/null
 
@@ -1195,31 +1201,22 @@ will be working on this codebase. Read this before touching any file.
 ### Before Making Any Change
 
 1. Read this document (ARCHITECTURE.md) fully. Especially sections 4, 5, and the ADRs.
-2. Read the relevant section of server.py by searching for the SECTION header.
+2. Inspect the relevant module under `api/` or `static/`; `server.py` is only the routing shell.
 3. Check the Sprint Log (Section 15) to understand what was recently changed.
-4. Run the test suite first to confirm baseline: cd <agent-dir> &&
-   venv/bin/python -m pytest webui-mvp/tests/test_sprint1.py -v
+4. Run the relevant test slice first to confirm baseline, for example:
+   venv/bin/python -m pytest tests/test_regressions.py -q
 5. Check server health: curl -s http://127.0.0.1:8787/health
 
 ### Making Changes
 
-Always back up server.py before a non-trivial change:
-    cp server.py server.py.$(date +%Y%m%d_%H%M).bak
-
-Use exact string matching when patching. The pitfalls are documented in the
-hermes-webui-mvp skill. Key ones:
-- Never use sed on this file from the shell. Use execute_code with Python string replace.
-- Always assert the old string is found before replacing (prevents silent no-op patches).
-- Unicode escape sequences in JS (\u2026) exist as literal backslash-u in the file.
-  Match the file's raw content, not interpreted Python strings.
-- The HTML block is a Python raw string (r"""..."""). Standard triple-quote escaping
-  rules do not apply inside it, but Python escape sequences \n etc. work in JS strings
-  inside it as literal two-character sequences.
+Keep edits scoped to the module that owns the behavior. Use exact string
+matching when making mechanical patches and verify that the intended old string
+was found before replacing it.
 
 After any change:
-    venv/bin/python -m py_compile webui-mvp/server.py   # syntax check
+    venv/bin/python -m py_compile server.py             # syntax check
     curl -s http://127.0.0.1:8787/health                # server still alive
-    venv/bin/python -m pytest webui-mvp/tests/ -v       # tests still pass
+    venv/bin/python -m pytest tests/ -v                 # tests still pass
 
 ### Critical Rules (do NOT regress these)
 

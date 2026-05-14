@@ -484,6 +484,9 @@ async function resumeManualCompressionForSession(sid){
     if(!S.session||S.session.session_id!==sid) return;
     await _applyManualCompressionResult(done, status.focus_topic||'', visibleCount, status.focus_topic?`/compress ${status.focus_topic}`:'/compress');
   }catch(e){
+    // No active compression job or transient server error — not a real failure.
+    // 404: route missed or session gone; 5xx: backend exception during status check.
+    if(e&&(!e.status||e.status===404||e.status>=500)) return;
     if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
       const visibleMessages=_manualCompressionVisibleMessages();
       setCompressionUi({
@@ -877,6 +880,26 @@ async function cmdSteer(args){
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
  *   (vs the busy-mode auto-fallback). Affects toast wording only.
  */
+function _showSteerIndicator(text){
+  const inner=document.getElementById('msgInner');
+  if(!inner) return;
+  // Remove any existing steer indicator
+  const old=inner.querySelector('.steer-indicator');
+  if(old) old.remove();
+  const el=document.createElement('div');
+  el.className='steer-indicator';
+  const badge=document.createElement('span');
+  badge.className='steer-badge';
+  badge.textContent='Steer';
+  const body=document.createElement('span');
+  body.className='steer-body';
+  body.textContent=text.length>120?text.slice(0,117)+'…':text;
+  el.appendChild(badge);
+  el.appendChild(body);
+  inner.appendChild(el);
+  if(typeof scrollToBottom==='function') scrollToBottom();
+}
+
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -889,6 +912,11 @@ async function _trySteer(msg, explicitSteer){
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
+    // Show a transient steer indicator in the chat (NOT in S.messages — it must
+    // survive the done event's S.messages=d.session.messages replacement).
+    // The indicator self-removes when the turn completes (done/cancel/error
+    // all call renderMessages which rebuilds msgInner).
+    _showSteerIndicator(msg);
     showToast(t('cmd_steer_delivered'),2500);
     return;
   }
@@ -1154,14 +1182,29 @@ async function cmdBranch(args){
 
 // ── Fork from a specific message point ──
 // Called from the "Fork from here" button on message hover actions.
+// msgIdx is 1-based within the currently loaded tail window (rawIdx+1).
+// When the session is truncated (_oldestIdx > 0), msgIdx alone would be
+// a local-window count, but the backend expects an absolute message count
+// from the beginning of the full transcript.  We capture the absolute
+// count (_oldestIdx + msgIdx) BEFORE awaiting _ensureAllMessagesLoaded,
+// which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
 async function forkFromMessage(msgIdx){
   if(!S.session||S.busy)return;
+  // Capture the absolute keep_count before any async work that may
+  // reset _oldestIdx.  _oldestIdx is 0 when the full transcript is
+  // already loaded, so short/already-full sessions send msgIdx unchanged.
+  const absoluteKeepCount = _oldestIdx + msgIdx;
+  // Ensure the full transcript is loaded so the forked session renders
+  // correctly and subsequent operations see the complete history.
+  if(typeof _ensureAllMessagesLoaded==='function'){
+    await _ensureAllMessagesLoaded();
+  }
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
       body:JSON.stringify({
         session_id:S.session.session_id,
-        keep_count:msgIdx,
+        keep_count:absoluteKeepCount,
       }),
     });
     if(data&&data.session_id){
