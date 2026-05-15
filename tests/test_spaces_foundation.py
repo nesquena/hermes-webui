@@ -4609,7 +4609,7 @@ def test_space_tool_adapter_research_progress_uses_active_space_metadata_only(mo
             "phase": "writing summary",
             "message": "Drafting artifact from public notes",
             "sources": [{"title": "Ref", "url": "https://example.org", "renderer": "<script>bad()</script>"}],
-            "notes": ["ready for summary", "authorization: Bearer SECRET_VALUE_DO_NOT_LEAK"],
+            "notes": ["ready for summary", "authorization: Bearer token placeholder"],
         },
     )
     serialized = json.dumps(result).lower()
@@ -4628,6 +4628,41 @@ def test_space_tool_adapter_research_progress_uses_active_space_metadata_only(mo
     assert "<script" not in serialized
     assert "authorization" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_adapter_research_progress_accepts_space_id_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="tool-research-camel-progress")
+
+    result = spaces.run_space_tool(
+        "space.research.progress.set",
+        {
+            "spaceId": installed["space"]["space_id"],
+            "phase": "camel tool source review",
+            "message": "Checking public references",
+            "sources": [{"title": "Safe source", "url": "https://example.com/source", "renderer": "<script>bad()</script>"}],
+            "notes": ["safe tool note", "api_key=SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.research.progress.set"
+    assert result["space_id"] == installed["space"]["space_id"]
+    assert "active_space_id" not in result
+    assert result["widgets"]["plan"]["metadata"]["status"]["phase"] == "camel tool source review"
+    assert result["widgets"]["sources"]["metadata"]["table"]["rows"][0] == {
+        "title": "Safe source",
+        "url": "https://example.com/source",
+        "notes": "",
+    }
+    assert result["widgets"]["notes"]["metadata"]["notes"]["items"] == ["safe tool note", "[REDACTED]"]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeypatch, tmp_path):
@@ -6509,6 +6544,39 @@ def test_space_tool_adapter_admin_rollback_aliases_restore_metadata_only(monkeyp
         assert "api_key" not in serialized
         assert "secret_value_do_not_leak" not in serialized
         assert "<script" not in serialized
+
+
+def test_space_tool_adapter_admin_rollback_rejects_conflicting_space_aliases_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "tool-admin-space-conflict-target", "name": "Target Original"})
+    other = spaces.create_space({"space_id": "tool-admin-space-conflict-other", "name": "Other Original"})
+    target_original_event_id = target["revision_event_id"]
+    target_updated = spaces.update_space(target["space_id"], {"name": "Target Patched"})
+    other_updated = spaces.update_space(other["space_id"], {"name": "Other Patched"})
+
+    with pytest.raises(ValueError, match="space selector aliases"):
+        spaces.run_space_tool(
+            "space.admin.rollback",
+            {
+                "space_id": target["space_id"],
+                "spaceId": other["space_id"],
+                "eventId": target_original_event_id,
+                "renderer": "<script>should-not-leak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    target_detail = spaces.read_space_detail(target["space_id"])
+    other_detail = spaces.read_space_detail(other["space_id"])
+    serialized = json.dumps({"target": target_detail, "other": other_detail}).lower()
+    assert target_detail["name"] == "Target Patched"
+    assert target_detail["revision_event_id"] == target_updated["revision_event_id"]
+    assert other_detail["name"] == "Other Patched"
+    assert other_detail["revision_event_id"] == other_updated["revision_event_id"]
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
 
 
 def test_space_tool_adapter_admin_rollback_rejects_conflicting_event_aliases_before_side_effects(monkeypatch, tmp_path):

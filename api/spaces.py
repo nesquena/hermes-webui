@@ -3042,6 +3042,11 @@ def _space_tool_arg(payload: dict[str, Any], index: int) -> Any:
 
 def _space_tool_current_id(payload: dict[str, Any]) -> str:
     """Return the optional current-space id from a tool payload."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"),
+        "Conflicting space selector aliases",
+    )
     raw = (
         payload.get("space_id")
         or payload.get("spaceId")
@@ -3137,6 +3142,11 @@ def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
 
 def _space_tool_space_id(payload: dict[str, Any]) -> str:
     """Return a Space id from Hermes or source-style space helper payloads."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("space_id", "spaceId", "current_space_id", "currentSpaceId", "active_space_id", "activeSpaceId", "id"),
+        "Conflicting space selector aliases",
+    )
     return str(
         payload.get("space_id")
         or payload.get("spaceId")
@@ -3818,7 +3828,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.current.research.progress.update",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_space_id(data))
         result = set_research_progress(
             space_id,
             phase=data.get("phase") or data.get("status") or "working",
@@ -3856,7 +3866,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.restore",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_current_id(data) or data.get("space_id"))
+        if not is_current:
+            _space_tool_assert_matching_aliases(
+                data,
+                ("space_id", "spaceId", "current_space_id", "currentSpaceId", "active_space_id", "activeSpaceId", "id"),
+                "Conflicting space selector aliases",
+                _space_tool_arg(data, 0),
+            )
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_space_id(data))
         event_id = _space_tool_event_id(data, positional_event_index=1)
         result = restore_revision(space_id, event_id)
         if is_current:
