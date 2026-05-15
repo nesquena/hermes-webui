@@ -206,7 +206,6 @@
   :root:not(.dark) *{scrollbar-color:rgba(0,0,0,.15) transparent;}
   /* ── Light mode: sidebar, roles, chips, active states ── */
   :root:not(.dark) .session-item{color:var(--muted);}
-  :root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}
   :root:not(.dark) .session-item.active{background:var(--accent-bg);color:var(--accent-text);}
   :root:not(.dark) .session-item.active .session-title{color:var(--accent-text);}
   :root:not(.dark) .session-pin-indicator{color:var(--accent-text);}
@@ -354,14 +353,15 @@
      menu-open / focus-within rule below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;}
   .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
-  .session-item:hover{background:var(--hover-bg);color:var(--text);}
+  @media (hover:hover){.session-item:hover{background:var(--hover-bg);color:var(--text);}}
+  .session-item.loading{background:var(--hover-bg);color:var(--text);}
   /* Suppress hover highlight during drag to avoid visual noise mid-scroll */
   .session-item.dragging:hover{background:transparent;color:var(--muted);}
   /* Restore hover padding-right only for mouse (hover:hover) devices.
      Touch/iPad (hover:none) must NOT expand padding-right on :hover —
      the expansion causes a layout-reflow mid-tap that moves session-actions
      under the finger, triggering stopPropagation and swallowing navigation. */
-  @media (hover:hover){.session-item:hover{padding-right:40px;}}
+  @media (hover:hover){:root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}.session-item:hover{padding-right:40px;}}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
   .session-item.streaming .session-title{color:var(--accent);}
   .session-item.streaming .session-title-row{color:var(--text);}
@@ -1551,9 +1551,9 @@
 
   @media (hover:none) and (pointer:coarse){
     .session-actions{display:none;}
-    .session-item{padding-right:12px;}
+    .session-item{padding-right:6px;}
     .session-item.streaming,.session-item.unread{padding-right:40px;}
-    .session-item:focus-within,.session-item.menu-open{padding-right:12px;}
+    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
   }
 
   @media (max-width: 340px){

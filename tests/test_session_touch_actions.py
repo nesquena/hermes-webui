@@ -35,9 +35,9 @@ def test_mobile_session_menu_opens_from_long_press_and_hides_dots():
     assert "const _beginSessionTouchGesture=(clientX,clientY)=>{" in SESSIONS_JS
     assert "const _scheduleSessionLongPressMenu=()=>{" in SESSIONS_JS
     mobile_touch = STYLE_CSS[STYLE_CSS.find("@media (hover:none) and (pointer:coarse)"):STYLE_CSS.find("@media (max-width: 340px)")]
-    assert ".session-item{padding-right:12px;}" in mobile_touch
+    assert ".session-item{padding-right:6px;}" in mobile_touch
     assert ".session-item.streaming,.session-item.unread{padding-right:40px;}" in mobile_touch
-    assert ".session-item:focus-within,.session-item.menu-open{padding-right:12px;}" in mobile_touch
+    assert ".session-item:focus-within,.session-item.menu-open{padding-right:6px;}" in mobile_touch
 
 
 def test_open_session_menu_consumes_next_row_activation():

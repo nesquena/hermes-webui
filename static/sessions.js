@@ -3288,6 +3288,7 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        el.classList.remove('loading');
         startRename();
         return;
       }
@@ -3297,6 +3298,7 @@ function renderSessionListFromCache(){
       // accidental navigation during scroll-drag lifts.
       clearTimeout(_tapTimer);
       const delay=e.pointerType==='mouse'?0:300;
+      if(e.pointerType!=='mouse') el.classList.add('loading');
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;
