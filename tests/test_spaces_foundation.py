@@ -5064,6 +5064,135 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
     assert "secret" not in serialized
 
 
+def test_space_tool_template_install_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.run_space_tool(
+        "space.template.install",
+        {
+            "template": "research",
+            "space_id": "   ",
+            "spaceId": "tool-template-camel",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["space"]["space_id"] == "tool-template-camel"
+    assert result["space"]["name"] == "Research Harness"
+    assert "research-query" in [widget["id"] for widget in spaces.list_widgets("tool-template-camel")]
+    assert "tool-template-camel" in [space["space_id"] for space in spaces.list_spaces()]
+    assert "research-harness" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("big-bang", space_id="tool-reset-camel")
+    spaces.upsert_widget(
+        installed["space"]["space_id"],
+        {"id": "unsafe-extra", "kind": "html", "title": "Unsafe", "renderer": "<script>bad()</script>"},
+    )
+
+    result = spaces.run_space_tool(
+        "space.template.reset",
+        {
+            "template": "big-bang",
+            "space_id": "   ",
+            "spaceId": "tool-reset-camel",
+            "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["reset"] is True
+    assert result["space"]["space_id"] == "tool-reset-camel"
+    assert [widget["id"] for widget in spaces.list_widgets("tool-reset-camel")] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert "unsafe-extra" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_template_actions_reject_conflicting_space_id_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "tool-template-target", "name": "Template Target"})
+    spaces.create_space({"space_id": "tool-template-other", "name": "Template Other"})
+
+    with pytest.raises(ValueError, match="selector aliases"):
+        spaces.run_space_tool(
+            "space.template.install",
+            {
+                "template": "research",
+                "space_id": "tool-template-target",
+                "spaceId": "tool-template-other",
+                "renderer": "<script>conflict()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+    with pytest.raises(ValueError, match="selector aliases"):
+        spaces.run_space_tool(
+            "space.template.reset",
+            {"template": "big-bang", "space_id": "tool-template-target", "spaceId": "tool-template-other"},
+        )
+
+    assert spaces.read_space("tool-template-target")["name"] == "Template Target"
+    assert spaces.read_space("tool-template-other")["name"] == "Template Other"
+    assert spaces.list_widgets("tool-template-target") == []
+    assert spaces.list_widgets("tool-template-other") == []
+
+
+def test_space_tool_template_actions_ignore_ambient_and_generic_id_targets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "ambient-template-target", "name": "Ambient Target"})
+
+    install_result = spaces.run_space_tool(
+        "space.template.install",
+        {
+            "template": "research",
+            "activeSpaceId": "ambient-template-target",
+            "currentSpaceId": "ambient-template-target",
+            "id": "ambient-template-target",
+            "args": ["ambient-template-target"],
+        },
+    )
+
+    assert install_result["space"]["space_id"] == "research-harness"
+    assert spaces.list_widgets("ambient-template-target") == []
+    assert "research-query" in [widget["id"] for widget in spaces.list_widgets("research-harness")]
+
+    spaces.install_template("big-bang", space_id="ambient-reset-target")
+    spaces.upsert_widget(
+        "ambient-reset-target",
+        {"id": "ambient-extra", "kind": "metadata", "title": "Ambient extra"},
+    )
+    reset_result = spaces.run_space_tool(
+        "space.template.reset",
+        {
+            "template": "big-bang",
+            "activeSpaceId": "ambient-reset-target",
+            "currentSpaceId": "ambient-reset-target",
+            "id": "ambient-reset-target",
+            "args": ["ambient-reset-target"],
+        },
+    )
+
+    assert reset_result["space"]["space_id"] == "big-bang-onboarding"
+    assert "ambient-extra" in [widget["id"] for widget in spaces.list_widgets("ambient-reset-target")]
+
+
 def test_space_tool_adapter_supports_source_install_example_alias_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -9156,6 +9285,32 @@ def test_big_bang_template_install_route_returns_safe_metadata(monkeypatch, tmp_
     assert "secret" not in serialized
 
 
+def test_template_install_route_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/templates/install",
+        {
+            "template": "research",
+            "spaceId": "route-template-camel",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["space"]["space_id"] == "route-template-camel"
+    assert body["space"]["name"] == "Research Harness"
+    assert "research-query" in [widget["id"] for widget in spaces.list_widgets("route-template-camel")]
+    assert "research-harness" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_reset_big_bang_template_restores_canonical_metadata_and_removes_extra_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("big-bang")
@@ -9241,6 +9396,81 @@ def test_big_bang_template_reset_route_returns_safe_metadata(monkeypatch, tmp_pa
     assert "<script" not in serialized
     assert "api_key" not in serialized
     assert "secret" not in serialized
+
+
+def test_template_reset_route_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("big-bang", space_id="route-reset-camel")
+    spaces.upsert_widget(
+        installed["space"]["space_id"],
+        {"id": "unsafe-extra", "kind": "html", "title": "Unsafe", "renderer": "<script>bad()</script>"},
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/templates/reset",
+        {"template": "big-bang", "spaceId": "route-reset-camel", "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["space"]["space_id"] == "route-reset-camel"
+    assert body["reset"] is True
+    assert [widget["id"] for widget in spaces.list_widgets("route-reset-camel")] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert "unsafe-extra" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_template_routes_reject_conflicting_space_id_aliases_before_install_or_reset(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "route-template-target", "name": "Template Target"})
+    spaces.create_space({"space_id": "route-template-other", "name": "Template Other"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/templates/install",
+        {
+            "template": "research",
+            "space_id": "route-template-target",
+            "spaceId": "route-template-other",
+            "renderer": "<script>conflict()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert spaces.read_space("route-template-target")["name"] == "Template Target"
+    assert spaces.read_space("route-template-other")["name"] == "Template Other"
+    assert spaces.list_widgets("route-template-target") == []
+    assert spaces.list_widgets("route-template-other") == []
+    assert "conflict()" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, body = _route_post(
+        "/api/spaces/templates/reset",
+        {"template": "big-bang", "space_id": "route-template-target", "spaceId": "route-template-other"},
+    )
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert spaces.read_space("route-template-target")["name"] == "Template Target"
+    assert spaces.read_space("route-template-other")["name"] == "Template Other"
+    assert spaces.list_widgets("route-template-target") == []
+    assert spaces.list_widgets("route-template-other") == []
 
 
 def test_install_game_template_creates_safe_canvas_game_widgets(monkeypatch, tmp_path):

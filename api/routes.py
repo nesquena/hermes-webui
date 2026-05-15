@@ -4960,7 +4960,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.install_template(
                     body.get("template") or "weather",
-                    space_id=body.get("space_id") or None,
+                    space_id=_route_alias_value("space_id", "spaceId") or None,
                 ),
             )
         except RuntimeError as e:
@@ -4977,7 +4977,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.reset_template(
                     body.get("template") or "big-bang",
-                    space_id=body.get("space_id") or None,
+                    space_id=_route_alias_value("space_id", "spaceId") or None,
                 ),
             )
         except RuntimeError as e:

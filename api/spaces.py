@@ -3040,6 +3040,20 @@ def _space_tool_arg(payload: dict[str, Any], index: int) -> Any:
     return ""
 
 
+def _space_tool_space_id_alias(payload: dict[str, Any]) -> str:
+    """Return an explicit Space target id from snake/camel aliases only."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("space_id", "spaceId"),
+        "Conflicting space selector aliases",
+    )
+    for key in ("space_id", "spaceId"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _space_tool_current_id(payload: dict[str, Any]) -> str:
     """Return the optional current-space id from a tool payload."""
     _space_tool_assert_matching_aliases(
@@ -3464,11 +3478,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
     if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:
         template_name = _space_tool_template_name(data, "weather")
-        result = install_template(template_name, space_id=data.get("space_id") or None)
+        result = install_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.template.reset", "space.templates.reset", "template.reset"}:
         template_name = _space_tool_template_name(data, "big-bang")
-        result = reset_template(template_name, space_id=data.get("space_id") or None)
+        result = reset_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.import", "space.package.import", "space.agent.import"}:
         result = import_space_agent_package(data, space_id=data.get("space_id") or None)
