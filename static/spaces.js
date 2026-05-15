@@ -950,10 +950,11 @@
       const previewText = formatRestorePreview(rev && rev.restore_preview);
       const diffText = formatRestoreDiff(rev && rev.restore_diff);
       const currentRevision = isCurrentRevision(rev);
-      const widgetRestoreButtons = currentRevision ? '' : renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff);
+      const hasRestorePreview = !!(rev && rev.restore_preview && typeof rev.restore_preview === 'object' && !Array.isArray(rev.restore_preview));
+      const widgetRestoreButtons = currentRevision || !hasRestorePreview ? '' : renderRestoreWidgetButtons(spaceId, eventId, rev && rev.restore_diff);
       const timelineLabel = formatRevisionTimelineLabel(rev);
       const restoreLabel = isReturnToPresentRevision(rev) ? 'Return to present' : 'Restore';
-      const restoreButton = !currentRevision && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
+      const restoreButton = !currentRevision && hasRestorePreview && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventIdLabel)+'</div>' +
@@ -2739,7 +2740,8 @@
       const currentRevision = isCurrentRevision(rev);
       const timelineLabel = formatRevisionTimelineLabel(rev);
       const restoreLabel = isReturnToPresentRevision(rev) ? 'Return to present' : 'Restore revision';
-      const restoreButton = !currentRevision && actionSpaceId && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(actionSpaceId)+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
+      const hasRestorePreview = !!(rev && rev.restore_preview && typeof rev.restore_preview === 'object' && !Array.isArray(rev.restore_preview));
+      const restoreButton = !currentRevision && hasRestorePreview && actionSpaceId && eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(actionSpaceId)+'" data-event-id="'+escapeHtml(eventId)+'">'+escapeHtml(restoreLabel)+'</button>' : '';
       const widgetRestoreButtons = currentRevision ? '' : renderRestoreWidgetButtons(actionSpaceId, eventId, rev && rev.restore_diff, 'restoreRecoveryWidgetRevision');
       const actions = (restoreButton || widgetRestoreButtons) ? '<div class="capy-spaces-actions">'+restoreButton+widgetRestoreButtons+'</div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +

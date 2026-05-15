@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 06:49 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 10:42 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces Space-tool widget-event adapter ignores blank snake_case event-name aliases while accepting valid Space-Agent-style camelCase `eventName` before queueing metadata-only events. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces rollback/time-travel restore paths now require revision snapshots to declare an exact owning `space_id` before full-Space or widget restore can mutate manifests. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): verify revision snapshot ownership`
+  - Added RED/GREEN backend rollback coverage proving full-Space restore rejects mismatched, missing, and malformed/whitespace-padded snapshot `space_id` values before mutation, and widget restore rejects mismatched snapshot ownership before replacing a widget.
+  - Hardened revision event summaries to emit metadata-only restore previews/diffs only when the stored snapshot belongs exactly to the requested Space, and kept Space-detail plus recovery-panel revision summaries without restore previews non-actionable so unowned/foreign rollback snapshots cannot appear as actionable restore controls.
+  - Validation at completion: focused RED failed before implementation for mismatched, missing, malformed, Space-detail non-actionable, and recovery-panel non-actionable unowned snapshot ownership; focused GREEN passed; full Spaces foundation + UI behavior + demo parity suites passed (`497 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/revision-snapshot-ownership-qa.png`.
 
 - `fix(spaces): ignore blank widget event tool aliases`
   - Added RED/GREEN backend tool-adapter coverage proving `run_space_tool("space.widget.event", ...)` ignores a blank `event_name` when a valid camelCase `eventName` is present, queues exactly one metadata-only `agent.prompt` event, and omits generated renderer/API-auth/secret-looking fixture markers from queued receipts/events.

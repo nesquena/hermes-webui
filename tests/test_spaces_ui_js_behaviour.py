@@ -607,6 +607,8 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           revisions: (scenario === 'recoveryUnsafeRevisionEventId' ? [
             { event_id: 'renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK', event_type: 'space.updated', space_id: 'broken', created_at: 1710000250, details: { note: 'safe recovery unsafe-event probe' }, restore_preview: { name: 'Recovery unsafe revision probe', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown' }] }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget'], widgets_to_add: [], widgets_to_remove: [] } },
+          ] : []).concat(scenario === 'recoveryUnownedRevisionSummary' ? [
+            { event_id: 'rev-unowned', event_type: 'space.updated', space_id: 'broken', created_at: 1710000175, details: { note: 'unowned snapshot summary suppressed' }, restore_diff: { widgets_to_update: ['safe-widget'], widgets_to_add: [], widgets_to_remove: [] } },
           ] : []).concat([
             { event_id: 'rev-broken', event_type: 'widget.recovery_disabled', space_id: 'broken', created_at: 1710000200, timeline_state: 'current', is_current_revision: true, details: { widget_id: 'bad-widget', reason: 'Authorization: Bearer *** renderer: <script>bad()</script>' }, restore_preview: { name: 'Broken current', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
             { event_id: 'rev-return-present', event_type: 'space.updated', space_id: 'broken', created_at: 1710000150, timeline_state: 'future', is_return_to_present_candidate: true, details: { fields: ['widgets'], note: 'return safely to present', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Broken present checkpoint', widget_count: 2, widgets: [{ id: 'bad-widget', title: 'Bad <Widget>', kind: 'html', renderer: '<script>bad()</script>', api_key: 'SECRET' }, { id: 'disabled-widget', title: 'Disabled Widget', kind: 'markdown' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: true, widgets_to_update: ['bad-widget'], widgets_to_add: [], widgets_to_remove: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
@@ -971,6 +973,9 @@ global.fetch = async function(path, opts = {}) {
     ];
     if (scenario === 'openSpaceDetailUnsafeRevisionEventId') {
       labRevisions.unshift({ event_id: 'renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK', event_type: 'space.updated', space_id: 'lab', created_at: 1710000070, details: { note: 'safe unsafe-event probe' }, restore_preview: { name: 'Unsafe revision probe', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather intermediate', kind: 'markdown' }] }, restore_diff: { has_changes: true, widgets_to_update: ['weather'], widgets_to_add: [], widgets_to_remove: [] } });
+    }
+    if (scenario === 'openSpaceDetailUnownedRevisionSummary') {
+      labRevisions.unshift({ event_id: 'rev-unowned-detail', event_type: 'space.updated', space_id: 'lab', created_at: 1710000080, timeline_state: 'past', details: { note: 'unowned snapshot summary suppressed' } });
     }
     return response({ revisions: labRevisions });
   }
@@ -2014,7 +2019,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runAllDemoSmokes', {});
-  } else if (scenario === 'openSpaceDetail' || scenario === 'openSpaceDetailUnsafeRevisionEventId') {
+  } else if (scenario === 'openSpaceDetail' || scenario === 'openSpaceDetailUnsafeRevisionEventId' || scenario === 'openSpaceDetailUnownedRevisionSummary') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
   } else if (scenario === 'openSpaceCanvasRecovery' || scenario === 'recoveryUnsafeRevisionEventId') {
@@ -2131,7 +2136,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId' || scenario === 'recoveryUnsafeSpaceDisplayMetadata') {
+  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId' || scenario === 'recoveryUnsafeSpaceDisplayMetadata' || scenario === 'recoveryUnownedRevisionSummary') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -2681,6 +2686,22 @@ def test_spaces_ui_revision_history_omits_unsafe_event_id_restore_actions_metada
     assert "renderer" not in out["rootHtml"].lower()
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
+def test_spaces_ui_space_detail_keeps_unowned_revision_summaries_non_actionable(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetailUnownedRevisionSummary")
+
+    detail_html = out["rootHtml"]
+    assert "rev-unowned-detail" in detail_html
+    assert "unowned snapshot summary suppressed" in detail_html
+    assert 'data-event-id="rev-unowned-detail"' not in detail_html
+    assert "Preview: Unowned" not in detail_html
+    assert "Weather patched" in detail_html
+    assert "Return to present" in detail_html
+    assert "<script>" not in detail_html
+    assert "renderer" not in detail_html
+    assert "api_key" not in detail_html.lower()
+    assert "SECRET" not in detail_html
 
 
 def test_spaces_ui_canvas_shell_opens_safe_recovery_hard_gate_metadata_only(driver_path):
@@ -4759,6 +4780,20 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_panel_keeps_unowned_revision_summaries_non_actionable(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoveryUnownedRevisionSummary")
+
+    recovery_html = out["recoveryHtml"]
+    assert "rev-unowned" in recovery_html
+    assert "unowned snapshot summary suppressed" in recovery_html
+    assert 'data-event-id="rev-unowned"' not in recovery_html
+    assert "Preview: Unowned" not in recovery_html
+    assert "<script>" not in recovery_html
+    assert "renderer" not in recovery_html
+    assert "api_key" not in recovery_html.lower()
+    assert "SECRET" not in recovery_html
 
 
 def test_spaces_ui_recovery_panel_redacts_unsafe_space_id_and_omits_actions(driver_path):

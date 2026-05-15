@@ -1365,6 +1365,11 @@ def _public_revision_event_id(event_id: Any) -> str | None:
     return event_id_text if _event_id_is_safe(event_id_text) else None
 
 
+def _revision_snapshot_belongs_to_space(snapshot: dict[str, Any], sid: str) -> bool:
+    snapshot_space_id = snapshot.get("space_id")
+    return isinstance(snapshot_space_id, str) and bool(snapshot_space_id) and snapshot_space_id == sid
+
+
 def _event_summary(event: dict[str, Any], sid: str, current_snapshot: dict[str, Any] | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
@@ -1381,7 +1386,7 @@ def _event_summary(event: dict[str, Any], sid: str, current_snapshot: dict[str, 
         "details": details,
     }
     snapshot = event.get("snapshot")
-    if isinstance(snapshot, dict):
+    if isinstance(snapshot, dict) and _revision_snapshot_belongs_to_space(snapshot, sid):
         summary["restore_preview"] = _restore_preview_summary(snapshot, sid)
         if isinstance(current_snapshot, dict):
             summary["restore_diff"] = _restore_diff_summary(snapshot, current_snapshot)
@@ -4407,6 +4412,8 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     snapshot = event.get("snapshot")
     if not isinstance(snapshot, dict):
         raise ValueError("Revision snapshot is unavailable")
+    if not _revision_snapshot_belongs_to_space(snapshot, sid):
+        raise ValueError("Revision snapshot does not belong to this space")
     restored = dict(snapshot)
     restored["space_id"] = sid
     restored.setdefault("schema_version", SCHEMA_VERSION)
@@ -4474,6 +4481,8 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
     snapshot = event.get("snapshot")
     if not isinstance(snapshot, dict):
         raise ValueError("Revision snapshot is unavailable")
+    if not _revision_snapshot_belongs_to_space(snapshot, sid):
+        raise ValueError("Revision snapshot does not belong to this space")
     target_widget: dict[str, Any] | None = None
     for widget in snapshot.get("widgets") if isinstance(snapshot.get("widgets"), list) else []:
         if isinstance(widget, dict) and widget.get("id") == wid:

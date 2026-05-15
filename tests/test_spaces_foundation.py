@@ -5981,6 +5981,104 @@ def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monke
     assert "secret" not in serialized
 
 
+def test_restore_revision_rejects_mismatched_snapshot_space_id_without_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "restore-owner", "name": "Restore Owner"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "owner-widget",
+            "kind": "html",
+            "title": "Owner Widget",
+            "renderer": "<script>foreign()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "owner-widget", {"title": "Current Owner Widget"})
+    before = spaces.read_space(created["space_id"])
+
+    event_path = spaces.events_dir() / f"{original['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["snapshot"]["space_id"] = "foreign-space"
+    event["snapshot"]["name"] = "Foreign Snapshot"
+    event["snapshot"]["widgets"] = [
+        {
+            "id": "foreign-widget",
+            "kind": "html",
+            "title": "Foreign Widget",
+            "renderer": "<script>bad()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    ]
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Revision snapshot does not belong to this space"):
+        spaces.restore_revision(created["space_id"], original["revision_event_id"])
+
+    assert spaces.read_space(created["space_id"]) == before
+    revisions = spaces.list_revision_events(created["space_id"], limit=10)
+    assert not any(revision["event_type"] == "space.restored" for revision in revisions)
+    serialized = json.dumps({"space": spaces.read_space_detail(created["space_id"]), "revisions": revisions}).lower()
+    assert "foreign" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_restore_revision_rejects_missing_snapshot_space_id_without_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "missing-owner", "name": "Missing Owner"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {"id": "owner-widget", "kind": "card", "title": "Owner Widget"},
+    )
+    spaces.patch_widget(created["space_id"], "owner-widget", {"title": "Current Owner Widget"})
+    before = spaces.read_space(created["space_id"])
+
+    event_path = spaces.events_dir() / f"{original['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["snapshot"].pop("space_id", None)
+    event["snapshot"]["name"] = "Unowned Snapshot"
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Revision snapshot does not belong to this space"):
+        spaces.restore_revision(created["space_id"], original["revision_event_id"])
+
+    assert spaces.read_space(created["space_id"]) == before
+    revisions = spaces.list_revision_events(created["space_id"], limit=10)
+    assert not any(revision["event_type"] == "space.restored" for revision in revisions)
+    rewritten = next(revision for revision in revisions if revision["event_id"] == original["revision_event_id"])
+    assert "restore_preview" not in rewritten
+    assert "restore_diff" not in rewritten
+
+
+def test_restore_revision_rejects_malformed_snapshot_space_id_without_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "malformed-owner", "name": "Malformed Owner"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {"id": "owner-widget", "kind": "card", "title": "Owner Widget"},
+    )
+    spaces.patch_widget(created["space_id"], "owner-widget", {"title": "Current Owner Widget"})
+    before = spaces.read_space(created["space_id"])
+
+    event_path = spaces.events_dir() / f"{original['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["snapshot"]["space_id"] = f"{created['space_id']} "
+    event["snapshot"]["name"] = "Whitespace Padded Snapshot"
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Revision snapshot does not belong to this space"):
+        spaces.restore_revision(created["space_id"], original["revision_event_id"])
+
+    assert spaces.read_space(created["space_id"]) == before
+    revisions = spaces.list_revision_events(created["space_id"], limit=10)
+    rewritten = next(revision for revision in revisions if revision["event_id"] == original["revision_event_id"])
+    assert "restore_preview" not in rewritten
+    assert "restore_diff" not in rewritten
+
+
 def test_restore_revision_preserves_future_history_for_return_to_present_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Return To Present"})
@@ -6078,6 +6176,50 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
 
+
+
+def test_restore_widget_revision_rejects_mismatched_snapshot_space_id_without_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-restore-owner", "name": "Widget Restore Owner"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "owner-widget",
+            "kind": "html",
+            "title": "Owner Widget Original",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "owner-widget", {"title": "Owner Widget Current"})
+    before = spaces.read_space(created["space_id"])
+
+    event_path = spaces.events_dir() / f"{original['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["snapshot"]["space_id"] = "foreign-space"
+    event["snapshot"]["widgets"] = [
+        {
+            "id": "owner-widget",
+            "kind": "html",
+            "title": "Foreign Hijack",
+            "renderer": "<script>bad()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    ]
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Revision snapshot does not belong to this space"):
+        spaces.restore_widget_revision(created["space_id"], original["revision_event_id"], "owner-widget")
+
+    assert spaces.read_space(created["space_id"]) == before
+    revisions = spaces.list_revision_events(created["space_id"], limit=10)
+    assert not any(revision["event_type"] == "widget.restored" for revision in revisions)
+    serialized = json.dumps({"space": spaces.read_space_detail(created["space_id"]), "revisions": revisions}).lower()
+    assert "foreign hijack" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_restore_widget_revision_preserves_disabled_state_until_enable_control(monkeypatch, tmp_path):
