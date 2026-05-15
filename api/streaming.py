@@ -1657,6 +1657,17 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
+            # snapshot too. If the disk snapshot was last persisted while the
+            # parent was live, it could carry a stale active_stream_id /
+            # pending_* over to disk. The sidebar projection filters snapshot
+            # rows so this is latent today, but the contract should match the
+            # primary branch above so future readers can trust snapshot files
+            # to never contain live runtime state.
+            snapshot.active_stream_id = None
+            snapshot.pending_user_message = None
+            snapshot.pending_attachments = []
+            snapshot.pending_started_at = None
             snapshot.save(touch_updated_at=False, skip_index=False)
             logger.info(
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
