@@ -34,6 +34,7 @@ from api.config import (
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
+from api.profiles import profile_env_for_background_worker
 from api.metering import meter
 from api.turn_journal import append_turn_journal_event_for_stream
 
@@ -1445,54 +1446,6 @@ def _is_generic_fallback_title(title: str) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
-@contextlib.contextmanager
-def _profile_env_for_title_worker(session):
-    """Temporarily route auxiliary title-generation config through the session profile.
-
-    Background title workers run in their own thread and do not inherit the
-    streaming thread's thread-local/profile context.  Without setting
-    HERMES_HOME here, hermes-agent's auxiliary_client.load_config() can read
-    the default profile and use the wrong title_generation model.
-    """
-    profile = str(getattr(session, 'profile', '') or '').strip()
-    if not profile or profile == 'default':
-        yield
-        return
-    try:
-        from api.profiles import (
-            get_hermes_home_for_profile,
-            get_profile_runtime_env,
-            patch_skill_home_modules,
-            restore_skill_home_modules,
-            snapshot_skill_home_modules,
-        )
-        profile_home_path = Path(get_hermes_home_for_profile(profile))
-        runtime_env = get_profile_runtime_env(profile_home_path)
-    except Exception:
-        yield
-        return
-
-    env_keys = set(runtime_env.keys()) | {'HERMES_HOME'}
-    with _ENV_LOCK:
-        old_env = {key: os.environ.get(key) for key in env_keys}
-        skill_home_snapshot = snapshot_skill_home_modules()
-        try:
-            os.environ.update(runtime_env)
-            os.environ['HERMES_HOME'] = str(profile_home_path)
-            try:
-                patch_skill_home_modules(profile_home_path)
-            except Exception:
-                logger.debug("Failed to patch skill modules for background title profile %s", profile)
-            yield
-        finally:
-            for key, old_value in old_env.items():
-                if old_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_value
-            restore_skill_home_modules(skill_home_snapshot)
-
-
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
@@ -1516,7 +1469,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        with _profile_env_for_title_worker(s):
+        with profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
@@ -1597,7 +1550,7 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             return
         if not effective or effective in ('Untitled', 'New Chat'):
             return
-        with _profile_env_for_title_worker(s):
+        with profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)

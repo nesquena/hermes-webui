@@ -431,8 +431,6 @@ class TestUpdateSummaryRouteModelSelection:
         assert '"compression"' in src
         assert '"update_summary"' not in src
         assert 'main_runtime=main_runtime' in src
-        assert '_profile_env_for_background_worker' in src
-        assert 'get_active_profile_name' in src
         assert 'update summary auxiliary model failed; falling back to main model' in src
         assert 'from run_agent import AIAgent' in src
 

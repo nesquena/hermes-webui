@@ -20,9 +20,8 @@ import threading
 import time
 import uuid
 import re
-from types import SimpleNamespace
 from pathlib import Path
-from contextlib import closing, contextmanager
+from contextlib import closing
 from urllib.parse import parse_qs
 from api.agent_sessions import (
     MESSAGING_SOURCES,
@@ -31,6 +30,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.profiles import get_active_profile_name as _get_active_profile_name, profile_env_for_background_worker
 
 logger = logging.getLogger(__name__)
 
@@ -70,57 +70,6 @@ _CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
 _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
-
-
-@contextmanager
-def _profile_env_for_background_worker(session, purpose: str = "background worker"):
-    """Temporarily route agent/config reads through a session's profile.
-
-    Detached WebUI workers run in their own threads, so they do not inherit the
-    streaming thread's profile-scoped HERMES_HOME/runtime environment.  Any
-    worker that calls hermes-agent config/runtime helpers must set the session
-    profile explicitly or it may read the default profile instead.
-    """
-    profile = str(getattr(session, "profile", "") or "").strip()
-    if not profile or profile == "default":
-        yield
-        return
-
-    try:
-        from api.profiles import (
-            get_hermes_home_for_profile,
-            get_profile_runtime_env,
-            patch_skill_home_modules,
-            restore_skill_home_modules,
-            snapshot_skill_home_modules,
-        )
-        from api.streaming import _ENV_LOCK
-
-        profile_home_path = Path(get_hermes_home_for_profile(profile))
-        runtime_env = get_profile_runtime_env(profile_home_path)
-    except Exception:
-        yield
-        return
-
-    env_keys = set(runtime_env.keys()) | {"HERMES_HOME"}
-    with _ENV_LOCK:
-        old_env = {key: os.environ.get(key) for key in env_keys}
-        skill_home_snapshot = snapshot_skill_home_modules()
-        try:
-            os.environ.update(runtime_env)
-            os.environ["HERMES_HOME"] = str(profile_home_path)
-            try:
-                patch_skill_home_modules(profile_home_path)
-            except Exception:
-                logger.debug("Failed to patch skill modules for %s profile %s", purpose, profile)
-            yield
-        finally:
-            for key, old_value in old_env.items():
-                if old_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_value
-            restore_skill_home_modules(skill_home_snapshot)
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -5495,100 +5444,94 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target") if isinstance(body, dict) else None
 
         def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
-            try:
-                from api.profiles import get_active_profile_name
-                active_profile = get_active_profile_name() or "default"
-            except Exception:
-                active_profile = "default"
+            active_profile = _get_active_profile_name() or "default"
 
-            with _profile_env_for_background_worker(
-                SimpleNamespace(profile=active_profile),
+            with profile_env_for_background_worker(
+                active_profile,
                 "update summary",
+                logger_override=logger,
             ):
-                return _llm_update_summary_with_profile_env(system_prompt, user_prompt)
-
-        def _llm_update_summary_with_profile_env(system_prompt: str, user_prompt: str) -> str:
-            from api.config import (
-                get_effective_default_model,
-                resolve_model_provider,
-                resolve_custom_provider_connection,
-            )
-
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]
-
-            _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
-            _main_api_key = None
-            try:
-                from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-
-                _rt = resolve_runtime_provider_with_anthropic_env_lock(
-                    resolve_runtime_provider,
-                    requested=_main_provider,
+                from api.config import (
+                    get_effective_default_model,
+                    resolve_model_provider,
+                    resolve_custom_provider_connection,
                 )
-                _main_api_key = _rt.get("api_key")
-                if not _main_provider:
-                    _main_provider = _rt.get("provider")
-                if not _main_base_url:
-                    _main_base_url = _rt.get("base_url")
-            except Exception as _e:
-                logger.debug("update summary runtime provider resolution failed: %s", _e)
-            if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
-                if not _main_api_key and _cp_key:
-                    _main_api_key = _cp_key
-                if not _main_base_url and _cp_base:
-                    _main_base_url = _cp_base
 
-            main_runtime = {
-                "provider": _main_provider,
-                "model": _main_model,
-                "base_url": _main_base_url,
-                "api_key": _main_api_key,
-            }
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
 
-            try:
-                from agent.auxiliary_client import get_text_auxiliary_client
+                _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
+                _main_api_key = None
+                try:
+                    from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
 
-                # Update summaries are a short text-compression/summarization task.
-                # Reuse the documented auxiliary.compression slot instead of
-                # inventing a WebUI-only auxiliary task name that users cannot
-                # discover in the Hermes Agent setup/config UI.
-                aux_client, aux_model = get_text_auxiliary_client(
-                    "compression",
-                    main_runtime=main_runtime,
-                )
-                if aux_client is not None and aux_model:
-                    response = aux_client.chat.completions.create(
-                        model=aux_model,
-                        messages=messages,
+                    _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                        resolve_runtime_provider,
+                        requested=_main_provider,
                     )
-                    return str(response.choices[0].message.content or "").strip()
-            except Exception as _e:
-                logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
+                    _main_api_key = _rt.get("api_key")
+                    if not _main_provider:
+                        _main_provider = _rt.get("provider")
+                    if not _main_base_url:
+                        _main_base_url = _rt.get("base_url")
+                except Exception as _e:
+                    logger.debug("update summary runtime provider resolution failed: %s", _e)
+                if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
+                    _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
+                    if not _main_api_key and _cp_key:
+                        _main_api_key = _cp_key
+                    if not _main_base_url and _cp_base:
+                        _main_base_url = _cp_base
 
-            from run_agent import AIAgent
+                main_runtime = {
+                    "provider": _main_provider,
+                    "model": _main_model,
+                    "base_url": _main_base_url,
+                    "api_key": _main_api_key,
+                }
 
-            agent = AIAgent(
-                model=_main_model,
-                provider=_main_provider,
-                base_url=_main_base_url,
-                api_key=_main_api_key,
-                platform="webui",
-                quiet_mode=True,
-                enabled_toolsets=[],
-                session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-            )
-            result = agent.run_conversation(
-                user_message=user_prompt,
-                system_message=system_prompt,
-                conversation_history=[],
-                task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
-            )
-            return str(result.get("final_response") or "").strip()
+                try:
+                    from agent.auxiliary_client import get_text_auxiliary_client
+
+                    # Update summaries are a short text-compression/summarization task.
+                    # Reuse the documented auxiliary.compression slot instead of
+                    # inventing a WebUI-only auxiliary task name that users cannot
+                    # discover in the Hermes Agent setup/config UI.
+                    aux_client, aux_model = get_text_auxiliary_client(
+                        "compression",
+                        main_runtime=main_runtime,
+                    )
+                    if aux_client is not None and aux_model:
+                        response = aux_client.chat.completions.create(
+                            model=aux_model,
+                            messages=messages,
+                        )
+                        return str(response.choices[0].message.content or "").strip()
+                except Exception as _e:
+                    logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
+
+                from run_agent import AIAgent
+
+                agent = AIAgent(
+                    model=_main_model,
+                    provider=_main_provider,
+                    base_url=_main_base_url,
+                    api_key=_main_api_key,
+                    platform="webui",
+                    quiet_mode=True,
+                    enabled_toolsets=[],
+                    session_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+                )
+                result = agent.run_conversation(
+                    user_message=user_prompt,
+                    system_message=system_prompt,
+                    conversation_history=[],
+                    task_id=f"updates-summary-{uuid.uuid4().hex[:8]}",
+                )
+                return str(result.get("final_response") or "").strip()
 
         return j(handler, summarize_update_payload(updates, llm_callback=_llm_update_summary, target=target))
 
@@ -8338,7 +8281,7 @@ def _run_manual_compression_job(sid, body):
         except KeyError:
             session = None
         if session is not None:
-            with _profile_env_for_background_worker(session, "manual compression"):
+            with profile_env_for_background_worker(session, "manual compression", logger_override=logger):
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)

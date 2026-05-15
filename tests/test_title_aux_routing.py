@@ -380,6 +380,30 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
 
 
 class TestBackgroundTitleProfileRouting(unittest.TestCase):
+    def test_profile_env_context_logs_fail_open_resolution_errors(self):
+        """Profile env setup failures should be diagnosable without breaking workers."""
+        import api.profiles as profiles
+
+        session = types.SimpleNamespace(profile='work')
+        captured = {}
+
+        with patch(
+            'api.profiles.get_hermes_home_for_profile',
+            side_effect=RuntimeError('profile lookup failed'),
+        ):
+            with patch.dict(os.environ, {'HERMES_HOME': 'default-home'}, clear=False):
+                with self.assertLogs('api.profiles', level='DEBUG') as logs:
+                    with profiles.profile_env_for_background_worker(session, 'background title'):
+                        captured['HERMES_HOME'] = os.environ.get('HERMES_HOME')
+
+        message_found = any(
+            'Failed to resolve profile env for background title profile work' in record.getMessage()
+            for record in logs.records
+        )
+        self.assertEqual(captured['HERMES_HOME'], 'default-home')
+        self.assertTrue(message_found)
+        self.assertTrue(any(record.exc_info for record in logs.records))
+
     def test_skill_home_snapshot_removes_modules_imported_during_context(self):
         """Modules first imported inside a temporary profile context must not leak."""
         import api.profiles as profiles

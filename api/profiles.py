@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -672,6 +673,69 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
             logger.debug("Failed to read runtime env from %s", env_path)
 
     return env
+
+
+@contextmanager
+def profile_env_for_background_worker(
+    session,
+    purpose: str = "background worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Temporarily route detached worker config reads through a profile.
+
+    Background WebUI workers run outside the request/streaming thread that
+    established the profile-scoped environment.  Workers that read agent config,
+    runtime provider settings, or skill paths must temporarily apply the
+    session/request profile env or they can fall back to the server-default
+    profile. Pass either a session-like object with `.profile` or a profile name.
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or profile == "default":
+        yield
+        return
+
+    try:
+        # Lazy import avoids a module-load cycle: streaming imports this helper.
+        from api.streaming import _ENV_LOCK
+
+        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        runtime_env = get_profile_runtime_env(profile_home_path)
+    except Exception:
+        log.debug(
+            "Failed to resolve profile env for %s profile %s; falling back to current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+
+    env_keys = set(runtime_env.keys()) | {"HERMES_HOME"}
+    with _ENV_LOCK:
+        old_env = {key: os.environ.get(key) for key in env_keys}
+        skill_home_snapshot = snapshot_skill_home_modules()
+        try:
+            os.environ.update(runtime_env)
+            os.environ["HERMES_HOME"] = str(profile_home_path)
+            try:
+                patch_skill_home_modules(profile_home_path)
+            except Exception:
+                log.debug(
+                    "Failed to patch skill modules for %s profile %s",
+                    purpose,
+                    profile,
+                    exc_info=True,
+                )
+            yield
+        finally:
+            for key, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+            restore_skill_home_modules(skill_home_snapshot)
 
 
 def _set_hermes_home(home: Path):
