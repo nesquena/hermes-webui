@@ -30,7 +30,6 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
-from api.profiles import get_active_profile_name as _get_active_profile_name, profile_env_for_background_worker
 
 logger = logging.getLogger(__name__)
 
@@ -5444,9 +5443,11 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target") if isinstance(body, dict) else None
 
         def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
-            active_profile = _get_active_profile_name() or "default"
+            from api import profiles as profiles_api
 
-            with profile_env_for_background_worker(
+            active_profile = profiles_api.get_active_profile_name() or "default"
+
+            with profiles_api.profile_env_for_background_worker(
                 active_profile,
                 "update summary",
                 logger_override=logger,
@@ -8281,7 +8282,9 @@ def _run_manual_compression_job(sid, body):
         except KeyError:
             session = None
         if session is not None:
-            with profile_env_for_background_worker(session, "manual compression", logger_override=logger):
+            from api import profiles as profiles_api
+
+            with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
                 _handle_session_compress(memory_handler, body)
         else:
             _handle_session_compress(memory_handler, body)

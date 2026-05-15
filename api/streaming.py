@@ -34,7 +34,6 @@ from api.config import (
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
-from api.profiles import profile_env_for_background_worker
 from api.metering import meter
 from api.turn_journal import append_turn_journal_event_for_stream
 
@@ -1469,7 +1468,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        with profile_env_for_background_worker(s, "background title", logger_override=logger):
+        from api import profiles as profiles_api
+
+        with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
@@ -1550,7 +1551,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             return
         if not effective or effective in ('Untitled', 'New Chat'):
             return
-        with profile_env_for_background_worker(s, "background title", logger_override=logger):
+        from api import profiles as profiles_api
+
+        with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)

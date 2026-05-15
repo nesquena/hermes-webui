@@ -387,8 +387,9 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
         session = types.SimpleNamespace(profile='work')
         captured = {}
 
-        with patch(
-            'api.profiles.get_hermes_home_for_profile',
+        with patch.object(
+            profiles,
+            'get_hermes_home_for_profile',
             side_effect=RuntimeError('profile lookup failed'),
         ):
             with patch.dict(os.environ, {'HERMES_HOME': 'default-home'}, clear=False):
