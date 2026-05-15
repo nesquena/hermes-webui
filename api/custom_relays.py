@@ -123,14 +123,23 @@ def _env_file_has(var_name: str) -> bool:
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def list_relays() -> dict[str, Any]:
-    """Return every ``custom_providers`` entry as a relay record."""
+    """Return every ``custom_providers`` entry as a relay record.
+
+    Side-effect: any entry whose ``models`` field is still a YAML list (an
+    early-WebUI bug — get_available_models() at config.py:3110 only iterates
+    dict keys, so list-form models silently never reach the picker) gets
+    rewritten on disk to dict form during this call.  Idempotent.
+    """
     cfg = get_config()
     entries = cfg.get("custom_providers", [])
     relays: list[dict[str, Any]] = []
+    needs_migration = False
     if isinstance(entries, list):
         for entry in entries:
             if not _is_custom_relay_entry(entry):
                 continue
+            if isinstance(entry.get("models"), list):
+                needs_migration = True
             name = str(entry["name"]).strip()
             base_url = str(entry.get("base_url") or "").strip()
             has_key, key_env = _entry_has_key(entry)
@@ -142,7 +151,47 @@ def list_relays() -> dict[str, Any]:
                 "has_key": has_key,
                 "models": _entry_models(entry),
             })
+    if needs_migration:
+        _migrate_list_models_to_dict()
     return {"ok": True, "relays": relays}
+
+
+def _migrate_list_models_to_dict() -> None:
+    """Rewrite any ``custom_providers[].models`` list to dict form on disk."""
+    home = _get_hermes_home()
+    config_path = home / "config.yaml"
+    if not config_path.exists():
+        return
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return
+    try:
+        cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return
+    if not isinstance(cfg_data, dict):
+        return
+    entries = cfg_data.get("custom_providers")
+    if not isinstance(entries, list):
+        return
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("models")
+        if isinstance(raw, list):
+            entry["models"] = {str(m).strip(): {} for m in raw if isinstance(m, str) and m.strip()}
+            changed = True
+    if not changed:
+        return
+    try:
+        _save_yaml_config_file(config_path, cfg_data)
+        reload_config()
+        invalidate_models_cache()
+        logger.info("Migrated custom_providers[].models from list to dict form")
+    except Exception:
+        logger.debug("Failed to migrate custom_providers[].models", exc_info=True)
 
 
 def _validate(name: str, base_url: str, models: list[str]) -> str | None:
@@ -277,7 +326,12 @@ def upsert_relay(
         "api_key": f"${{{env_var}}}",
     }
     if models_list:
-        new_entry["models"] = models_list
+        # custom_providers[].models must be a dict (model_id → metadata) — this
+        # is what get_available_models() (config.py:3110) and resolve_runtime_provider
+        # (config.py:1611) actually consume.  A YAML list is silently ignored by
+        # the picker, so always serialise as {id: {}} to keep the relay's models
+        # routable. (#1106 test fixtures use this same shape.)
+        new_entry["models"] = {mid: {} for mid in models_list}
 
     # Write the new key (or keep the old reference if no new key supplied).
     env_path = home / ".env"
