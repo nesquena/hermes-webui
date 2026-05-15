@@ -299,9 +299,11 @@
   :root:not(.dark) .cron-btn:hover{background:rgba(0,0,0,.08);}
   /* ── Smooth dark mode transitions ── */
   body,header,footer,aside,nav,main,div,button,input,textarea,select{transition-property:background-color,border-color,color;transition-duration:.15s;transition-timing-function:ease;}
-  :root{--app-titlebar-safe-top:0px;--app-safe-bottom:0px;}
+  :root{--app-titlebar-safe-top:0px;}
   @supports (padding-top: env(safe-area-inset-top)){
-    :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);--app-safe-bottom:env(safe-area-inset-bottom,0px);}
+    @media (display-mode: standalone), (display-mode: fullscreen){
+      :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
+    }
   }
   html{background:var(--sidebar);}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
@@ -1457,10 +1459,15 @@
     .rightpanel{display:flex!important;position:fixed;
       --mobile-rightpanel-width:min(300px, 100vw);
       right:calc(-1 * var(--mobile-rightpanel-width))!important;
-      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;transition:right .25s ease;
+      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;padding-top:var(--app-titlebar-safe-top);box-sizing:border-box;transition:right .25s ease;
       box-shadow:none!important;}
     .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
     .rightpanel .resize-handle{display:none;}
+    .rightpanel .panel-header{display:grid;grid-template-columns:minmax(0,1fr) auto;row-gap:8px;}
+    .rightpanel .panel-header > span:first-child{grid-column:1;min-width:0;}
+    .rightpanel .git-badge{grid-column:2;justify-self:end;}
+    .rightpanel .panel-actions{grid-column:1 / -1;width:100%;align-items:center;gap:8px;justify-content:flex-start;margin-left:0;}
+    .rightpanel .mobile-close-btn{margin-left:auto;min-width:36px;min-height:36px;}
     /* Topbar adjustments */
     .topbar{padding:8px 12px;gap:8px;}
     .topbar-title{font-size:14px;}
@@ -1472,7 +1479,7 @@
     .messages-inner{padding:12px 10px 20px;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
-    .composer-wrap{padding:8px max(10px,env(safe-area-inset-right,0px)) calc(28px + var(--app-safe-bottom)) max(10px,env(safe-area-inset-left,0px))!important;}
+    .composer-wrap{padding:8px 10px 12px!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
@@ -1532,7 +1539,7 @@
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
     .sidebar .panel-view{height:100%;margin-left:52px;}
-    .panel-icon-btn{min-width:44px;min-height:44px;width:auto;height:auto;}
+    .sidebar .panel-icon-btn{min-width:44px;min-height:44px;width:auto;height:auto;}
     /* Touch targets — minimum 44px */
     .icon-btn,.mic-btn,.voice-mode-btn{min-width:44px;min-height:44px;}
     .session-item{min-height:44px;padding:10px 40px 10px 12px;}

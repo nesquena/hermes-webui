@@ -282,6 +282,12 @@ function expandSidebar(){
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
+function closeMobileWorkspacePanelFromChat(e){
+  if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
+  const panel=document.querySelector('.rightpanel');
+  if(panel&&panel.contains(e.target)) return;
+  closeWorkspacePanel();
+}
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
   if(!panel)return;
@@ -323,6 +329,7 @@ $('btnSend').onclick=()=>{
   }
   send();
 };
+$('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
@@ -1520,7 +1527,7 @@ function applyBotName(){
         // even though there is no active session (#workspace-persist).
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-        if(_ephPanelPref) _workspacePanelMode='browse';
+        if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -1531,7 +1538,7 @@ function applyBotName(){
       // the panel via toolbar X doesn't suppress the "keep open" setting.
       const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
         || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-      if(S.session&&S.session.workspace&&panelPref){
+      if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
@@ -1545,7 +1552,7 @@ function applyBotName(){
   // user had it open during their last session (#workspace-persist).
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-  if(_freshPanelPref) _workspacePanelMode='browse';
+  if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();
