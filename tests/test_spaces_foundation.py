@@ -12472,6 +12472,47 @@ def test_widget_event_route_accepts_camelcase_runtime_aliases_metadata_only(monk
     assert "api_key" not in serialized
 
 
+def test_widget_event_route_ignores_blank_selector_and_event_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "blank-alias-route", "name": "Blank Alias Route"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "space_id": "   ",
+            "spaceId": created["space_id"],
+            "widget_id": "",
+            "widgetId": "sandbox",
+            "event_name": "   ",
+            "eventName": "agent.prompt",
+            "messageType": "capy:agent:prompt",
+            "prompt": "safe sandbox prompt",
+            "payload": {
+                "query": "safe blank alias route prompt",
+                "renderer": "<script>bad()</script>",
+                "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["space_id"] == created["space_id"]
+    assert body["widget_id"] == "sandbox"
+    assert body["event_name"] == "agent.prompt"
+    assert body["payload_summary"]["query"] == "safe blank alias route prompt"
+    assert len(events) == 1
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_widget_event_route_rejects_conflicting_selector_aliases(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "selector-conflict-route", "name": "Selector Conflict Route"})

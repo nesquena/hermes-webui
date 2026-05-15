@@ -5177,57 +5177,51 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/widget/event":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id") or body.get("spaceId")
-        widget_id = body.get("widget_id") or body.get("widgetId")
-        if not space_id or not widget_id:
-            return bad(handler, "Missing space_id or widget_id")
         try:
-            if (
-                "space_id" in body
-                and "spaceId" in body
-                and str(body.get("space_id") or "") != str(body.get("spaceId") or "")
-            ):
-                raise ValueError("Conflicting widget event selector aliases")
-            if (
-                "widget_id" in body
-                and "widgetId" in body
-                and str(body.get("widget_id") or "") != str(body.get("widgetId") or "")
-            ):
-                raise ValueError("Conflicting widget event selector aliases")
-            if (
-                "event_name" in body
-                and "eventName" in body
-                and str(body.get("event_name") or "") != str(body.get("eventName") or "")
-            ):
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId")
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
+            event_name_values = []
+            for alias in ("event_name", "eventName"):
+                if alias not in body:
+                    continue
+                alias_value = body.get(alias)
+                if alias_value is None:
+                    continue
+                alias_value = str(alias_value).strip()
+                if alias_value:
+                    event_name_values.append(alias_value)
+            if event_name_values and any(value != event_name_values[0] for value in event_name_values[1:]):
                 raise ValueError("Conflicting widget event name aliases")
+            event_name = event_name_values[0] if event_name_values else "agent.prompt"
             payload = body["payload"] if "payload" in body else {}
-            if "payload" in body and payload is None:
+            if "payload" in body and not isinstance(payload, dict):
                 raise ValueError("payload must be an object")
-            if isinstance(payload, dict):
-                payload = dict(payload)
-                runtime_alias_values = []
-                for source in (payload, body):
-                    for alias in ("type", "message_type", "messageType"):
-                        if alias in source:
-                            alias_value = str(source.get(alias) or "").strip()
-                            if alias == "type" and not alias_value.lower().startswith("capy:"):
-                                continue
-                            if not alias_value:
-                                raise ValueError("Blocked by widget runtime contract")
-                            runtime_alias_values.append(alias_value)
-                if runtime_alias_values and any(
-                    value.lower() != runtime_alias_values[0].lower() for value in runtime_alias_values
-                ):
-                    raise ValueError("Blocked by widget runtime contract")
+            payload = dict(payload)
+            runtime_alias_values = []
+            for source in (payload, body):
                 for alias in ("type", "message_type", "messageType"):
-                    if alias in body and alias not in payload:
-                        payload[alias] = body.get(alias)
+                    if alias in source:
+                        alias_value = str(source.get(alias) or "").strip()
+                        if alias == "type" and not alias_value.lower().startswith("capy:"):
+                            continue
+                        if not alias_value:
+                            raise ValueError("Blocked by widget runtime contract")
+                        runtime_alias_values.append(alias_value)
+            if runtime_alias_values and any(
+                value.lower() != runtime_alias_values[0].lower() for value in runtime_alias_values
+            ):
+                raise ValueError("Blocked by widget runtime contract")
+            for alias in ("type", "message_type", "messageType"):
+                if alias in body and alias not in payload:
+                    payload[alias] = body.get(alias)
             return j(
                 handler,
                 capy_spaces.queue_widget_event(
                     space_id,
                     widget_id,
-                    body.get("event_name") or body.get("eventName") or "agent.prompt",
+                    event_name,
                     payload,
                     prompt=body.get("prompt") or "",
                     session_id=body.get("session_id") or "",

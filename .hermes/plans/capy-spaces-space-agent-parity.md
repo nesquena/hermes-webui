@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 02:59 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 05:33 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces recovery/admin widget quarantine tool aliases reject conflicting source-style positional selectors before disabling/enabling widgets. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces direct widget-event HTTP route ignores blank snake_case aliases while accepting valid Space-Agent-style camelCase selectors before queueing metadata-only events. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): ignore blank widget event route aliases`
+  - Added RED/GREEN backend route coverage proving `POST /api/spaces/widget/event` ignores blank `space_id` / `widget_id` / `event_name` aliases when matching `spaceId` / `widgetId` / `eventName` are valid, queues exactly one metadata-only `agent.prompt` event, and omits generated renderer/API-auth/secret-looking fixture markers from route receipts/events.
+  - Hardened the direct widget-event route to reuse the shared route selector resolver for Space/widget IDs, strip blank event-name aliases before consistency checks, keep conflicting nonblank event aliases fail-closed, and reject explicit non-object payloads before the canonical `queue_widget_event(...)` path.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); widget-event route regressions passed (`10 passed, 291 deselected`); full Spaces foundation suite passed (`301 passed`); Spaces UI behavior + demo parity suites passed (`183 passed`); `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` backend route-alias browser QA passed.
 
 - `fix(spaces): reject conflicting recovery widget positional aliases`
   - Added RED/GREEN backend coverage proving `space.recovery.disable_widget` rejects mismatched named Space selectors versus source-style positional `args[0]`, and `space.recovery.enable_widget` rejects mismatched named widget selectors versus positional `args[1]`, before recovery side effects.
