@@ -3186,6 +3186,39 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 .msg-foot .msg-actions { opacity: 1; margin-left: 0; }
 .msg-foot .msg-time { font-size: 10.5px; opacity: .75; }
+.msg-question-jump-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.msg-question-jump-btn:hover,
+.msg-question-jump-btn:focus-visible {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--hover-bg);
+  outline: none;
+}
+.msg-question-highlight .msg-body {
+  animation: question-highlight-pulse 1.6s ease-out;
+}
+@keyframes question-highlight-pulse {
+  0% { box-shadow: 0 0 0 0 var(--focus-ring); }
+  35% { box-shadow: 0 0 0 5px var(--focus-ring); }
+  100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+}
+@media (max-width: 600px) {
+  .msg-question-jump-btn { display: none; }
+}
 .msg-foot-with-usage {
   justify-content: flex-start;
   gap: 8px;
