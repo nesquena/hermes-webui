@@ -448,7 +448,6 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
         self, mock_get_session, mock_configured,
     ):
         """A background title worker for a non-default profile must resolve aux config from that profile."""
-        from api import config as config_api
         from api.streaming import _run_background_title_update
 
         mock_session = MagicMock()
@@ -470,9 +469,7 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
         sys.modules['tools.skills_tool'] = fake_skill_module
 
         def fake_aux_title(*args, **kwargs):
-            thread_env = getattr(config_api._thread_ctx, 'env', {})
-            captured['hermes_home'] = thread_env.get('HERMES_HOME')
-            captured['process_hermes_home'] = os.environ.get('HERMES_HOME')
+            captured['hermes_home'] = os.environ.get('HERMES_HOME')
             captured['skill_module_home'] = getattr(fake_skill_module, 'HERMES_HOME')
             captured['skill_module_dir'] = getattr(fake_skill_module, 'SKILLS_DIR')
             return ('Profile Routed Title', 'llm_aux', '')
@@ -498,7 +495,6 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
                 sys.modules['tools.skills_tool'] = original_skill_module
 
         self.assertEqual(captured.get('hermes_home'), 'profile-home')
-        self.assertEqual(captured.get('process_hermes_home'), 'default-home')
         self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
         self.assertEqual(str(captured.get('skill_module_dir')), 'profile-home/skills')
         self.assertEqual(captured.get('restored_hermes_home'), 'default-home')

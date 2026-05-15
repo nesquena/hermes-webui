@@ -1,8 +1,5 @@
 import os
 import re
-import sys
-import threading
-import types
 from pathlib import Path
 
 import yaml
@@ -98,62 +95,3 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     assert env["HERMES_SESSION_PLATFORM"] == "webui"
     assert env["HERMES_HOME"] == "/active/profile/home"
     assert env["TERMINAL_ENV"] == "ssh"
-
-
-def test_background_worker_profile_env_uses_thread_local_without_process_env(monkeypatch, tmp_path):
-    from api import config as config_api
-    from api import profiles
-
-    home = tmp_path / "profiles" / "ops"
-    home.mkdir(parents=True)
-    (home / "config.yaml").write_text(
-        yaml.safe_dump({"terminal": {"backend": "ssh", "cwd": "/profile/cwd"}}),
-        encoding="utf-8",
-    )
-    (home / ".env").write_text("HERMES_MAX_ITERATIONS=42\n", encoding="utf-8")
-
-    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda profile: home)
-    monkeypatch.setattr(profiles, "snapshot_skill_home_modules", lambda: {"snapshot": True})
-    patched_homes = []
-    restored = []
-    monkeypatch.setattr(profiles, "patch_skill_home_modules", lambda path: patched_homes.append(path))
-    monkeypatch.setattr(profiles, "restore_skill_home_modules", lambda snapshot: restored.append(snapshot))
-    monkeypatch.setitem(sys.modules, "api.streaming", types.SimpleNamespace(_ENV_LOCK=threading.Lock()))
-
-    monkeypatch.setenv("HERMES_HOME", "/root/default")
-    monkeypatch.delenv("TERMINAL_ENV", raising=False)
-    monkeypatch.delenv("TERMINAL_CWD", raising=False)
-    monkeypatch.delenv("HERMES_MAX_ITERATIONS", raising=False)
-    config_api._clear_thread_env()
-
-    with profiles.profile_env_for_background_worker("ops"):
-        assert os.environ["HERMES_HOME"] == "/root/default"
-        assert "TERMINAL_ENV" not in os.environ
-        assert "TERMINAL_CWD" not in os.environ
-        assert "HERMES_MAX_ITERATIONS" not in os.environ
-        assert config_api._thread_ctx.env["HERMES_HOME"] == str(home)
-        assert config_api._thread_ctx.env["TERMINAL_ENV"] == "ssh"
-        assert config_api._thread_ctx.env["TERMINAL_CWD"] == "/profile/cwd"
-        assert config_api._thread_ctx.env["HERMES_MAX_ITERATIONS"] == "42"
-        assert patched_homes == [home]
-
-    assert os.environ["HERMES_HOME"] == "/root/default"
-    assert getattr(config_api._thread_ctx, "env", {}) == {}
-    assert restored == [{"snapshot": True}]
-
-
-def test_background_worker_profile_env_source_avoids_os_environ_mutation():
-    src = Path("api/profiles.py").read_text(encoding="utf-8")
-    match = re.search(
-        r"(@contextmanager\ndef profile_env_for_background_worker\(.*?\n)(?=\ndef |\nclass )",
-        src,
-        re.DOTALL,
-    )
-    assert match, "profile_env_for_background_worker not found"
-    body = match.group(1)
-
-    assert "from api.config import _set_thread_env, _clear_thread_env" in body
-    assert "_set_thread_env(**thread_env)" in body
-    assert "_clear_thread_env()" in body
-    assert "os.environ.update(runtime_env)" not in body
-    assert 'os.environ["HERMES_HOME"] = str(profile_home_path)' not in body

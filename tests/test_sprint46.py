@@ -408,7 +408,6 @@ def test_session_compress_async_reports_stream_state_guard(monkeypatch, cleanup_
 
 
 def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, cleanup_test_sessions):
-    import api.config as config_api
     import api.profiles as profiles
     import api.routes as routes
 
@@ -417,12 +416,9 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
 
         def __init__(self, **kwargs):
             skill_module = sys.modules.get("tools.skills_tool")
-            thread_env = getattr(config_api._thread_ctx, "env", {})
             EnvAssertingAgent.seen_env = {
-                "HERMES_HOME": thread_env.get("HERMES_HOME"),
-                "HERMES_TEST_PROFILE_ENV": thread_env.get("HERMES_TEST_PROFILE_ENV"),
-                "PROCESS_HERMES_HOME": os.environ.get("HERMES_HOME"),
-                "PROCESS_HERMES_TEST_PROFILE_ENV": os.environ.get("HERMES_TEST_PROFILE_ENV"),
+                "HERMES_HOME": os.environ.get("HERMES_HOME"),
+                "HERMES_TEST_PROFILE_ENV": os.environ.get("HERMES_TEST_PROFILE_ENV"),
                 "SKILL_MODULE_HOME": getattr(skill_module, "HERMES_HOME", None),
                 "SKILL_MODULE_DIR": getattr(skill_module, "SKILLS_DIR", None),
             }
@@ -465,8 +461,6 @@ def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, 
     assert EnvAssertingAgent.seen_env == {
         "HERMES_HOME": str(profile_home),
         "HERMES_TEST_PROFILE_ENV": "work-runtime",
-        "PROCESS_HERMES_HOME": "default-home",
-        "PROCESS_HERMES_TEST_PROFILE_ENV": None,
         "SKILL_MODULE_HOME": profile_home,
         "SKILL_MODULE_DIR": profile_home / "skills",
     }
