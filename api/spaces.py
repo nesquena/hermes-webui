@@ -3882,7 +3882,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name in {"space.revisions", "space.revision.list", "space.history", "space.current.revisions", "space.current.revision.list", "space.current.history"}:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
+        if is_current:
+            space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=0))
+        else:
+            _space_tool_assert_matching_aliases(
+                data,
+                ("space_id", "spaceId", "current_space_id", "currentSpaceId", "active_space_id", "activeSpaceId", "id"),
+                "Conflicting space selector aliases",
+                _space_tool_arg(data, 0),
+            )
+            space_id = validate_space_id(_space_tool_space_id(data))
         result = {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
         if is_current:
             result["active_space_id"] = space_id

@@ -4618,6 +4618,7 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
 def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "current-rollback-lab", "name": "Current Rollback Lab"})
+    other = spaces.create_space({"space_id": "current-rollback-other", "name": "Current Rollback Other"})
     original = spaces.upsert_widget(
         created["space_id"],
         {
@@ -4646,6 +4647,17 @@ def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_meta
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
     )
+    with pytest.raises(ValueError, match="Conflicting space selector aliases") as current_conflict_exc_info:
+        spaces.run_space_tool(
+            "space.current.revisions",
+            {
+                "active_space_id": created["space_id"],
+                "args": [other["space_id"]],
+                "renderer": "<script>currentRevisionConflictLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
     serialized = json.dumps({"revisions": revisions, "restored": restored}).lower()
 
     assert revisions["ok"] is True
@@ -4655,11 +4667,81 @@ def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_meta
     assert restored["ok"] is True
     assert restored["action"] == "space.current.rollback"
     assert restored["space"]["widgets"][0]["title"] == "Original summary"
+    assert spaces.read_space_detail(other["space_id"])["name"] == "Current Rollback Other"
+    assert "currentrevisionconflictleak" not in str(current_conflict_exc_info.value).lower()
+    assert "secret_value_do_not_leak" not in str(current_conflict_exc_info.value).lower()
     assert "donotexpose" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_adapter_revision_list_accepts_camelcase_space_id_and_rejects_conflicts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "revision-list-camel", "name": "Revision List Camel"})
+    other = spaces.create_space({"space_id": "revision-list-other", "name": "Revision List Other"})
+    spaces.upsert_widget(
+        target["space_id"],
+        {
+            "id": "safe-widget",
+            "kind": "markdown",
+            "title": "Safe revision widget",
+            "renderer": "<script>revisionListLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    spaces.patch_widget(
+        target["space_id"],
+        "safe-widget",
+        {"title": "Patched revision widget", "source": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    listed = spaces.run_space_tool(
+        "space.revisions",
+        {"spaceId": target["space_id"], "limit": 5, "renderer": "<script>ignore()</script>"},
+    )
+    serialized = json.dumps(listed).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.revisions"
+    assert listed["space_id"] == target["space_id"]
+    assert [event["event_type"] for event in listed["revisions"][:2]] == ["widget.patched", "widget.created"]
+    assert "revisionlistleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    with pytest.raises(ValueError, match="Conflicting space selector aliases") as exc_info:
+        spaces.run_space_tool(
+            "space.revisions",
+            {
+                "space_id": target["space_id"],
+                "spaceId": other["space_id"],
+                "renderer": "<script>conflictRevisionListLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    with pytest.raises(ValueError, match="Conflicting space selector aliases") as positional_exc_info:
+        spaces.run_space_tool(
+            "space.revisions",
+            {
+                "spaceId": target["space_id"],
+                "args": [other["space_id"]],
+                "renderer": "<script>positionalConflictRevisionListLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    assert spaces.read_space_detail(target["space_id"])["widgets"][0]["title"] == "Patched revision widget"
+    assert spaces.read_space_detail(other["space_id"])["name"] == "Revision List Other"
+    assert "conflictrevisionlistleak" not in str(exc_info.value).lower()
+    assert "secret_value_do_not_leak" not in str(exc_info.value).lower()
+    assert "positionalconflictrevisionlistleak" not in str(positional_exc_info.value).lower()
+    assert "secret_value_do_not_leak" not in str(positional_exc_info.value).lower()
 
 
 def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_path):

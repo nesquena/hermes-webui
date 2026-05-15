@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 10:42 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 12:05 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces rollback/time-travel restore paths now require revision snapshots to declare an exact owning `space_id` before full-Space or widget restore can mutate manifests. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces revision-list tool adapters now accept Space-Agent-style `spaceId` selectors and reject conflicting `space_id` / `spaceId` aliases before listing rollback/time-travel metadata. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): harden revision list tool aliases`
+  - Added RED/GREEN backend Space-tool coverage proving `space.revisions` accepts camelCase `spaceId`, returns bounded metadata-only revision history, and rejects conflicting `space_id` / `spaceId` plus explicit-vs-positional `args[0]` aliases before selecting a Space. Current-space revision-list aliases now also reject conflicting active/current selectors vs `args[0]`.
+  - Hardened the revision-list tool branch to reuse the shared Space selector alias resolver and validate positional selector consistency before listing revisions, bringing tool rollback discovery parity with the already-hardened `/api/spaces/revisions` route.
+  - Validation at completion: focused RED failed before implementation (`Invalid space_id`) and reviewer-requested positional/current conflict REDs failed as expected (`DID NOT RAISE`); focused GREEN passed (`2 passed`); related revision tool/route/rollback regressions passed (`4 passed, 309 deselected`); full Spaces foundation suite passed (`313 passed`); Spaces UI behavior + demo parity suites passed (`185 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static revision-list browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/revision-list-tool-alias-qa.png`.
 
 - `fix(spaces): verify revision snapshot ownership`
   - Added RED/GREEN backend rollback coverage proving full-Space restore rejects mismatched, missing, and malformed/whitespace-padded snapshot `space_id` values before mutation, and widget restore rejects mismatched snapshot ownership before replacing a widget.
