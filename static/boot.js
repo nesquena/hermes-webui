@@ -1168,6 +1168,7 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
+  {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
@@ -1392,11 +1393,37 @@ function applyBotName(){
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
-    const appearance=_normalizeAppearance(s.theme,s.skin);
-    localStorage.setItem('hermes-theme',appearance.theme);
-    _applyTheme(appearance.theme);
-    localStorage.setItem('hermes-skin',appearance.skin);
-    _applySkin(appearance.skin);
+    // Reconcile appearance: prefer localStorage (what the user last saw) over
+    // the server.  If they diverge (e.g. a previous autosave POST failed),
+    // push the localStorage values back to the server so settings.json stays
+    // in sync without ever clobbering the user's chosen theme/skin.
+    //
+    // Caveat: the pre-paint inline script in index.html normalises empty
+    // localStorage into 'dark'/'default' BEFORE this code runs, so a truly
+    // empty (new-browser) state is indistinguishable from a user who chose
+    // the defaults.  To avoid blocking server→client sync on first visit we
+    // only let localStorage override the server when it carries a NON-DEFAULT
+    // skin or a non-dark/light theme value (i.e. the user explicitly picked
+    // something).  When localStorage is at the defaults, the server wins.
+    const srvAppearance=_normalizeAppearance(s.theme,s.skin);
+    const lsTheme=(localStorage.getItem('hermes-theme')||'').trim().toLowerCase();
+    const lsSkin=(localStorage.getItem('hermes-skin')||'').trim().toLowerCase();
+    const lsAppearance=_normalizeAppearance(lsTheme||null,lsSkin||null);
+    const lsHasExplicitSkin=lsSkin&&lsSkin!=='default';
+    const lsHasExplicitTheme=lsTheme&&lsTheme==='system';
+    const theme=lsHasExplicitTheme?lsAppearance.theme:srvAppearance.theme;
+    const skin=lsHasExplicitSkin?lsAppearance.skin:srvAppearance.skin;
+    localStorage.setItem('hermes-theme',theme);
+    _applyTheme(theme);
+    localStorage.setItem('hermes-skin',skin);
+    _applySkin(skin);
+    // Reconcile: if localStorage and server disagree, push localStorage
+    // values to the server so the next refresh won't revert.
+    if((lsHasExplicitTheme||lsHasExplicitSkin)&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
+      try{
+        api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
+      }catch(_){}
+    }
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
