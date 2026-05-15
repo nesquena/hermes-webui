@@ -46,14 +46,14 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
+def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
     conn.execute(
         """
         INSERT INTO sessions
         (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
         VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, source, session_source, sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
     )
     conn.commit()
 
@@ -267,5 +267,49 @@ def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(_
         assert tip.get("relationship_type") == "child_session"
         assert tip.get("parent_source") == "telegram"
         assert tip.get("_cross_surface_child_session") is True
+    finally:
+        conn.close()
+
+
+def test_generic_webui_title_gets_read_only_state_db_display_title(_isolate):
+    """Sidebar rows can display the fresher state.db title without mutating JSON."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_stale_title", title="Hermes WebUI #8", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_stale_title",
+            title="Hermes WebUI #177",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_stale_title"]
+
+        assert row["title"] == "Hermes WebUI #8"
+        assert row["display_title"] == "Hermes WebUI #177"
+        assert row["_state_db_title"] == "Hermes WebUI #177"
+    finally:
+        conn.close()
+
+
+def test_state_db_display_title_does_not_override_custom_json_title(_isolate):
+    """Manual/custom JSON titles stay authoritative even when state.db differs."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_custom_title", title="Customer escalation notes", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_custom_title",
+            title="Hermes WebUI #177",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_custom_title"]
+
+        assert row["title"] == "Customer escalation notes"
+        assert "display_title" not in row
+        assert "_state_db_title" not in row
     finally:
         conn.close()

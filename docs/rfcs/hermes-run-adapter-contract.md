@@ -1,134 +1,140 @@
-# Hermes Run Adapter Compatibility Contract
+# Hermes Run Adapter Contract and Migration Gates
 
 - **Status:** Proposed
 - **Author:** @Michaelyklam
+- **Updated by:** @franksong2702
 - **Created:** 2026-05-11
+- **Revised:** 2026-05-14
 - **Tracking issue:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925)
 
-## Problem
+## Credit and Scope
 
-Hermes WebUI currently gives a rich workbench experience, but browser-originated
-chat turns are still executed inside the WebUI server process. The WebUI path
-creates process-local stream state, starts background agent threads, constructs or
-reuses `AIAgent`, and owns callback queues for token, tool, reasoning, approval,
-and clarify state.
+This RFC codifies the direction discussed in #1925. It does not introduce an
+implementation. The central guardrail comes from Michael Lam's review framing:
 
-The target boundary from #1925 is:
+> the adapter should be a protocol translator, not a runtime surrogate.
+
+The product boundary from #1925 is:
 
 > WebUI should be thin in execution ownership, not thin in product scope.
 
 That means WebUI remains the full browser workbench for sessions, workspace
-files, chat rendering, tools, approvals, status, diagnostics, and controls. The
-change is that Hermes Agent must own run lifecycle, event ordering, replay,
-approvals, clarify, cancellation, and terminal state.
+files, chat rendering, tool cards, approvals, status, diagnostics, and controls.
+The change is that long-lived execution ownership should move behind an explicit
+runtime boundary instead of remaining scattered through the main WebUI request
+process.
 
-This document defines the first reviewable contract for a Hermes-owned run
-adapter. It is intentionally a spec/gap matrix, not an implementation plan for a
-new WebUI runtime surrogate.
+This document is intentionally a reviewable spec and migration gate. It should be
+accepted before any implementation PR changes the streaming hot path, introduces a
+runner process, or moves cancellation / approval / clarify control flow.
+
+## Problem
+
+Browser-originated chat turns are still executed inside the WebUI server process.
+The current path creates process-local stream state, starts background agent
+threads, constructs or reuses `AIAgent`, and owns callback state for token, tool,
+reasoning, approval, clarify, cancellation, and terminal events.
+
+That shape works, but it makes the WebUI process the owner of active runtime
+truth. Consequences include:
+
+- restarting WebUI can orphan active work,
+- reconnect depends on process-local state rather than a durable run/event view,
+- cancellation and stale writeback bugs recur around ownership boundaries,
+- approvals and clarify prompts are tied to live callbacks,
+- future Hermes runtime APIs cannot be adopted cleanly because WebUI lacks a
+  single adapter boundary.
+
+The immediate goal is not to build a sidecar. The immediate goal is to define the
+browser contract, classify current runtime state, and gate the first reversible
+journal slice.
 
 ## Goals
 
-- Keep the browser-facing WebUI workbench contract stable while execution moves
-  out of the WebUI process.
-- Define the minimum Hermes Runtime API / IPC v0 surface WebUI needs before it
-  can route new runs to Hermes-owned execution.
-- Map current WebUI-owned runtime primitives to Hermes-owned APIs, WebUI
-  presentation state, or explicit temporary compatibility shims.
-- Make restart/reattach the first meaningful success criterion, not merely
-  "basic chat streamed once."
+- Preserve the current rich WebUI workbench experience.
+- Make the browser-facing event/control contract explicit.
+- Classify every current runtime-owned state primitive as `runner process`,
+  `journal`, `adapter API surface`, or `WebUI presentation cache`.
+- Identify future backend mapping: existing Hermes runtime API, missing Hermes
+  API, or temporary WebUI compatibility shim.
+- Define acceptance tests that must survive any migration.
+- Define reversible implementation slices, starting with an append-only
+  in-process event journal / replay layer.
 
 ## Non-goals
 
 - Do not implement the adapter in this RFC.
-- Do not create a new run-manager sidecar or broker requirement.
-- Do not re-create `STREAMS`, cached `AIAgent` objects, approval queues, clarify
-  queues, or cancellation flags under new names inside WebUI.
-- Do not reduce WebUI product scope. The rich workbench UX remains in WebUI.
-- Do not require every event to be durably persisted on day one if the first
-  upstream runtime slice can still prove Hermes-owned execution and reconnect.
+- Do not introduce a runner process or sidecar in the first implementation slice.
+- Do not change `_run_agent_streaming` control flow in the first journal slice.
+- Do not recreate `STREAMS`, cached `AIAgent` objects, callback queues, or
+  cancellation flags under new names.
+- Do not reduce WebUI product scope or move normal workbench UX out of WebUI.
+- Do not depend on Hermes Agent shipping a WebUI-specific runtime connector before
+  WebUI can improve its own boundary.
 
-## Ownership boundary
+## Artifact 1: Browser Event and Control Contract
 
-### Hermes Agent owns
+This is the compatibility contract the browser depends on, regardless of whether
+the backend is today's in-process streaming path, an in-process journaled path, a
+future WebUI-managed runner, or a future Hermes `/v1/runs` backend.
 
-- run creation and lifecycle
-- run ids and session-to-active-run mapping
-- ordered event stream and replay cursor
-- terminal run state, final result, and error metadata
-- model/provider/profile/toolset routing
-- agent execution and tool dispatch
-- command semantics and capability metadata
-- approval and clarify lifecycle
-- cancel, interrupt, queue, continue, steer, and goal control where supported
-- durable runtime/session state needed for reconnect
+The current inventory should be derived from `static/messages.js` consumers and
+SSE/event production in `api/streaming.py`. Future edits to those files should
+update this RFC or the implementation contract that replaces it.
 
-### WebUI owns
+### Event Envelope
 
-- browser authentication and presentation-specific session routing
-- chat layout, transcript rendering, tool cards, thinking/progress display
-- approval and clarify widgets
-- workspace/file-panel UX
-- settings/admin/diagnostics presentation
-- adapting Hermes runtime events into WebUI-compatible browser events
-- temporary compatibility shims explicitly listed in this RFC
-
-## WebUI event/control compatibility contract
-
-The browser-facing contract should remain stable enough that the current WebUI
-workbench can render either the legacy in-process runtime or the Hermes-owned run
-adapter during migration. These are presentation events over Hermes runtime
-truth, not a second source of truth.
-
-All events should include enough metadata for idempotent rendering and
-reconnect:
+Every replayable runtime event should be representable with:
 
 ```json
 {
   "event_id": "run_123:42",
   "seq": 42,
   "run_id": "run_123",
-  "session_id": "20260511_...",
-  "type": "tool.update",
-  "created_at": 1778540000.0,
+  "session_id": "20260514_...",
+  "type": "tool.updated",
+  "created_at": 1778750000.0,
   "terminal": false,
   "payload": {}
 }
 ```
 
-`event_id` may be an SSE `id:` value or an equivalent cursor token. `seq` is a
-monotonic per-run cursor. Clients may send `Last-Event-ID` or `after_seq` on
-reconnect. The runtime should treat replay as at-least-once delivery; WebUI must
-deduplicate by `run_id` + `seq` / `event_id`.
+Required semantics:
 
-### Event families
+- `seq` is monotonic per run.
+- `event_id` is stable enough to use as an SSE `id:` value or equivalent cursor.
+- Reconnect supports `Last-Event-ID` or `after_seq`.
+- Replay is at-least-once; WebUI deduplicates by `run_id` + `seq` or `event_id`.
+- Terminal runs can replay their final `done`, `cancelled`, or `error` state.
 
-| WebUI event family | Required payload | Runtime source of truth |
-|---|---|---|
-| `run.started` / `status` | lifecycle state, controls available, session id, workspace/profile/model/toolset summary | Hermes run state |
-| `token.delta` | assistant message id/segment id, delta text, optional content type | Hermes model output stream |
-| `reasoning.delta` / `reasoning.done` | reasoning text or structured reasoning block, visibility metadata | Hermes reasoning callback/event stream |
-| `progress` | concise status/progress text, optional phase/tool context | Hermes agent progress callbacks |
-| `tool.started` | tool call id, tool name, sanitized arguments, start time | Hermes tool dispatch lifecycle |
-| `tool.updated` | stdout/stderr/structured partial data, progress metadata | Hermes tool dispatch lifecycle |
-| `tool.done` | result, exit/status, duration, error flag | Hermes tool dispatch lifecycle |
-| `approval.requested` | approval id, command/action summary, risk metadata, available choices | Hermes approval queue/control plane |
-| `approval.resolved` | approval id, choice, resulting status | Hermes approval queue/control plane |
-| `clarify.requested` | clarify id, question, choices/input mode | Hermes clarify lifecycle |
-| `clarify.resolved` | clarify id, answer metadata/status | Hermes clarify lifecycle |
-| `title.updated` | title text, title source/confidence | Hermes session/title subsystem |
-| `usage.updated` / `usage.final` | tokens, cost, model/provider, duration where available | Hermes usage accounting |
-| `error` | stable error code, safe message, redacted diagnostic metadata, terminal flag | Hermes run terminal/error state |
-| `done` | final lifecycle state, usage, terminal result/error summary, last seq | Hermes run terminal state |
+### Event Families
 
-### Reconnect metadata
+| Event family | Required payload | Browser responsibility | Runtime source of truth |
+|---|---|---|---|
+| `run.started` / `status` | lifecycle state, controls available, session id, workspace/profile/model/toolset summary | render active state and controls | runtime run state |
+| `token.delta` | assistant message id or segment id, delta text, content type | append visible assistant text | runtime model output stream |
+| `reasoning.delta` / `reasoning.done` | reasoning block id, delta/final text, visibility metadata | render thinking/progress UI | runtime reasoning events |
+| `progress` | concise phase/status text, optional tool context | render activity/progress text | runtime progress callbacks |
+| `tool.started` | tool call id, name, sanitized arguments, start time | open/update tool card | runtime tool lifecycle |
+| `tool.updated` | stdout/stderr/structured partial data, progress metadata | update tool card | runtime tool lifecycle |
+| `tool.done` | result, status/exit code, duration, error flag | finalize tool card | runtime tool lifecycle |
+| `approval.requested` | approval id, action summary, risk metadata, available choices | show approval widget | runtime approval state |
+| `approval.resolved` | approval id, choice, resulting status | close/update approval widget | runtime approval state |
+| `clarify.requested` | clarify id, question, choices/input mode | show clarify widget | runtime clarify state |
+| `clarify.resolved` | clarify id, answer metadata/status | close/update clarify widget | runtime clarify state |
+| `title.updated` | title text, source/confidence | update title surfaces | session/title subsystem |
+| `usage.updated` / `usage.final` | tokens, cost, model/provider, duration where available | update usage surfaces | runtime usage accounting |
+| `error` | stable error code, safe message, redacted diagnostics, terminal flag | render error and final state | runtime terminal/error state |
+| `done` | final lifecycle state, usage, terminal result/error summary, last seq | finalize run UI | runtime terminal state |
+
+### Reconnect Metadata
 
 Every active or terminal run must expose:
 
 - `run_id`
 - `session_id`
-- current `status`: `queued`, `running`, `awaiting_approval`,
-  `awaiting_clarify`, `paused`, `cancelling`, `cancelled`, `failed`,
-  `completed`, or `expired`
+- `status`: `queued`, `running`, `awaiting_approval`, `awaiting_clarify`,
+  `paused`, `cancelling`, `cancelled`, `failed`, `completed`, or `expired`
 - last committed event cursor / `last_event_id`
 - terminal state and final result/error when finished
 - currently available controls
@@ -137,179 +143,217 @@ Every active or terminal run must expose:
 
 ### Controls
 
-| WebUI control | Required semantics | Runtime endpoint / IPC |
+| Control | Required semantics | Target owner |
 |---|---|---|
-| cancel | Request graceful cancellation of the current run; terminal event must follow | `cancel_run` / `interrupt` |
-| queue / continue | Append follow-up work to a live, paused, or resumable run/session according to Hermes semantics | `queue_or_continue` |
-| approval | Resolve a pending approval request with `allow_once`, `allow_session`, `always`, or `deny` where supported | `respond_approval` |
-| clarify | Submit answer text or selected choice for a pending clarify request | `respond_clarify` |
-| goal | Set/status/pause/resume/clear goal where Hermes exposes goal capability for this surface | command/capability API |
-| observe | Attach to live events and replay from cursor | `observe_run` |
-| status | Poll lifecycle state when SSE/WebSocket is unavailable | `get_run` |
+| observe | attach to live events and replay from cursor | adapter API surface backed by runtime/journal |
+| status | poll lifecycle state when SSE/WebSocket is unavailable | adapter API surface backed by runtime/journal |
+| cancel | request graceful cancellation; terminal event follows | runner/runtime control plane |
+| queue / continue | append follow-up work according to Hermes semantics | runner/runtime control plane |
+| approval | resolve pending approval by id with supported choices | runner/runtime control plane |
+| clarify | answer pending clarify request by id | runner/runtime control plane |
+| goal | set/status/pause/resume/clear goal where capability exists | runtime command/capability plane |
 
-WebUI may keep local UI state such as which disclosure rows are expanded, but it
-must not infer or privately mutate runtime state for these controls.
+WebUI may keep presentation state such as expanded rows, selected tabs, and local
+scroll position. WebUI must not privately mutate runtime truth for these controls.
 
-## Hermes Runtime API / IPC v0 minimum
+## Artifact 2: Runtime State Inventory and Classifier
 
-The transport can be HTTP, stdio IPC, websocket, or another Hermes-owned local
-protocol. The key requirement is the semantic contract: Hermes owns the run id,
-lifecycle, event cursor, controls, pending human-interaction state, and terminal
-state.
+Classifications:
 
-### `start_run`
+- `runner process`: should be owned by the eventual execution runner / runtime
+  backend, not the main WebUI request process.
+- `journal`: should be captured in append-only durable events for replay and
+  diagnostics.
+- `adapter API surface`: should be exposed through a WebUI-owned boundary that
+  can later switch backend implementations.
+- `WebUI presentation cache`: may remain local because it is not execution truth.
 
-Creates a Hermes-owned run.
+| Current primitive | Current legacy source of truth | Target classification | Future backend mapping | Slice 1 handling | Notes / gap |
+|---|---|---|---|---|---|
+| `STREAMS` / `STREAMS_LOCK` | `api.state_sync` process memory | adapter API surface + presentation fan-out | WebUI runner or future Hermes run observation API | keep live path; mirror events into journal | Must stop being authoritative for active run existence. |
+| `CANCEL_FLAGS` | `api.state_sync` process memory | runner process | cancel/interrupt endpoint or runner control | no control-flow change | Final cancel state must return as a replayable event. |
+| cached `AIAgent` objects / `AGENT_INSTANCES` | `api/config.py` process memory | runner process | runner-owned Hermes integration | unchanged | Moving this is deferred until after journal proof. |
+| background thread lifecycle | `_run_agent_streaming` in `api/streaming.py` | runner process | runner-owned execution lifecycle | unchanged | Slice 1 must not rewrite thread/control flow. |
+| token / partial text buffers | streaming callbacks and browser SSE state | journal + presentation cache | replayable runtime events | append emitted events | Browser can cache rendered state, but replay must rebuild it. |
+| reasoning buffers | streaming callbacks and UI rendering state | journal + presentation cache | replayable reasoning events | append emitted events | Thinking cards must survive reconnect. |
+| tool buffers / live tool calls | WebUI streaming callbacks | journal + presentation cache | replayable tool lifecycle events | append emitted events | WebUI owns rendering, not tool execution state. |
+| approval callbacks / queues | live Python callbacks | runner process + adapter API surface + journal | approval state/control endpoint | journal request/resolution events only | Pending approval must eventually survive WebUI restart. |
+| clarify callbacks / queues | live Python callbacks | runner process + adapter API surface + journal | clarify state/control endpoint | journal request/resolution events only | Pending clarify must eventually survive WebUI restart. |
+| per-request `HERMES_HOME` env mutation lock | `api/streaming.py` / config helpers | runner process | runner/profile execution context | unchanged | Long-term runner must isolate profile env without process-global mutation. |
+| session-to-active-run mapping | session JSON + active stream ids + memory | journal + adapter API surface | runtime run registry/session mapping | journal run metadata | Reopen session must discover active/completed run. |
+| title generation state | WebUI callbacks/session saves | journal + presentation cache | runtime/session title event | append title events | WebUI may display title updates after event receipt. |
+| usage accounting state | WebUI callbacks/session saves | journal + presentation cache | runtime usage event/source of truth | append usage events | Avoid divergent WebUI-only accounting. |
+| command capability metadata | WebUI command registry + Hermes command assumptions | adapter API surface | runtime command/capability metadata | unchanged | Unknown command support should not be guessed by WebUI. |
+| voice mode state | browser/UI + streaming path | presentation cache + adapter API surface | runtime input/control capability | unchanged | Acceptance tests must pin voice behavior before migration. |
+| project/workspace context | WebUI session/workspace state + env mutation | adapter API surface + runner process | runtime run context | unchanged | Must preserve workspace-aware chat and project context. |
 
-Input fields:
+Unclassified state is a design blocker. If an implementation slice discovers a
+runtime primitive that does not fit this table, update the RFC before landing code.
 
-- `session_id` or instruction to create one
-- user message / queued input
-- workspace context and attachments metadata
-- profile/provider/model/toolset hints
-- source/surface metadata, e.g. `source=webui`
-- optional command intent, e.g. `/goal` if parsed by WebUI command UI
-- idempotency key for duplicate browser submissions
+## Artifact 3: Acceptance Test Catalog
 
-Output fields:
+These are the user-observable behaviors that must survive the migration. The
+catalog should become automated tests where practical. Where full automation is
+not feasible in the first slice, the PR must include the strongest practical
+diagnostic or manual validation plan.
 
-- `run_id`
-- `session_id`
-- initial `status`
-- `observe` cursor / first event id
-- supported controls for this run
+| Behavior | Acceptance criterion | Why it matters | First slice that must prove it |
+|---|---|---|---|
+| Journal replay after refresh/reconnect | reconnect or restart after events have been journaled can replay from cursor without duplicate transcript/tool/reasoning state | proves the browser contract is replayable and duplicate-safe | journal/replay slice |
+| Terminal replay | completed/failed/cancelled runs replay terminal state and do not duplicate transcript content | prevents stale spinner and duplicate-message regressions | journal/replay slice |
+| Interrupted/stale run diagnostics | if WebUI restarts while execution is still owned by the WebUI process, replay shows the last journaled state and a clear interrupted/stale diagnostic instead of pretending the run kept executing | keeps slice 1 honest before a runner exists | journal/replay slice |
+| Execution survives WebUI restart | active execution outlives the main WebUI process, reconnect discovers the active run, ordered replay catches up, and controls such as cancel still work | proves execution ownership actually moved out of the request process | runner/sidecar or external-runtime slice |
+| Cancel during tool call | cancel emits one terminal cancelled state and no stale writeback | catches historical stream ownership races | control migration slice |
+| Cancel during reasoning | partial/reasoning content is preserved cleanly and final state is not provider-error | catches cancellation classification regressions | control migration slice |
+| Approval request/response | approval survives observation, browser response reaches runtime, result is replayable | approval callbacks are cross-cutting and easy to orphan | approval migration slice |
+| Clarify request/response | clarify survives observation, browser response reaches runtime, result is replayable | same risk as approval, different UI/control path | clarify migration slice |
+| Slash commands | `/compress`, `/branch`, `/retry`, and other supported commands keep current semantics | command behavior should not be reimplemented ad hoc | command capability slice |
+| Model switch mid-session | provider/model changes route through the correct runtime context | prevents provider/source-of-truth drift | adapter control slice |
+| Workspace context | run receives the session workspace and attachments context | preserves workbench value | adapter control slice |
+| Multi-profile isolation | profile-specific runs write/read the correct Hermes home and memory | protects #2134-family isolation concerns | runner/profile slice |
+| Queue/continue | follow-up input during live/resumable work obeys Hermes semantics | prevents parallel continuation model | control migration slice |
+| Goal continuation | goal status/control survives the adapter boundary | goal logic is lifecycle-sensitive | goal capability slice |
+| Voice mode | voice-originated input uses the same run/event/control contract | prevents alternate input path drift | adapter parity slice |
+| Projects context | project metadata remains visible and correct across run replay | preserves session/workbench organization | adapter parity slice |
 
-### `observe_run`
+## Artifact 4: Slicing Plan and Reversibility
 
-Streams ordered run events, with replay from a cursor.
+### Slice 0: Spec PR
 
-Required behavior:
+Scope:
 
-- support `after_seq` or `Last-Event-ID`
-- emit events in monotonically increasing per-run order
-- replay terminal `error` / `done` state for completed runs
-- make duplicate delivery safe for reconnecting clients
-- preserve enough history for short WebUI restarts and browser reloads
+- this RFC update,
+- no runtime behavior change,
+- no streaming hot-path code change.
 
-### `get_run`
+Revert path: revert the docs PR.
 
-Returns current lifecycle state without consuming the event stream.
+### Slice 1: Append-only journal/replay beside the legacy path
 
-Required fields:
+Pre-authorized only after this spec is reviewed and accepted in #1925.
 
-- `run_id`, `session_id`, `status`
-- `created_at`, `updated_at`, optional `completed_at`
-- `last_seq` / `last_event_id`
-- active controls
-- pending approval/clarify summaries
-- terminal result/error summary
-- usage/model/provider/profile/toolset summary where available
+Scope:
 
-### `cancel_run` / interrupt
+- add an append-only event journal alongside existing callback paths,
+- capture the event families in Artifact 1,
+- persist run metadata, cursor, terminal state, and safe diagnostic fields,
+- allow reconnect to replay from a cursor and then continue live observation,
+- keep `_run_agent_streaming` control flow unchanged,
+- keep cancellation, approval, clarify, queue, and goal behavior unchanged.
 
-Requests graceful run cancellation or interruption. Hermes owns the final state
-transition and emits a terminal event. WebUI should not directly toggle a local
-cancellation flag as the source of truth.
+Non-goals:
 
-### `queue_or_continue`
+- no runner process,
+- no sidecar,
+- no adapter interface that changes control flow,
+- no replacement of `STREAMS` as the live delivery path,
+- no speculative rewrite of agent construction/caching.
 
-Submits follow-up work for a live, paused, or resumable run/session. Semantics
-must match Hermes-native queue/continue behavior so WebUI does not create a
-parallel continuation model.
+Revert path:
 
-### `respond_approval`
+- disable journal writes/replay behind one small integration seam,
+- retain legacy WebUI streaming path unchanged.
 
-Resolves a pending approval request by id.
+Success criterion:
 
-Required behavior:
+1. Start a non-trivial WebUI run.
+2. Refresh/reconnect the browser, or restart WebUI after events have already been
+   journaled.
+3. Rediscover the run from journal metadata.
+4. Replay from cursor without duplicate visible transcript content.
+5. Render the same already-journaled token/reasoning/tool/status/terminal state
+   the workbench would have rendered without the reconnect.
+6. If WebUI restarted while execution was still owned by the WebUI process, show
+   an explicit interrupted/stale diagnostic rather than claiming the active run
+   kept executing.
 
-- validate the approval belongs to the run/session
-- accept only supported choices
-- emit `approval.resolved`
-- continue, pause, or fail the run according to Hermes approval semantics
+### Slice 2: Adapter interface over the journaled legacy path
 
-### `respond_clarify`
+Scope:
 
-Resolves a pending clarification request by id.
+- introduce the `RuntimeAdapter` interface only after Slice 1 proves replay,
+- implement the first backend as a thin facade over the still-legacy path plus
+  journal,
+- keep the browser event contract stable,
+- keep controls routed to existing code until a later control-specific slice.
 
-Required behavior:
+Revert path: switch the feature flag back to direct legacy path.
 
-- validate the clarify request belongs to the run/session
-- accept text or selected-choice payloads
-- emit `clarify.resolved`
-- continue or fail the run according to Hermes clarify semantics
+### Slice 3: Control migration
 
-## Gap matrix
+Scope:
 
-| Current WebUI primitive | Current role | Hermes-owned target | Temporary shim allowed? | Notes / gap |
-|---|---|---|---|---|
-| `STREAMS` / `STREAMS_LOCK` | Process-local live stream registry and subscriber fan-out | Hermes run registry + `observe_run` replay/fan-out | Yes, adapter may keep per-browser SSE connections only | Shim must not be the run source of truth and must survive WebUI restart by re-observing Hermes. |
-| `CANCEL_FLAGS` | Local cancellation signal checked by WebUI-owned agent thread | `cancel_run` / interrupt control | No, except translating button clicks into runtime calls | Cancellation result must come back as Hermes status/events. |
-| `AGENT_INSTANCES` | Cached `AIAgent` objects inside WebUI process | Hermes Agent runtime owns agent construction/reuse | No | Keeping this in the adapter would recreate the runtime surrogate. |
-| Partial text buffers | Reconstruct live assistant deltas for browser reconnect/render | Hermes event log/cursor plus WebUI renderer cache | Short-lived presentation cache only | Source should be replayed token events or persisted transcript, not WebUI-only execution state. |
-| Reasoning buffers | Preserve streamed reasoning/thinking text | Hermes reasoning events + replay | Short-lived presentation cache only | Replay must rebuild the same thinking cards after refresh. |
-| Tool buffers / live tool calls | Render tool cards and updates | Hermes tool lifecycle events + replay | Short-lived presentation cache only | WebUI owns card rendering, not tool execution state. |
-| Approval callbacks and queues | Bridge WebUI buttons to a live Python callback | Hermes pending approval state + `respond_approval` | No private callback queue | Pending approval must be discoverable after WebUI restart. |
-| Clarify callbacks and queues | Bridge WebUI form to a live Python callback | Hermes pending clarify state + `respond_clarify` | No private callback queue | Pending clarify must be discoverable after WebUI restart. |
-| Command capability metadata | Decide which slash commands render/execute in WebUI | Hermes command registry/capability API with owner/surface metadata | WebUI may cache metadata | Unknown commands should not be reimplemented in WebUI by default. |
-| Session-to-active-run mapping | Stored implicitly in WebUI session JSON / active stream ids | Hermes session/run mapping API | WebUI may cache last seen run id | Reopen session must rediscover active/completed run from Hermes. |
-| Reconnect/replay behavior | Depends on WebUI process memory and session JSON | `observe_run(after_seq)` + `get_run` terminal state | Browser SSE adapter only | First milestone must prove WebUI restart does not orphan the run. |
-| Usage/title/status events | Produced by WebUI streaming callbacks | Hermes usage/title/status events and run state | WebUI formatting only | WebUI can display and persist presentation copies after events arrive. |
-| Goal / queue / continue hooks | Mixed WebUI command handling and streaming callbacks | Hermes command/control plane | Only UI affordance shim | Goal support should be driven by Hermes capabilities. |
+- move cancel first,
+- then approval,
+- then clarify,
+- then queue/continue and goal controls,
+- each control gets its own acceptance tests and rollback path.
 
-## Migration ladder
+Revert path: per-control feature flags or route-level fallback to legacy control
+handlers.
 
-1. **Inventory and contract**: keep this RFC current with the current WebUI-owned
-   runtime primitives and browser event/control contract.
-2. **Hermes Runtime API / IPC v0**: add or stabilize upstream Hermes primitives
-   for `start_run`, `observe_run`, `get_run`, `cancel_run`, and replayable event
-   cursors.
-3. **Read-only observation spike**: from WebUI, observe an existing Hermes-owned
-   run and adapt its events into WebUI-compatible event objects without starting
-   a WebUI-owned agent thread.
-4. **Feature-flagged new-run path**: route new WebUI runs to Hermes-owned
-   `start_run` behind a flag while preserving the legacy path as fallback.
-5. **Restart/reattach milestone**: prove a non-trivial WebUI-started run
-   survives a WebUI-only restart and browser reload with ordered replay.
-6. **Controls migration**: move cancel, queue/continue, approval, clarify, and
-   goal controls to Hermes-owned endpoints/capabilities.
-7. **Parity tests**: compare legacy and adapter event streams for synthetic
-   token, reasoning, tool, approval, clarify, error, and done scenarios.
-8. **Retire runtime surrogate state**: remove normal WebUI chat ownership of
-   `AIAgent`, cancellation flags, callback queues, and process-local run truth
-   once parity and fallback criteria are satisfied.
+### Slice 4: Runner process / sidecar boundary
 
-## First success criterion
+Explicitly deferred until Slice 1 has worked in production for at least one
+release cycle and the adapter surface has review approval.
 
-The first implementation milestone is not "basic chat streams through a new
-endpoint." The first meaningful milestone is:
+Scope:
 
-1. Start a non-trivial chat run from WebUI through the Hermes-owned path.
-2. Restart only `hermes-webui` while the run is active.
-3. Reload or reopen the browser session.
-4. Rediscover the same `run_id` from Hermes using `session_id` or last known run
-   metadata.
-5. Replay events from the last cursor with no duplicate visible transcript
-   content.
-6. Render the same token/reasoning/tool/approval/clarify state the workbench
-   would have rendered without the restart.
-7. Cancel the run from WebUI and observe Hermes emit the terminal cancelled
-   state.
+- move long-lived execution out of the main WebUI request process,
+- runner owns active execution state,
+- main WebUI server observes/replays through the adapter/journal,
+- future Hermes CLI/Python/local API or `/v1/runs` backends can be evaluated
+  behind the adapter.
 
-If this works, WebUI is moving toward a protocol translator over Hermes-owned
-execution instead of becoming another runtime with different variable names.
+Revert path: disable runner backend and fall back to journaled legacy backend.
 
-## Open questions
+## First Meaningful Success Criteria
 
-- Where should the normative Hermes Runtime API / IPC v0 spec live: in
-  `NousResearch/hermes-agent`, this WebUI RFC, or both with one designated
-  source of truth?
-- What retention window is enough for v0 event replay: active-run memory only,
-  SQLite-backed event log, or transcript-derived reconstruction plus terminal
-  state?
-- Should WebUI talk to Hermes over the existing API server, an embedded IPC
-  channel, or a profile-local runtime socket?
-- How should multiple clients observing the same run coordinate controls and
-  pending approval/clarify prompts?
-- Which slash commands need surface-specific capability metadata before WebUI
-  can safely delegate them to Hermes?
+The first meaningful milestones are deliberately split.
+
+### Journal / Replay Gate
+
+This gate belongs to Slice 1. It does not prove active execution survives a WebUI
+process restart, because execution is still owned by the WebUI process in this
+slice.
+
+It proves:
+
+1. A WebUI run emits append-only journal events with stable cursors.
+2. Browser refresh/reconnect can replay already-journaled events from cursor.
+3. Terminal `done`, `error`, or `cancelled` state replays without duplicate
+   transcript content.
+4. Tool/reasoning/status state can be reconstructed from replayed journal events.
+5. If WebUI restarts before execution ownership has moved out of process, the UI
+   can show a clear interrupted/stale diagnostic for the last journaled run state.
+
+### Execution-Survives-WebUI-Restart Gate
+
+This stronger gate belongs to the runner/sidecar or external-runtime slice, not
+Slice 1. It proves execution ownership has actually moved out of the main WebUI
+request process:
+
+1. Start a long-running run from WebUI.
+2. Restart only `hermes-webui`.
+3. Keep the active run executing outside the restarted WebUI process.
+4. Reload the browser/session.
+5. Rediscover the active run and replay/catch up from cursor.
+6. Preserve the rendered workbench state without duplicate transcript content.
+7. If the run is still active, cancellation still works.
+
+If this works without moving runtime ownership into a new pile of process-local
+globals, the architecture is moving in the right direction.
+
+## Open Questions
+
+- What exact storage format should Slice 1 use: SQLite run/event tables, JSONL,
+  or a hybrid with transcript-derived checkpoints?
+- How long should event replay be retained after terminal state?
+- Which event fields must be redacted before journal persistence?
+- Should the journal live under the WebUI state dir, the session dir, or a
+  future runtime-specific subdirectory?
+- What is the minimum set of synthetic event fixtures needed to compare legacy
+  rendering with replay rendering?
+- Which controls need route-level feature flags before migration?
+- If Hermes Agent later ships a durable `/v1/runs` API, which adapter fields map
+  directly and which remain WebUI presentation concerns?

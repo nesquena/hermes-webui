@@ -1190,7 +1190,7 @@ function _normalizeAppearance(theme,skin){
   return {theme:nextTheme,skin:nextSkin};
 }
 
-// Sync <meta name="theme-color"> with the active theme's computed --bg.
+// Sync <meta name="theme-color"> with the active theme's app chrome color.
 // This surfaces the WebUI's exact theme background to:
 //   1. Mobile Safari status bar (the prefers-color-scheme media variants in index.html
 //      cover the pre-load case; this updater handles user-toggled changes mid-session).
@@ -1198,12 +1198,12 @@ function _normalizeAppearance(theme,skin){
 //   3. Native WKWebView wrappers (e.g. hermes-swift-mac) that read this attribute as
 //      the source of truth for AppKit chrome (tab bar, title bar, traffic-light area)
 //      instead of pixel-sampling — overlay-resistant and IPC-free.
-// Reading getComputedStyle(html).getPropertyValue('--bg') picks up the active skin
+// Reading getComputedStyle(html).getPropertyValue('--sidebar') picks up the active skin
 // (Default, Sienna, Sisyphus, Charizard, etc.) so each skin's distinct paint reaches
 // the meta tag.
 function _syncThemeColorMeta(){
   try{
-    const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    const bg=getComputedStyle(document.documentElement).getPropertyValue('--sidebar').trim();
     if(!bg) return;
     const known=document.getElementById('hermes-theme-color');
     if(known){
@@ -1376,6 +1376,7 @@ function applyBotName(){
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showTps=!!s.show_tps;
+    window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
@@ -1413,6 +1414,7 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showTps=false;
+    window._fadeTextEffect=false;
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;

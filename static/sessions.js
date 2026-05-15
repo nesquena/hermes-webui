@@ -2031,7 +2031,7 @@ function filterSessions(){
   _searchDebounceTimer = setTimeout(async () => {
     try {
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(q)}&content=1&depth=5`);
-      const titleIds = new Set(_allSessions.filter(s => (s.title||'Untitled').toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
+      const titleIds = new Set(_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !titleIds.has(s.session_id));
       renderSessionListFromCache();
     } catch(e) { /* ignore */ }
@@ -2315,7 +2315,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       const childCopy={...child};
       if(parentSegment){
         childCopy._parent_segment_id=parentSegment.session_id;
-        childCopy._parent_segment_title=parentSegment.title||child.parent_title||'Untitled';
+        childCopy._parent_segment_title=_sessionDisplayTitle(parentSegment)||child.parent_title||'Untitled';
       }
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
@@ -2364,6 +2364,21 @@ function _collapseSessionLineageForSidebar(sessions){
     result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
   }
   return result;
+}
+
+function _sessionDisplayTitle(s){
+  const title=String((s&&(s.display_title||s._state_db_title||s.title))||'Untitled').trim();
+  return title||'Untitled';
+}
+
+function _sessionTitleIsDefaultWebUI(rawTitle){
+  const title=String(rawTitle||'').replace(/\s+/g,' ').trim();
+  return title==='Hermes WebUI'||/^Hermes WebUI #\d+$/.test(title);
+}
+
+function _sessionTitleTags(rawTitle){
+  if(_sessionTitleIsDefaultWebUI(rawTitle)) return [];
+  return String(rawTitle||'').match(/#[\w-]+/g)||[];
 }
 
 function _activeSessionIdForSidebar(){
@@ -2538,7 +2553,7 @@ function renderSessionListFromCache(){
   _purgeStaleInflightEntries();
   const q=($('sessionSearch').value||'').toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
-  const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
+  const titleMatches=q?_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q)):_allSessions;
   // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
@@ -2830,8 +2845,8 @@ function renderSessionListFromCache(){
     }
     if(readOnly) el.classList.add('read-only-session');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
-    const rawTitle=s.title||'Untitled';
-    const tags=(rawTitle.match(/#[\w-]+/g)||[]);
+    const rawTitle=_sessionDisplayTitle(s);
+    const tags=_sessionTitleTags(rawTitle);
     let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
     // Guard: system prompt content must never surface as a visible session title
     if(cleanTitle.startsWith('[SYSTEM:')){
@@ -2987,7 +3002,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
-        const segTitle=seg.title||t('session_lineage_segment_untitled');
+        const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');
         const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
         row.textContent=`-> ${segTitle} - ${segTime}`;
         row.title=t('session_lineage_segment_open');
@@ -3013,7 +3028,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        const childTitle=child.title||'Untitled child session';
+        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         row.textContent=`-> ${childTitle}${parentNote} - ${childTime}`;

@@ -7,8 +7,8 @@ Covers:
   before any external JS loads (no flash of wrong colour for native chrome).
 - boot.js defines `_syncThemeColorMeta()` and calls it from `_setResolvedTheme()`
   (covering both prism-loaded and prism-absent paths) and from `_applySkin()`.
-- The helper reads `getComputedStyle(html).getPropertyValue('--bg')`, which means
-  every skin (Default, Sienna, Sisyphus, Charizard, etc.) reaches the meta tag.
+- The helper reads `getComputedStyle(html).getPropertyValue('--sidebar')`, which
+  means native/mobile chrome follows the app chrome instead of message content.
 - Both the pre-paint script and boot sync update all theme-color tags and remove
   stale media attributes so OS light/dark preference cannot override the user theme.
 
@@ -66,14 +66,14 @@ class TestBootJsThemeColorSync:
         src = BOOT.read_text(encoding="utf-8")
         assert "function _syncThemeColorMeta()" in src
 
-    def test_sync_helper_reads_computed_bg_var(self):
-        """The helper must read the computed --bg CSS custom property so each skin's
-        background reaches the meta tag (Sienna gets terracotta, Sisyphus gets purple,
-        etc.).
+    def test_sync_helper_reads_computed_sidebar_var(self):
+        """The helper must read the computed --sidebar CSS custom property.
+
+        Mobile/PWA browser chrome should match the app titlebar/sidebar chrome,
+        not the scrollable message background.
         """
         src = BOOT.read_text(encoding="utf-8")
-        # The helper reads getComputedStyle on documentElement and extracts --bg.
-        assert "getComputedStyle(document.documentElement).getPropertyValue('--bg')" in src
+        assert "getComputedStyle(document.documentElement).getPropertyValue('--sidebar')" in src
 
     def test_sync_helper_updates_all_theme_color_tags(self):
         """The helper must update the canonical id tag and the static fallback tags.

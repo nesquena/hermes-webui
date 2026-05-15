@@ -683,6 +683,10 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         if not row:
             continue
 
+        state_title = str(row.get('title') or '').strip()
+        if state_title:
+            metadata.setdefault(sid, {})['_state_db_title'] = state_title
+
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None
         if parent_id and parent_row:

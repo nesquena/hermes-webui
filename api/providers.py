@@ -7,6 +7,8 @@ multi-provider support).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -14,9 +16,10 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,6 +56,8 @@ def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
 _ACCOUNT_USAGE_SUBPROCESS_TIMEOUT_SECONDS = 35.0
+_ACCOUNT_USAGE_CACHE_TTL_SECONDS = 45.0
+_ACCOUNT_USAGE_CACHE_MAX_ENTRIES = 64
 _ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic"})
 
 # Upper bound on simultaneous profile-isolated quota probe subprocesses.
@@ -98,6 +103,16 @@ _ACCOUNT_USAGE_PARENT_DEATHSIG_BOOTSTRAP = (
 # Lazily created so this module compiles even when threading isn't ready.
 _account_usage_probe_semaphore: threading.BoundedSemaphore | None = None
 
+# Short-lived account-usage cache. The Codex pooled probe may check multiple
+# credentials, so cache sanitized snapshots briefly to avoid re-querying the
+# provider on every Settings repaint/profile-panel refresh. Pool composition
+# changes can be stale for at most this TTL; that is preferred to hammering the
+# provider usage API while the Settings panel is open. Transient None probe
+# results are intentionally not cached; known exhausted/unavailable states are
+# represented as non-None snapshots and remain cacheable.
+_account_usage_status_cache: dict[tuple[str, str, str], tuple[float, Any]] = {}
+_account_usage_status_cache_lock = threading.Lock()
+
 
 def _get_account_usage_probe_semaphore() -> threading.BoundedSemaphore:
     global _account_usage_probe_semaphore
@@ -128,7 +143,8 @@ _ACCOUNT_USAGE_SUBPROCESS_CODE = r"""
 import base64
 import json
 import sys
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib import request as urllib_request
 
@@ -136,6 +152,8 @@ from agent.account_usage import fetch_account_usage
 
 
 _CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_CODEX_POOL_USAGE_TIMEOUT_SECONDS = 4.0
+_CODEX_POOL_MAX_WORKERS = 6
 
 
 def _iso(value):
@@ -159,7 +177,7 @@ def _snapshot_payload(snapshot):
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
         })
-    return {
+    payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
         "source": str(getattr(snapshot, "source", "") or ""),
         "title": str(getattr(snapshot, "title", "") or ""),
@@ -170,6 +188,10 @@ def _snapshot_payload(snapshot):
         "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
         "fetched_at": _iso(getattr(snapshot, "fetched_at", None)),
     }
+    pool = getattr(snapshot, "pool", None)
+    if isinstance(pool, dict):
+        payload["pool"] = pool
+    return payload
 
 
 def _snapshot_available(snapshot):
@@ -317,25 +339,273 @@ def _codex_snapshot_from_usage_payload(payload):
     )
 
 
+def _snapshot_windows_payload(snapshot):
+    windows = []
+    for window in getattr(snapshot, "windows", ()) or ():
+        label = str(getattr(window, "label", "") or "").strip()
+        if not label:
+            continue
+        used_percent = _number(getattr(window, "used_percent", None))
+        remaining_percent = None
+        if used_percent is not None:
+            remaining_percent = max(0.0, min(100.0, 100.0 - float(used_percent)))
+        windows.append({
+            "label": label,
+            "used_percent": used_percent,
+            "remaining_percent": remaining_percent,
+            "reset_at": _iso(getattr(window, "reset_at", None)),
+            "detail": getattr(window, "detail", None),
+        })
+    return windows
+
+
+def _snapshot_details_payload(snapshot):
+    return [
+        str(detail).strip()
+        for detail in (getattr(snapshot, "details", ()) or ())
+        if str(detail).strip()
+    ]
+
+
+def _safe_entry_label(entry, index):
+    label = _entry_value(entry, "label", "source") or ""
+    if not label:
+        label = "Credential " + str(index)
+    label = " ".join(str(label).split())
+    if len(label) > 64:
+        label = label[:61].rstrip() + "..."
+    return label
+
+
+def _safe_unavailable_reason(reason):
+    text = " ".join(str(reason or "").split())
+    if not text:
+        return None
+    lowered = text.lower()
+    sensitive_terms = ("access_token", "refresh_token", "authorization", "bearer ", "jwt", "secret")
+    if any(term in lowered for term in sensitive_terms):
+        return "Usage unavailable for this credential."
+    return text[:180]
+
+
+def _entry_exhausted_ttl_seconds(error_code):
+    code = str(error_code or "").strip()
+    if code == "401":
+        return 5 * 60
+    return 60 * 60
+
+
+def _entry_pool_exhausted_until(entry):
+    if str(_entry_value(entry, "last_status") or "").strip().lower() != "exhausted":
+        return None
+    reset_at = _parse_dt(getattr(entry, "last_error_reset_at", None))
+    if reset_at is not None:
+        return reset_at
+    status_at = _parse_dt(getattr(entry, "last_status_at", None))
+    if status_at is None:
+        return None
+    return status_at + timedelta(seconds=_entry_exhausted_ttl_seconds(_entry_value(entry, "last_error_code")))
+
+
+def _entry_is_pool_exhausted(entry):
+    exhausted_until = _entry_pool_exhausted_until(entry)
+    return exhausted_until is not None and datetime.now(timezone.utc) < exhausted_until
+
+
+def _entry_pool_exhausted_reason(entry):
+    code = _entry_value(entry, "last_error_code")
+    reset_at = _entry_pool_retry_after(entry)
+    reason = "Credential pool marked this credential exhausted"
+    if code:
+        reason += " after provider status " + code
+    if reset_at:
+        reason += "; retry after " + reset_at
+    return reason + "."
+
+
+def _entry_pool_retry_after(entry):
+    return _iso(_entry_pool_exhausted_until(entry))
+
+
+def _fetch_codex_entry_snapshot(entry):
+    access_token = _entry_value(entry, "runtime_api_key", "access_token")
+    if not access_token:
+        return None, False, "No runtime token available."
+    base_url = _entry_value(entry, "runtime_base_url", "base_url") or _CODEX_DEFAULT_BASE_URL
+    request = urllib_request.Request(
+        _resolve_codex_usage_url(base_url),
+        headers=_codex_usage_headers(access_token),
+    )
+    with urllib_request.urlopen(request, timeout=_CODEX_POOL_USAGE_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8") or "{}")
+    return _codex_snapshot_from_usage_payload(payload), True, None
+
+
+def _best_remaining_by_window(rows):
+    best = {}
+    for row in rows:
+        if row.get("status") != "available":
+            continue
+        label = row.get("label") or "Credential"
+        for window in row.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            window_label = str(window.get("label") or "").strip()
+            remaining = _number(window.get("remaining_percent"))
+            if not window_label or remaining is None:
+                continue
+            candidate = {
+                "label": window_label,
+                "remaining_percent": remaining,
+                "used_percent": window.get("used_percent"),
+                "reset_at": window.get("reset_at"),
+                "detail": window.get("detail"),
+                "credential_label": label,
+            }
+            current = best.get(window_label.lower())
+            # The normalized Codex account-limit payload currently exposes
+            # percentages, not absolute request/token capacity. If absolute
+            # remaining capacity becomes available, prefer it here.
+            if current is None or float(remaining) > float(current.get("remaining_percent") or -1):
+                best[window_label.lower()] = candidate
+    return list(best.values())
+
+
+def _next_reset_at(rows):
+    best_dt = None
+    best_text = None
+    for row in rows:
+        for window in row.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            reset_text = window.get("reset_at")
+            dt = _parse_dt(reset_text)
+            if dt is None:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_text = _iso(dt)
+    return best_text
+
+
+def _codex_pool_snapshot(entries, rows, queried):
+    available_rows = [row for row in rows if row.get("status") == "available"]
+    exhausted_rows = [row for row in rows if row.get("status") == "exhausted"]
+    failed_rows = [row for row in rows if row.get("status") not in {"available", "exhausted"}]
+    plans = []
+    for row in rows:
+        plan = row.get("plan")
+        if plan and plan not in plans:
+            plans.append(plan)
+    best_windows = _best_remaining_by_window(rows)
+    pool = {
+        "total_credentials": len(entries),
+        "queried_credentials": queried,
+        "available_credentials": len(available_rows),
+        "exhausted_credentials": len(exhausted_rows),
+        "failed_credentials": len(failed_rows),
+        "plans": plans,
+        "next_reset_at": _next_reset_at(rows),
+        "best_remaining_by_window": best_windows,
+        "credentials": rows,
+    }
+    details = [str(len(available_rows)) + "/" + str(len(entries)) + " credentials available"]
+    if exhausted_rows:
+        details.append(str(len(exhausted_rows)) + " exhausted")
+    if failed_rows:
+        details.append(str(len(failed_rows)) + " failed to load")
+    if plans:
+        details.append("Plans: " + ", ".join(plans))
+    plan = plans[0] if len(plans) == 1 else None
+    windows = tuple(
+        SimpleNamespace(
+            label=window.get("label"),
+            used_percent=window.get("used_percent"),
+            reset_at=window.get("reset_at"),
+            detail="Best of " + str(len(available_rows)) + " available credentials",
+        )
+        for window in best_windows
+    )
+    return SimpleNamespace(
+        provider="openai-codex",
+        source="usage_api_pool",
+        title="Account limits",
+        plan=plan,
+        windows=windows,
+        details=tuple(details),
+        available=bool(available_rows),
+        unavailable_reason=None if available_rows else "No Codex pool credentials returned available account limits.",
+        fetched_at=datetime.now(timezone.utc),
+        pool=pool,
+    )
+
+
+def _codex_pool_exhausted_row(entry, index):
+    label = _safe_entry_label(entry, index)
+    retry_after = _entry_pool_retry_after(entry)
+    return {
+        "label": label,
+        "status": "exhausted",
+        "plan": None,
+        "windows": [],
+        "details": [],
+        "unavailable_reason": _entry_pool_exhausted_reason(entry),
+        "retry_after": retry_after,
+        "fetched_at": None,
+    }
+
+
+def _probe_codex_pool_entry(item):
+    index, entry = item
+    label = _safe_entry_label(entry, index)
+    did_query_count = 0
+    try:
+        snapshot, did_query, reason = _fetch_codex_entry_snapshot(entry)
+        if did_query:
+            did_query_count = 1
+    except Exception as exc:
+        snapshot = None
+        reason = str(exc)
+    windows = _snapshot_windows_payload(snapshot) if snapshot is not None else []
+    details = _snapshot_details_payload(snapshot) if snapshot is not None else []
+    snapshot_available = _snapshot_available(snapshot)
+    status = "available" if snapshot_available else "unavailable"
+    row = {
+        "label": label,
+        "status": status,
+        "plan": getattr(snapshot, "plan", None) if snapshot is not None else None,
+        "windows": windows,
+        "details": details,
+        "unavailable_reason": None if snapshot_available else _safe_unavailable_reason(reason or getattr(snapshot, "unavailable_reason", None)),
+        "fetched_at": _iso(getattr(snapshot, "fetched_at", None)) if snapshot is not None else None,
+    }
+    return index, row, did_query_count
+
+
 def _fetch_codex_account_usage_from_pool():
     try:
         from agent.credential_pool import load_pool
 
         pool = load_pool("openai-codex")
-        entry = pool.select() if pool is not None else None
-        if entry is None:
+        entries = list(pool.entries()) if pool is not None and hasattr(pool, "entries") else []
+        if not entries:
             return None
-        access_token = _entry_value(entry, "runtime_api_key", "access_token")
-        if not access_token:
-            return None
-        base_url = _entry_value(entry, "runtime_base_url", "base_url") or _CODEX_DEFAULT_BASE_URL
-        request = urllib_request.Request(
-            _resolve_codex_usage_url(base_url),
-            headers=_codex_usage_headers(access_token),
-        )
-        with urllib_request.urlopen(request, timeout=15.0) as response:
-            payload = json.loads(response.read().decode("utf-8") or "{}")
-        return _codex_snapshot_from_usage_payload(payload)
+        rows_by_index = {}
+        probe_items = []
+        queried = 0
+        for index, entry in enumerate(entries, start=1):
+            if _entry_is_pool_exhausted(entry):
+                rows_by_index[index] = _codex_pool_exhausted_row(entry, index)
+            else:
+                probe_items.append((index, entry))
+        if probe_items:
+            max_workers = min(_CODEX_POOL_MAX_WORKERS, len(probe_items))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for index, row, did_query_count in executor.map(_probe_codex_pool_entry, probe_items):
+                    rows_by_index[index] = row
+                    queried += did_query_count
+        rows = [rows_by_index[index] for index in range(1, len(entries) + 1)]
+        return _codex_pool_snapshot(entries, rows, queried)
     except Exception:
         return None
 
@@ -346,10 +616,10 @@ try:
     snapshot = fetch_account_usage(provider, api_key=api_key)
 except Exception:
     snapshot = None
-if str(provider or "").strip().lower() == "openai-codex" and not _snapshot_available(snapshot):
-    fallback_snapshot = _fetch_codex_account_usage_from_pool()
-    if _snapshot_available(fallback_snapshot) or snapshot is None:
-        snapshot = fallback_snapshot
+if str(provider or "").strip().lower() == "openai-codex":
+    pool_snapshot = _fetch_codex_account_usage_from_pool()
+    if isinstance(getattr(pool_snapshot, "pool", None), dict):
+        snapshot = pool_snapshot
 print(json.dumps(_snapshot_payload(snapshot)))
 """
 
@@ -445,6 +715,91 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
     except Exception:
         return {}
     return values
+
+
+def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
+    """Decode JWT claims for token-shape classification only.
+
+    The signature is intentionally not verified because this helper is not an
+    authorization decision: it only prevents a Codex OAuth JWT-shaped value from
+    being treated as a raw OpenAI API key in provider-card detection.
+    """
+    if not isinstance(token, str) or token.count(".") != 2:
+        return {}
+    payload = token.split(".", 2)[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
+    except Exception:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _looks_like_codex_oauth_token(value: str) -> bool:
+    """Return True when a value is a ChatGPT/Codex OAuth JWT, not an OpenAI API key."""
+    token = str(value or "").strip()
+    if not token or token.startswith("sk-"):
+        return False
+    claims = _decode_jwt_claims_unverified(token)
+    if not claims:
+        return False
+    auth_claim = claims.get("https://api.openai.com/auth")
+    if isinstance(auth_claim, dict) and auth_claim:
+        return True
+    return any(key in claims for key in ("chatgpt_account_id", "https://api.openai.com/profile"))
+
+
+def _provider_value_counts_as_api_key(provider_id: str, value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if (provider_id or "").strip().lower() == "openai" and _looks_like_codex_oauth_token(text):
+        return False
+    return True
+
+
+def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
+    """True when the bare OpenAI credential slot contains only a Codex OAuth JWT.
+
+    Users who authenticate Codex can end up with a ChatGPT/Codex JWT in a
+    legacy OPENAI_API_KEY-shaped location. That value should not make the bare
+    OpenAI API provider appear as configured, and the Providers tab should not
+    show an extra OpenAI card solely because of that Codex-only credential.
+    """
+    if (provider_id or "").strip().lower() != "openai":
+        return False
+    values: list[object] = []
+    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    if env_var:
+        env_path = _get_hermes_home() / ".env"
+        env_values = _load_env_file(env_path)
+        values.append(env_values.get(env_var))
+        values.append(os.getenv(env_var))
+        for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
+            values.append(env_values.get(alias))
+            values.append(os.getenv(alias))
+
+    cfg = get_config()
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, dict):
+        active_provider = str(model_cfg.get("provider") or "").strip().lower()
+        if active_provider == provider_id:
+            values.append(model_cfg.get("api_key"))
+    providers_cfg = cfg.get("providers", {})
+    if isinstance(providers_cfg, dict):
+        provider_cfg = providers_cfg.get(provider_id, {})
+        if isinstance(provider_cfg, dict):
+            values.append(provider_cfg.get("api_key"))
+    custom_providers = cfg.get("custom_providers", [])
+    if isinstance(custom_providers, list):
+        for cp in custom_providers:
+            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
+                cp_key = cp.get("api_key")
+                if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
+                    values.append(os.getenv(cp_key[2:-1]))
+                else:
+                    values.append(cp_key)
+    return any(_looks_like_codex_oauth_token(str(value or "")) for value in values)
 
 
 def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
@@ -559,17 +914,19 @@ def _provider_has_key(provider_id: str) -> bool:
     if env_var:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
-        if env_values.get(env_var):
+        env_file_value = env_values.get(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_file_value):
             return True
-        if os.getenv(env_var):
+        env_value = os.getenv(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_value):
             return True
         # Fall back to legacy env-var aliases (e.g. lmstudio's pre-#1500
         # LMSTUDIO_API_KEY name) so existing users don't lose detection
         # after an env-var rename.  See _PROVIDER_ENV_VAR_ALIASES.
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
-            if env_values.get(alias):
+            if _provider_value_counts_as_api_key(provider_id, env_values.get(alias)):
                 return True
-            if os.getenv(alias):
+            if _provider_value_counts_as_api_key(provider_id, os.getenv(alias)):
                 return True
 
     cfg = get_config()
@@ -580,20 +937,22 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         active_provider = model_cfg.get("provider")
         if active_provider and str(active_provider).strip().lower() == provider_id.lower():
-            return True
+            if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
+                return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers", {})
     if isinstance(providers_cfg, dict):
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
-            return True
+            if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
+                return True
     # Check custom_providers
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
                 if _custom_provider_name_matches(provider_id, cp.get("name")):
-                    if str(cp.get("api_key") or "").strip():
+                    if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
 
@@ -605,22 +964,26 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     if env_var:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
-        if env_values.get(env_var):
-            return str(env_values[env_var]).strip() or None
-        if os.getenv(env_var):
-            return os.getenv(env_var, "").strip() or None
+        env_file_value = env_values.get(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_file_value):
+            return str(env_file_value).strip() or None
+        env_value = os.getenv(env_var)
+        if _provider_value_counts_as_api_key(provider_id, env_value):
+            return str(env_value).strip() or None
         for alias in _PROVIDER_ENV_VAR_ALIASES.get(provider_id, ()) or ():
-            if env_values.get(alias):
-                return str(env_values[alias]).strip() or None
-            if os.getenv(alias):
-                return os.getenv(alias, "").strip() or None
+            alias_file_value = env_values.get(alias)
+            if _provider_value_counts_as_api_key(provider_id, alias_file_value):
+                return str(alias_file_value).strip() or None
+            alias_value = os.getenv(alias)
+            if _provider_value_counts_as_api_key(provider_id, alias_value):
+                return str(alias_value).strip() or None
 
     cfg = get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
         model_key = str(model_cfg.get("api_key") or "").strip()
-        if model_key and active_provider == provider_id:
+        if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
             return model_key
 
     providers_cfg = cfg.get("providers", {})
@@ -628,7 +991,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
             provider_key = str(provider_cfg.get("api_key") or "").strip()
-            if provider_key:
+            if _provider_value_counts_as_api_key(provider_id, provider_key):
                 return provider_key
 
     custom_providers = cfg.get("custom_providers", [])
@@ -640,7 +1003,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return os.getenv(cp_key[2:-1], "").strip() or None
-                if cp_key:
+                if _provider_value_counts_as_api_key(provider_id, cp_key):
                     return cp_key
     return None
 
@@ -718,7 +1081,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     ]
     plan = str(getattr(snapshot, "plan", "") or "").strip() or None
     unavailable_reason = str(getattr(snapshot, "unavailable_reason", "") or "").strip() or None
-    return {
+    result = {
         "provider": str(getattr(snapshot, "provider", "") or "").strip() or None,
         "source": str(getattr(snapshot, "source", "") or "").strip() or None,
         "title": str(getattr(snapshot, "title", "") or "").strip() or "Account limits",
@@ -729,6 +1092,10 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
         "unavailable_reason": unavailable_reason,
         "fetched_at": _isoformat_utc(getattr(snapshot, "fetched_at", None)),
     }
+    pool = getattr(snapshot, "pool", None)
+    if isinstance(pool, dict):
+        result["pool"] = pool
+    return result
 
 
 def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, api_key: str | None = None) -> Any:
@@ -791,7 +1158,66 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
         available=bool(payload.get("available")),
         unavailable_reason=payload.get("unavailable_reason"),
         fetched_at=payload.get("fetched_at"),
+        pool=payload.get("pool") if isinstance(payload.get("pool"), dict) else None,
     )
+
+
+def _account_usage_cache_key(provider: str, home: Path, api_key: str | None) -> tuple[str, str, str]:
+    key_fingerprint = ""
+    if api_key:
+        key_fingerprint = hashlib.sha256(api_key.encode("utf-8", "ignore")).hexdigest()
+    return ((provider or "").strip().lower(), str(Path(home)), key_fingerprint)
+
+
+def _get_cached_account_usage(cache_key: tuple[str, str, str]) -> tuple[bool, Any]:
+    now = time.monotonic()
+    with _account_usage_status_cache_lock:
+        cached = _account_usage_status_cache.get(cache_key)
+        if cached is None:
+            return False, None
+        fetched_at, snapshot = cached
+        if now - fetched_at <= _ACCOUNT_USAGE_CACHE_TTL_SECONDS:
+            return True, snapshot
+        _account_usage_status_cache.pop(cache_key, None)
+    return False, None
+
+
+def invalidate_account_usage_status_cache(provider_id: str | None = None) -> None:
+    normalized = str(provider_id or "").strip().lower()
+    with _account_usage_status_cache_lock:
+        if not normalized:
+            _account_usage_status_cache.clear()
+            return
+        for key in list(_account_usage_status_cache):
+            if key[0] == normalized:
+                _account_usage_status_cache.pop(key, None)
+
+
+def _set_cached_account_usage(
+    cache_key: tuple[str, str, str],
+    snapshot: Any,
+) -> None:
+    now = time.monotonic()
+    with _account_usage_status_cache_lock:
+        if snapshot is None:
+            cached = _account_usage_status_cache.get(cache_key)
+            if cached is not None and cached[1] is not None:
+                return
+            _account_usage_status_cache.pop(cache_key, None)
+            return
+        _account_usage_status_cache[cache_key] = (now, snapshot)
+        expired = [
+            key for key, (fetched_at, _snapshot) in _account_usage_status_cache.items()
+            if now - fetched_at > _ACCOUNT_USAGE_CACHE_TTL_SECONDS
+        ]
+        for key in expired:
+            _account_usage_status_cache.pop(key, None)
+        while len(_account_usage_status_cache) > _ACCOUNT_USAGE_CACHE_MAX_ENTRIES:
+            oldest_key = min(
+                _account_usage_status_cache,
+                key=lambda key: _account_usage_status_cache[key][0],
+            )
+            _account_usage_status_cache.pop(oldest_key, None)
 
 
 def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: str | None = None) -> Any:
@@ -843,7 +1269,7 @@ def _agent_fetch_account_usage_for_home(provider: str, home: Path, *, api_key: s
     return _account_usage_payload_to_snapshot(payload)
 
 
-def _fetch_account_usage_with_profile_context(provider: str) -> Any:
+def _fetch_account_usage_with_profile_context(provider: str, *, refresh: bool = False) -> Any:
     """Fetch account usage for a provider within the active profile context.
 
     Concurrency is capped by the module-level BoundedSemaphore so that rapid
@@ -856,21 +1282,29 @@ def _fetch_account_usage_with_profile_context(provider: str) -> Any:
     """
     home = _get_hermes_home()
     api_key = _get_provider_api_key(provider)
+    cache_key = _account_usage_cache_key(provider, home, api_key)
+    if not refresh:
+        cache_hit, cached = _get_cached_account_usage(cache_key)
+        if cache_hit:
+            return cached
     sem = _get_account_usage_probe_semaphore()
     try:
         with sem:
-            return _agent_fetch_account_usage_for_home(
+            snapshot = _agent_fetch_account_usage_for_home(
                 provider,
                 home,
                 api_key=api_key,
             )
+            _set_cached_account_usage(cache_key, snapshot)
+            return snapshot
     except Exception:
         logger.debug("Failed to fetch account usage for %s", provider, exc_info=True)
+        _set_cached_account_usage(cache_key, None)
         return None
 
 
-def _provider_account_usage_status(provider: str, display_name: str) -> dict[str, Any]:
-    snapshot = _fetch_account_usage_with_profile_context(provider)
+def _provider_account_usage_status(provider: str, display_name: str, *, refresh: bool = False) -> dict[str, Any]:
+    snapshot = _fetch_account_usage_with_profile_context(provider, refresh=refresh)
     account_limits = _serialize_account_usage_snapshot(snapshot)
     if account_limits and account_limits.get("available"):
         return {
@@ -905,7 +1339,7 @@ def _provider_account_usage_status(provider: str, display_name: str) -> dict[str
     }
 
 
-def get_provider_quota(provider_id: str | None = None) -> dict[str, Any]:
+def get_provider_quota(provider_id: str | None = None, *, refresh: bool = False) -> dict[str, Any]:
     """Return sanitized quota/rate-limit status for the active provider.
 
     OpenRouter keeps its documented key endpoint. OAuth-backed account usage
@@ -926,7 +1360,7 @@ def get_provider_quota(provider_id: str | None = None) -> dict[str, Any]:
 
     display_name = _PROVIDER_DISPLAY.get(provider, provider.replace("-", " ").title())
     if provider in _ACCOUNT_USAGE_PROVIDERS:
-        return _provider_account_usage_status(provider, display_name)
+        return _provider_account_usage_status(provider, display_name, refresh=refresh)
 
     if provider != "openrouter":
         detail = "OpenAI/Anthropic rate-limit headers are a follow-up once WebUI captures provider response metadata."
@@ -1075,9 +1509,9 @@ def get_providers() -> dict[str, Any]:
             if env_var:
                 env_path = _get_hermes_home() / ".env"
                 env_values = _load_env_file(env_path)
-                if env_values.get(env_var):
+                if _provider_value_counts_as_api_key(pid, env_values.get(env_var)):
                     key_source = "env_file"
-                elif os.getenv(env_var):
+                elif _provider_value_counts_as_api_key(pid, os.getenv(env_var)):
                     key_source = "env_var"
                 else:
                     # Canonical name not set; check legacy aliases (e.g. lmstudio's
@@ -1086,11 +1520,11 @@ def get_providers() -> dict[str, Any]:
                     # actually lives in .env under the old name.
                     aliased = False
                     for alias in _PROVIDER_ENV_VAR_ALIASES.get(pid, ()) or ():
-                        if env_values.get(alias):
+                        if _provider_value_counts_as_api_key(pid, env_values.get(alias)):
                             key_source = "env_file"
                             aliased = True
                             break
-                        if os.getenv(alias):
+                        if _provider_value_counts_as_api_key(pid, os.getenv(alias)):
                             key_source = "env_var"
                             aliased = True
                             break
@@ -1123,6 +1557,9 @@ def get_providers() -> dict[str, Any]:
                         is_oauth = True
                 except Exception:
                     pass
+
+        if pid == "openai" and not has_key and _provider_has_shadowed_codex_oauth_value(pid):
+            continue
 
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)

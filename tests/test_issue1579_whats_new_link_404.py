@@ -38,6 +38,10 @@ def _make_throwaway_repo(tmp_path, *, local_only_commits=0, upstream_advanced=0)
     """
     upstream = tmp_path / 'upstream.git'
     subprocess.run(['git', 'init', '--quiet', '--bare', str(upstream)], check=True)
+    subprocess.run(
+        ['git', '--git-dir', str(upstream), 'symbolic-ref', 'HEAD', 'refs/heads/master'],
+        check=True,
+    )
 
     seed = tmp_path / 'seed'
     subprocess.run(['git', 'init', '--quiet', '--initial-branch=master', str(seed)], check=True)

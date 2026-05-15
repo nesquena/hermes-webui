@@ -418,7 +418,19 @@ class TestForceUpdateRoute:
         )
 
 
-# ── static/ui.js ──────────────────────────────────────────────────────────────
+class TestUpdateSummaryRouteModelSelection:
+    """Update summaries should use a known text auxiliary model before main model fallback."""
+
+    def test_summary_route_prefers_documented_compression_auxiliary_model(self):
+        src = read('api/routes.py')
+
+        assert 'get_text_auxiliary_client' in src
+        assert '"compression"' in src
+        assert '"update_summary"' not in src
+        assert 'main_runtime=main_runtime' in src
+        assert 'update summary auxiliary model failed; falling back to main model' in src
+        assert 'from run_agent import AIAgent' in src
+
 
 class TestUiJsUpdateBanner:
     """#813 + #814 — UI must show persistent error, force button, and correct toast."""
@@ -792,7 +804,7 @@ class TestWhatsNewSummaryToggle:
         assert 'human-readable' in updates
         assert 'avoid technical jargon' in updates
         assert 'regular diff comparison' in updates
-        assert 'Return only bullets' in updates
+        assert 'Return only prefixed bullets' in updates
         assert 'def _format_update_summary_sections' in updates
 
     def test_update_summary_formats_llm_text_into_stable_sections(self):
@@ -875,6 +887,43 @@ class TestWhatsNewSummaryToggle:
         assert result['summary'].count(duplicate_menu_item) == 1
         assert result['summary'].count(duplicate_quality_item) == 1
 
+    def test_update_summary_keeps_all_categorized_notice_and_worth_bullets(self):
+        from api.updates import summarize_update_payload
+
+        result = summarize_update_payload(
+            {'webui': {'behind': 8, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'}},
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Notice: The settings panel loads faster.',
+                    'Notice: Update prompts are easier to read.',
+                    'Notice: Chat status is clearer during reconnects.',
+                    'Notice: Tool results stay grouped by source.',
+                    'Notice: Mobile controls remain visible.',
+                    'Worth knowing: Some labels were renamed to match the new flow.',
+                    'Worth knowing: The full diff is still available from the update banner.',
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert sections["What you'll notice"] == [
+            'The settings panel loads faster.',
+            'Update prompts are easier to read.',
+            'Chat status is clearer during reconnects.',
+            'Tool results stay grouped by source.',
+            'Mobile controls remain visible.',
+        ]
+        assert sections['Worth knowing'] == [
+            'Some labels were renamed to match the new flow.',
+            'The full diff is still available from the update banner.',
+        ]
+
+    def test_update_summary_panel_is_scrollable_for_long_summaries(self):
+        style = read('static/style.css')
+
+        assert '#updateSummaryPanel{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+
     def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
         import api.updates as upd
 
@@ -889,9 +938,11 @@ class TestWhatsNewSummaryToggle:
         def fake_llm(_system, prompt):
             prompts.append(prompt)
             return '\n'.join([
-                'Several user-facing fixes are ready.',
-                'Settings and update messaging should be easier to understand.',
-                'The update flow should feel safer and clearer.',
+                'Notice: Several user-facing fixes are ready.',
+                'Notice: Settings and update messaging should be easier to understand.',
+                'Notice: The update flow should feel safer and clearer.',
+                'Notice: Mobile update controls should stay reachable.',
+                'Worth knowing: Some lower-level cleanup supports the visible update changes.',
             ])
 
         result = upd.summarize_update_payload(
@@ -918,9 +969,11 @@ class TestWhatsNewSummaryToggle:
             'Several user-facing fixes are ready.',
             'Settings and update messaging should be easier to understand.',
             'The update flow should feel safer and clearer.',
+            'Mobile update controls should stay reachable.',
         ]
         assert sections['Worth knowing'] == [
-            'WebUI has 57 updates; this summary uses the latest 24 commit subjects, with the full comparison still available in the diff link.'
+            'Some lower-level cleanup supports the visible update changes.',
+            'WebUI has 57 updates; this summary uses the latest 24 commit subjects, with the full comparison still available in the diff link.',
         ]
         assert result['targets'][0]['commits_truncated'] is True
 

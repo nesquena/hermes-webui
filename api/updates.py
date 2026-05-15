@@ -369,11 +369,34 @@ def _clean_summary_bullet(line: str) -> str:
     return line[:240]
 
 
+def _split_summary_category(line: str) -> tuple[str | None, str]:
+    raw = str(line or '').strip()
+    match = re.match(r'^\s*(?:[-*•]+|\d+[.)])?\s*(notice|what you(?:ll|\'ll| will) notice|user(?:s)? will notice|worth knowing|worth|note)\s*:\s*(.+)$', raw, re.I)
+    if not match:
+        return None, raw
+    label = match.group(1).lower()
+    category = 'worth' if label in {'worth knowing', 'worth', 'note'} else 'notice'
+    return category, match.group(2)
+
+
+def _unique_summary_bullets(items: list[str]) -> list[str]:
+    seen = set()
+    bullets = []
+    for item in items:
+        cleaned = _clean_summary_bullet(item)
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            bullets.append(cleaned)
+            seen.add(key)
+    return bullets
+
+
 def _summary_bullets_from_text(text: str, *, fallback_items: list[str]) -> list[str]:
     raw = str(text or '').strip()
     candidates = []
     for line in raw.splitlines():
-        cleaned = _clean_summary_bullet(line)
+        _category, body = _split_summary_category(line)
+        cleaned = _clean_summary_bullet(body)
         if cleaned:
             candidates.append(cleaned)
     if len(candidates) <= 1 and raw:
@@ -381,16 +404,20 @@ def _summary_bullets_from_text(text: str, *, fallback_items: list[str]) -> list[
         candidates = [item for item in candidates if item]
     if not candidates:
         candidates = [_clean_summary_bullet(item) for item in fallback_items]
-    seen = set()
-    bullets = []
-    for item in candidates:
-        key = item.lower()
-        if item and key not in seen:
-            bullets.append(item)
-            seen.add(key)
-        if len(bullets) >= 5:
-            break
+    bullets = _unique_summary_bullets(candidates)
     return bullets or ['Updates are available.']
+
+
+def _categorized_summary_bullets_from_text(text: str) -> tuple[list[str], list[str]]:
+    notice_items: list[str] = []
+    worth_items: list[str] = []
+    for line in str(text or '').splitlines():
+        category, body = _split_summary_category(line)
+        if category == 'notice':
+            notice_items.append(body)
+        elif category == 'worth':
+            worth_items.append(body)
+    return _unique_summary_bullets(notice_items), _unique_summary_bullets(worth_items)
 
 
 def _fallback_update_bullets(details: list[dict]) -> list[str]:
@@ -431,21 +458,15 @@ def _worth_knowing_bullets(details: list[dict]) -> list[str]:
 
 
 def _format_update_summary_sections(summary_text: str, details: list[dict]) -> tuple[list[dict], str]:
-    bullets = _summary_bullets_from_text(summary_text, fallback_items=_fallback_update_bullets(details))
-    if len(bullets) > 1:
-        notice_items = bullets[:3]
-        worth_items = bullets[3:]
-    else:
-        notice_items = bullets
-        worth_items = []
+    notice_items, worth_items = _categorized_summary_bullets_from_text(summary_text)
+    if not notice_items:
+        notice_items = _summary_bullets_from_text(summary_text, fallback_items=_fallback_update_bullets(details))
     notice_keys = {item.lower() for item in notice_items}
     worth_items = [item for item in worth_items if item.lower() not in notice_keys]
-    if not worth_items:
-        worth_items = [
-            item for item in _worth_knowing_bullets(details)
-            if item.lower() not in notice_keys
-        ]
-    worth_items = worth_items[:2]
+    worth_items.extend(
+        item for item in _worth_knowing_bullets(details)
+        if item.lower() not in notice_keys and item.lower() not in {existing.lower() for existing in worth_items}
+    )
     sections = [
         {
             'title': "What you'll notice",
@@ -480,9 +501,12 @@ def _update_summary_prompt(details: list[dict]) -> tuple[str, str]:
         "Return only bullets. Do not include headings, markdown tables, intro paragraphs, or closing notes."
     )
     user_lines = [
-        "Summarize these available updates as 3-5 concise bullets.",
+        "Summarize these available updates as concise bullets.",
+        "Prefix each bullet with `Notice:` for user-visible behavior changes or `Worth knowing:` for useful context.",
+        "Put user-visible Notice bullets first and include every meaningful user-facing change from the available commit subjects.",
+        "Use Worth knowing only for helpful context that is not a duplicate of a Notice bullet.",
         "Use everyday language and explain visible behavior changes, not code mechanics.",
-        "Return only bullets; the WebUI will add the fixed section headings separately.",
+        "Return only prefixed bullets; the WebUI will add the fixed section headings separately.",
         "",
     ]
     for item in details:

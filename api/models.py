@@ -989,19 +989,37 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
+def _sidebar_title_is_generic_webui(title: str | None) -> bool:
+    text = ' '.join(str(title or '').split())
+    if text == 'Hermes WebUI':
+        return True
+    prefix = 'Hermes WebUI #'
+    return text.startswith(prefix) and text[len(prefix):].isdigit()
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse."""
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
-            {s.get('session_id') for s in sessions},
+            {str(s.get('session_id')) for s in sessions if s.get('session_id')},
         )
     except Exception:
         return
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
-            session.update(metadata[sid])
+            entry = dict(metadata[sid])
+            state_db_title = entry.pop('_state_db_title', None)
+            session.update(entry)
+            title = session.get('title')
+            if (
+                state_db_title
+                and state_db_title != title
+                and _sidebar_title_is_generic_webui(title)
+            ):
+                session['_state_db_title'] = state_db_title
+                session['display_title'] = state_db_title
 
 
 def _diag_stage(diag, name: str) -> None:

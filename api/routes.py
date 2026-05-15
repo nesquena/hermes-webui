@@ -269,13 +269,13 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     return result
 
 
-def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
-    """Resolve a WebUI skill name inside an explicit skills directory."""
+def _find_skill_in_dirs(name: str, skills_dirs: list[Path]) -> tuple[Path | None, Path | None]:
+    """Resolve a WebUI skill name inside explicit skills directories."""
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import _EXCLUDED_SKILL_DIRS, _parse_frontmatter
 
     raw_name = str(name or "").strip().strip("/")
-    if not raw_name or not skills_dir.exists():
+    if not raw_name:
         return None, None
 
     candidate_names = [raw_name]
@@ -284,35 +284,43 @@ def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path |
         if namespace and bare:
             candidate_names.append(f"{namespace}/{bare}")
 
-    for candidate_name in candidate_names:
-        direct_path = skills_dir / candidate_name
-        if not _skill_path_within(skills_dir, direct_path):
+    for skills_dir in skills_dirs:
+        if not skills_dir.exists():
             continue
-        if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-            return direct_path, direct_path / "SKILL.md"
-        legacy_md = direct_path.with_suffix(".md")
-        if legacy_md.exists() and _skill_path_within(skills_dir, legacy_md):
-            return legacy_md.parent, legacy_md
+        for candidate_name in candidate_names:
+            direct_path = skills_dir / candidate_name
+            if not _skill_path_within(skills_dir, direct_path):
+                continue
+            if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
+                return direct_path, direct_path / "SKILL.md"
+            legacy_md = direct_path.with_suffix(".md")
+            if legacy_md.exists() and _skill_path_within(skills_dir, legacy_md):
+                return legacy_md.parent, legacy_md
 
-    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
-        if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
-            continue
-        skill_dir = skill_md.parent
-        if skill_dir.name == raw_name:
-            return skill_dir, skill_md
-        try:
-            frontmatter, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
-            if frontmatter.get("name") == raw_name:
+        for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+            if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+                continue
+            skill_dir = skill_md.parent
+            if skill_dir.name == raw_name:
                 return skill_dir, skill_md
-        except Exception:
-            continue
+            try:
+                frontmatter, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+                if frontmatter.get("name") == raw_name:
+                    return skill_dir, skill_md
+            except Exception:
+                continue
 
-    for legacy_md in skills_dir.rglob("*.md"):
-        if legacy_md.name == "SKILL.md":
-            continue
-        if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
-            return legacy_md.parent, legacy_md
+        for legacy_md in skills_dir.rglob("*.md"):
+            if legacy_md.name == "SKILL.md":
+                continue
+            if legacy_md.stem == raw_name and _skill_path_within(skills_dir, legacy_md):
+                return legacy_md.parent, legacy_md
     return None, None
+
+
+def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
+    """Resolve a WebUI skill name inside an explicit skills directory."""
+    return _find_skill_in_dirs(name, [skills_dir])
 
 
 def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
@@ -325,11 +333,80 @@ def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
     }
 
 
+def _linked_files_for_skill(skill_dir: Path | None) -> dict:
+    if not skill_dir or not (skill_dir / "SKILL.md").exists():
+        return {}
+    linked_files: dict[str, list[str]] = {}
+
+    references_dir = skill_dir / "references"
+    if references_dir.exists():
+        refs = [str(f.relative_to(skill_dir)) for f in references_dir.glob("*.md")]
+        if refs:
+            linked_files["references"] = sorted(refs)
+
+    templates_dir = skill_dir / "templates"
+    if templates_dir.exists():
+        templates = []
+        for ext in ["*.md", "*.py", "*.yaml", "*.yml", "*.json", "*.tex", "*.sh"]:
+            templates.extend(str(f.relative_to(skill_dir)) for f in templates_dir.rglob(ext))
+        if templates:
+            linked_files["templates"] = sorted(set(templates))
+
+    assets_dir = skill_dir / "assets"
+    if assets_dir.exists():
+        assets = [str(f.relative_to(skill_dir)) for f in assets_dir.rglob("*") if f.is_file()]
+        if assets:
+            linked_files["assets"] = sorted(assets)
+
+    scripts_dir = skill_dir / "scripts"
+    if scripts_dir.exists():
+        scripts = []
+        for ext in ["*.py", "*.sh", "*.bash", "*.js", "*.ts", "*.rb"]:
+            scripts.extend(str(f.relative_to(skill_dir)) for f in scripts_dir.glob(ext))
+        if scripts:
+            linked_files["scripts"] = sorted(set(scripts))
+
+    return linked_files
+
+
+def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
+    from tools.skills_tool import _parse_frontmatter, _parse_tags, skill_matches_platform
+
+    content = skill_md.read_text(encoding="utf-8")
+    frontmatter, _body = _parse_frontmatter(content)
+    if not skill_matches_platform(frontmatter):
+        return {"success": False, "error": "Skill is not available on this platform."}
+
+    metadata = frontmatter.get("metadata")
+    hermes_meta = metadata.get("hermes", {}) if isinstance(metadata, dict) else {}
+    tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
+    related_skills = _parse_tags(
+        hermes_meta.get("related_skills") or frontmatter.get("related_skills", "")
+    )
+    try:
+        path = str(skill_md.relative_to((skill_dir or skill_md.parent).parent))
+    except ValueError:
+        path = str(skill_md)
+
+    return {
+        "success": True,
+        "name": frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name),
+        "description": frontmatter.get("description", ""),
+        "tags": tags,
+        "related_skills": related_skills,
+        "content": content,
+        "path": path,
+        "skill_dir": str(skill_dir) if skill_dir else None,
+        "linked_files": _linked_files_for_skill(skill_dir),
+    }
+
+
 def _skill_view_from_active_dir(name: str) -> dict:
     from tools.skills_tool import skill_view as _skill_view
 
     skills_dir = _active_skills_dir()
-    skill_dir, skill_md = _find_skill_in_dir(name, skills_dir)
+    search_dirs = _active_skill_search_dirs(skills_dir)
+    skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
         # Preserve plugin-qualified skill viewing without falling back to the
         # startup/root profile's local skills tree for ordinary missing skills.
@@ -348,10 +425,7 @@ def _skill_view_from_active_dir(name: str) -> dict:
             except Exception:
                 pass
         return _skill_not_found_payload(name, skills_dir)
-    target_name = str(skill_dir) if skill_dir and (skill_dir / "SKILL.md") == skill_md else str(skill_md)
-    raw = _skill_view(target_name)
-    data = json.loads(raw) if isinstance(raw, str) else raw
-    return data
+    return _skill_view_from_file(skill_dir, skill_md)
 
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
@@ -958,6 +1032,27 @@ def _clear_stale_stream_state(session) -> bool:
         except Exception:
             pass
     return True
+
+
+def _ensure_full_session_before_mutation(sid: str, session):
+    """Reload cached metadata-only sessions before mutating persisted fields.
+
+    Session.save() intentionally refuses metadata-only stubs (#1558) because
+    their messages list is empty by design. Mutation routes that save session
+    metadata must upgrade the cached stub first so they do not trip that guard
+    or risk writing an incomplete object.
+    """
+    if not getattr(session, "_loaded_metadata_only", False):
+        return session
+    full_session = Session.load(sid)
+    if full_session is None:
+        raise KeyError(sid)
+    with LOCK:
+        SESSIONS[sid] = full_session
+        SESSIONS.move_to_end(sid)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)
+    return full_session
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -3000,6 +3095,28 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _serve_manifest(handler) -> bool:
+    """Serve static/manifest.json with the correct PWA Content-Type.
+
+    Shared by the root (/manifest.json, /manifest.webmanifest) and
+    session-prefixed (/session/manifest.json, /session/manifest.webmanifest)
+    routes so Firefox Android can fetch the manifest when installing from
+    a /session/<id> page.  See #2226.
+    """
+    static_root = Path(__file__).parent.parent / "static"
+    manifest_path = (static_root / "manifest.json").resolve()
+    if manifest_path.exists():
+        data = manifest_path.read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+        return True
+    return j(handler, {"error": "not found"}, status=404)
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -3009,6 +3126,15 @@ def handle_get(handler, parsed) -> bool:
         # its own path-traversal sandbox via Path.resolve()+relative_to().
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
+
+    # Firefox Android resolves <link rel="manifest"> against the page URL
+    # before the dynamic <base href> script runs when installing from
+    # /session/<id>, producing requests like /session/manifest.json.
+    # Without this guard the catch-all below returns index.html instead of
+    # the manifest, and Firefox falls back to a generated letter icon.
+    # See #2226.
+    if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
+        return _serve_manifest(handler)
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:
@@ -3064,18 +3190,7 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
-        static_root = Path(__file__).parent.parent / "static"
-        manifest_path = (static_root / "manifest.json").resolve()
-        if manifest_path.exists():
-            data = manifest_path.read_bytes()
-            handler.send_response(200)
-            handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
-            handler.send_header("Cache-Control", "no-store")
-            handler.send_header("Content-Length", str(len(data)))
-            handler.end_headers()
-            handler.wfile.write(data)
-            return True
-        return j(handler, {"error": "not found"}, status=404)
+        return _serve_manifest(handler)
 
     if parsed.path == "/sw.js":
         static_root = Path(__file__).parent.parent / "static"
@@ -3176,7 +3291,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
-        return j(handler, get_provider_quota(provider_id))
+        refresh = (query.get("refresh", [""])[0] or "").strip().lower() in {"1", "true", "yes", "on"}
+        return j(handler, get_provider_quota(provider_id, refresh=refresh))
 
     if parsed.path == "/api/settings":
         settings = load_settings()
@@ -3890,7 +4006,9 @@ def handle_get(handler, parsed) -> bool:
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
             skills_dir = _active_skills_dir()
-            skill_dir, _skill_md = _find_skill_in_dir(name, skills_dir)
+            skill_dir, _skill_md = _find_skill_in_dirs(
+                name, _active_skill_search_dirs(skills_dir)
+            )
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
             target = (skill_dir / file_path).resolve()
@@ -4286,6 +4404,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         try:
             s = get_session(body["session_id"])
+            s = _ensure_full_session_before_mutation(body["session_id"], s)
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(body["session_id"]):
@@ -4304,6 +4423,7 @@ def handle_post(handler, parsed) -> bool:
         name = body["name"].strip()
         try:
             s = get_session(sid)
+            s = _ensure_full_session_before_mutation(sid, s)
         except KeyError:
             return bad(handler, "Session not found", 404)
         # Resolve personality from config.yaml agent.personalities section
@@ -5095,6 +5215,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         try:
             s = get_session(body["session_id"])
+            s = _ensure_full_session_before_mutation(body["session_id"], s)
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(body["session_id"]):
@@ -5111,6 +5232,16 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         try:
             s = get_session(sid)
+            # #1558: save() refuses metadata-only session stubs because their
+            # messages list is intentionally empty. If a sidebar/status preload
+            # left one in the LRU cache, upgrade to a full disk load before
+            # mutating archived state so the guard stays intact.
+            if getattr(s, "_loaded_metadata_only", False):
+                s = Session.load(sid)
+                if s is None:
+                    raise KeyError(sid)
+                with LOCK:
+                    SESSIONS[sid] = s
         except KeyError:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
@@ -5312,41 +5443,75 @@ def handle_post(handler, parsed) -> bool:
         target = body.get("target") if isinstance(body, dict) else None
 
         def _llm_update_summary(system_prompt: str, user_prompt: str) -> str:
-            from run_agent import AIAgent
             from api.config import (
                 get_effective_default_model,
                 resolve_model_provider,
                 resolve_custom_provider_connection,
             )
 
-            _model, _provider, _base_url = resolve_model_provider(get_effective_default_model())
-            _api_key = None
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            _main_model, _main_provider, _main_base_url = resolve_model_provider(get_effective_default_model())
+            _main_api_key = None
             try:
                 from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
                 from hermes_cli.runtime_provider import resolve_runtime_provider
 
                 _rt = resolve_runtime_provider_with_anthropic_env_lock(
                     resolve_runtime_provider,
-                    requested=_provider,
+                    requested=_main_provider,
                 )
-                _api_key = _rt.get("api_key")
-                if not _provider:
-                    _provider = _rt.get("provider")
-                if not _base_url:
-                    _base_url = _rt.get("base_url")
+                _main_api_key = _rt.get("api_key")
+                if not _main_provider:
+                    _main_provider = _rt.get("provider")
+                if not _main_base_url:
+                    _main_base_url = _rt.get("base_url")
             except Exception as _e:
                 logger.debug("update summary runtime provider resolution failed: %s", _e)
-            if isinstance(_provider, str) and _provider.startswith("custom:"):
-                _cp_key, _cp_base = resolve_custom_provider_connection(_provider)
-                if not _api_key and _cp_key:
-                    _api_key = _cp_key
-                if not _base_url and _cp_base:
-                    _base_url = _cp_base
+            if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
+                _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
+                if not _main_api_key and _cp_key:
+                    _main_api_key = _cp_key
+                if not _main_base_url and _cp_base:
+                    _main_base_url = _cp_base
+
+            main_runtime = {
+                "provider": _main_provider,
+                "model": _main_model,
+                "base_url": _main_base_url,
+                "api_key": _main_api_key,
+            }
+
+            try:
+                from agent.auxiliary_client import get_text_auxiliary_client
+
+                # Update summaries are a short text-compression/summarization task.
+                # Reuse the documented auxiliary.compression slot instead of
+                # inventing a WebUI-only auxiliary task name that users cannot
+                # discover in the Hermes Agent setup/config UI.
+                aux_client, aux_model = get_text_auxiliary_client(
+                    "compression",
+                    main_runtime=main_runtime,
+                )
+                if aux_client is not None and aux_model:
+                    response = aux_client.chat.completions.create(
+                        model=aux_model,
+                        messages=messages,
+                    )
+                    return str(response.choices[0].message.content or "").strip()
+            except Exception as _e:
+                logger.debug("update summary auxiliary model failed; falling back to main model: %s", _e)
+
+            from run_agent import AIAgent
+
             agent = AIAgent(
-                model=_model,
-                provider=_provider,
-                base_url=_base_url,
-                api_key=_api_key,
+                model=_main_model,
+                provider=_main_provider,
+                base_url=_main_base_url,
+                api_key=_main_api_key,
                 platform="webui",
                 quiet_mode=True,
                 enabled_toolsets=[],

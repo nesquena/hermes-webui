@@ -391,12 +391,86 @@ def test_sidebar_nav_present():
         ".sidebar-nav CSS rule missing from style.css"
 
 
-def test_mobile_does_not_hide_sidebar_nav():
-    """Phone breakpoint must keep the sidebar top navigation visible."""
+def test_mobile_keeps_panel_navigation_available():
+    """Phone breakpoint must keep panel navigation available inside the drawer."""
     mobile_css = "\n".join(_max_width_media_blocks(640))
     assert mobile_css, "Missing @media(max-width:640px) block in style.css"
-    assert ".sidebar-nav{display:none" not in mobile_css.replace(" ", ""), \
-        ".sidebar-nav must stay visible on mobile"
+    assert ".sidebar-nav" in mobile_css, \
+        "Phone panel navigation must remain available in the hamburger drawer"
+
+
+def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
+    """Phone panel navigation should be vertical inside the hamburger drawer.
+
+    Phones need to preserve horizontal space for the conversation. The titlebar
+    hamburger opens the session/sidebar drawer; inside that drawer, panel icons
+    should use a vertical strip with 44px targets instead of a cramped top row.
+    """
+    mobile_css = "\n".join(_max_width_media_blocks(640))
+    assert re.search(r'\.app-titlebar-hamburger,\s*\.app-titlebar-spacer\{[^}]*display:\s*flex', mobile_css), (
+        "Phone titlebar hamburger must stay visible"
+    )
+    assert not re.search(r'\.rail\{[^}]*display:\s*flex[^}]*position:\s*fixed', mobile_css), (
+        "Phone must not use a persistent left rail that consumes chat width"
+    )
+    assert not re.search(r'\.sidebar\s*>\s*\.sidebar-nav\{[^}]*display:\s*none', mobile_css), (
+        "Phone hamburger drawer must keep the sidebar panel tabs visible"
+    )
+    assert re.search(r'\.sidebar-nav\{[^}]*position:\s*absolute', mobile_css), (
+        "Phone drawer panel tabs should be laid out as an internal side strip"
+    )
+    assert re.search(r'\.sidebar-nav\{[^}]*width:\s*52px', mobile_css), (
+        "Phone drawer panel strip should reserve stable space for 44px targets"
+    )
+    assert re.search(r'\.sidebar-nav\{[^}]*flex-direction:\s*column', mobile_css), (
+        "Phone drawer panel tabs must be vertical, not horizontal"
+    )
+    assert re.search(r'\.sidebar-nav\s+\.nav-tab\{[^}]*min-width:\s*44px', mobile_css), (
+        "Phone drawer panel tabs must be at least 44px wide"
+    )
+    assert re.search(r'\.sidebar-nav\s+\.nav-tab\{[^}]*min-height:\s*44px', mobile_css), (
+        "Phone drawer panel tabs must be at least 44px tall"
+    )
+    assert re.search(r'\.sidebar\s+\.panel-view\{[^}]*margin-left:\s*52px', mobile_css), (
+        "Phone drawer panel content should start beside the vertical icon strip"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
+        ".panel-icon-btn must min-width:44px on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*min-height:\s*44px', mobile_css), (
+        ".panel-icon-btn must min-height:44px on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*width:\s*auto', mobile_css), (
+        ".panel-icon-btn must override its base 24px width on phone"
+    )
+    assert re.search(r'\.panel-icon-btn\{[^}]*height:\s*auto', mobile_css), (
+        ".panel-icon-btn must override its base 24px height on phone"
+    )
+
+
+def test_mobile_rail_click_opens_sidebar_for_all_panels():
+    """Rail clicks on phone must reveal the selected sidebar panel."""
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "opts.fromRailClick" in panels_js, (
+        "switchPanel() should distinguish rail clicks from programmatic switches"
+    )
+    assert "!_isDesktopWidth()" in panels_js, (
+        "Rail-click sidebar opening must be limited to mobile widths"
+    )
+    mobile_click_block = re.search(
+        r'if\s*\(\s*opts\.fromRailClick[^{}]*!\s*_isDesktopWidth\(\)[\s\S]*?\n\s*\}',
+        panels_js,
+    )
+    assert mobile_click_block, "Missing mobile rail-click sidebar handler"
+    assert "sidebar.classList.add('mobile-open')" in panels_js, (
+        "Phone rail clicks should open the sidebar panel"
+    )
+    assert "overlay.classList.add('visible')" in panels_js, (
+        "Phone rail clicks should show the overlay behind the opened sidebar"
+    )
+    assert "nextPanel === 'chat'" not in mobile_click_block.group(0), (
+        "Chat rail clicks must open the session list on phone, not close the sidebar"
+    )
 
 
 def test_mobile_files_button_present():
@@ -570,13 +644,31 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
-def test_titlebar_safe_area_top_not_double_counted_in_browser_viewport():
-    """The base titlebar must not always add env(safe-area-inset-top).
+def test_pwa_viewport_fit_cover_couples_unconditional_safe_area_env_values():
+    """Safe-area env variables must stay coupled to viewport-fit=cover.
 
-    Normal mobile browsers and webview wrappers already lay out the page below
-    their own chrome/status area. Applying the top env inset unconditionally can
-    double-count that space and push the titlebar down.
+    PR #1381 scoped the top inset because normal browser/webview chrome can
+    already reserve status-bar space. This PR applies the safe-area env()
+    values through variables unconditionally, which is safe only while the
+    page opts into cover-mode viewport geometry.
     """
+    assert 'viewport-fit=cover' in HTML, (
+        "index.html viewport meta must include viewport-fit=cover so iOS PWA "
+        "safe-area-inset values are available"
+    )
+    assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
+        "CSS uses the top safe-area env() value unconditionally through "
+        "--app-titlebar-safe-top, so the viewport-fit=cover contract must "
+        "be regression-tested beside it"
+    )
+    assert "--app-safe-bottom:env(safe-area-inset-bottom" in CSS, (
+        "CSS uses the bottom safe-area env() value unconditionally through "
+        "--app-safe-bottom, so the viewport-fit=cover contract must stay coupled"
+    )
+
+
+def test_titlebar_safe_area_top_uses_scoped_variable():
+    """The titlebar must use the safe-area variable instead of direct env()."""
     m = re.search(r'\.app-titlebar\{(?P<body>[^}]*)\}', CSS)
     assert m, ".app-titlebar rule missing from style.css"
     rule = m.group("body")
@@ -589,20 +681,22 @@ def test_titlebar_safe_area_top_not_double_counted_in_browser_viewport():
     )
 
 
-def test_titlebar_safe_area_top_preserved_for_standalone_modes():
-    """Installed/fullscreen app modes should still protect notched devices."""
+def test_safe_area_variables_available_for_pwa_shell():
+    """Top and bottom safe-area variables should be available to PWA shell CSS."""
     assert "--app-titlebar-safe-top:0px" in CSS, (
-        "titlebar top safe-area variable must default to 0px for browser/webview layouts"
+        "titlebar top safe-area variable must default to 0px"
     )
-    pattern = re.compile(
-        r'@media\s*\(display-mode:\s*standalone\)\s*,\s*'
-        r'\(display-mode:\s*fullscreen\)\s*\{[^}]*'
-        r'--app-titlebar-safe-top:\s*env\(safe-area-inset-top',
-        re.DOTALL,
+    assert "--app-safe-bottom:0px" in CSS, (
+        "bottom safe-area variable must default to 0px"
     )
-    assert pattern.search(CSS), (
-        "standalone/fullscreen display modes must opt back into "
-        "env(safe-area-inset-top) for notched installed-app layouts"
+    assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
+        "CSS must expose env(safe-area-inset-top) through --app-titlebar-safe-top"
+    )
+    assert "--app-safe-bottom:env(safe-area-inset-bottom" in CSS, (
+        "CSS must expose env(safe-area-inset-bottom) through --app-safe-bottom"
+    )
+    assert "calc(28px + var(--app-safe-bottom))" in CSS, (
+        "Phone composer must reserve bottom space for home indicator / rounded corners"
     )
 
 

@@ -2348,6 +2348,15 @@ def invalidate_credential_pool_cache(provider_id: str):
     with _available_models_cache_lock:
         _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
         _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+    try:
+        # api.providers imports from api.config; keep this lazy to avoid
+        # import-cycle/module-initialization issues.
+        from api.providers import invalidate_account_usage_status_cache
+
+        invalidate_account_usage_status_cache(provider_id)
+        invalidate_account_usage_status_cache(_resolve_provider_alias(provider_id))
+    except Exception:
+        logger.debug("Failed to invalidate account usage status cache", exc_info=True)
 
 
 def invalidate_provider_models_cache(provider_id: str):
@@ -2872,11 +2881,16 @@ def get_available_models() -> dict:
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
         _cfg_providers = cfg.get("providers", {})
+        # Map canonical provider IDs back to raw config keys so the
+        # generic-provider branch can preserve mixed-case/underscore
+        # provider_cfg values (#2245).
+        _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
             for _pid_key in _cfg_providers:
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
+                _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
                 if _canonical in _PROVIDER_MODELS or _canonical in _cfg_providers or _pid_key in _cfg_providers:
                     detected_providers.add(_canonical)
 
@@ -3502,8 +3516,14 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    provider_cfg = cfg.get("providers", {}).get(pid, {})
+                elif pid in _PROVIDER_MODELS or pid in _canonical_to_raw_provider_key:
+                    # Look up provider_cfg using the original raw key from
+                    # config.yaml so that mixed-case / underscore keys like
+                    # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
+                    # (#2245).  Fall back to the canonical pid for providers
+                    # that appear in _PROVIDER_MODELS but not in cfg.
+                    _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
+                    provider_cfg = cfg.get("providers", {}).get(_raw_key, {})
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -3906,6 +3926,7 @@ _SETTINGS_DEFAULTS = {
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
+    "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -4035,6 +4056,7 @@ _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
     "show_token_usage",
     "show_tps",
+    "fade_text_effect",
     "show_cli_sessions",
     "sync_to_insights",
     "check_for_updates",
