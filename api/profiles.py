@@ -1266,6 +1266,28 @@ def create_profile_api(name: str, clone_from: str = None,
             break
 
     profile_path.mkdir(parents=True, exist_ok=True)
+
+    # Seed bundled skills for non-cloned profiles (#2305).
+    # Cloned profiles should preserve the clone-source behaviour and must not
+    # receive a second bundled-skill overlay.
+    if clone_from is None:
+        try:
+            from hermes_cli.profiles import seed_profile_skills
+            seed_profile_skills(profile_path, quiet=True)
+        except ImportError:
+            logger.debug(
+                'seed_profile_skills unavailable — bundled skills not seeded '
+                'for profile %s (hermes_cli not in path)',
+                name,
+            )
+        except Exception:
+            logger.warning(
+                'Bundled skills could not be seeded for profile %s; '
+                'profile created successfully anyway',
+                name,
+                exc_info=True,
+            )
+
     _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
     _write_model_defaults_to_config(
         profile_path,
