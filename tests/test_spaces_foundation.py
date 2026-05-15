@@ -4184,6 +4184,28 @@ def test_space_tool_adapter_ignores_blank_widget_event_name_aliases_metadata_onl
     assert "apikey" not in serialized
 
 
+@pytest.mark.parametrize("bad_payload", [[], False, 0, "", None])
+def test_space_tool_adapter_rejects_non_object_widget_event_payloads_metadata_only(monkeypatch, tmp_path, bad_payload):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-nonobject-payload-lab", "name": "Tool Nonobject Payload Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    with pytest.raises(ValueError, match="payload must be an object"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "sandbox",
+                "eventName": "agent.prompt",
+                "messageType": "capy:agent:prompt",
+                "prompt": "Queue metadata-only prompt safely.",
+                "payload": bad_payload,
+            },
+        )
+
+    assert spaces.list_widget_events(created["space_id"], "sandbox") == []
+
+
 def test_space_tool_adapter_rejects_conflicting_widget_event_name_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-event-name-conflict-lab", "name": "Tool Event Name Conflict Lab"})

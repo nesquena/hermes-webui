@@ -4261,8 +4261,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if event_name and event_name_alias and event_name != event_name_alias:
             raise ValueError("Conflicting widget event name aliases")
         event_name_value = event_name or event_name_alias or "agent.prompt"
-        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
-        payload = dict(payload)
+        raw_payload = data.get("payload") if "payload" in data else {}
+        if not isinstance(raw_payload, dict):
+            raise ValueError("payload must be an object")
+        payload = dict(raw_payload)
         runtime_alias_values: list[str] = []
         for source in (payload, data):
             for alias in ("type", "message_type", "messageType"):
