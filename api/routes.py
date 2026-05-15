@@ -4114,6 +4114,12 @@ def handle_post(handler, parsed) -> bool:
             raise ValueError("Conflicting Capy Spaces route selector aliases")
         return values[0] if values else ""
 
+    def _capy_spaces_session_receipt(session):
+        receipt = session.compact()
+        for key in ("pending_user_message", "pending_attachments", "composer_draft"):
+            receipt.pop(key, None)
+        return receipt
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
@@ -4904,10 +4910,10 @@ def handle_post(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        session_id = body.get("session_id")
-        if not session_id:
-            return bad(handler, "Missing session_id")
         try:
+            session_id = _route_alias_value("session_id", "sessionId")
+            if not session_id:
+                return bad(handler, "Missing session_id")
             s = get_session(session_id)
             created = capy_spaces.create_space_from_session_metadata(s)
             space_id = capy_spaces.validate_space_id(created["space_id"])
@@ -4919,7 +4925,7 @@ def handle_post(handler, parsed) -> bool:
                 {
                     "ok": True,
                     "space": capy_spaces.read_space_detail(space_id),
-                    "session": s.compact(),
+                    "session": _capy_spaces_session_receipt(s),
                 },
             )
         except KeyError:
@@ -5422,7 +5428,7 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(session_id):
                 s.active_space_id = capy_spaces.validate_space_id(space_id)
                 s.save()
-            return j(handler, {"ok": True, "session": s.compact()})
+            return j(handler, {"ok": True, "session": _capy_spaces_session_receipt(s)})
         except ValueError as e:
             return bad(handler, str(e))
         except (FileNotFoundError, KeyError):
@@ -5444,7 +5450,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(session_id):
             s.active_space_id = None
             s.save()
-        return j(handler, {"ok": True, "session": s.compact()})
+        return j(handler, {"ok": True, "session": _capy_spaces_session_receipt(s)})
 
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)

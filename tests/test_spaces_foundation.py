@@ -12061,6 +12061,64 @@ def test_deactivate_space_route_rejects_conflicting_session_aliases_before_mutat
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_active_space_route_receipts_omit_pending_prompt_and_draft(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "active-receipt-safe", "name": "Active Receipt Safe"})
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_active_receipt", workspace=str(tmp_path))
+    session.pending_user_message = "raw prompt renderer <script> SECRET_PENDING_DO_NOT_LEAK"
+    session.composer_draft = {
+        "text": "api_key SECRET_DRAFT_DO_NOT_LEAK",
+        "attachments": [{"name": "source.txt", "body": "generated widget body"}],
+    }
+    session.save(skip_index=True)
+
+    handled, status, activate_body = _route_post(
+        "/api/spaces/activate",
+        {"space_id": created["space_id"], "session_id": "session_active_receipt"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert activate_body["session"]["active_space_id"] == created["space_id"]
+    assert "pending_user_message" not in activate_body["session"]
+    assert "composer_draft" not in activate_body["session"]
+    activate_serialized = json.dumps(activate_body).lower()
+    assert "secret_pending_do_not_leak" not in activate_serialized
+    assert "secret_draft_do_not_leak" not in activate_serialized
+    assert "raw prompt" not in activate_serialized
+    assert "renderer" not in activate_serialized
+    assert "api_key" not in activate_serialized
+    assert "generated widget body" not in activate_serialized
+    assert "<script" not in activate_serialized
+
+    handled, status, deactivate_body = _route_post(
+        "/api/spaces/deactivate",
+        {"session_id": "session_active_receipt"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert deactivate_body["session"]["active_space_id"] is None
+    assert "pending_user_message" not in deactivate_body["session"]
+    assert "composer_draft" not in deactivate_body["session"]
+    deactivate_serialized = json.dumps(deactivate_body).lower()
+    assert "secret_pending_do_not_leak" not in deactivate_serialized
+    assert "secret_draft_do_not_leak" not in deactivate_serialized
+    assert "raw prompt" not in deactivate_serialized
+    assert "renderer" not in deactivate_serialized
+    assert "api_key" not in deactivate_serialized
+    assert "generated widget body" not in deactivate_serialized
+    assert "<script" not in deactivate_serialized
+
+
 def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "System Widget Lab"})
@@ -12286,11 +12344,16 @@ def test_create_space_from_session_route_creates_metadata_only_active_space(monk
         {"role": "user", "content": "Use API_KEY=SECRET_VALUE_DO_NOT_LEAK for the weather call"},
         {"role": "assistant", "content": "I will keep the token hidden."},
     ]
+    session.pending_user_message = "raw prompt renderer <script> SECRET_PENDING_DO_NOT_LEAK"
+    session.composer_draft = {
+        "text": "api_key SECRET_DRAFT_DO_NOT_LEAK",
+        "attachments": [{"name": "source.txt", "body": "generated widget body"}],
+    }
     session.save(skip_index=True)
 
     handled, status, body = _route_post(
         "/api/spaces/create-from-session",
-        {"session_id": "session_context"},
+        {"sessionId": "session_context"},
     )
 
     assert handled is None
@@ -12308,14 +12371,55 @@ def test_create_space_from_session_route_creates_metadata_only_active_space(monk
     ]
     assert body["session"]["active_space_id"] == body["space"]["space_id"]
     assert "messages" not in body["session"]
+    assert "pending_user_message" not in body["session"]
+    assert "composer_draft" not in body["session"]
     loaded = models.Session.load("session_context")
     assert loaded is not None
     assert loaded.active_space_id == body["space"]["space_id"]
     serialized = json.dumps(body).lower()
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+    assert "secret_pending_do_not_leak" not in serialized
+    assert "secret_draft_do_not_leak" not in serialized
     assert "token hidden" not in serialized
+    assert "raw prompt" not in serialized
+    assert "renderer" not in serialized
+    assert "generated widget body" not in serialized
     assert "<script" not in serialized
+
+
+def test_create_space_from_session_route_rejects_conflicting_session_aliases_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    first = models.Session(session_id="session_context_first", workspace=str(tmp_path / "first"))
+    first.title = "First Context"
+    first.save(skip_index=True)
+    second = models.Session(session_id="session_context_second", workspace=str(tmp_path / "second"))
+    second.title = "Second Context"
+    second.save(skip_index=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/create-from-session",
+        {"session_id": "session_context_first", "sessionId": "session_context_second"},
+    )
+
+    assert handled is None
+    assert status == 400
+    assert "Conflicting Capy Spaces route selector aliases" in body["error"]
+    first_loaded = models.Session.load("session_context_first")
+    second_loaded = models.Session.load("session_context_second")
+    assert first_loaded is not None
+    assert second_loaded is not None
+    assert first_loaded.active_space_id is None
+    assert second_loaded.active_space_id is None
+    assert spaces.list_spaces() == []
 
 
 def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path):

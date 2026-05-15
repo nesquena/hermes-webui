@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 12:05 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 18:21 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces revision-list tool adapters now accept Space-Agent-style `spaceId` selectors and reject conflicting `space_id` / `spaceId` aliases before listing rollback/time-travel metadata. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces session route receipts now stay metadata-only across create-from-session, activate, and deactivate, while create-from-session accepts Space-Agent-style `sessionId` and rejects conflicting `session_id` / `sessionId` selectors before Space creation or active-session mutation. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): sanitize session route receipts`
+  - Added RED/GREEN backend route coverage proving `/api/spaces/activate` and `/api/spaces/deactivate` omit pending prompt/draft metadata from session receipts, and `/api/spaces/create-from-session` accepts camelCase `sessionId` while rejecting conflicting `session_id` / `sessionId` aliases before creating or activating a Space.
+  - Hardened Capy Spaces session receipts to strip `pending_user_message`, `pending_attachments`, and `composer_draft`, preserving only compact safe session metadata such as `session_id`, `active_space_id`, counters, and timestamps.
+  - Validation at completion: focused RED failed in a clean worktree with three expected failures; focused GREEN passed (`3 passed`); full Spaces foundation suite passed (`325 passed`); Spaces UI behavior + demo parity suites passed (`185 passed`); `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/session-receipt-route-qa.png`.
 
 - `fix(spaces): harden revision list tool aliases`
   - Added RED/GREEN backend Space-tool coverage proving `space.revisions` accepts camelCase `spaceId`, returns bounded metadata-only revision history, and rejects conflicting `space_id` / `spaceId` plus explicit-vs-positional `args[0]` aliases before selecting a Space. Current-space revision-list aliases now also reject conflicting active/current selectors vs `args[0]`.
