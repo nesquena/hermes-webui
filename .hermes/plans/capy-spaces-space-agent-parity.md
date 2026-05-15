@@ -9,11 +9,19 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 20:33 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 00:27 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces update HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before metadata-only Space update side effects. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces creator-preview tool path rejects conflicting existing-Space target aliases (`target_space_id` / `targetSpaceId` / `space_id` / `spaceId`) before creating a sandbox preview receipt. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting creator preview target aliases`
+  - Added RED/GREEN backend coverage proving `space.creator.preview` rejects conflicting target Space selector aliases before creating a preview receipt, ignores blank higher-priority aliases while resolving a valid explicit target, leaves both candidate Spaces unchanged, and keeps generated renderer/API-auth/secret-looking fixture markers out of visible creator/recovery QA surfaces.
+  - Hardened the creator-loop target selector helper to treat `target_space_id`, `targetSpaceId`, `space_id`, and `spaceId` as one consistency set before preview draft sanitization and receipt storage, while stripping blanks so empty aliases do not displace valid Space-Agent-style camelCase targets.
+  - Validation at completion: focused RED failed before implementation (`1 failed` for conflicts; `1 failed` for blank-alias resolution); focused GREEN passed (`2 passed`); creator preview/commit regressions passed (`24 passed, 273 deselected`); full Spaces foundation suite passed (`297 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, and `/tmp` real-static creator target alias browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/creator-target-alias-qa.png`.
+
+- `fix(spaces): harden package route aliases` *(latest committed before this slice)*
+  - Hardened direct Space Agent package import/export route selector aliases so camelCase `spaceId` is accepted and conflicts are rejected before package side effects.
 
 - `fix(spaces): harden update route aliases`
   - Added RED/GREEN route coverage proving `POST /api/spaces/update` accepts camelCase `spaceId`, updates only the selected Space, and rejects conflicting `space_id` / `spaceId` selectors before mutating either candidate Space.

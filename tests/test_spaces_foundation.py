@@ -2040,6 +2040,58 @@ def test_creator_preview_targets_existing_space_with_revision_diff_without_persi
     assert "secret_source" not in serialized
 
 
+def test_creator_preview_rejects_conflicting_target_space_aliases_before_receipt(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "creator-target-one", "name": "Creator Target One"})
+    spaces.create_space({"space_id": "creator-target-two", "name": "Creator Target Two"})
+    before_one = spaces.read_space("creator-target-one")
+    before_two = spaces.read_space("creator-target-two")
+
+    with pytest.raises(ValueError, match="creator target Space selector aliases"):
+        spaces.run_space_tool(
+            "space.creator.preview",
+            {
+                "space_id": "creator-target-one",
+                "targetSpaceId": "creator-target-two",
+                "spaceName": "Conflicting Creator Target",
+                "widgets": [
+                    {
+                        "widgetId": "safe-panel",
+                        "title": "Safe Panel",
+                        "kind": "markdown",
+                        "renderer": "<script>bad()</script>",
+                        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                    }
+                ],
+            },
+        )
+
+    assert spaces.read_space("creator-target-one") == before_one
+    assert spaces.read_space("creator-target-two") == before_two
+    assert spaces._CREATOR_PREVIEW_RECEIPTS == {}
+
+
+def test_creator_preview_ignores_blank_target_aliases_when_resolving_explicit_target(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "creator-blank-target", "name": "Creator Blank Target"})
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "target_space_id": "   ",
+            "targetSpaceId": "creator-blank-target",
+            "spaceName": "Creator Blank Target Revised",
+            "widgets": [{"widgetId": "safe-panel", "title": "Safe Panel", "kind": "markdown"}],
+        },
+    )
+
+    assert preview["ok"] is True
+    assert preview["space"]["space_id"] == "creator-blank-target"
+    assert preview["revision_preview"]["space_id"] == "creator-blank-target"
+    assert preview["stored"] is False
+    assert spaces.read_space("creator-blank-target")["name"] == "Creator Blank Target"
+
+
 def test_creator_commit_existing_preview_returns_revision_receipt_diff(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

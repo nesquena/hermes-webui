@@ -2538,10 +2538,15 @@ def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
 
 def _space_creator_target_space_id(payload: dict[str, Any]) -> str | None:
     """Return an explicit existing-space target id for creator previews/commits."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("target_space_id", "targetSpaceId", "space_id", "spaceId"),
+        "Conflicting creator target Space selector aliases",
+    )
     for key in ("target_space_id", "targetSpaceId", "space_id", "spaceId"):
-        raw = payload.get(key)
+        raw = str(payload.get(key) or "").strip()
         if raw:
-            return validate_space_id(str(raw))
+            return validate_space_id(raw)
     return None
 
 
