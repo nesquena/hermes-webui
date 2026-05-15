@@ -36,6 +36,7 @@ from api.config import (
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
+from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
@@ -2460,6 +2461,11 @@ def _run_agent_streaming(
         provider=model_provider,
         ephemeral=bool(ephemeral),
     )
+    try:
+        run_journal = RunJournalWriter(session_id, stream_id)
+    except Exception:
+        run_journal = None
+        logger.debug("Failed to initialize run journal for stream %s", stream_id, exc_info=True)
     if not ephemeral:
         try:
             append_turn_journal_event_for_stream(
@@ -2616,6 +2622,11 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        if run_journal is not None:
+            try:
+                run_journal.append_sse_event(event, data)
+            except Exception:
+                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
             q.put_nowait((event, data))
         except Exception:

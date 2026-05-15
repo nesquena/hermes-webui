@@ -1699,6 +1699,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
+            if(st.replay_available){
+              setComposerStatus('Restoring stream…');
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}&replay=1&after_seq=0`,document.baseURI||location.href).href,{withCredentials:true}));
+              return;
+            }
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
@@ -1841,10 +1846,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   (async()=>{
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
+    let replayOnly=false;
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active){
+        if(!st.active&&st.replay_available){
+          replayOnly=true;
+        }else if(!st.active){
           _clearOwnerInflightState();
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
@@ -1861,7 +1869,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+    const replayParams=replayOnly?'&replay=1&after_seq=0':'';
+    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
 }
