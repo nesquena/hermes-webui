@@ -11736,6 +11736,158 @@ def test_current_space_route_handles_no_active_space_without_manifest_lookup(mon
     assert body == {"enabled": True, "active_space_id": None, "space": None}
 
 
+def test_current_space_route_accepts_camelcase_session_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-camel", "name": "Current Camel"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "safe-card",
+            "kind": "markdown",
+            "title": "Safe Card",
+            "renderer": "<script>currentLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_current_camel", workspace=str(tmp_path))
+    session.active_space_id = created["space_id"]
+    session.save(skip_index=True)
+
+    handled, status, body = _route_get("/api/spaces/current?sessionId=session_current_camel")
+
+    assert handled is None
+    assert status == 200
+    assert body["enabled"] is True
+    assert body["active_space_id"] == created["space_id"]
+    assert body["space"]["space_id"] == created["space_id"]
+    serialized = json.dumps(body).lower()
+    assert "currentleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_current_space_route_rejects_conflicting_session_aliases_before_lookup(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_current_safe", workspace=str(tmp_path))
+    session.save(skip_index=True)
+
+    handled, status, body = _route_get(
+        "/api/spaces/current?session_id=session_current_safe&sessionId=session_missing&renderer=%3Cscript%3Eleak()%3C/script%3E&api_key=SECRET_VALUE_DO_NOT_LEAK"
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+    serialized = json.dumps(body).lower()
+    assert "leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_activate_space_route_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "activate-camel", "name": "Activate Camel"})
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_activate_camel", workspace=str(tmp_path))
+    session.save(skip_index=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/activate",
+        {
+            "spaceId": created["space_id"],
+            "session_id": "session_activate_camel",
+            "renderer": "<script>activateLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["session"]["active_space_id"] == created["space_id"]
+    activated_session = models.get_session("session_activate_camel")
+    assert activated_session is not None
+    assert activated_session.active_space_id == created["space_id"]
+    serialized = json.dumps(body).lower()
+    assert "activateleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_activate_space_route_rejects_conflicting_space_aliases_before_session_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    first = spaces.create_space({"space_id": "activate-first", "name": "Activate First"})
+    second = spaces.create_space({"space_id": "activate-second", "name": "Activate Second"})
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_activate_conflict", workspace=str(tmp_path))
+    session.save(skip_index=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/activate",
+        {
+            "space_id": first["space_id"],
+            "spaceId": second["space_id"],
+            "session_id": "session_activate_conflict",
+            "renderer": "<script>conflictLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting Capy Spaces route selector aliases"
+    conflict_session = models.get_session("session_activate_conflict")
+    assert conflict_session is not None
+    assert conflict_session.active_space_id is None
+    assert spaces.read_space(first["space_id"])["space_id"] == first["space_id"]
+    assert spaces.read_space(second["space_id"])["space_id"] == second["space_id"]
+    serialized = json.dumps(body).lower()
+    assert "conflic leak" not in serialized
+    assert "conflictl eak" not in serialized
+    assert "conflic tleak" not in serialized
+    assert "conflictleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "System Widget Lab"})
@@ -11941,6 +12093,7 @@ def test_spaces_deactivate_route_clears_active_space_from_session(monkeypatch, t
     assert body["session"]["active_space_id"] is None
     assert body["session"]["messages"] == []
     loaded = models.Session.load("session_deactivate")
+    assert loaded is not None
     assert loaded.active_space_id is None
 
 
@@ -11983,6 +12136,7 @@ def test_create_space_from_session_route_creates_metadata_only_active_space(monk
     assert body["session"]["active_space_id"] == body["space"]["space_id"]
     assert "messages" not in body["session"]
     loaded = models.Session.load("session_context")
+    assert loaded is not None
     assert loaded.active_space_id == body["space"]["space_id"]
     serialized = json.dumps(body).lower()
     assert "api_key" not in serialized

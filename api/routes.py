@@ -3585,7 +3585,11 @@ def handle_get(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+        qs = parse_qs(parsed.query)
+        try:
+            session_id = _query_alias_value(qs, "session_id", "sessionId")
+        except ValueError as e:
+            return bad(handler, str(e))
         if not session_id:
             return bad(handler, "Missing session_id")
         try:
@@ -5408,11 +5412,11 @@ def handle_post(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        space_id = body.get("space_id")
-        session_id = body.get("session_id")
-        if not space_id or not session_id:
-            return bad(handler, "Missing space_id or session_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            session_id = body.get("session_id")
+            if not space_id or not session_id:
+                return bad(handler, "Missing space_id or session_id")
             capy_spaces.read_space(space_id)
             s = get_session(session_id)
             s.active_space_id = capy_spaces.validate_space_id(space_id)
