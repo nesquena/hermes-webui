@@ -10006,6 +10006,56 @@ def test_spaces_safe_get_routes_accept_camelcase_query_aliases_and_reject_confli
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_update_route_accepts_camelcase_id_and_rejects_conflicts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    camel = spaces.create_space({"space_id": "update-camel-route", "name": "Update Camel Route"})
+    conflict = spaces.create_space({"space_id": "update-conflict-route", "name": "Update Conflict Route"})
+    other = spaces.create_space({"space_id": "update-other-route", "name": "Update Other Route"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/update",
+        {
+            "spaceId": camel["space_id"],
+            "updates": {"name": "Updated Camel Route", "description": "Safe updated description"},
+            "renderer": "<script>updateLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["space"]["space_id"] == camel["space_id"]
+    assert body["space"]["name"] == "Updated Camel Route"
+    assert body["space"]["description"] == "Safe updated description"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+    handled, status, body = _route_post(
+        "/api/spaces/update",
+        {
+            "space_id": conflict["space_id"],
+            "spaceId": other["space_id"],
+            "updates": {"name": "Conflicting Update"},
+            "renderer": "<script>conflictUpdateLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert spaces.read_space_detail(conflict["space_id"])["name"] == "Update Conflict Route"
+    assert spaces.read_space_detail(other["space_id"])["name"] == "Update Other Route"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_space_delete_route_accepts_camelcase_id_and_rejects_conflicts_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     camel = spaces.create_space({"space_id": "delete-camel-route", "name": "Delete Camel Route"})

@@ -4927,10 +4927,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/update":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(handler, {"space": capy_spaces.update_space(space_id, body.get("updates") or body)})
         except RuntimeError as e:
             return bad(handler, str(e), 403)

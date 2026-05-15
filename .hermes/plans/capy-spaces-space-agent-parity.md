@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-14 15:23 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-14 20:33 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces Research Harness HTTP routes now accept Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before metadata-only progress/artifact side effects. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces update HTTP route now accepts Space-Agent-style camelCase `spaceId` while rejecting conflicting `space_id` / `spaceId` aliases before metadata-only Space update side effects. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): harden update route aliases`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/update` accepts camelCase `spaceId`, updates only the selected Space, and rejects conflicting `space_id` / `spaceId` selectors before mutating either candidate Space.
+  - Hardened the direct HTTP Space update route to use the shared Capy route selector alias resolver, aligning this revision-producing metadata mutation route with recently hardened delete/research/shared-data/system-widget/safe-GET route boundaries.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); full Spaces foundation suite passed (`286 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality review, and `/tmp` real-static update-route browser harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/update-route-alias-qa.png`.
 
 - `fix(spaces): harden research route aliases`
   - Added RED/GREEN route coverage proving `POST /api/spaces/research/progress` and `POST /api/spaces/research/artifact` accept camelCase `spaceId`, preserve metadata-only sanitized progress/export receipts, and reject conflicting `space_id` / `spaceId` selectors before mutating either candidate Research Space.
