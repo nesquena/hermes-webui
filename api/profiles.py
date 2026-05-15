@@ -986,6 +986,85 @@ def _split_webui_provider_model_value(default_model: Optional[str], model_provid
     return model, provider
 
 
+def _strip_webui_provider_prefix(model_id: object) -> str:
+    value = str(model_id or "").strip()
+    if value.startswith("@") and ":" in value:
+        return value.rsplit(":", 1)[1]
+    return value
+
+
+def _profile_model_selection_exists(
+    available_models: object,
+    default_model: Optional[str],
+    model_provider: Optional[str],
+) -> bool:
+    """Return True when a profile default model/provider exists in /api/models."""
+    if not default_model and not model_provider:
+        return True
+    if not isinstance(available_models, dict):
+        return False
+
+    provider_seen = False
+    model_seen = False
+    for group in available_models.get("groups", []) or []:
+        if not isinstance(group, dict):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip()
+        if model_provider and provider_id != model_provider:
+            continue
+        if model_provider and provider_id == model_provider:
+            provider_seen = True
+        for model in group.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            if default_model and (
+                model_id == default_model
+                or _strip_webui_provider_prefix(model_id) == default_model
+            ):
+                model_seen = True
+                if model_provider:
+                    return True
+        if not default_model and provider_seen:
+            return True
+
+    if model_provider and not provider_seen:
+        return False
+    return bool(model_seen)
+
+
+def _get_available_models_for_profile_validation() -> dict:
+    from api.config import get_available_models
+
+    return get_available_models()
+
+
+def _validate_profile_model_selection(
+    default_model: Optional[str],
+    model_provider: Optional[str],
+    available_models: Optional[dict] = None,
+) -> None:
+    """Reject profile model defaults that do not exist in the server catalog."""
+    if not default_model and not model_provider:
+        return
+    catalog = (
+        available_models
+        if available_models is not None
+        else _get_available_models_for_profile_validation()
+    )
+    if _profile_model_selection_exists(catalog, default_model, model_provider):
+        return
+    if default_model and model_provider:
+        raise ValueError(
+            f"Selected model '{default_model}' is not available for provider '{model_provider}'"
+        )
+    if default_model:
+        raise ValueError(f"Selected model '{default_model}' is not available")
+    raise ValueError(f"Selected model provider '{model_provider}' is not available")
+
+
 def _write_model_defaults_to_config(
     profile_dir: Path,
     *,
@@ -1033,6 +1112,7 @@ def create_profile_api(name: str, clone_from: str = None,
     if clone_from is not None and not _is_root_profile(clone_from):
         _validate_profile_name(clone_from)
     default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
+    _validate_profile_model_selection(default_model, model_provider)
 
     try:
         from hermes_cli.profiles import create_profile
