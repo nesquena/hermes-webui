@@ -5414,14 +5414,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Capy Spaces is disabled", 403)
         try:
             space_id = _route_alias_value("space_id", "spaceId")
-            session_id = body.get("session_id")
+            session_id = _route_alias_value("session_id", "sessionId")
             if not space_id or not session_id:
                 return bad(handler, "Missing space_id or session_id")
             capy_spaces.read_space(space_id)
             s = get_session(session_id)
-            s.active_space_id = capy_spaces.validate_space_id(space_id)
-            s.save()
-            return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+            with _get_session_agent_lock(session_id):
+                s.active_space_id = capy_spaces.validate_space_id(space_id)
+                s.save()
+            return j(handler, {"ok": True, "session": s.compact()})
         except ValueError as e:
             return bad(handler, str(e))
         except (FileNotFoundError, KeyError):
@@ -5431,17 +5432,19 @@ def handle_post(handler, parsed) -> bool:
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
             return bad(handler, "Capy Spaces is disabled", 403)
-        session_id = body.get("session_id")
-        if not session_id:
-            return bad(handler, "Missing session_id")
         try:
+            session_id = _route_alias_value("session_id", "sessionId")
+            if not session_id:
+                return bad(handler, "Missing session_id")
             s = get_session(session_id)
+        except ValueError as e:
+            return bad(handler, str(e))
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(session_id):
             s.active_space_id = None
             s.save()
-        return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+        return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)
