@@ -664,6 +664,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
+  let _lastRunJournalSeq=0;
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
@@ -1084,6 +1085,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     _resetStreamFadeState();
   }
+  function _rememberRunJournalCursor(e){
+    const raw=String(e&&e.lastEventId||'').trim();
+    if(!raw) return;
+    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
+    const seq=Number.parseInt(tail,10);
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+  }
+  function _runJournalReplayAfterSeq(){
+    return Math.max(0,_lastRunJournalSeq||0);
+  }
+  function _runJournalReplayParams(){
+    // `replay=1` documents frontend intent. The server selects replay when the
+    // stream id no longer has a live worker; `after_seq` prevents duplicated
+    // journal events after this EventSource has already rendered part of a run.
+    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
+  }
 
   let _lastRenderMs=0;
   function _scheduleRender(){
@@ -1149,6 +1166,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    const _on=(event,handler)=>{
+      source.addEventListener(event,e=>{
+        const result=handler(e);
+        _rememberRunJournalCursor(e);
+        return result;
+      });
+    };
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -1164,7 +1189,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // the fixes below (_streamFinalized guard + cancelAnimationFrame in the
     // terminal handlers) address it without needing a reset here.
 
-    source.addEventListener('token',e=>{
+    _on('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -1176,7 +1201,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    source.addEventListener('interim_assistant',e=>{
+    _on('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -1197,7 +1222,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    source.addEventListener('reasoning',e=>{
+    _on('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
@@ -1215,7 +1240,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    source.addEventListener('tool',e=>{
+    _on('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
@@ -1247,7 +1272,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
-    source.addEventListener('tool_complete',e=>{
+    _on('tool_complete',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       const inflight=INFLIGHT[activeSid];
@@ -1277,28 +1302,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
-    source.addEventListener('approval',e=>{
+    _on('approval',e=>{
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playNotificationSound();
       sendBrowserNotification('Approval required',d.description||'Tool approval needed');
     });
 
-    source.addEventListener('clarify',e=>{
+    _on('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playNotificationSound();
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
     });
 
-    source.addEventListener('title',e=>{
+    _on('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       applySessionTitleUpdate(activeSid, d.title);
     });
 
-    source.addEventListener('title_status',e=>{
+    _on('title_status',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -1326,7 +1351,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return raw;
     }
 
-    source.addEventListener('goal',e=>{
+    _on('goal',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -1344,7 +1369,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('goal_continue',e=>{
+    _on('goal_continue',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -1363,7 +1388,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('done',e=>{
+    _on('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
@@ -1527,7 +1552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finishDone();
     });
 
-    source.addEventListener('stream_end',e=>{
+    _on('stream_end',e=>{
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
@@ -1536,7 +1561,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       source.close();
     });
 
-    source.addEventListener('pending_steer_leftover',e=>{
+    _on('pending_steer_leftover',e=>{
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -1559,7 +1584,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('compressing',e=>{
+    _on('compressing',e=>{
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -1577,7 +1602,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
     });
 
-    source.addEventListener('compressed',e=>{
+    _on('compressed',e=>{
       // Context was auto-compressed during this turn. Render it through the
       // same transient compression-card path as manual /compress, without
       // inserting a fake assistant message into history or model context.
@@ -1604,7 +1629,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showToast(message||'Context compressed', 8000);
     });
 
-    source.addEventListener('metering',e=>{
+    _on('metering',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -1622,7 +1647,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('apperror',e=>{
+    _on('apperror',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -1667,7 +1692,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
-    source.addEventListener('warning',e=>{
+    _on('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -1679,7 +1704,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('error',async e=>{
+    _on('error',async e=>{
       source.close();
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
@@ -1701,7 +1726,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
             if(st.replay_available){
               setComposerStatus('Restoring stream…');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}&replay=1&after_seq=0`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
           }catch(_){
@@ -1720,7 +1745,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _handleStreamError();
     });
 
-    source.addEventListener('cancel',e=>{
+    _on('cancel',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -1869,7 +1894,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=replayOnly?'&replay=1&after_seq=0':'';
+    const replayParams=replayOnly?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 

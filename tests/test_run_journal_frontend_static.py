@@ -11,7 +11,7 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replay=1&after_seq=0" in block
+    assert "replayOnly?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
@@ -22,4 +22,15 @@ def test_error_reconnect_path_can_restore_from_journal():
     assert "st.active" in block
     assert "st.replay_available" in block
     assert "Restoring stream" in block
-    assert "replay=1&after_seq=0" in block
+    assert "_runJournalReplayParams()" in block
+
+
+def test_frontend_replay_cursor_uses_eventsource_last_event_id():
+    cursor_pos = MESSAGES_SRC.index("function _rememberRunJournalCursor")
+    block = MESSAGES_SRC[cursor_pos : cursor_pos + 1000]
+
+    assert "e.lastEventId" in block
+    assert "lastIndexOf(':')" in block
+    assert "_lastRunJournalSeq=seq" in block
+    assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
+    assert "after_seq=0" not in MESSAGES_SRC

@@ -27,6 +27,36 @@ def test_run_journal_appends_monotonic_seq_and_reads_after_cursor(tmp_path):
     assert [event["event"] for event in journal["events"]] == ["done"]
 
 
+def test_run_journal_default_fsyncs_terminal_events_only(tmp_path, monkeypatch):
+    path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    fsync_calls = []
+    monkeypatch.delenv("HERMES_WEBUI_RUN_JOURNAL_FSYNC", raising=False)
+    monkeypatch.setattr("api.run_journal.os.fsync", lambda fd: fsync_calls.append(fd))
+
+    append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
+
+    assert fsync_calls == []
+
+    append_run_event("session_1", "run_1", "done", {"session": {}}, session_dir=tmp_path)
+
+    assert len(fsync_calls) == 1
+
+
+def test_run_journal_eager_fsync_mode_fsyncs_non_terminal_events(tmp_path, monkeypatch):
+    path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    fsync_calls = []
+    monkeypatch.setenv("HERMES_WEBUI_RUN_JOURNAL_FSYNC", "eager")
+    monkeypatch.setattr("api.run_journal.os.fsync", lambda fd: fsync_calls.append(fd))
+
+    append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
+
+    assert len(fsync_calls) == 1
+
+
 def test_run_journal_tolerates_malformed_lines(tmp_path):
     append_run_event("session_1", "run_1", "token", {"text": "ok"}, session_dir=tmp_path)
     path = tmp_path / "_run_journal" / "session_1" / "run_1.jsonl"

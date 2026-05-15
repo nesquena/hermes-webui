@@ -18,6 +18,9 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
 _TERMINAL_SSE_EVENTS = {"done", "cancel", "apperror", "error", "stream_end"}
+_FSYNC_MODE_ENV = "HERMES_WEBUI_RUN_JOURNAL_FSYNC"
+_FSYNC_MODE_EAGER = "eager"
+_FSYNC_MODE_TERMINAL_ONLY = "terminal-only"
 
 
 def _default_session_dir() -> Path:
@@ -94,6 +97,31 @@ def _terminal_state_for_event(event_name: str, payload) -> str | None:
     return None
 
 
+def _run_journal_fsync_mode() -> str:
+    raw = os.environ.get(_FSYNC_MODE_ENV, _FSYNC_MODE_TERMINAL_ONLY)
+    mode = str(raw or "").strip().lower()
+    if mode in {_FSYNC_MODE_EAGER, _FSYNC_MODE_TERMINAL_ONLY}:
+        return mode
+    return _FSYNC_MODE_TERMINAL_ONLY
+
+
+def _should_fsync_event(terminal_state: str | None) -> bool:
+    if _run_journal_fsync_mode() == _FSYNC_MODE_EAGER:
+        return True
+    return bool(terminal_state)
+
+
+def _fsync_parent_dir(path: Path) -> None:
+    try:
+        dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:
+        pass
+
+
 def append_run_event(
     session_id: str,
     run_id: str,
@@ -104,7 +132,7 @@ def append_run_event(
     seq: int | None = None,
     created_at: float | None = None,
 ) -> dict:
-    """Append one durable run event and fsync it before returning."""
+    """Append one durable run event and fsync it according to the journal policy."""
     path = _run_path(session_id, run_id, session_dir=session_dir)
     payload = payload if payload is not None else {}
     event_name = str(event_name or "").strip()
@@ -127,20 +155,16 @@ def append_run_event(
             "payload": payload,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
+        created_file = not path.exists()
         line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
         fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
-            os.fsync(fh.fileno())
-        try:
-            dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+            if _should_fsync_event(terminal_state):
+                os.fsync(fh.fileno())
+        if created_file:
+            _fsync_parent_dir(path)
         return event
 
 
