@@ -1101,6 +1101,19 @@
             <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
             </div>
+            <div class="settings-section-head" style="margin-top:28px">
+              <div>
+                <div class="settings-section-title" data-i18n="custom_relays_title">Custom Relays</div>
+                <div class="settings-section-meta" data-i18n="custom_relays_meta">OpenAI-compatible 中转 endpoints (CLI Proxy API, LiteLLM, OneAPI, …). Keys stored in ~/.hermes/.env, endpoints written to ~/.hermes/config.yaml custom_providers.</div>
+              </div>
+              <button type="button" id="customRelayAddBtn" class="provider-card-btn provider-card-btn-primary" data-i18n="custom_relays_add">+ Add Relay</button>
+            </div>
+            <div id="customRelaysList" style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+              <!-- Populated dynamically by loadCustomRelaysPanel() -->
+            </div>
+            <div id="customRelaysEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px" data-i18n="custom_relays_empty">
+              No custom relays configured.
+            </div>
           </div>
           <div class="settings-pane" id="settingsPanePlugins">
             <div class="settings-section-head">

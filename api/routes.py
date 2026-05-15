@@ -2015,6 +2015,12 @@ from api.onboarding import (
     complete_onboarding,
     probe_provider_endpoint,
 )
+from api.custom_relays import (
+    list_relays as list_custom_relays,
+    upsert_relay as upsert_custom_relay,
+    delete_relay as delete_custom_relay,
+    probe_relay as probe_custom_relay,
+)
 from api.oauth import (
     cancel_onboarding_oauth_flow,
     poll_onboarding_oauth_flow,
@@ -3285,6 +3291,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
 
+    # ── Custom relays / OpenAI-compatible 中转端点 (GET) ──
+    if parsed.path == "/api/custom-relays":
+        return j(handler, list_custom_relays())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -4350,6 +4360,29 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    # ── Custom relays / 中转端点 (POST) ──
+    if parsed.path == "/api/custom-relays":
+        result = upsert_custom_relay(
+            body.get("name"),
+            body.get("base_url"),
+            body.get("api_key"),
+            body.get("models") or [],
+            original_name=body.get("original_name"),
+        )
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/custom-relays/delete":
+        result = delete_custom_relay(body.get("name"))
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/custom-relays/probe":
+        result = probe_custom_relay(body.get("base_url"), body.get("api_key"))
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":

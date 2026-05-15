@@ -5511,6 +5511,7 @@ async function loadSettingsPanel(){
     _syncHermesPanelSessionActions();
     if(typeof loadDashboardSettings==='function') loadDashboardSettings();
     loadProvidersPanel(); // load provider cards in background
+    loadCustomRelaysPanel(); // load custom OpenAI-compatible relay endpoints
     loadPluginsPanel(); // load plugin/hook visibility in background
     switchSettingsSection(_settingsSection);
   }catch(e){
@@ -6119,6 +6120,319 @@ async function _refreshProviderModels(providerId, btn){
   }finally{
     btn.disabled=false;
     btn.innerHTML=orig;
+  }
+}
+
+// ── Custom Relays / OpenAI-compatible 中转端点 ──────────────────────────────
+// CRUD UI for ~/.hermes/config.yaml custom_providers, mirroring the
+// _buildProviderCard pattern but with editable name/base_url/models fields.
+async function loadCustomRelaysPanel(){
+  const list=$('customRelaysList');
+  const empty=$('customRelaysEmpty');
+  if(!list) return;
+  const addBtn=$('customRelayAddBtn');
+  if(addBtn && !addBtn._wired){
+    addBtn._wired=true;
+    addBtn.addEventListener('click',()=>{
+      // Don't stack draft cards — focus an existing one if open.
+      const existing=list.querySelector('.provider-card[data-relay-draft="1"]');
+      if(existing){
+        existing.classList.add('open');
+        const input=existing.querySelector('.relay-name-input');
+        if(input) input.focus();
+        return;
+      }
+      const draft=_buildCustomRelayCard({name:'',base_url:'',models:[],has_key:false,key_env:''}, true);
+      draft.dataset.relayDraft='1';
+      draft.classList.add('open');
+      list.insertBefore(draft, list.firstChild);
+      const nameInput=draft.querySelector('.relay-name-input');
+      if(nameInput) nameInput.focus();
+      if(empty) empty.style.display='none';
+    });
+  }
+  try{
+    const data=await api('/api/custom-relays');
+    const relays=(data && data.relays)||[];
+    list.innerHTML='';
+    if(relays.length===0){
+      if(empty) empty.style.display='';
+    }else{
+      if(empty) empty.style.display='none';
+      for(const r of relays){
+        list.appendChild(_buildCustomRelayCard(r, false));
+      }
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load custom relays: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+function _buildCustomRelayCard(r, isDraft){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  if(!isDraft) card.classList.add('open');
+  if(r && r.id) card.dataset.provider=r.id;
+
+  const modelCount=Array.isArray(r.models)?r.models.length:0;
+  const sourceLabel=r.has_key
+    ?(t('providers_status_configured')||'Configured')
+    :(t('providers_status_not_configured_label')||'Not configured');
+  const metaParts=[];
+  if(r.base_url) metaParts.push(r.base_url);
+  if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
+  metaParts.push(sourceLabel);
+  const titleText=r.name||t('custom_relays_new_title')||'New relay';
+  const metaText=metaParts.join(' · ');
+
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(titleText)}</div>
+      <div class="provider-card-meta">${esc(metaText)}</div>
+    </div>
+    ${r.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured')||'Configured')}</span>`:''}
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // Name field
+  const nameField=document.createElement('div');
+  nameField.className='provider-card-field';
+  const nameLabel=document.createElement('label');
+  nameLabel.className='provider-card-label';
+  nameLabel.textContent=t('custom_relays_name')||'Display name';
+  nameField.appendChild(nameLabel);
+  const nameInput=document.createElement('input');
+  nameInput.type='text';
+  nameInput.className='provider-card-input relay-name-input';
+  nameInput.placeholder=t('custom_relays_name_placeholder')||'e.g. CLI Proxy (local)';
+  nameInput.value=r.name||'';
+  nameInput.maxLength=64;
+  nameField.appendChild(nameInput);
+  body.appendChild(nameField);
+
+  // Base URL field
+  const urlField=document.createElement('div');
+  urlField.className='provider-card-field';
+  const urlLabel=document.createElement('label');
+  urlLabel.className='provider-card-label';
+  urlLabel.textContent=t('custom_relays_base_url')||'Base URL';
+  urlField.appendChild(urlLabel);
+  const urlInput=document.createElement('input');
+  urlInput.type='url';
+  urlInput.className='provider-card-input relay-url-input';
+  urlInput.placeholder=t('custom_relays_base_url_placeholder')||'http://127.0.0.1:8317/v1';
+  urlInput.value=r.base_url||'';
+  urlInput.maxLength=512;
+  urlField.appendChild(urlInput);
+  body.appendChild(urlField);
+
+  // API key field
+  const keyField=document.createElement('div');
+  keyField.className='provider-card-field';
+  const keyLabel=document.createElement('label');
+  keyLabel.className='provider-card-label';
+  keyLabel.textContent=t('custom_relays_api_key')||'API Key';
+  keyField.appendChild(keyLabel);
+  const keyRow=document.createElement('div');
+  keyRow.className='provider-card-row';
+  const keyInput=document.createElement('input');
+  keyInput.type='password';
+  keyInput.className='provider-card-input relay-key-input';
+  keyInput.autocomplete='off';
+  keyInput.placeholder=r.has_key
+    ?(t('providers_key_placeholder_replace')||'Enter new key to replace…')
+    :(t('providers_key_placeholder_new')||'sk-...');
+  const keyToggle=document.createElement('button');
+  keyToggle.type='button';
+  keyToggle.className='provider-card-btn provider-card-btn-ghost';
+  keyToggle.textContent='Show';
+  keyToggle.onclick=()=>{
+    const revealed=keyInput.type==='text';
+    keyInput.type=revealed?'password':'text';
+    keyToggle.textContent=revealed?'Show':'Hide';
+  };
+  keyRow.appendChild(keyInput);
+  keyRow.appendChild(keyToggle);
+  keyField.appendChild(keyRow);
+  if(r.key_env){
+    const envHint=document.createElement('div');
+    envHint.className='provider-card-hint';
+    envHint.style.fontSize='11px';
+    envHint.style.marginTop='4px';
+    envHint.textContent=(t('custom_relays_key_env_hint')||'Stored in ~/.hermes/.env as')+' '+r.key_env;
+    keyField.appendChild(envHint);
+  }
+  body.appendChild(keyField);
+
+  // Models textarea
+  const modelsField=document.createElement('div');
+  modelsField.className='provider-card-field';
+  const modelsLabel=document.createElement('label');
+  modelsLabel.className='provider-card-label';
+  modelsLabel.textContent=t('custom_relays_models')||'Models (one per line)';
+  modelsField.appendChild(modelsLabel);
+  const modelsTextarea=document.createElement('textarea');
+  modelsTextarea.className='provider-card-input relay-models-input';
+  modelsTextarea.rows=4;
+  modelsTextarea.style.fontFamily='var(--font-mono, monospace)';
+  modelsTextarea.style.fontSize='12px';
+  modelsTextarea.placeholder='gemini-2.5-pro\nclaude-opus-4.5\ngpt-5';
+  modelsTextarea.value=(Array.isArray(r.models)?r.models:[]).join('\n');
+  modelsField.appendChild(modelsTextarea);
+  body.appendChild(modelsField);
+
+  // Action buttons
+  const actions=document.createElement('div');
+  actions.className='provider-card-row';
+  actions.style.marginTop='8px';
+  actions.style.flexWrap='wrap';
+
+  const probeBtn=document.createElement('button');
+  probeBtn.type='button';
+  probeBtn.className='provider-card-btn provider-card-btn-ghost';
+  probeBtn.textContent=t('custom_relays_probe')||'Test & Fetch Models';
+  probeBtn.onclick=()=>_probeCustomRelay(urlInput.value, keyInput.value, probeBtn, modelsTextarea);
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('providers_save')||'Save';
+  saveBtn.onclick=()=>_saveCustomRelay({
+    nameInput,urlInput,keyInput,modelsTextarea,saveBtn,card,
+    originalName: isDraft?null:(r.name||null),
+  });
+
+  actions.appendChild(probeBtn);
+  actions.appendChild(saveBtn);
+
+  if(isDraft){
+    const cancelBtn=document.createElement('button');
+    cancelBtn.type='button';
+    cancelBtn.className='provider-card-btn provider-card-btn-ghost';
+    cancelBtn.textContent=t('cancel')||'Cancel';
+    cancelBtn.onclick=()=>{
+      card.remove();
+      const list=$('customRelaysList');
+      const empty=$('customRelaysEmpty');
+      if(list && list.children.length===0 && empty) empty.style.display='';
+    };
+    actions.appendChild(cancelBtn);
+  } else {
+    const removeBtn=document.createElement('button');
+    removeBtn.type='button';
+    removeBtn.className='provider-card-btn provider-card-btn-danger';
+    removeBtn.textContent=t('providers_remove')||'Remove';
+    removeBtn.onclick=()=>_deleteCustomRelay(r.name);
+    actions.appendChild(removeBtn);
+  }
+  body.appendChild(actions);
+
+  card.appendChild(body);
+
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+
+  return card;
+}
+
+async function _probeCustomRelay(baseUrl, apiKey, btn, modelsTextarea){
+  const url=(baseUrl||'').trim();
+  if(!url){
+    showToast(t('custom_relays_base_url')+' required');
+    return;
+  }
+  btn.disabled=true;
+  const orig=btn.innerHTML;
+  btn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refreshing')||'Probing...'}`;
+  try{
+    const payload={base_url:url};
+    if(apiKey && apiKey.trim()) payload.api_key=apiKey.trim();
+    const res=await api('/api/custom-relays/probe',{method:'POST',body:JSON.stringify(payload)});
+    if(res && res.ok){
+      const ids=Array.isArray(res.models)?res.models:[];
+      if(ids.length){
+        modelsTextarea.value=ids.join('\n');
+        const tmpl=t('custom_relays_probe_ok')||'Fetched {0} model(s).';
+        showToast(tmpl.replace('{0}',String(ids.length)).replace('%1',String(ids.length)));
+      } else {
+        showToast(t('custom_relays_probe_empty')||'Endpoint reachable but returned no models.');
+      }
+    } else {
+      const detail=(res && (res.detail||res.error))||'unknown error';
+      const tmpl=t('custom_relays_probe_failed')||'Probe failed: {0}';
+      showToast(tmpl.replace('{0}',detail).replace('%1',detail));
+    }
+  }catch(e){
+    const tmpl=t('custom_relays_probe_failed')||'Probe failed: {0}';
+    showToast(tmpl.replace('{0}',e.message||String(e)).replace('%1',e.message||String(e)));
+  }finally{
+    btn.disabled=false;
+    btn.innerHTML=orig;
+  }
+}
+
+async function _saveCustomRelay(ctx){
+  const name=ctx.nameInput.value.trim();
+  const baseUrl=ctx.urlInput.value.trim();
+  const apiKey=ctx.keyInput.value;  // pass through; backend treats blank as "keep existing"
+  const models=ctx.modelsTextarea.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(!name){
+    showToast(t('custom_relays_name')+' required');
+    return;
+  }
+  if(!baseUrl){
+    showToast(t('custom_relays_base_url')+' required');
+    return;
+  }
+  ctx.saveBtn.disabled=true;
+  const origLabel=ctx.saveBtn.textContent;
+  ctx.saveBtn.textContent=t('providers_saving')||'Saving…';
+  try{
+    const payload={name, base_url: baseUrl, models};
+    if(apiKey && apiKey.trim()) payload.api_key=apiKey.trim();
+    if(ctx.originalName) payload.original_name=ctx.originalName;
+    const res=await api('/api/custom-relays',{method:'POST',body:JSON.stringify(payload)});
+    if(res && res.ok){
+      showToast(t('custom_relays_saved')||'Custom relay saved.');
+      _refreshModelDropdownsAfterProviderChange();
+      await loadCustomRelaysPanel();
+    } else {
+      showToast((res && res.error)||'Failed to save relay');
+      ctx.saveBtn.disabled=false;
+      ctx.saveBtn.textContent=origLabel;
+    }
+  }catch(e){
+    showToast('Error: '+(e.message||String(e)));
+    ctx.saveBtn.disabled=false;
+    ctx.saveBtn.textContent=origLabel;
+  }
+}
+
+async function _deleteCustomRelay(name){
+  if(!name) return;
+  const tmpl=t('custom_relays_confirm_delete')||'Remove "{0}"?';
+  const message=tmpl.replace('{0}',name).replace('%1',name);
+  if(!window.confirm(message)) return;
+  try{
+    const res=await api('/api/custom-relays/delete',{method:'POST',body:JSON.stringify({name})});
+    if(res && res.ok){
+      showToast(t('custom_relays_deleted')||'Custom relay removed.');
+      _refreshModelDropdownsAfterProviderChange();
+      await loadCustomRelaysPanel();
+    } else {
+      showToast((res && res.error)||'Failed to remove relay');
+    }
+  }catch(e){
+    showToast('Error: '+(e.message||String(e)));
   }
 }
 
