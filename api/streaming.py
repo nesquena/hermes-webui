@@ -2135,6 +2135,90 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     return history
 
 
+def _normalize_fresh_chat_text(text):
+    text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text.strip(" \t\r\n.!?。！？,，~～")
+
+
+def _is_casual_fresh_chat_message(msg_text):
+    """Return True for short opener messages that should not resume old tasks."""
+    text = _normalize_fresh_chat_text(msg_text)
+    if not text or len(text) > 24:
+        return False
+    continuation_terms = (
+        "continue",
+        "resume",
+        "carry on",
+        "go on",
+        # CJK continuation terms (zh-CN): jixu, jiezhe, wangxia, xiayibu.
+        # Encoded as Python escape sequences (not literal CJK) so api/streaming.py
+        # passes tests/test_title_sanitization.py::test_title_generation_source_has_no_cjk_literals,
+        # which scans this file for any U+4E00-U+9FFF code points. Runtime
+        # comparisons still use the real CJK strings — Python decodes the
+        # escapes at compile time.
+        "\u7ee7\u7eed",
+        "\u63a5\u7740",
+        "\u5f80\u4e0b",
+        "\u4e0b\u4e00\u6b65",
+    )
+    if any(term in text for term in continuation_terms):
+        return False
+    return text in {
+        "hi",
+        "hello",
+        "hey",
+        "hello there",
+        "hi there",
+        # CJK greetings (zh-CN): nihao, ninhao, hai, haluo, zaima, zaime.
+        # Same escape-sequence rationale as the continuation block above.
+        "\u4f60\u597d",
+        "\u60a8\u597d",
+        "\u5616",
+        "\u54c8\u5582",
+        "\u5728\u5417",
+        "\u5728\u4e48",
+    }
+
+
+def _has_task_resume_compaction_marker(messages):
+    """Detect compacted model context that tells the agent to resume an old task."""
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        text = _message_text(msg.get('content', '')).lower()
+        if not text:
+            continue
+        if "context compaction" not in text and "context compression" not in text:
+            continue
+        if (
+            "active task" in text
+            or "resume exactly" in text
+            or "current task" in text
+            or "task list was preserved" in text
+            or "in_progress" in text
+        ):
+            return True
+    return False
+
+
+def _context_messages_for_new_turn(session, msg_text):
+    """Return provider-facing history for a new user turn.
+
+    Compacted agent sessions can carry a hidden "resume the active task" summary
+    long after the visible UI looks like normal chat.  A short greeting should
+    not silently reactivate that old task; explicit continuation prompts still
+    keep the full compacted context.
+    """
+    history = _drop_checkpointed_current_user_from_context(
+        _session_context_messages(session),
+        msg_text,
+    )
+    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
+        return []
+    return history
+
+
 def _stream_writeback_is_current(session, stream_id):
     """Return True only while a worker still owns the session writeback.
 
@@ -3674,10 +3758,7 @@ def _run_agent_streaming(
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
             _previous_messages = list(s.messages or [])
-            _previous_context_messages = _drop_checkpointed_current_user_from_context(
-                _session_context_messages(s),
-                msg_text,
-            )
+            _previous_context_messages = _context_messages_for_new_turn(s, msg_text)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,

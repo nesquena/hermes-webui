@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compressed sessions with hidden "resume active task" context no longer treat a short fresh greeting (e.g. `hi`, `hello`, the equivalent CJK opener) as implicit permission to continue an old agent task. Explicit continuation prompts (e.g. `continue`, `resume`, or the equivalent CJK continuation phrase) still keep the compacted task context. Closes #2308.
+
 ## [v0.51.79] — 2026-05-16 — Release BC (stage-372 — 5-PR batch — text-mode image history fix + Activity-group compression boundary + named custom provider routing + quota chip Settings toggle + RFC docs)
 
 ### Added
