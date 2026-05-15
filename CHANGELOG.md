@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Docker startup no longer fails when a bind-mounted `~/.hermes/hermes-agent/.git/objects` tree contains read-only git object packs. The root init ownership pass now skips that git object subtree while still chowning the rest of `/home/hermeswebui`, so macOS Docker Desktop bind mounts can start WebUI without requiring writable ownership over agent git internals (fixes #2237).
+
 ### Added
 
 - **PR #2099** by @dobby-d-elf — Adds an opt-in `Settings → Preferences → Fade text effect` toggle (off by default). When enabled, newly streamed output tokens are revealed through an adaptive playout buffer and animated with an opacity-only fade similar to ChatGPT and other frontier LLM apps. Implementation details: fade locked per stream to avoid mid-stream toggle rewind; reduced-motion users get non-animated text; live cursor hidden while fade is active; custom renderer on `streaming-markdown` parser wraps only newly-appended words; animated spans replace themselves with plain text on `animationend` (no long-lived wrapper buildup in long responses); unsafe streamed `href`/`src` values blocked in fade renderer `set_attr` path. Performance tuning: 200ms base fade duration scaling to 350ms for fast output, 16ms word stagger, 320ms done-drain wait cap, 160 wps visual cap, max 2-3 words/frame, brief pauses after sentence punctuation. Default-off means existing users see no change. 293-line regression test pinning the contract.

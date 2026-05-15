@@ -181,6 +181,15 @@ load_env() {
   fi
 }
 
+chown_home_hermeswebui() {
+  # macOS Docker bind mounts can expose hermes-agent git object packs as
+  # read-only host files. The runtime only needs to read those existing objects;
+  # requiring chown on them makes startup fail before WebUI can run (#2237).
+  find /home/hermeswebui \
+    -path "/home/hermeswebui/.hermes/hermes-agent/.git/objects" -prune \
+    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+}
+
 # The production image does not ship sudo. The entrypoint starts as root only
 # long enough to align the hermeswebui UID/GID with mounted volumes, prepare
 # root-owned paths, and then drop privileges for the server process.
@@ -209,7 +218,7 @@ if [ "A${whoami}" == "Aroot" ]; then
     usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
   fi
 
-  chown -R "${WANTED_UID}:${WANTED_GID}" /home/hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
+  chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
 
   echo ""; echo "-- Preparing /app for the hermeswebui runtime user"
   mkdir -p /app || error_exit "Failed to create /app directory"
