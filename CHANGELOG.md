@@ -4,9 +4,34 @@
 
 ### Added
 
+- **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
+
+### Fixed
+
+- **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
+
+
+- **PR #2326** by @Michaelyklam (closes #2232) — Legacy `hermes` CLI toolset alias is now normalized to `hermes-cli` + `hermes-api-server` when WebUI resolves CLI toolsets from shared Hermes config. Modern Hermes Agent exposes the composite under those two names; older configs that still contain the legacy `hermes` toolset name no longer surface as "unknown toolset" warnings.
+
+- **PR #2327** by @dotBeeps — Cancel-mid-stream messaging now uses the user's configured assistant name (e.g. "Hermes") instead of hardcoded "Skyly". Preferences allow defining an Assistant Name that persists throughout the UI; the cancel copy was the last place still showing the persona placeholder. Backend persisted-cancelled-turn text and frontend live-cancel toast both now read from the same `botName` setting.
+
+- **PR #2328** by @Michaelyklam (closes #2325) — Two cleanup follow-ups from v0.51.68 stage-361 review: (a) when a session is deleted via `/api/session/delete`, its `~/.hermes/webui/attachments/<sid>/` inbox is also removed (orphan accumulation prevention); (b) the deferred stream-recovery listener bound by `_deferStreamErrorIfPageHidden()` now bails out when the user switches sessions in the same tab — the recovery would otherwise fire `setComposerStatus('Reconnected')` for a stream the user has moved past. Both fixes are narrow cleanup with regression tests.
+
+- **PR #2330** by @Michaelyklam (closes #2329) — Provider mismatch warnings now skip named custom providers such as `custom:zenmux`. Custom aggregators can legitimately route vendor-prefixed models like `google/gemini-3.1-flash-lite`, so `_checkProviderMismatch()` now treats `custom:<name>` the same as bare `custom` and avoids false-positive "may not work with your configured provider" warnings.
+
+- **PR #2331** by @Michaelyklam — Live activity row now shows a transient human-readable progress phrase derived from the current tool category (e.g. "Reading file…", "Searching files…", "Running command…") instead of only the elapsed-time counter `Working 1m 23s`. Compact transcript view unchanged.
+
+- **PR #2333** by @Michaelyklam (closes #2312 follow-up #1) — Removed dead production helper `_save_pre_compression_snapshot()` at `api/streaming.py:1945`. The production path now uses `_preserve_pre_compression_snapshot()` exclusively (which must index snapshots with `skip_index=False` for sidebar filtering). The dead helper was only called from `tests/test_compression_snapshot_runtime_clear.py`; the test is retargeted to exercise the actual production helper instead. Closes follow-up item #1 from the v0.51.66 review (#2312).
+
+## [v0.51.68] — 2026-05-15 — Release AR (stage-361 — 4-PR follow-up batch — #2315 profile skill seeding + #2317 theme fallback + #2318 mobile stream defer + #2319 chat upload relocation — with Opus-caught vision-model regression fix)
+
+### Added
+
+
 - **PR #2319** by @Michaelyklam — Chat file uploads now land in a session-scoped attachment inbox instead of cluttering the active workspace root. By default uploads are stored under `~/.hermes/webui/attachments/<session_id>/`; operators can override the root with `HERMES_WEBUI_ATTACHMENT_DIR`, and the agent still receives the absolute uploaded file path for context. Archive extraction stays workspace-scoped (it's an explicit workspace operation). README updated to document the new default location. **Stage-361 maintainer fix applied inline**: Opus advisor caught that `_build_native_multimodal_message` at `api/streaming.py:787` required uploads to be under `workspace_root`, which would have silently dropped every image upload for vision-capable models once the inbox moved outside the workspace. The fix adds `_attachment_root()` (from `api/upload.py`) as a second allowed location, with 3 regression tests covering the new code path AND verifying the original workspace + cross-root rejection paths still work.
 
 ### Fixed
+
 
 - **PR #2315** by @Michaelyklam (closes #2305, refs #749) — WebUI profile creation now seeds bundled profile skills for newly-created non-cloned profiles, matching the CLI's `hermes profile create` behaviour. Pre-fix, creating a profile via Settings → New Profile (without checking "Clone from active profile") left the profile's `skills/` directory empty, which was inconsistent with CLI-created profiles that get the full bundled-skills overlay. The fix calls `seed_profile_skills(profile_path, quiet=True)` after `profile_path.mkdir()` when `clone_from is None`. Cloned profiles still inherit skills from their source — they don't get a second bundled-skills overlay. Seed failures (e.g. `hermes_cli` unavailable in Docker fallback) are logged as warnings, not fatal — profile creation still succeeds.
 
@@ -17,6 +42,8 @@
 ## [v0.51.67] — 2026-05-15 — Release AQ (stage-360 — 3-PR streaming-lane batch — #2279 stream completion recovery + #2299 profile-scoped aux routing + #2306 workspace panel polish — with _ENV_LOCK narrow-lock architectural fix)
 
 ### Fixed
+
+- LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. Refs #2271.
 
 - **PR #2279** by @franksong2702 (closes #2262 + refs #2168) — WebUI stream completion recovery gaps closed for both `notify_on_complete` background tasks and the preserved-task-list compression marker UI. Pre-fix, completions held in the agent process registry were never drained by the WebUI gateway session because the gateway session platform was unset. The fix routes the completion queue by process session key before injecting any notification into a WebUI turn. Separately, the preserved-task-list compression marker — an internal sentinel — was sometimes the only assistant text rendered after a context compression turn timed out, leaving a confusing "preserved tasks" message with no actual response. The frontend now suppresses the marker when it's the only assistant content and the run state is terminal.
 

@@ -173,3 +173,14 @@ class TestReconnectAccumulatorPreservation:
         assert 'cancelAnimationFrame' in fn, (
             "_handleStreamError must cancel any pending rAF before renderMessages() runs"
         )
+
+    def test_deferred_stream_recovery_bails_after_session_switch(self):
+        """Deferred hidden-tab recovery must not reattach an old stream after
+        the user has switched to a different session in the same tab."""
+        src = read('static/messages.js')
+        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
+        assert m, "_reattachOrRestoreAfterDeferredStreamError not found"
+        fn = m.group(0)
+        assert 'S.session&&S.session.session_id' in fn
+        assert '!==activeSid' in fn
+        assert fn.index('!==activeSid') < fn.index('api(`/api/chat/stream/status?stream_id=')

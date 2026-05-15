@@ -116,6 +116,40 @@ def test_cron_output_snippet_helper(cleanup_test_sessions):
     assert "_cronOutputSnippet" in src
 
 
+def test_cron_output_usage_metadata_parses_optional_fields(cleanup_test_sessions):
+    from api.routes import _cron_output_usage_metadata
+
+    content = "\n".join([
+        "# Cron Job: Nightly",
+        "**Model:** openai-codex/gpt-5.5",
+        "**Tokens:** 12,345 in / 678 out",
+        "**Estimated cost:** $0.0123 (estimated)",
+        "**Duration:** 42.5s",
+        "",
+        "## Response",
+        "Done",
+    ])
+
+    usage = _cron_output_usage_metadata(content)
+
+    assert usage["model"] == "openai-codex/gpt-5.5"
+    assert usage["input_tokens"] == 12345
+    assert usage["output_tokens"] == 678
+    assert usage["total_tokens"] == 13023
+    assert usage["estimated_cost_usd"] == 0.0123
+    assert usage["duration_seconds"] == 42.5
+
+
+def test_cron_output_usage_strip_render_hook(cleanup_test_sessions):
+    src, _ = get_text("/static/panels.js")
+    css, _ = get_text("/static/style.css")
+
+    assert "_formatCronRunUsageStrip(run.usage)" in src
+    assert "_formatCronRunUsageStrip(data.usage)" in src
+    assert "cron-run-usage-strip" in src
+    assert ".cron-run-usage-strip" in css
+
+
 def test_cron_output_window_preserves_response_after_large_prompt(cleanup_test_sessions):
     """Large skill dumps before ## Response must not hide the useful output."""
     from api.routes import _cron_output_content_window

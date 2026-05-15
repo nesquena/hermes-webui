@@ -179,6 +179,25 @@ def test_session_delete():
         assert e.code in (404, 500), f"Expected 404 or 500, got {e.code}"
 
 
+def test_session_delete_removes_attachment_inbox(cleanup_test_sessions):
+    """Deleting a session also removes its chat attachment inbox directory."""
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+
+    result, status = post_multipart("/api/upload", {"session_id": sid}, {
+        "file": ("delete-me.txt", b"temporary attachment")
+    })
+    assert status == 200, f"Upload failed {status}: {result}"
+    attachment_dir = pathlib.Path(result["path"]).parent
+    assert attachment_dir.name == sid
+    assert attachment_dir.exists()
+
+    delete_result, delete_status = post("/api/session/delete", {"session_id": sid})
+
+    assert delete_status == 200
+    assert delete_result.get("ok") is True
+    assert not attachment_dir.exists()
+
+
 def test_session_delete_nonexistent():
     """Deleting a nonexistent session should return ok:True (idempotent)."""
     result, status = post("/api/session/delete", {"session_id": "doesnotexist"})
@@ -321,7 +340,7 @@ def test_upload_text_file(cleanup_test_sessions):
 
 def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
     """HERMES_WEBUI_ATTACHMENT_DIR routes chat uploads to a per-session inbox."""
-    from api.upload import _upload_destination
+    from api.upload import _session_attachment_dir, _upload_destination
 
     inbox = tmp_path / "attachment-inbox"
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(inbox))
@@ -330,6 +349,7 @@ def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
 
     assert dest == inbox.resolve() / "session-123" / "notes.md"
     assert dest.parent.exists()
+    assert _session_attachment_dir("session-123") == inbox.resolve() / "session-123"
 
 
 def test_upload_too_large(cleanup_test_sessions):

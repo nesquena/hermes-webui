@@ -214,6 +214,25 @@ class TestToolCallGroupingStatic:
             "A previously-open Activity group should still restore open from persisted state."
         )
 
+    def test_live_activity_summary_shows_readable_progress_without_persisted_content(self):
+        sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
+        progress_fn = _function_body(UI_JS, "_activityProgressLabelForToolName")
+        live_progress_fn = _function_body(UI_JS, "_activityLiveProgressLabel")
+        assert "_activityLiveProgressLabel" in sync_fn, (
+            "Live compact Activity rows should expose a readable transient progress label."
+        )
+        assert "durationEl.textContent" in sync_fn and "filter(Boolean).join(' · ')" in sync_fn, (
+            "Progress should share the existing non-persistent summary/duration slot, not become transcript text."
+        )
+        for label in ("Searching workspace", "Reading files", "Updating files", "Running command"):
+            assert label in progress_fn
+        assert "tool-card-running" in live_progress_fn, (
+            "The live progress label should prefer the currently running tool over older completed tools."
+        )
+        assert "tool-call-group-list" not in sync_fn, (
+            "Readable progress must not reintroduce the noisy secondary tool-name list."
+        )
+
     def test_tools_and_thinking_share_one_collapsed_activity_dropdown(self):
         ui_min = re.sub(r"\s+", "", UI_JS)
         assert "functionensureActivityGroup(" in ui_min, (

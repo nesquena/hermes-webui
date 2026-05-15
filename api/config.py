@@ -596,6 +596,28 @@ _DEFAULT_TOOLSETS = [
     "web",
     "webhook",
 ]
+
+_LEGACY_CLI_TOOLSET_ALIASES = {
+    # Older Hermes configs used "hermes" as the CLI composite toolset. Modern
+    # Hermes Agent exposes that split as these two registered composites; keep
+    # WebUI sessions usable when pointed at an older shared config.yaml.
+    "hermes": ("hermes-cli", "hermes-api-server"),
+}
+
+
+def _normalize_cli_toolsets(toolsets):
+    """Expand legacy CLI toolset aliases while preserving order and de-duping."""
+    normalized = []
+    seen = set()
+    for name in toolsets or []:
+        replacements = _LEGACY_CLI_TOOLSET_ALIASES.get(name, (name,))
+        for replacement in replacements:
+            if replacement and replacement not in seen:
+                seen.add(replacement)
+                normalized.append(replacement)
+    return normalized
+
+
 def _resolve_cli_toolsets(cfg=None):
     """Resolve CLI toolsets using the agent's _get_platform_tools() so that
     MCP server toolsets are automatically included, matching CLI behaviour."""
@@ -603,10 +625,10 @@ def _resolve_cli_toolsets(cfg=None):
         cfg = get_config()
     try:
         from hermes_cli.tools_config import _get_platform_tools
-        return list(_get_platform_tools(cfg, "cli"))
+        return _normalize_cli_toolsets(_get_platform_tools(cfg, "cli"))
     except Exception:
         # Fallback: read raw list from config (MCP toolsets will be missing)
-        return cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+        return _normalize_cli_toolsets(cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS))
 
 CLI_TOOLSETS = _resolve_cli_toolsets()
 
@@ -923,6 +945,30 @@ def _normalize_base_url_for_match(value: object) -> str:
     if not parsed_url.netloc:
         path = ""
     return f"{scheme}://{netloc}{path}"
+
+
+def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
+    """Return custom provider slugs that WebUI may derive from a base URL.
+
+    Model picker values for endpoint-discovered models have historically used
+    both ``custom:<host>:<port>`` and ``custom:<host>-<port>`` forms. When the
+    active config already names a local-server provider such as Ollama for that
+    same base URL, those endpoint slugs are just UI routing hints and should
+    resolve back to the configured provider rather than requiring a CUSTOM_* API
+    key.
+    """
+    url = str(value or "").strip().rstrip("/")
+    if not url:
+        return set()
+    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    host = (parsed_url.hostname or "").strip().lower()
+    if not host:
+        return set()
+    port = parsed_url.port
+    if port is None:
+        scheme = (parsed_url.scheme or "http").lower()
+        port = 443 if scheme == "https" else 80
+    return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
 def _named_custom_provider_slug_for_base_url(
@@ -1681,6 +1727,13 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
+        if (
+            provider_hint.startswith("custom:")
+            and config_base_url
+            and _is_local_server_provider(config_provider)
+            and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
+        ):
+            return bare_model, config_provider, config_base_url
         return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:

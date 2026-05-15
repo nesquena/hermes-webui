@@ -4628,6 +4628,12 @@ def handle_post(handler, parsed) -> bool:
             p.with_suffix('.json.bak').unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session file %s", p)
+        try:
+            from api.upload import _session_attachment_dir
+
+            shutil.rmtree(_session_attachment_dir(sid), ignore_errors=True)
+        except Exception:
+            logger.debug("Failed to clean attachment dir for deleted session %s", sid)
         # Prune the per-session agent lock so deleted sessions don't leak
         # Lock entries in SESSION_AGENT_LOCKS forever.
         with SESSION_AGENT_LOCKS_LOCK:
@@ -6816,10 +6822,14 @@ def _handle_cron_history(handler, parsed):
         for f in page:
             try:
                 st = f.stat()
+                usage = _cron_output_usage_metadata(
+                    f.read_text(encoding="utf-8", errors="replace")
+                )
                 runs.append({
                     "filename": f.name,
                     "size": st.st_size,
                     "modified": st.st_mtime,
+                    "usage": usage,
                 })
             except OSError:
                 logger.debug("Failed to stat cron output file %s", f)
@@ -6851,10 +6861,69 @@ def _handle_cron_run_detail(handler, parsed):
     try:
         content = fpath.read_text(encoding="utf-8", errors="replace")
         snippet = _cron_output_snippet(content)
+        usage = _cron_output_usage_metadata(content)
         return j(handler, {"job_id": job_id, "filename": filename,
-                           "content": content, "snippet": snippet})
+                           "content": content, "snippet": snippet,
+                           "usage": usage})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=500)
+
+
+def _cron_output_usage_metadata(text: str) -> dict:
+    """Extract optional token/cost metadata from a cron output markdown file."""
+    import re as _re
+
+    head = text.split("## Response", 1)[0].split("# Response", 1)[0]
+    usage: dict = {}
+
+    def _intish(value: str):
+        cleaned = _re.sub(r"[^0-9]", "", value or "")
+        return int(cleaned) if cleaned else None
+
+    def _floatish(value: str):
+        match = _re.search(r"[-+]?\d+(?:\.\d+)?", (value or "").replace(",", ""))
+        return float(match.group(0)) if match else None
+
+    for raw_line in head.splitlines():
+        line = raw_line.strip()
+        model_match = _re.match(r"\*\*(?:Model|Model Used):\*\*\s*(.+)$", line, _re.I)
+        if model_match:
+            usage["model"] = model_match.group(1).strip()
+            continue
+        provider_match = _re.match(r"\*\*Provider:\*\*\s*(.+)$", line, _re.I)
+        if provider_match:
+            usage["provider"] = provider_match.group(1).strip()
+            continue
+        cost_match = _re.match(r"\*\*(?:Estimated cost|Cost):\*\*\s*(.+)$", line, _re.I)
+        if cost_match:
+            cost = _floatish(cost_match.group(1))
+            if cost is not None:
+                usage["estimated_cost_usd"] = cost
+            continue
+        duration_match = _re.match(r"\*\*(?:Duration|Elapsed):\*\*\s*(.+)$", line, _re.I)
+        if duration_match:
+            seconds = _floatish(duration_match.group(1))
+            if seconds is not None:
+                usage["duration_seconds"] = seconds
+            continue
+        tokens_match = _re.match(r"\*\*Tokens:\*\*\s*(.+)$", line, _re.I)
+        if tokens_match:
+            value = tokens_match.group(1)
+            input_match = _re.search(r"([0-9][0-9,]*)\s*(?:input|in)\b", value, _re.I)
+            output_match = _re.search(r"([0-9][0-9,]*)\s*(?:output|out)\b", value, _re.I)
+            total_match = _re.search(r"([0-9][0-9,]*)\s*(?:total\s*)?tokens?\b", value, _re.I)
+            if input_match:
+                usage["input_tokens"] = _intish(input_match.group(1))
+            if output_match:
+                usage["output_tokens"] = _intish(output_match.group(1))
+            if total_match and "total_tokens" not in usage:
+                usage["total_tokens"] = _intish(total_match.group(1))
+
+    if "total_tokens" not in usage:
+        total = sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens"))
+        if total:
+            usage["total_tokens"] = total
+    return usage
 
 
 def _cron_output_snippet(text: str, limit: int = 600) -> str:

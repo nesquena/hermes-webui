@@ -76,15 +76,20 @@ def _attachment_root() -> Path:
 
 
 def _upload_destination(session_id: str, safe_name: str) -> Path:
-    root = _attachment_root()
-    dest_dir = (root / _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]).resolve()
-    if not dest_dir.is_relative_to(root):
-        raise ValueError('Invalid attachment directory')
+    dest_dir = _session_attachment_dir(session_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
         raise ValueError('Invalid upload destination')
     return dest
+
+
+def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Path:
+    root = (root or _attachment_root()).resolve()
+    dest_dir = (root / _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]).resolve()
+    if not dest_dir.is_relative_to(root):
+        raise ValueError('Invalid attachment directory')
+    return dest_dir
 
 
 def handle_upload(handler):

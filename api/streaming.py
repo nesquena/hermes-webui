@@ -31,6 +31,7 @@ from api.config import (
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
+    load_settings,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
@@ -165,6 +166,21 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     )
 
 
+def _preferred_agent_display_name() -> str:
+    """Return the configured assistant display name for user-facing copy."""
+    try:
+        name = str((load_settings() or {}).get('bot_name') or '').strip()
+    except Exception:
+        logger.debug("Failed to load bot_name for cancellation copy", exc_info=True)
+        name = ''
+    return name or 'Hermes'
+
+
+def _cancelled_turn_hint(agent_name: str | None = None) -> str:
+    name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
+    return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
+
+
 def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = False) -> dict:
     """Classify provider/agent failure text for WebUI apperror UX.
 
@@ -201,7 +217,7 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
         return {
             'label': 'Task cancelled',
             'type': 'cancelled',
-            'hint': 'The run was cancelled by the user before Skyly finished. No provider failure occurred.',
+            'hint': _cancelled_turn_hint(),
         }
     if _is_interrupted:
         return {
@@ -318,7 +334,7 @@ def _cancelled_turn_content(message: str = 'Task cancelled.') -> str:
         _message += '.'
     return (
         f"**Task cancelled:** {_message}\n\n"
-        "*The run was cancelled by the user before Skyly finished. No provider failure occurred.*"
+        f"*{_cancelled_turn_hint()}*"
     )
 
 
@@ -2064,37 +2080,6 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     if current_user_key and _message_identity(history[-1]) == current_user_key:
         return history[:-1]
     return history
-
-
-def _save_pre_compression_snapshot(session, old_session_id):
-    """Persist the archived pre-compression session without live turn state.
-
-    During context compression the same ``Session`` object is reused for the new
-    continuation id.  Before the final continuation save clears
-    ``active_stream_id`` and ``pending_*``, we also preserve an old-id snapshot so
-    the full pre-compression transcript remains recoverable.  That archived
-    parent must not keep the current stream bookkeeping, otherwise the sidebar can
-    reopen the parent as a permanently running session while the child already
-    contains the completed answer.
-    """
-    saved_sid = session.session_id
-    saved_active_stream_id = getattr(session, 'active_stream_id', None)
-    saved_pending_user_message = getattr(session, 'pending_user_message', None)
-    saved_pending_attachments = list(getattr(session, 'pending_attachments', []) or [])
-    saved_pending_started_at = getattr(session, 'pending_started_at', None)
-    session.session_id = old_session_id
-    session.active_stream_id = None
-    session.pending_user_message = None
-    session.pending_attachments = []
-    session.pending_started_at = None
-    try:
-        session.save(touch_updated_at=False, skip_index=True)
-    finally:
-        session.session_id = saved_sid
-        session.active_stream_id = saved_active_stream_id
-        session.pending_user_message = saved_pending_user_message
-        session.pending_attachments = saved_pending_attachments
-        session.pending_started_at = saved_pending_started_at
 
 
 def _stream_writeback_is_current(session, stream_id):
