@@ -592,6 +592,54 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
+  let _deferredStreamRecoveryBound=false;
+
+  function _pageHiddenForStreamError(){
+    return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
+      (typeof document!=='undefined'&&document.wasDiscarded===true);
+  }
+
+  function _reattachOrRestoreAfterDeferredStreamError(){
+    if(_terminalStateReached||_streamFinalized) return;
+    (async()=>{
+      try{
+        if(streamId){
+          const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(st.active){
+            setComposerStatus('Reconnected');
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+            return;
+          }
+        }
+      }catch(_){
+        if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      }
+      if(await _restoreSettledSession()) return;
+      if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      _handleStreamError();
+    })();
+  }
+
+  function _deferStreamErrorIfPageHidden(){
+    if(!_pageHiddenForStreamError()) return false;
+    setComposerStatus('Connection paused. Reconnecting when this tab returns…');
+    if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
+    if(!_deferredStreamRecoveryBound){
+      _deferredStreamRecoveryBound=true;
+      const resume=()=>{
+        if(_pageHiddenForStreamError()) return;
+        window.removeEventListener('focus',resume);
+        window.removeEventListener('pageshow',resume);
+        document.removeEventListener('visibilitychange',resume);
+        _deferredStreamRecoveryBound=false;
+        _reattachOrRestoreAfterDeferredStreamError();
+      };
+      document.addEventListener('visibilitychange',resume);
+      window.addEventListener('focus',resume);
+      window.addEventListener('pageshow',resume);
+    }
+    return true;
+  }
 
   // Bug A fix (#631): track whether the stream has been finalized so any rAF
   // scheduled by a trailing 'token'/'reasoning' event that arrives in the same
@@ -1633,6 +1681,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('error',async e=>{
       source.close();
       if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden()) return;
       if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
@@ -1654,12 +1703,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           if(await _restoreSettledSession()) return;
           if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden()) return;
           _handleStreamError();
         },1500);
         return;
       }
       if(await _restoreSettledSession()) return;
       if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden()) return;
       _handleStreamError();
     });
 
