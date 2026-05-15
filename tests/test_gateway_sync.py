@@ -818,6 +818,42 @@ def test_agent_session_source_normalization_contract():
             assert normalized['raw_source'] is None
 
 
+def test_empty_active_gateway_session_does_not_hide_messaging_history(monkeypatch):
+    """A zero-message active Gateway row must not hide older Discord history."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {
+            "discord_empty_active": {
+                "raw_source": "discord",
+                "platform": "discord",
+                "user_id": "user-1",
+            }
+        },
+    )
+
+    rows = [
+        {
+            "session_id": "discord_previous_history",
+            "title": "Previous Discord chat",
+            "source_tag": "discord",
+            "raw_source": "discord",
+            "session_source": "messaging",
+            "source_label": "Discord",
+            "user_id": "user-1",
+            "message_count": 7,
+            "updated_at": 100.0,
+            "end_reason": "session_reset",
+        }
+    ]
+
+    kept = routes._keep_latest_messaging_session_per_source(rows)
+
+    assert [row["session_id"] for row in kept] == ["discord_previous_history"]
+
+
 def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
     """A WebUI continuation from a messaging parent must keep WebUI metadata.
 

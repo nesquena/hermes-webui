@@ -1843,10 +1843,16 @@ def _keep_latest_messaging_session_per_source(sessions: list[dict]) -> list[dict
     """Keep only the newest sidebar row per messaging session identity."""
     gateway_metadata = _load_gateway_session_identity_map()
     active_gateway_session_ids = {str(sid) for sid in gateway_metadata.keys() if sid}
+    session_ids = {
+        _safe_first(session.get("session_id"))
+        for session in sessions
+        if isinstance(session, dict)
+    }
+    visible_active_gateway_session_ids = active_gateway_session_ids & session_ids
     active_gateway_sources = {
         _normalize_messaging_source(_safe_first(meta.get("raw_source"), meta.get("platform")))
-        for meta in gateway_metadata.values()
-        if isinstance(meta, dict)
+        for sid, meta in gateway_metadata.items()
+        if sid in visible_active_gateway_session_ids and isinstance(meta, dict)
     }
     active_gateway_sources = {source for source in active_gateway_sources if _is_known_messaging_source(source)}
 
@@ -1858,7 +1864,7 @@ def _keep_latest_messaging_session_per_source(sessions: list[dict]) -> list[dict
         if not key:
             kept.append(session)
             continue
-        if _should_hide_stale_messaging_session(session, active_gateway_session_ids, active_gateway_sources):
+        if _should_hide_stale_messaging_session(session, visible_active_gateway_session_ids, active_gateway_sources):
             continue
         if key in kept_sources:
             kept_sources.add(key)
