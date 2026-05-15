@@ -3417,12 +3417,18 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .cron-watch-spinner{width:14px;height:14px;border:2px solid rgba(59,130,246,.3);border-top-color:rgba(59,130,246,.9);border-radius:50%;animation:cron-spin .8s linear infinite;flex-shrink:0;}
 @keyframes cron-spin{to{transform:rotate(360deg)}}
 .cron-watch-elapsed{color:var(--muted);font-variant-numeric:tabular-nums;margin-left:auto;}
+.detail-card-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.detail-expand-toggle{border:1px solid var(--border);background:var(--surface);color:var(--muted);border-radius:6px;padding:3px 8px;font-size:11px;line-height:1.3;cursor:pointer;}
+.detail-expand-toggle:hover{color:var(--text);border-color:var(--accent);}
 .detail-prompt{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;max-height:240px;overflow-y:auto;}
+.detail-prompt.expanded{max-height:none;overflow-y:visible;}
 .detail-run-item{border-top:1px solid var(--border);padding:8px 0;}
 .detail-run-item:first-child{border-top:none;}
 .detail-run-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:12px;color:var(--muted);}
+.detail-run-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}
 .detail-run-body{display:none;margin-top:6px;font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.5;max-height:260px;overflow-y:auto;background:var(--sidebar);border:1px solid var(--border);border-radius:6px;padding:8px 10px;}
 .detail-run-item.open .detail-run-body{display:block;}
+.detail-run-body.expanded{max-height:none;overflow-y:visible;}
 .cron-item.active,.ws-row.active,.profile-card.active{background:var(--accent-bg);}
 .cron-item.active .cron-name,.ws-row.active .ws-row-name,.profile-card.active .profile-card-name{color:var(--accent-text);}
 

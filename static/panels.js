@@ -461,6 +461,45 @@ async function loadCrons(animate) {
   }
 }
 
+function _cronPanelExpandKey(jobId, suffix){
+  return `hermes-webui-cron-${suffix}-expanded-${encodeURIComponent(String(jobId||''))}`;
+}
+
+function _cronRunExpandKey(jobId, filename){
+  return `${_cronPanelExpandKey(jobId, 'run')}-${encodeURIComponent(String(filename||''))}`;
+}
+
+function _cronExpansionGet(key){
+  try { return localStorage.getItem(key) === '1'; } catch(_) { return false; }
+}
+
+function _cronExpansionSet(key, expanded){
+  try { localStorage.setItem(key, expanded ? '1' : '0'); } catch(_) {}
+}
+
+function toggleCronPromptExpanded(jobId){
+  const key = _cronPanelExpandKey(jobId, 'prompt');
+  _cronExpansionSet(key, !_cronExpansionGet(key));
+  if (_currentCronDetail && String(_currentCronDetail.id) === String(jobId)) {
+    _renderCronDetail(_currentCronDetail);
+  }
+}
+
+function toggleCronRunExpanded(jobId, filename, runId){
+  const key = _cronRunExpandKey(jobId, filename);
+  const expanded = !_cronExpansionGet(key);
+  _cronExpansionSet(key, expanded);
+  const item = document.getElementById(runId);
+  const body = item ? item.querySelector('.detail-run-body') : null;
+  const btn = item ? item.querySelector('.detail-expand-toggle') : null;
+  if (body) body.classList.toggle('expanded', expanded);
+  if (btn) {
+    btn.textContent = expanded ? '▴' : '▾';
+    btn.title = expanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
+    btn.setAttribute('aria-label', btn.title);
+  }
+}
+
 function _renderCronDetail(job){
   _currentCronDetail = job;
   const title = $('taskDetailTitle');
@@ -501,6 +540,8 @@ function _renderCronDetail(job){
         </div>
       </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
+  const promptExpanded = _cronExpansionGet(_cronPanelExpandKey(job.id, 'prompt'));
+  const promptToggleLabel = promptExpanded ? (t('cron_collapse_prompt') || 'Collapse prompt') : (t('cron_expand_prompt') || 'Expand prompt');
   body.innerHTML = `
     <div class="main-view-content">
       ${attentionBanner}
@@ -519,8 +560,11 @@ function _renderCronDetail(job){
         ${lastError}
       </div>
       <div class="detail-card">
-        <div class="detail-card-title">Prompt</div>
-        <div class="detail-prompt">${esc(job.prompt || '')}</div>
+        <div class="detail-card-title detail-card-title-row">
+          <span>Prompt</span>
+          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
+        </div>
+        <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
       </div>
       <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
         <div class="detail-card-title">${esc(t('cron_last_output'))}</div>
@@ -579,12 +623,17 @@ async function _loadCronDetailRuns(jobId){
       const sizeStr = run.size > 1024 ? (run.size/1024).toFixed(1)+' KB' : run.size+' B';
       const dateStr = new Date(run.modified * 1000).toLocaleString();
       const rid = `cron-det-run-${jobId}-${i}`;
+      const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
+      const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
       return `<div class="detail-run-item" id="${rid}">
         <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
           <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span></span>
-          <span style="opacity:.6">▸</span>
+          <span class="detail-run-actions">
+            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded('${esc(jobId)}','${esc(run.filename)}','${rid}')" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
+            <span style="opacity:.6">▸</span>
+          </span>
         </div>
-        <div class="detail-run-body" style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
+        <div class="detail-run-body ${runExpanded ? 'expanded' : ''}" style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>`;
     }).join('');
     const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
@@ -599,6 +648,7 @@ async function _loadRunContent(jobId, filename, runId){
   if (!item.classList.contains('open')) {
     item.classList.add('open');
   }
+  body.classList.toggle('expanded', _cronExpansionGet(_cronRunExpandKey(jobId, filename)));
   body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
   try {
     const data = await api(`/api/crons/run?job_id=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}`);
