@@ -4990,11 +4990,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/import":
         from api import spaces as capy_spaces
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
             return j(
                 handler,
                 capy_spaces.import_space_agent_package(
                     body,
-                    space_id=body.get("space_id") or None,
+                    space_id=space_id or None,
                 ),
             )
         except RuntimeError as e:
@@ -5004,10 +5005,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/export":
         from api import spaces as capy_spaces
-        space_id = body.get("space_id")
-        if not space_id:
-            return bad(handler, "Missing space_id")
         try:
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
             return j(handler, capy_spaces.export_space_agent_package(space_id, format=body.get("format") or "yaml"))
         except RuntimeError as e:
             return bad(handler, str(e), 403)

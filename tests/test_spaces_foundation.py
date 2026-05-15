@@ -8393,6 +8393,128 @@ def test_import_space_agent_zip_b64_route_returns_safe_metadata(monkeypatch, tmp
     assert "source" not in serialized.replace('"source": "space-agent-zip"', "")
 
 
+def test_import_export_routes_accept_camelcase_space_id_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    exported_source = spaces.create_space(
+        {
+            "space_id": "export-route-camel",
+            "name": "Export Route Camel",
+            "description": "Safe package export target",
+        }
+    )
+    spaces.upsert_widget(
+        exported_source["space_id"],
+        {
+            "id": "safe-chart",
+            "kind": "chart",
+            "title": "Safe Chart",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    handled, status, exported = _route_post(
+        "/api/spaces/export",
+        {
+            "spaceId": "export-route-camel",
+            "format": "yaml",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    export_serialized = json.dumps(exported).lower()
+
+    assert handled is None
+    assert status == 200
+    assert exported["source"] == "capy-space"
+    assert exported["format"] == "space-agent-yaml"
+    assert exported["space_id"] == "export-route-camel"
+    assert "widgets/safe-chart.yaml" in exported["widgets"]
+    assert "renderer" not in export_serialized
+    assert "<script" not in export_serialized
+    assert "api_key" not in export_serialized
+    assert "secret_value_do_not_leak" not in export_serialized
+    assert "secret_source" not in export_serialized
+
+    handled, status, imported = _route_post(
+        "/api/spaces/import",
+        {
+            "spaceId": "import-route-camel",
+            "space_yaml": "id: ignored-source-id\nname: Import Route Camel\ndescription: Safe import target\n",
+            "widgets": {
+                "widgets/chart.yaml": "id: chart\ntitle: Import Chart\ntype: chart\nrenderer: '<script>bad()</script>'\nsource: SECRET_SOURCE\n",
+            },
+            "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    import_serialized = json.dumps(imported).lower()
+
+    assert handled is None
+    assert status == 200
+    assert imported["imported"] is True
+    assert imported["space"]["space_id"] == "import-route-camel"
+    assert spaces.read_space("import-route-camel")["name"] == "Import Route Camel"
+    assert "ignored-source-id" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "renderer" not in import_serialized
+    assert "<script" not in import_serialized
+    assert "api_auth" not in import_serialized
+    assert "secret_value_do_not_leak" not in import_serialized
+    assert "secret_source" not in import_serialized
+
+
+def test_import_export_routes_reject_conflicting_space_id_aliases_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    first = spaces.create_space({"space_id": "package-route-first", "name": "Package Route First"})
+    second = spaces.create_space({"space_id": "package-route-second", "name": "Package Route Second"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/export",
+        {
+            "space_id": first["space_id"],
+            "spaceId": second["space_id"],
+            "renderer": "<script>conflict()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert spaces.read_space(first["space_id"])["name"] == "Package Route First"
+    assert spaces.read_space(second["space_id"])["name"] == "Package Route Second"
+    assert "conflict()" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, body = _route_post(
+        "/api/spaces/import",
+        {
+            "space_id": "package-import-first",
+            "spaceId": "package-import-second",
+            "space_yaml": "id: package-import-yaml\nname: Package Import YAML\n",
+            "renderer": "<script>conflict()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "selector aliases" in body["error"]
+    assert "package-import-first" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "package-import-second" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "package-import-yaml" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "conflict()" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_export_space_agent_yaml_package_omits_generated_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
