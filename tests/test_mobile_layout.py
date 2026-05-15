@@ -205,16 +205,8 @@ def test_rightpanel_mobile_slide_over_css():
     assert re.search(r'\.rightpanel\.mobile-open\{[^}]*box-shadow:\s*-4px 0 24px rgba\(0,\s*0,\s*0,\s*\.?4\)',
                      rightpanel_block, re.DOTALL), \
         "open mobile rightpanel should keep the edge shadow"
-    assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,1fr\)\s+auto', rightpanel_block), \
-        "mobile workspace header should use a compact two-row grid"
-    assert re.search(r'\.rightpanel\s+\.panel-header\s*>\s*span:first-child\{[^}]*grid-column:\s*1', rightpanel_block), \
-        "mobile workspace heading should stay on the first row"
-    assert re.search(r'\.rightpanel\s+\.git-badge\{[^}]*grid-column:\s*2[^}]*justify-self:\s*end', rightpanel_block), \
-        "mobile git badge should share the first row with the heading"
-    assert re.search(r'\.rightpanel\s+\.panel-actions\{[^}]*grid-column:\s*1 / -1[^}]*width:\s*100%', rightpanel_block), \
-        "mobile workspace actions should span the full second row"
-    assert re.search(r'\.rightpanel\s+\.mobile-close-btn\{[^}]*margin-left:\s*auto', rightpanel_block), \
-        "mobile workspace close button should align to the far right"
+    assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*row-gap:\s*8px', rightpanel_block), \
+        "mobile workspace header should keep comfortable row spacing"
 
 
 def test_workspace_panel_inline_width_is_desktop_only():

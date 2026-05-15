@@ -1279,19 +1279,17 @@
      panel's width so the header can collapse less-essential elements as the
      user resizes the panel narrower. */
   .rightpanel{width:300px;background:var(--sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;min-width:0;opacity:1;transform:translateX(0);transform-origin:right center;transition:width .24s cubic-bezier(.22,1,.36,1),opacity .18s ease,transform .24s cubic-bezier(.22,1,.36,1),border-color .24s ease;container-type:inline-size;container-name:rightpanel;}
-  /* Collapse priority as the panel narrows: git-badge first, then "Workspace"
-     label, never the icon buttons. flex-shrink ratios give graceful ellipsis;
-     @container queries below cut to display:none at hard breakpoints. */
-  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;gap:6px;overflow:visible;}
-  .panel-header > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:2;}
+  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:6px;overflow:visible;}
+  .workspace-panel-title-group{grid-column:1;grid-row:1;display:flex;align-items:center;min-width:0;}
+  .workspace-panel-title-group > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
   .workspace-panel-heading{cursor:default;border-radius:6px;padding:2px 4px;margin:-2px -4px;}
   .workspace-panel-heading.workspace-panel-heading--enabled{cursor:pointer;}
   .workspace-panel-heading.workspace-panel-heading--enabled:hover,
   .workspace-panel-heading.workspace-panel-heading--enabled:focus-visible{color:var(--text);background:var(--hover-bg);outline:none;}
-  .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:3;overflow:hidden;min-width:0;}
+  .git-badge{grid-column:1 / -1;grid-row:2;justify-self:start;font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;overflow:hidden;min-width:0;max-width:100%;}
   .topbar-source-badge{display:inline-flex;align-items:center;margin-left:6px;padding:2px 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);font-size:10px;font-weight:700;letter-spacing:.02em;vertical-align:middle;}
   .git-badge.dirty{color:var(--accent-text);background:var(--accent-bg);}
-  .panel-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
+  .panel-actions{grid-column:2;grid-row:1;display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
 
   /* Crisp display:none at narrow widths so the header doesn't show a sliver
      of an ellipsised label or git badge — icons survive longest. */
@@ -1299,9 +1297,8 @@
     .git-badge{display:none !important;}
   }
   @container rightpanel (max-width: 160px){
-    .panel-header > span:first-child{display:none;}
+    .workspace-panel-title-group{display:none;}
   }
-  .mobile-close-btn{display:none;}
   .panel-icon-btn{width:24px;height:24px;background:none;border:none;color:var(--muted);cursor:pointer;border-radius:5px;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .panel-icon-btn:hover{background:var(--hover-bg);color:var(--text);}
   .panel-icon-btn:disabled{opacity:.35;cursor:not-allowed;}
@@ -1310,7 +1307,6 @@
   /* file-item-actions removed: delete button is now a flex child */
   .file-action-btn{width:20px;height:20px;background:rgba(0,0,0,.4);border:none;border-radius:4px;color:var(--muted);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;}
   .file-action-btn:hover{color:var(--accent);}
-  .close-preview{cursor:pointer;opacity:.6;}.close-preview:hover{opacity:1;}
   /* Breadcrumb navigation */
   .breadcrumb-bar{display:flex;align-items:center;gap:2px;padding:6px 12px;font-size:12px;border-bottom:1px solid var(--border);flex-shrink:0;overflow:hidden;white-space:nowrap;}
   /* ── Workspace prefs kebab menu (#1793) ─────────────────────────── */
@@ -1437,9 +1433,6 @@
   @media(max-width:900px){
     .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
-    .mobile-close-btn{display:flex;}
-    .close-preview{display:none;}
-    #btnCollapseWorkspacePanel{display:none;}
   }
 
   @container composer-footer (max-width: 700px){
@@ -1539,11 +1532,8 @@
       box-shadow:none!important;}
     .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
     .rightpanel .resize-handle{display:none;}
-    .rightpanel .panel-header{display:grid;grid-template-columns:minmax(0,1fr) auto;row-gap:8px;}
-    .rightpanel .panel-header > span:first-child{grid-column:1;min-width:0;}
-    .rightpanel .git-badge{grid-column:2;justify-self:end;}
-    .rightpanel .panel-actions{grid-column:1 / -1;width:100%;align-items:center;gap:8px;justify-content:flex-start;margin-left:0;}
-    .rightpanel .mobile-close-btn{margin-left:auto;min-width:36px;min-height:36px;}
+    .rightpanel .panel-header{row-gap:8px;}
+    .rightpanel .panel-actions{align-items:center;gap:8px;}
     /* Topbar adjustments */
     .topbar{padding:8px 12px;gap:8px;}
     .topbar-title{font-size:14px;}
