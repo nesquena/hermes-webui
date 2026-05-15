@@ -4256,8 +4256,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         elif isinstance(args, (list, tuple)) and len(args) > 1:
             widget_id_raw = str(args[1] or "").strip()
         widget_id = validate_widget_id(widget_id_raw)
-        if "event_name" in data and "eventName" in data and str(data.get("event_name") or "") != str(data.get("eventName") or ""):
+        event_name = str(data.get("event_name") or "").strip()
+        event_name_alias = str(data.get("eventName") or "").strip()
+        if event_name and event_name_alias and event_name != event_name_alias:
             raise ValueError("Conflicting widget event name aliases")
+        event_name_value = event_name or event_name_alias or "agent.prompt"
         payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
         payload = dict(payload)
         runtime_alias_values: list[str] = []
@@ -4286,7 +4289,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = queue_widget_event(
             space_id,
             widget_id,
-            data.get("event_name") or data.get("eventName") or "agent.prompt",
+            event_name_value,
             payload,
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",

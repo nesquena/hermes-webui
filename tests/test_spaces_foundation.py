@@ -4145,6 +4145,45 @@ def test_space_tool_adapter_rejects_conflicting_widget_event_runtime_aliases_met
     assert "capy:raw" not in serialized
 
 
+def test_space_tool_adapter_ignores_blank_widget_event_name_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-event-name-blank-lab", "name": "Tool Event Name Blank Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    queued = spaces.run_space_tool(
+        "space.widget.event",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "research-card",
+            "event_name": "   ",
+            "eventName": "agent.prompt",
+            "messageType": "capy:agent:prompt",
+            "prompt": "Summarize this widget safely.",
+            "payload": {
+                "query": "Claude Mythos",
+                "renderer": "<script>bad()</script>",
+                "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps({"queued": queued, "events": events}).lower()
+
+    assert queued["ok"] is True
+    assert queued["queued"] is True
+    assert queued["event_name"] == "agent.prompt"
+    assert queued["payload_summary"]["query"] == "Claude Mythos"
+    assert events["events"][0]["event_name"] == "agent.prompt"
+    assert events["events"][0]["payload_summary"]["query"] == "Claude Mythos"
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+
+
 def test_space_tool_adapter_rejects_conflicting_widget_event_name_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-event-name-conflict-lab", "name": "Tool Event Name Conflict Lab"})

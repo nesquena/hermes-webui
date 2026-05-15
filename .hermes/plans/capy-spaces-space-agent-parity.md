@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 05:33 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 06:49 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces direct widget-event HTTP route ignores blank snake_case aliases while accepting valid Space-Agent-style camelCase selectors before queueing metadata-only events. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces Space-tool widget-event adapter ignores blank snake_case event-name aliases while accepting valid Space-Agent-style camelCase `eventName` before queueing metadata-only events. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): ignore blank widget event tool aliases`
+  - Added RED/GREEN backend tool-adapter coverage proving `run_space_tool("space.widget.event", ...)` ignores a blank `event_name` when a valid camelCase `eventName` is present, queues exactly one metadata-only `agent.prompt` event, and omits generated renderer/API-auth/secret-looking fixture markers from queued receipts/events.
+  - Hardened the Space-tool widget-event adapter to strip blank event-name aliases before consistency checks, keep conflicting nonblank `event_name` / `eventName` aliases fail-closed, and pass the normalized event name into the canonical `queue_widget_event(...)` runtime/safety path.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN/regression set passed (`6 passed`); full Spaces foundation suite passed (`302 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static browser QA harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/event-tool-blank-alias-qa.png`.
 
 - `fix(spaces): ignore blank widget event route aliases`
   - Added RED/GREEN backend route coverage proving `POST /api/spaces/widget/event` ignores blank `space_id` / `widget_id` / `event_name` aliases when matching `spaceId` / `widgetId` / `eventName` are valid, queues exactly one metadata-only `agent.prompt` event, and omits generated renderer/API-auth/secret-looking fixture markers from route receipts/events.
