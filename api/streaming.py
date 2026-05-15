@@ -40,7 +40,11 @@ from api.turn_journal import append_turn_journal_event_for_stream
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
 # interleave their os.environ writes. This global lock serializes the env
-# save/restore around the entire agent run.
+# save/restore — held only briefly across the env-mutation critical section,
+# NOT for the entire agent run. The agent runs outside the lock; the finally
+# block re-acquires to atomically restore env vars. See narrow-lock pattern
+# in _run_agent_streaming (line ~2719) and profile_env_for_background_worker
+# (api/profiles.py:715).
 _ENV_LOCK = threading.Lock()
 
 
