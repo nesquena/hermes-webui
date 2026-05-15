@@ -14373,17 +14373,19 @@ def _handle_chat_sync(handler, body):
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _context_messages_for_new_turn,
-                _workspace_context_prefix,
+                _webui_message_context_prefix,
             )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _webui_message_context_prefix(s)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block and "
+                "the legacy [Workspace::v1: /absolute/path] marker. The context block contains "
+                "the workspace selected in the web UI and, when the chat is assigned to a WebUI "
+                "project, project_id and project_name. Treat the most recent HermesWebUIContext "
+                "block as authoritative WebUI context for the current turn. The workspace field "
+                "overrides any prior workspace mentioned in this system prompt, memory, or "
+                "conversation history. Always use the workspace from the most recent context "
+                "block or [Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present.\n\n"
                 f"{_WEBUI_PROGRESS_PROMPT}\n\n"

@@ -16,7 +16,8 @@ def test_workspace_display_prefix_helper_strips_leading_metadata_only():
     assert end != -1, "user fenced block renderer not found after prefix stripper"
     helper = src[start:end]
 
-    # v1 sentinel regex must be present (matches `[Workspace::v1: <escaped path>]`).
+    # Structured WebUI context and v1 workspace sentinel regexes must be present.
+    assert r"^\s*\[HermesWebUIContext::v1\n[\s\S]*?\n\]\s*" in helper
     assert r"^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*" in helper
     # Legacy regex must ALSO be present as a fallback for transcripts saved
     # before the v1 migration (per Opus advisor on stage-322 — without this,

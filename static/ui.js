@@ -285,13 +285,15 @@ function _isBacktickFenceClose(line,minLen){
  */
 
 function _stripWorkspaceDisplayPrefix(text){
+  // Structured WebUI context format injected before the workspace sentinel.
   // v1 sentinel format `[Workspace::v1: <escaped path>]\n` injected since #1918.
   // Legacy format `[Workspace: <path>]\n` may still be present in transcripts
   // saved before the v1 migration; fall through to the legacy regex when the
-  // v1 strip didn't match. Mirrors the Python `include_legacy=True` branch in
-  // api/streaming.py:_strip_workspace_prefix(). Per Opus advisor on stage-322.
+  // current structured/v1 strip didn't match. Mirrors the Python
+  // `include_legacy=True` branch in api/streaming.py:_strip_workspace_prefix().
   const value = String(text||'');
-  const stripped = value.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  let stripped = value.replace(/^\s*\[HermesWebUIContext::v1\n[\s\S]*?\n\]\s*/,'');
+  stripped = stripped.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
   if(stripped !== value) return stripped.trim();
   return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }

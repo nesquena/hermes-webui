@@ -2183,6 +2183,7 @@ def _message_text(value) -> str:
     return _strip_thinking_markup(str(value or '').strip())
 
 
+_HERMES_WEBUI_CONTEXT_RE = re.compile(r'^\s*\[HermesWebUIContext::v1\n.*?\n\]\s*', re.DOTALL)
 _WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
 _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
 _WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
@@ -2197,10 +2198,58 @@ def _workspace_context_prefix(path: str) -> str:
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
+def _json_or_null(value) -> str:
+    if value is None:
+        return 'null'
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _project_name_for_id(project_id: str | None) -> str | None:
+    """Best-effort lookup of a WebUI project display name for a session."""
+    if not project_id:
+        return None
+    try:
+        from api.models import load_projects
+        for project in load_projects():
+            if str(project.get('project_id') or '') == str(project_id):
+                name = str(project.get('name') or '').strip()
+                return name or None
+    except Exception:
+        logger.debug("Failed to resolve WebUI project metadata for %s", project_id, exc_info=True)
+    return None
+
+
+def _hermes_webui_context_prefix(*, project_id=None, project_name=None, workspace_path=None) -> str:
+    """Build the model-facing WebUI context block prepended to user turns."""
+    return (
+        "[HermesWebUIContext::v1\n"
+        f"project_id: {_json_or_null(project_id)}\n"
+        f"project_name: {_json_or_null(project_name)}\n"
+        f"workspace: {_json_or_null(workspace_path)}\n"
+        "]\n"
+    )
+
+
+def _webui_message_context_prefix(session) -> str:
+    """Return structured WebUI context plus the legacy workspace sentinel."""
+    workspace = str(getattr(session, 'workspace', '') or '')
+    project_id = getattr(session, 'project_id', None) or None
+    project_name = _project_name_for_id(project_id)
+    return (
+        _hermes_webui_context_prefix(
+            project_id=project_id,
+            project_name=project_name,
+            workspace_path=workspace or None,
+        )
+        + _workspace_context_prefix(workspace)
+    )
+
+
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-injected workspace tags without eating user-typed text."""
     value = str(text or '')
-    stripped = _WORKSPACE_PREFIX_RE.sub('', value, count=1)
+    stripped = _HERMES_WEBUI_CONTEXT_RE.sub('', value, count=1)
+    stripped = _WORKSPACE_PREFIX_RE.sub('', stripped, count=1)
     if include_legacy and stripped == value:
         stripped = _LEGACY_WORKSPACE_PREFIX_RE.sub('', value, count=1)
     return stripped.strip()
@@ -6828,15 +6877,17 @@ def _run_agent_streaming(
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _webui_message_context_prefix(s)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block and "
+                "the legacy [Workspace::v1: /absolute/path] marker. The context block contains "
+                "the workspace selected in the web UI and, when the chat is assigned to a WebUI "
+                "project, project_id and project_name. Treat the most recent HermesWebUIContext "
+                "block as authoritative WebUI context for the current turn. The workspace field "
+                "overrides any prior workspace mentioned in this system prompt, memory, or "
+                "conversation history. Always use the workspace from the most recent context "
+                "block or [Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
