@@ -7199,6 +7199,61 @@ def test_space_tool_adapter_current_recovery_quarantine_aliases_use_active_space
     assert "bearer" not in serialized
 
 
+def test_space_tool_adapter_recovery_disable_widget_rejects_conflicting_positional_space_alias_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    primary = spaces.create_space({"space_id": "recovery-primary", "name": "Recovery Primary"})
+    other = spaces.create_space({"space_id": "recovery-other", "name": "Recovery Other"})
+    spaces.upsert_widget(primary["space_id"], {"id": "bad-widget", "kind": "html", "title": "Bad Widget"})
+
+    with pytest.raises(ValueError, match="selector aliases"):
+        spaces.run_space_tool(
+            "space.recovery.disable_widget",
+            {
+                "spaceId": primary["space_id"],
+                "widgetId": "bad-widget",
+                "args": [other["space_id"], "bad-widget"],
+                "reason": "renderer source SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            },
+        )
+
+    stored = spaces.read_widget(primary["space_id"], "bad-widget")
+    serialized = json.dumps(stored).lower()
+    assert stored.get("recovery", {}).get("disabled") is not True
+    assert spaces.read_space_detail(other["space_id"])["space_id"] == other["space_id"]
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_recovery_enable_widget_rejects_conflicting_positional_widget_alias_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "recovery-enable-conflict", "name": "Recovery Enable Conflict"})
+    spaces.upsert_widget(created["space_id"], {"id": "bad-widget", "kind": "html", "title": "Bad Widget"})
+    spaces.upsert_widget(created["space_id"], {"id": "other-widget", "kind": "markdown", "title": "Other Widget"})
+    spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="trusted current quarantine")
+
+    with pytest.raises(ValueError, match="widget selector aliases"):
+        spaces.run_space_tool(
+            "space.recovery.enable_widget",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "bad-widget",
+                "args": [created["space_id"], "other-widget"],
+                "reason": "api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            },
+        )
+
+    bad_widget = spaces.read_widget(created["space_id"], "bad-widget")
+    other_widget = spaces.read_widget(created["space_id"], "other-widget")
+    serialized = json.dumps({"bad": bad_widget, "other": other_widget}).lower()
+    assert bad_widget.get("recovery", {}).get("disabled") is True
+    assert other_widget.get("recovery", {}).get("disabled") is not True
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_admin_recovery_aliases_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "admin-quarantine", "name": "Admin Quarantine"})

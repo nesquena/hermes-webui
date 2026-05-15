@@ -3064,12 +3064,16 @@ def _space_tool_space_id_alias(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _space_tool_current_id(payload: dict[str, Any]) -> str:
+def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: int | None = None) -> str:
     """Return the optional current-space id from a tool payload."""
+    positional_values = ()
+    if positional_space_index is not None:
+        positional_values = (_space_tool_arg(payload, positional_space_index),)
     _space_tool_assert_matching_aliases(
         payload,
         ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"),
         "Conflicting space selector aliases",
+        *positional_values,
     )
     raw = (
         payload.get("space_id")
@@ -3078,7 +3082,7 @@ def _space_tool_current_id(payload: dict[str, Any]) -> str:
         or payload.get("activeSpaceId")
         or payload.get("current_space_id")
         or payload.get("currentSpaceId")
-        or _space_tool_arg(payload, 0)
+        or (_space_tool_arg(payload, positional_space_index) if positional_space_index is not None else _space_tool_arg(payload, 0))
         or ""
     )
     return str(raw or "").strip()
@@ -3120,6 +3124,14 @@ def _space_tool_assert_matching_aliases(
     values.extend(str(value or "").strip() for value in positional_values if str(value or "").strip())
     if values and any(value != values[0] for value in values):
         raise ValueError(message)
+
+
+def _space_tool_space_widget_positional_indexes(payload: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Return positional Space/widget indexes for adapters whose args contract is [space_id, widget_id]."""
+    args = payload.get("args")
+    if isinstance(args, (list, tuple)) and len(args) >= 2:
+        return 0, 1
+    return None, None
 
 
 def _space_tool_module_id(payload: dict[str, Any]) -> str:
@@ -4057,8 +4069,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.disablewidget",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        positional_space_index, positional_widget_index = _space_tool_space_widget_positional_indexes(data)
+        space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
         result = disable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
         if is_current:
@@ -4080,8 +4093,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.enablewidget",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        positional_space_index, positional_widget_index = _space_tool_space_widget_positional_indexes(data)
+        space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
         result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
         if is_current:

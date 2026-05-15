@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 01:42 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 02:59 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces creator-commit tool path rejects conflicting preview receipt aliases (`preview_id` / `previewId`) before consuming any receipt or creating/updating a Space. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces recovery/admin widget quarantine tool aliases reject conflicting source-style positional selectors before disabling/enabling widgets. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting recovery widget positional aliases`
+  - Added RED/GREEN backend coverage proving `space.recovery.disable_widget` rejects mismatched named Space selectors versus source-style positional `args[0]`, and `space.recovery.enable_widget` rejects mismatched named widget selectors versus positional `args[1]`, before recovery side effects.
+  - Hardened the shared recovery/admin/current widget quarantine tool branches to validate explicit `spaceId`/`widgetId` values against `[space_id, widget_id]` positional args only for adapters whose positional contract is actually Space + widget, preserving legacy single positional widget args with a named Space.
+  - Validation at completion: focused RED failed before implementation (`2 failed`); focused GREEN passed (`2 passed`); related recovery/widget restore regressions passed (`7 passed, 293 deselected`); full Spaces foundation suite passed (`300 passed`); Spaces UI behavior + demo parity suites passed (`182 passed`); `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery/admin browser QA passed.
 
 - `fix(spaces): reject conflicting creator commit receipt aliases`
   - Added RED/GREEN backend coverage proving `space.creator.commit` rejects conflicting `preview_id` / `previewId` receipt aliases before consuming either cached preview or creating/updating a Space.
