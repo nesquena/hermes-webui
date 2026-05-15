@@ -2692,6 +2692,11 @@ def _space_creator_store_preview_receipt(draft: dict[str, Any]) -> str:
 
 
 def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("preview_id", "previewId"),
+        "Conflicting creator preview receipt selector aliases",
+    )
     preview_id = str(payload.get("preview_id") or payload.get("previewId") or "").strip()
     if not preview_id:
         raise ValueError("Creator commit requires a preview receipt")

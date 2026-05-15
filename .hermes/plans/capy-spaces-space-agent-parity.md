@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 00:27 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 01:42 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces creator-preview tool path rejects conflicting existing-Space target aliases (`target_space_id` / `targetSpaceId` / `space_id` / `spaceId`) before creating a sandbox preview receipt. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces creator-commit tool path rejects conflicting preview receipt aliases (`preview_id` / `previewId`) before consuming any receipt or creating/updating a Space. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject conflicting creator commit receipt aliases`
+  - Added RED/GREEN backend coverage proving `space.creator.commit` rejects conflicting `preview_id` / `previewId` receipt aliases before consuming either cached preview or creating/updating a Space.
+  - Hardened the creator commit receipt lookup path to reuse the shared alias-consistency resolver before cache pruning/pop, preserving both receipts on conflict and keeping the generic creator loop fail-closed before durable writes.
+  - Validation at completion: focused RED failed before implementation (`1 failed`); focused GREEN passed (`1 passed`); targeted creator preview/commit regressions passed (`26 passed, 272 deselected`); full Spaces foundation suite, UI/demo suites, syntax/compile/diff checks, browser QA, and live health are recorded in the scheduled sprint report for this run.
 
 - `fix(spaces): reject conflicting creator preview target aliases`
   - Added RED/GREEN backend coverage proving `space.creator.preview` rejects conflicting target Space selector aliases before creating a preview receipt, ignores blank higher-priority aliases while resolving a valid explicit target, leaves both candidate Spaces unchanged, and keeps generated renderer/API-auth/secret-looking fixture markers out of visible creator/recovery QA surfaces.

@@ -2336,6 +2336,41 @@ def test_creator_commit_preview_receipt_is_not_mutated_by_preview_response_calle
     assert committed["widgets"][0]["title"] == "Safe Summary"
 
 
+def test_creator_commit_rejects_conflicting_preview_id_aliases_before_consuming_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    first_preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Preview Alias One",
+            "widgets": [{"widgetId": "alias-one", "title": "Alias One", "kind": "markdown"}],
+        },
+    )
+    second_preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Preview Alias Two",
+            "widgets": [{"widgetId": "alias-two", "title": "Alias Two", "kind": "markdown"}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="creator preview receipt selector aliases"):
+        spaces.run_space_tool(
+            "space.creator.commit",
+            {
+                "preview_id": first_preview["preview_id"],
+                "previewId": second_preview["preview_id"],
+                "sandbox_previewed": True,
+                "visual_qa_passed": True,
+                "approve_commit": True,
+            },
+        )
+
+    assert spaces.list_spaces() == []
+    assert first_preview["preview_id"] in spaces._CREATOR_PREVIEW_RECEIPTS
+    assert second_preview["preview_id"] in spaces._CREATOR_PREVIEW_RECEIPTS
+
+
 def test_creator_commit_rejects_unknown_preview_id_without_creating_space(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
