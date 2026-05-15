@@ -1862,6 +1862,82 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     return history
 
 
+def _normalize_fresh_chat_text(text):
+    text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text.strip(" \t\r\n.!?。！？,，~～")
+
+
+def _is_casual_fresh_chat_message(msg_text):
+    """Return True for short opener messages that should not resume old tasks."""
+    text = _normalize_fresh_chat_text(msg_text)
+    if not text or len(text) > 24:
+        return False
+    continuation_terms = (
+        "continue",
+        "resume",
+        "carry on",
+        "go on",
+        "继续",
+        "接着",
+        "往下",
+        "下一步",
+    )
+    if any(term in text for term in continuation_terms):
+        return False
+    return text in {
+        "hi",
+        "hello",
+        "hey",
+        "hello there",
+        "hi there",
+        "你好",
+        "您好",
+        "嗨",
+        "哈喽",
+        "在吗",
+        "在么",
+    }
+
+
+def _has_task_resume_compaction_marker(messages):
+    """Detect compacted model context that tells the agent to resume an old task."""
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        text = _message_text(msg.get('content', '')).lower()
+        if not text:
+            continue
+        if "context compaction" not in text and "context compression" not in text:
+            continue
+        if (
+            "active task" in text
+            or "resume exactly" in text
+            or "current task" in text
+            or "task list was preserved" in text
+            or "in_progress" in text
+        ):
+            return True
+    return False
+
+
+def _context_messages_for_new_turn(session, msg_text):
+    """Return provider-facing history for a new user turn.
+
+    Compacted agent sessions can carry a hidden "resume the active task" summary
+    long after the visible UI looks like normal chat.  A short greeting should
+    not silently reactivate that old task; explicit continuation prompts still
+    keep the full compacted context.
+    """
+    history = _drop_checkpointed_current_user_from_context(
+        _session_context_messages(session),
+        msg_text,
+    )
+    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
+        return []
+    return history
+
+
 def _stream_writeback_is_current(session, stream_id):
     """Return True only while a worker still owns the session writeback.
 
@@ -3212,10 +3288,7 @@ def _run_agent_streaming(
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
             _previous_messages = list(s.messages or [])
-            _previous_context_messages = _drop_checkpointed_current_user_from_context(
-                _session_context_messages(s),
-                msg_text,
-            )
+            _previous_context_messages = _context_messages_for_new_turn(s, msg_text)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,

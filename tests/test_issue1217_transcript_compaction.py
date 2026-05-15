@@ -2,6 +2,7 @@ from api.models import Session
 import contextlib
 
 from api.streaming import (
+    _context_messages_for_new_turn,
     _merge_display_messages_after_agent_result,
     _sanitize_messages_for_api,
     _session_context_messages,
@@ -170,6 +171,56 @@ def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_
 
     assert session.context_messages == []
     assert _session_context_messages(session) == messages
+
+
+def test_casual_greeting_does_not_resume_stale_compaction_active_task(tmp_path):
+    compacted_task_context = [
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted. "
+                "Your current task is identified in the Active Task section — resume exactly from there. "
+                "[Your active task list was preserved across context compression] "
+                "- [>] 5. 更新测试：mock bridge 输出 (in_progress)"
+            ),
+        },
+        {"role": "assistant", "content": "I will inspect api/config.py next."},
+    ]
+    session = Session(
+        session_id="issue2308",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old provider/model task"},
+            {"role": "assistant", "content": "old task answer"},
+        ],
+        context_messages=compacted_task_context,
+    )
+
+    assert _context_messages_for_new_turn(session, "你好") == []
+
+
+def test_explicit_continue_keeps_compacted_active_task_context(tmp_path):
+    compacted_task_context = [
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted. "
+                "Your current task is identified in the Active Task section — resume exactly from there."
+            ),
+        },
+        {"role": "assistant", "content": "I will inspect api/config.py next."},
+    ]
+    session = Session(
+        session_id="issue2308-continue",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old provider/model task"},
+            {"role": "assistant", "content": "old task answer"},
+        ],
+        context_messages=compacted_task_context,
+    )
+
+    assert _context_messages_for_new_turn(session, "继续") == compacted_task_context
 
 
 def test_retry_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path):
