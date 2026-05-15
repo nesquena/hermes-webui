@@ -3736,6 +3736,41 @@ def test_space_tool_adapter_supports_source_space_duplicate_helper_metadata_only
     assert '"data":' not in serialized
 
 
+@pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
+def test_space_tool_adapter_duplicate_clone_rejects_conflicting_target_aliases_before_create_metadata_only(
+    monkeypatch, tmp_path, action
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    source = spaces.create_space({"space_id": "duplicate-conflict-source", "name": "Duplicate Conflict Source"})
+    existing_target = spaces.create_space({"space_id": "duplicate-conflict-existing", "name": "Existing Target"})
+    source_before = spaces.read_space(source["space_id"])
+    existing_before = spaces.read_space(existing_target["space_id"])
+    events_before = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="target Space selector aliases") as excinfo:
+        spaces.run_space_tool(
+            action,
+            {
+                "spaceId": source["space_id"],
+                "target_space_id": "duplicate-conflict-created",
+                "targetSpaceId": existing_target["space_id"],
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    serialized_error = str(excinfo.value).lower()
+    assert spaces.read_space(source["space_id"]) == source_before
+    assert spaces.read_space(existing_target["space_id"]) == existing_before
+    with pytest.raises(FileNotFoundError):
+        spaces.read_space("duplicate-conflict-created")
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == events_before
+    assert "renderer" not in serialized_error
+    assert "script" not in serialized_error
+    assert "api_key" not in serialized_error
+    assert "secret_value_do_not_leak" not in serialized_error
+
+
 def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-bulk-delete-lab", "name": "Source Bulk Delete Lab"})

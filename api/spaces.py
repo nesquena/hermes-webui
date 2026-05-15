@@ -3069,6 +3069,20 @@ def _space_tool_space_id_alias(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _space_tool_target_space_id_alias(payload: dict[str, Any]) -> str:
+    """Return an explicit target Space id from snake/camel aliases, rejecting conflicts."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("target_space_id", "targetSpaceId"),
+        "Conflicting duplicate target Space selector aliases",
+    )
+    for key in ("target_space_id", "targetSpaceId"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: int | None = None) -> str:
     """Return the optional current-space id from a tool payload."""
     positional_values = ()
@@ -3610,7 +3624,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
         result = duplicate_space_metadata_only(
             _space_tool_current_id(data),
-            target_space_id=data.get("target_space_id") or data.get("targetSpaceId") or None,
+            target_space_id=_space_tool_target_space_id_alias(data) or None,
         )
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
