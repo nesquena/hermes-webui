@@ -818,6 +818,61 @@ def test_agent_session_source_normalization_contract():
             assert normalized['raw_source'] is None
 
 
+def test_previous_messaging_setting_keeps_reset_history(monkeypatch):
+    """The previous-messaging toggle exposes older reset segments."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {
+            "discord_active": {
+                "raw_source": "discord",
+                "platform": "discord",
+                "user_id": "user-1",
+            }
+        },
+    )
+
+    rows = [
+        {
+            "session_id": "discord_active",
+            "title": "Current Discord chat",
+            "source_tag": "discord",
+            "raw_source": "discord",
+            "session_source": "messaging",
+            "source_label": "Discord",
+            "user_id": "user-1",
+            "message_count": 3,
+            "updated_at": 200.0,
+        },
+        {
+            "session_id": "discord_previous_history",
+            "title": "Previous Discord chat",
+            "source_tag": "discord",
+            "raw_source": "discord",
+            "session_source": "messaging",
+            "source_label": "Discord",
+            "user_id": "user-1",
+            "message_count": 7,
+            "updated_at": 100.0,
+            "end_reason": "session_reset",
+        },
+    ]
+
+    hidden = routes._keep_latest_messaging_session_per_source(rows)
+    visible = routes._keep_latest_messaging_session_per_source(
+        rows,
+        show_previous_messaging_sessions=True,
+    )
+
+    assert [row["session_id"] for row in hidden] == ["discord_active"]
+    assert [row["session_id"] for row in visible] == [
+        "discord_active",
+        "discord_previous_history",
+    ]
+
+
 def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
     """A WebUI continuation from a messaging parent must keep WebUI metadata.
 
