@@ -1067,6 +1067,22 @@ def create_profile_api(name: str, clone_from: str = None,
         model_provider=model_provider,
     )
 
+    # Seed bundled skills for fresh (non-cloned) profiles so WebUI-created
+    # profiles match CLI behaviour (#2305).  Cloned profiles already inherit
+    # skills from the source.  Wrapped in try/except so a seed failure is
+    # non-fatal — an empty skills/ directory is recoverable, a missing profile
+    # is not.
+    if clone_from is None:
+        try:
+            from hermes_cli.profiles import seed_profile_skills
+            seed_profile_skills(profile_path, quiet=True)
+        except ImportError:
+            # hermes_cli unavailable in Docker/standalone fallback — skills/
+            # remains empty, which is the pre-existing behaviour for that path.
+            logger.debug("hermes_cli unavailable; skipping skill seed for %s", name)
+        except Exception as e:
+            logger.warning("seed_profile_skills failed for new profile %s: %s", name, e)
+
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
     _invalidate_root_profile_cache()
