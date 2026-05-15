@@ -151,7 +151,12 @@ def _validate(name: str, base_url: str, models: list[str]) -> str | None:
     if len(name) > _MAX_NAME_LENGTH:
         return f"name exceeds {_MAX_NAME_LENGTH} chars"
     if not _slug_tail(name):
-        return "name produces an empty slug; use letters/numbers/dashes"
+        return (
+            "name must contain at least one ASCII letter/digit/dot/dash/underscore "
+            "(e.g. 'cli-proxy', 'relay1', or '中转 cli-proxy'). Pure non-ASCII names "
+            "aren't supported because the slug is used in env-var names and the agent's "
+            "@custom:<slug>:<model> routing grammar."
+        )
 
     if not base_url or not base_url.strip():
         return "base_url is required"

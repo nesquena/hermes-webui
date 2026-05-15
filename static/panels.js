@@ -6215,6 +6215,29 @@ function _buildCustomRelayCard(r, isDraft){
   nameInput.value=r.name||'';
   nameInput.maxLength=64;
   nameField.appendChild(nameInput);
+  // Live slug + env-var preview so users see immediately that pure-CJK names
+  // produce empty slugs (the agent's @custom:<slug>:<model> grammar and
+  // CUSTOM_RELAY_KEY_<SLUG> env-var name both require ASCII).
+  const slugHint=document.createElement('div');
+  slugHint.className='provider-card-hint';
+  slugHint.style.fontSize='11px';
+  slugHint.style.marginTop='4px';
+  const updateSlugHint=()=>{
+    const raw=(nameInput.value||'').trim().toLowerCase();
+    let slug=raw.replace(/[^a-z0-9._-]+/g,'-').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+    if(!slug){
+      slugHint.textContent=t('custom_relays_slug_empty_hint')||'⚠ Name has no ASCII letters/digits — add at least one (e.g. add "relay1" or "cli-proxy").';
+      slugHint.style.color='var(--accent, #e57)';
+    } else {
+      const envVar='CUSTOM_RELAY_KEY_'+slug.toUpperCase().replace(/[^A-Z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+      const tmpl=t('custom_relays_slug_preview')||'Slug: @custom:{0}  ·  env: {1}';
+      slugHint.textContent=tmpl.replace('{0}',slug).replace('{1}',envVar);
+      slugHint.style.color='';
+    }
+  };
+  nameInput.addEventListener('input',updateSlugHint);
+  updateSlugHint();
+  nameField.appendChild(slugHint);
   body.appendChild(nameField);
 
   // Base URL field
