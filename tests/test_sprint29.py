@@ -712,11 +712,18 @@ class TestSSRFCheck:
 
 class TestENVLock:
     def test_env_lock_importable_from_streaming(self):
-        """_ENV_LOCK must be importable from api.streaming."""
+        """_ENV_LOCK must be an importable threading-style reentrant lock."""
         from api.streaming import _ENV_LOCK
-        import threading
-        assert isinstance(_ENV_LOCK, type(threading.Lock())), \
-            "_ENV_LOCK must be a threading.Lock"
+
+        assert hasattr(_ENV_LOCK, "acquire"), "_ENV_LOCK must expose acquire()"
+        assert hasattr(_ENV_LOCK, "release"), "_ENV_LOCK must expose release()"
+        assert hasattr(_ENV_LOCK, "__enter__"), "_ENV_LOCK must support context manager use"
+        assert hasattr(_ENV_LOCK, "__exit__"), "_ENV_LOCK must support context manager use"
+
+        with _ENV_LOCK:
+            acquired = _ENV_LOCK.acquire(False)
+            assert acquired, "_ENV_LOCK must allow reentrant acquisition"
+            _ENV_LOCK.release()
 
     def test_env_lock_importable_in_routes(self):
         """api.routes must be able to import _ENV_LOCK from api.streaming."""
