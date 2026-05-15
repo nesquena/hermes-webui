@@ -4366,6 +4366,36 @@ def test_space_tool_adapter_lists_widget_events_with_positional_space_only(monke
     assert listed["events"][0]["payload_summary"] == {"query": "Claude Mythos", "messageType": "capy:agent:prompt"}
 
 
+def test_space_tool_adapter_event_list_rejects_conflicting_selector_aliases_before_read(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "event-list-alias-lab", "name": "Event List Alias Lab"})
+    other = spaces.create_space({"space_id": "event-list-other-lab", "name": "Event List Other Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "safe-widget", "kind": "prompt", "title": "Safe Widget"})
+    spaces.upsert_widget(created["space_id"], {"id": "other-widget", "kind": "prompt", "title": "Other Widget"})
+    spaces.upsert_widget(other["space_id"], {"id": "safe-widget", "kind": "prompt", "title": "Other Space Widget"})
+    spaces.queue_widget_event(
+        created["space_id"],
+        "safe-widget",
+        "agent.prompt",
+        {"query": "safe anchor"},
+        prompt="safe prompt",
+    )
+
+    conflicting_payloads = [
+        {"space_id": created["space_id"], "spaceId": other["space_id"], "widgetId": "safe-widget"},
+        {"spaceId": created["space_id"], "widget_id": "safe-widget", "widgetId": "other-widget"},
+        {"args": [created["space_id"], "safe-widget"], "spaceId": other["space_id"]},
+        {"args": [created["space_id"], "safe-widget"], "widgetId": "other-widget"},
+    ]
+
+    for payload in conflicting_payloads:
+        with pytest.raises(ValueError, match="selector aliases"):
+            spaces.run_space_tool("space.widget.events", {**payload, "limit": 5})
+
+    listed = spaces.run_space_tool("space.widget.events", {"spaceId": created["space_id"], "widgetId": "safe-widget", "limit": 5})
+    assert [event["widget_id"] for event in listed["events"]] == ["safe-widget"]
+
+
 def test_space_tool_adapter_event_requires_explicit_positional_widget_id(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "same-id", "name": "Same Id Lab"})

@@ -4210,17 +4210,33 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         )
         return {"ok": True, "action": name, **result}
     if name in {"widget.events", "widget.event.list", "space.widget.events", "space.widget.event.list", "space.current.widget.events", "space.current.widget.event.list"}:
+        args = data.get("args")
+        positional_space_id = _space_tool_arg(data, 0) if isinstance(args, (list, tuple)) else ""
+        positional_widget_id = _space_tool_arg(data, 1) if isinstance(args, (list, tuple)) and len(args) > 1 else ""
+        _space_tool_assert_matching_aliases(
+            data,
+            ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId")
+            if name.startswith("space.current.")
+            else ("space_id", "spaceId"),
+            "Conflicting widget event selector aliases",
+            positional_space_id,
+        )
+        _space_tool_assert_matching_aliases(
+            data,
+            ("widget_id", "widgetId", "id"),
+            "Conflicting widget event selector aliases",
+            positional_widget_id,
+        )
         space_id = validate_space_id(
             _space_tool_current_id(data)
             if name.startswith("space.current.")
-            else (data.get("space_id") or data.get("spaceId") or _space_tool_arg(data, 0))
+            else (data.get("space_id") or data.get("spaceId") or positional_space_id)
         )
         widget_id_raw = ""
-        args = data.get("args")
         if data.get("widget_id") or data.get("widgetId") or data.get("id"):
             widget_id_raw = _space_tool_widget_id(data)
-        elif isinstance(args, (list, tuple)) and len(args) > 1:
-            widget_id_raw = str(args[1] or "").strip()
+        elif positional_widget_id:
+            widget_id_raw = positional_widget_id
         widget_id = validate_widget_id(widget_id_raw) if widget_id_raw else None
         return {
             "ok": True,
