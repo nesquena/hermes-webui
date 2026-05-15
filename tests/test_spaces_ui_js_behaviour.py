@@ -900,6 +900,19 @@ global.fetch = async function(path, opts = {}) {
       data: { api_key: 'SECRET' },
     } });
   }
+  if (path === 'api/spaces/widget?space_id=data-lab&widget_id=timeline') {
+    return response({ widget: {
+      id: 'timeline',
+      kind: 'status',
+      title: 'Timeline',
+      layout: { x: 1, y: 2, w: 4, h: 3, minimized: false },
+      recovery: { disabled: false },
+      revision_event_id: '0123456789abcdef0123456789abcdea',
+      metadata: { status: { label: 'metadata-only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    } });
+  }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=notes-main') {
     return response({ widget: {
       id: 'notes-main',
@@ -1559,6 +1572,22 @@ async function dispatchWindowMessage(data, opts) {
       spaceId: 'other-lab',
       widgetId: 'other-widget',
       prompt: 'Queue this prompt with mismatched selectors and SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+    });
+  } else if (scenario === 'runtimePathLikeSelectorsDoNotNormalize') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await click('viewWidgetDetails', { spaceId: 'data-lab', widgetId: 'timeline' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token=\"([^\"]+)\"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      spaceId: 'data/lab',
+      widgetId: 'timeline',
+      prompt: 'Queue this path-like selector prompt with SECRET_VALUE_DO_NOT_LEAK',
       renderer: '<script>bad()</script>',
     });
   } else if (scenario === 'runtimePromptMissingSelectors') {
@@ -3319,6 +3348,21 @@ def test_spaces_ui_sandbox_postmessage_rejects_mismatched_camelcase_selectors(dr
     assert "Queue this prompt" not in out["rootHtml"]
     assert "other-lab" not in out["rootHtml"]
     assert "other-widget" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_path_like_selectors_without_normalizing(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimePathLikeSelectorsDoNotNormalize")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert "data-space-id=\"data-lab\"" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this path-like selector prompt" not in out["rootHtml"]
+    assert "data/lab" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

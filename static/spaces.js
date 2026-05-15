@@ -1331,11 +1331,16 @@
     return !!(frame && frame.contentWindow && event.source === frame.contentWindow);
   }
 
+  function runtimeMessageSelectorValue(value){
+    const text = String(value || '').trim().slice(0, 120);
+    return /^[a-z0-9][a-z0-9_-]{0,80}$/i.test(text) ? text : '';
+  }
+
   function runtimeMessageSelectorMatches(data, snakeKey, camelKey, expected){
     if (!data || typeof data !== 'object') return false;
     const values = [];
-    if (Object.prototype.hasOwnProperty.call(data, snakeKey)) values.push(runtimeTokenPart(data[snakeKey], ''));
-    if (Object.prototype.hasOwnProperty.call(data, camelKey)) values.push(runtimeTokenPart(data[camelKey], ''));
+    if (Object.prototype.hasOwnProperty.call(data, snakeKey)) values.push(runtimeMessageSelectorValue(data[snakeKey]));
+    if (Object.prototype.hasOwnProperty.call(data, camelKey)) values.push(runtimeMessageSelectorValue(data[camelKey]));
     return values.length > 0 && values.every(function(value){ return value && value === expected; });
   }
 
