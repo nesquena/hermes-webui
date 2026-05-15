@@ -1166,14 +1166,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
-    const _on=(event,handler)=>{
-      source.addEventListener(event,e=>{
-        const result=handler(e);
-        _rememberRunJournalCursor(e);
-        return result;
-      });
-    };
-
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -1189,7 +1181,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // the fixes below (_streamFinalized guard + cancelAnimationFrame in the
     // terminal handlers) address it without needing a reset here.
 
-    _on('token',e=>{
+    source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -1201,7 +1193,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    _on('interim_assistant',e=>{
+    source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -1222,7 +1214,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    _on('reasoning',e=>{
+    source.addEventListener('reasoning',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
@@ -1240,7 +1232,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
-    _on('tool',e=>{
+    source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
@@ -1272,7 +1264,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
-    _on('tool_complete',e=>{
+    source.addEventListener('tool_complete',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       const inflight=INFLIGHT[activeSid];
@@ -1302,28 +1294,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       scrollIfPinned();
     });
 
-    _on('approval',e=>{
+    source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playNotificationSound();
       sendBrowserNotification('Approval required',d.description||'Tool approval needed');
     });
 
-    _on('clarify',e=>{
+    source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playNotificationSound();
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
     });
 
-    _on('title',e=>{
+    source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
       applySessionTitleUpdate(activeSid, d.title);
     });
 
-    _on('title_status',e=>{
+    source.addEventListener('title_status',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
@@ -1351,7 +1343,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return raw;
     }
 
-    _on('goal',e=>{
+    source.addEventListener('goal',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -1369,7 +1361,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    _on('goal_continue',e=>{
+    source.addEventListener('goal_continue',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
@@ -1388,7 +1380,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    _on('done',e=>{
+    source.addEventListener('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
@@ -1552,7 +1544,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finishDone();
     });
 
-    _on('stream_end',e=>{
+    source.addEventListener('stream_end',e=>{
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
@@ -1561,7 +1553,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       source.close();
     });
 
-    _on('pending_steer_leftover',e=>{
+    source.addEventListener('pending_steer_leftover',e=>{
       // The agent finished its turn with steer text still stashed (no
       // tool-result boundary fired). Match the CLI's leftover-delivery
       // behaviour: queue the leftover text as a next-turn user message
@@ -1584,7 +1576,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    _on('compressing',e=>{
+    source.addEventListener('compressing',e=>{
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -1602,7 +1594,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
     });
 
-    _on('compressed',e=>{
+    source.addEventListener('compressed',e=>{
       // Context was auto-compressed during this turn. Render it through the
       // same transient compression-card path as manual /compress, without
       // inserting a fake assistant message into history or model context.
@@ -1629,7 +1621,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showToast(message||'Context compressed', 8000);
     });
 
-    _on('metering',e=>{
+    source.addEventListener('metering',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -1647,7 +1639,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    _on('apperror',e=>{
+    source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -1692,7 +1684,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
-    _on('warning',e=>{
+    source.addEventListener('warning',e=>{
       // Non-fatal warning from server (e.g. fallback activated, retrying)
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
@@ -1704,7 +1696,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    _on('error',async e=>{
+    source.addEventListener('error',async e=>{
       source.close();
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
@@ -1745,7 +1737,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _handleStreamError();
     });
 
-    _on('cancel',e=>{
+    source.addEventListener('cancel',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -1786,6 +1778,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList();
       _setActivePaneIdleIfOwner();
     });
+
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+    }
   }
 
   async function _restoreSettledSession(){
