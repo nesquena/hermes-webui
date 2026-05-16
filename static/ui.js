@@ -3902,7 +3902,7 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
-    const pendingMsg=getPendingSessionMessage(data.session);
+    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
 
@@ -4302,11 +4302,12 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function getPendingSessionMessage(session){
+function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
-  const messages=Array.isArray(session?.messages)?session.messages:[];
+  const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
+  const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
   if(lastUser){
     const lastText=String(msgContent(lastUser)||'').trim();

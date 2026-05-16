@@ -1738,8 +1738,6 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
             existing_snapshot = False
-        if len(s.messages) <= existing_msgs and existing_snapshot:
-            return
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its

@@ -540,6 +540,16 @@ async function loadSession(sid){
     S.busy=false;
   }
 
+  function _mergePendingSessionMessage(session,messages){
+    if(!Array.isArray(messages)) return false;
+    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
+    if(!pendingMsg) return false;
+    const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+    if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
+    else messages.push(pendingMsg);
+    return true;
+  }
+
   // Phase 2a: If session is streaming, restore from INFLIGHT cache before
   // loading full messages (INFLIGHT state is self-contained and sufficient).
   if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
@@ -558,6 +568,9 @@ async function loadSession(sid){
     // Streaming session: use cached INFLIGHT messages (already has pending assistant output).
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+    if(_mergePendingSessionMessage(S.session,S.messages)){
+      INFLIGHT[sid].messages=S.messages;
+    }
     S.busy=true;
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
@@ -634,8 +647,7 @@ async function loadSession(sid){
     updateQueueBadge(sid);
 
     // Attach pending user message if one is queued.
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(S.session):null;
-    if(pendingMsg) S.messages.push(pendingMsg);
+    _mergePendingSessionMessage(S.session,S.messages);
 
     if(activeStreamId){
       S.busy=true;

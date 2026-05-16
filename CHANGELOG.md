@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [v0.51.70] — 2026-05-16 — Release AS (stage-363 — 4-PR snapshot+journal+UI batch — #2337 compression snapshot runtime-clear + #2334 turn-journal fcntl lock + #2342 INFLIGHT reattach pending row + #2339 workspace panel edge toggle)
+
+### Added
+
+- **PR #2339** by @Michaelyklam (refs #2211) — The workspace panel now has a small desktop edge toggle that remains clickable after the right panel is hidden, making it possible to reopen the workspace browser without returning to Settings. The existing panel close button and composer workspace button remain unchanged; the new affordance only appears when the workspace panel is closed on desktop widths.
+
+### Fixed
+
+- **PR #2337** by @Michaelyklam (closes #2336) — Pre-compression snapshot preservation now also clears stale runtime stream fields when the existing on-disk snapshot is already as complete as the in-memory session. This keeps the load-and-mark branch aligned with the full-save branch and adds regression coverage so archived parent snapshots cannot retain stale `active_stream_id` / `pending_*` state.
+
+- **PR #2342** by @franksong2702 (fixes #2341) — Reattaching to an active streaming session now keeps the user prompt that started the running turn visible. Pre-fix, reload/session-switch restore could hydrate from the browser's INFLIGHT stream cache while the backend still held the initiating prompt only as `pending_user_message`, so the transcript showed assistant Thinking/Tool activity without the user's just-submitted message. The restore path now merges that pending user row into the live transcript before rendering and updates the INFLIGHT cache, while duplicate suppression checks the current message array so final session payloads do not show the prompt twice.
+
+- **PR #2334** by @Michaelyklam (refs #2097) — Turn journal appends now take an advisory `flock` around each JSONL event write and fsync when Unix file locks are available. This keeps oversized submitted-message events from interleaving at the byte level if a future deployment runs multiple WebUI worker processes against the same state directory, while preserving the previous best-effort append path on platforms without `fcntl`.
+
+## [v0.51.69] — 2026-05-15 — Release AT (stage-362 — 8-PR follow-up batch — Ollama routing + legacy toolset + cancel copy + cleanup + custom provider mismatch + cron metadata + dead-code removal; #2323 reverted after Opus-caught silent regression, refiled as #2321 reopen)
+
 ### Added
 
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
@@ -9,7 +25,6 @@
 ### Fixed
 
 - **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
-
 
 - **PR #2326** by @Michaelyklam (closes #2232) — Legacy `hermes` CLI toolset alias is now normalized to `hermes-cli` + `hermes-api-server` when WebUI resolves CLI toolsets from shared Hermes config. Modern Hermes Agent exposes the composite under those two names; older configs that still contain the legacy `hermes` toolset name no longer surface as "unknown toolset" warnings.
 
@@ -31,7 +46,6 @@
 - **PR #2319** by @Michaelyklam — Chat file uploads now land in a session-scoped attachment inbox instead of cluttering the active workspace root. By default uploads are stored under `~/.hermes/webui/attachments/<session_id>/`; operators can override the root with `HERMES_WEBUI_ATTACHMENT_DIR`, and the agent still receives the absolute uploaded file path for context. Archive extraction stays workspace-scoped (it's an explicit workspace operation). README updated to document the new default location. **Stage-361 maintainer fix applied inline**: Opus advisor caught that `_build_native_multimodal_message` at `api/streaming.py:787` required uploads to be under `workspace_root`, which would have silently dropped every image upload for vision-capable models once the inbox moved outside the workspace. The fix adds `_attachment_root()` (from `api/upload.py`) as a second allowed location, with 3 regression tests covering the new code path AND verifying the original workspace + cross-root rejection paths still work.
 
 ### Fixed
-
 
 - **PR #2315** by @Michaelyklam (closes #2305, refs #749) — WebUI profile creation now seeds bundled profile skills for newly-created non-cloned profiles, matching the CLI's `hermes profile create` behaviour. Pre-fix, creating a profile via Settings → New Profile (without checking "Clone from active profile") left the profile's `skills/` directory empty, which was inconsistent with CLI-created profiles that get the full bundled-skills overlay. The fix calls `seed_profile_skills(profile_path, quiet=True)` after `profile_path.mkdir()` when `clone_from is None`. Cloned profiles still inherit skills from their source — they don't get a second bundled-skills overlay. Seed failures (e.g. `hermes_cli` unavailable in Docker fallback) are logged as warnings, not fatal — profile creation still succeeds.
 

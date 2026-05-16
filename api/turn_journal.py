@@ -11,8 +11,14 @@ import os
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
+
+try:  # pragma: no cover - fcntl is unavailable on Windows.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover
+    _fcntl = None
 
 TURN_JOURNAL_DIR_NAME = "_turn_journal"
 _TERMINAL_EVENTS = {"completed", "interrupted"}
@@ -35,6 +41,26 @@ def _journal_path(session_id: str, session_dir: Path | None = None) -> Path:
 
 def _make_turn_id() -> str:
     return f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
+
+
+@contextmanager
+def _journal_file_lock(file_obj):
+    """Serialize multi-process journal writes when advisory locks exist.
+
+    ``O_APPEND`` keeps normal same-process appends simple, but a long JSONL event
+    can exceed POSIX's small atomic-write boundary.  On Unix, take an advisory
+    lock around the single event write+fsync so two WebUI worker processes cannot
+    interleave large submitted-message payloads into corrupted JSONL.  Platforms
+    without ``fcntl`` keep the previous best-effort append behavior.
+    """
+    if _fcntl is None:
+        yield
+        return
+    _fcntl.flock(file_obj.fileno(), _fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        _fcntl.flock(file_obj.fileno(), _fcntl.LOCK_UN)
 
 
 def append_turn_journal_event(
@@ -64,9 +90,10 @@ def append_turn_journal_event(
     line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
     fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
-        os.fsync(fh.fileno())
+        with _journal_file_lock(fh):
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
     try:
         dir_fd = os.open(path.parent, os.O_DIRECTORY)
         try:
