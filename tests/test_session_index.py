@@ -369,6 +369,65 @@ def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(mo
     assert [row["session_id"] for row in rows] == ["new_sid"]
 
 
+def test_fuller_pre_compression_snapshot_replaces_shorter_sidebar_continuation(monkeypatch):
+    """A fuller compression snapshot should stay reachable from the default sidebar."""
+    snapshot = Session(
+        session_id="full_sid",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "latest full transcript turn"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=100.0,
+    )
+    continuation = Session(
+        session_id="continuation_sid",
+        title="Long Conversation",
+        messages=[{"role": "assistant", "content": "compressed continuation"}],
+        parent_session_id="full_sid",
+        updated_at=200.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["full_sid"]
+    assert rows[0]["pre_compression_snapshot"] is True
+    assert rows[0]["message_count"] == 3
+
+
+def test_equal_or_fuller_continuation_keeps_snapshot_hidden(monkeypatch):
+    """Ordinary archival snapshots stay hidden once the continuation is complete enough."""
+    snapshot = Session(
+        session_id="archive_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "pre-compression history"}],
+        pre_compression_snapshot=True,
+        updated_at=100.0,
+    )
+    continuation = Session(
+        session_id="complete_continuation_sid",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "pre-compression history"},
+            {"role": "assistant", "content": "compressed continuation"},
+        ],
+        parent_session_id="archive_sid",
+        updated_at=200.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["complete_continuation_sid"]
+
+
 def test_session_save_does_not_persist_metadata_message_count_hint():
     s = Session(
         session_id="sess_private_hint",

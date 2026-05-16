@@ -1012,7 +1012,85 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
-    return bool(session.get('pre_compression_snapshot')) or source == 'cron' or sid.startswith('cron_')
+    snapshot_hidden = (
+        bool(session.get('pre_compression_snapshot'))
+        and not session.get('_show_pre_compression_snapshot_in_sidebar')
+    )
+    return (
+        snapshot_hidden
+        or bool(session.get('_hide_shorter_compression_continuation_from_sidebar'))
+        or source == 'cron'
+        or sid.startswith('cron_')
+    )
+
+
+def _sidebar_lineage_root_id(session: dict, by_id: dict[str, dict]) -> str:
+    """Return the oldest known parent id for grouping sidebar compression segments."""
+    sid = str(session.get('session_id') or '')
+    root = sid
+    seen = {sid}
+    parent = session.get('parent_session_id')
+    while parent:
+        parent_id = str(parent)
+        if parent_id in seen:
+            break
+        seen.add(parent_id)
+        root = parent_id
+        parent_session = by_id.get(parent_id)
+        if not parent_session:
+            break
+        parent = parent_session.get('parent_session_id')
+    return root
+
+
+def _surface_fuller_pre_compression_snapshots(sessions: list[dict]) -> list[dict]:
+    """Keep a fuller hidden compression snapshot visible over a shorter continuation.
+
+    Normal pre-compression snapshots are archival rows and stay hidden from the
+    default sidebar. If a continuation for the same lineage is visible but has a
+    shorter transcript than the snapshot, hiding the snapshot makes the sidebar
+    look like the user's conversation was truncated. In that narrow case, mark
+    the fuller snapshot as sidebar-visible before the generic hidden-row filter.
+    """
+    by_id = {str(s.get('session_id')): s for s in sessions if s.get('session_id')}
+    if not by_id:
+        return sessions
+
+    for session in sessions:
+        session.pop('_show_pre_compression_snapshot_in_sidebar', None)
+        session.pop('_hide_shorter_compression_continuation_from_sidebar', None)
+
+    visible_counts_by_root: dict[str, int] = {}
+    snapshot_counts_by_root: dict[str, int] = {}
+    for session in sessions:
+        if session.get('pre_compression_snapshot'):
+            root = _sidebar_lineage_root_id(session, by_id)
+            count = int(session.get('message_count') or 0)
+            snapshot_counts_by_root[root] = max(snapshot_counts_by_root.get(root, -1), count)
+            continue
+        if _hide_from_default_sidebar(session):
+            continue
+        root = _sidebar_lineage_root_id(session, by_id)
+        count = int(session.get('message_count') or 0)
+        visible_counts_by_root[root] = max(visible_counts_by_root.get(root, -1), count)
+
+    for session in sessions:
+        if not session.get('pre_compression_snapshot'):
+            if not _hide_from_default_sidebar(session):
+                root = _sidebar_lineage_root_id(session, by_id)
+                snapshot_count = snapshot_counts_by_root.get(root)
+                session_count = int(session.get('message_count') or 0)
+                if snapshot_count is not None and snapshot_count > session_count:
+                    session['_hide_shorter_compression_continuation_from_sidebar'] = True
+            continue
+        root = _sidebar_lineage_root_id(session, by_id)
+        visible_count = visible_counts_by_root.get(root)
+        if visible_count is None:
+            continue
+        snapshot_count = int(session.get('message_count') or 0)
+        if snapshot_count > visible_count:
+            session['_show_pre_compression_snapshot_in_sidebar'] = True
+    return sessions
 
 
 def _active_state_db_path() -> Path:
@@ -1131,6 +1209,7 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            result = _surface_fuller_pre_compression_snapshots(result)
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
@@ -1167,6 +1246,7 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    result = _surface_fuller_pre_compression_snapshots(result)
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
         if not s.get('profile'):

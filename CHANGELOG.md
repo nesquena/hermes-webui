@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2388** by @Michaelyklam (closes #2383) — The default session sidebar now surfaces a fuller pre-compression snapshot when its visible continuation has a shorter transcript for the same lineage. Ordinary archival snapshots remain hidden once the continuation is at least as complete, preventing compressed conversations from looking truncated while keeping the sidebar uncluttered.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
