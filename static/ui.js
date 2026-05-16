@@ -4787,6 +4787,13 @@ function ensureActivityGroup(inner, opts){
   if(live) _startActivityElapsedTimer(group);
   return group;
 }
+function closeCurrentLiveActivityGroup(){
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+    group.removeAttribute('data-live-activity-current');
+  });
+}
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
   if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
@@ -4914,6 +4921,7 @@ function appendLiveCompressionCard(state){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return false;
+  closeCurrentLiveActivityGroup();
   const node=_compressionCardsNode(state);
   if(!node) return false;
   node.setAttribute('data-live-compression-card','1');
