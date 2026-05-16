@@ -3194,6 +3194,16 @@ def get_available_models() -> dict:
                     for _m_id in _cp_models_dict:
                         if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
                             _cp_model_ids.append(_m_id.strip())
+                elif isinstance(_cp_models_dict, list):
+                    for _item in _cp_models_dict:
+                        if isinstance(_item, str):
+                            _mid = _item.strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
+                        elif isinstance(_item, dict):
+                            _mid = str(_item.get("id") or _item.get("model") or _item.get("name") or "").strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
