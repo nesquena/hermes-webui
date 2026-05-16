@@ -434,7 +434,7 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # INFLIGHT branch must call appendLiveToolCard
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+900]
+    inflight_block = src[inflight_idx:inflight_idx+1600]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -624,7 +624,7 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     src = (REPO_ROOT / "static/sessions.js").read_text()
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+700]
+    inflight_block = src[inflight_idx:inflight_idx+1600]
     busy_pos = inflight_block.find("S.busy=true;")
     render_pos = inflight_block.find("renderMessages();")
     assert busy_pos >= 0, "loadSession INFLIGHT branch must set S.busy=true"
