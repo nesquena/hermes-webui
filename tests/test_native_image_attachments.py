@@ -17,6 +17,7 @@ from api.streaming import (
     _attachment_name,
     _build_native_multimodal_message,
     _NATIVE_IMAGE_MAX_BYTES,
+    _sanitize_messages_for_api,
 )
 from api.routes import _normalize_chat_attachments
 
@@ -317,6 +318,41 @@ class TestBuildNativeMultimodalMessage:
             data_url = result[1]['image_url']['url']
             assert data_url.startswith('data:image/png;base64,')
             assert len(result) == 2
+
+    def test_text_image_mode_strips_historical_image_url_parts(self):
+        """#2297: text-only providers must not replay old native image parts."""
+        history = [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'what is in this image?'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
+                ],
+                'attachments': [{'name': 'photo.png'}],
+                'timestamp': 123,
+            },
+            {'role': 'assistant', 'content': 'It is a chart.'},
+        ]
+        cfg = {'agent': {'image_input_mode': 'text'}}
+
+        sanitized = _sanitize_messages_for_api(history, cfg=cfg)
+
+        assert sanitized[0] == {'role': 'user', 'content': 'what is in this image?'}
+        assert 'image_url' not in str(sanitized)
+        assert 'attachments' not in sanitized[0]
+        assert sanitized[1] == {'role': 'assistant', 'content': 'It is a chart.'}
+
+    def test_native_image_mode_keeps_historical_image_url_parts(self):
+        """Vision-capable/native mode keeps existing multimodal history intact."""
+        content = [
+            {'type': 'text', 'text': 'describe'},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
+        ]
+        cfg = {'agent': {'image_input_mode': 'native'}}
+
+        sanitized = _sanitize_messages_for_api([{'role': 'user', 'content': content}], cfg=cfg)
+
+        assert sanitized == [{'role': 'user', 'content': content}]
 
     def test_fake_png_rejected_by_magic_bytes(self):
         """A file named .png that is not actually an image must be rejected."""
