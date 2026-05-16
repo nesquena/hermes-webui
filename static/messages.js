@@ -1454,7 +1454,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(S.session&&S.session.session_id){
-            localStorage.setItem('hermes-webui-session',S.session.session_id);
+            try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
           const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
@@ -1824,7 +1824,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
         if(S.session&&S.session.session_id){
-          localStorage.setItem('hermes-webui-session',S.session.session_id);
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);

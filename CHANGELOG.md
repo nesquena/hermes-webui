@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2387** by @Michaelyklam (closes #2386) — Active-session and workspace-panel `localStorage` writes now degrade gracefully when browser storage quota is exhausted. The missed session/panel persistence writes now match the existing best-effort storage pattern so clicking sessions, creating chats, completing streams, and toggling the workspace panel no longer throw uncaught `QuotaExceededError` exceptions.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
