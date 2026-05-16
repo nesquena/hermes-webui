@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 23:20 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 01:50 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces safe-mode whole-Space repair aliases now match the recovery/current/admin repair paths: `space.safe_mode.repair` queues metadata-only `agent.repair` events through the shared recovery helper, and `space.safe_mode.space_repair_events` lists the same sanitized repair-event summaries without returning `active_space_id`. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces non-current recovery/safe-mode/admin rollback and widget-restore aliases now reject ambient `activeSpaceId` / `currentSpaceId` selectors before restoring revisions, while preserving explicit `spaceId` and existing positional rollback contracts. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject ambient rollback selectors`
+  - Added RED/GREEN backend coverage proving non-current rollback aliases (`space.recovery.rollback`, `space.safe_mode.restore`, `space.admin.rollback`, and `space.admin.recovery.restore`) and non-current widget-restore aliases (`space.recovery.restore_widget`, `space.safe_mode.restorewidget`, `space.admin.widget.rollback`, and `space.admin.recovery.restorewidget`) reject ambient current-space selectors before full-Space or widget restore side effects.
+  - Hardened the rollback and widget-restore Space-tool branches with the shared ambient current-selector rejection used by repair/quarantine paths, preserving explicit `space_id`/`spaceId`, conflict checks, metadata-only receipts, and pure positional recovery widget restore compatibility.
+  - Validation at completion: focused RED failed with expected `DID NOT RAISE` failures (`2 failed`); focused GREEN passed (`2 passed`); related rollback/recovery/widget-restore regressions passed (`19 passed, 316 deselected`); full Spaces foundation suite passed (`335 passed`); Spaces UI behavior + demo parity suites passed (`185 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery/admin browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/noncurrent-rollback-alias-qa.png`.
 
 - `fix(spaces): add safe mode repair aliases`
   - Added RED/GREEN backend coverage proving `space.safe_mode.repair` accepts Space-Agent-style `spaceId`, queues a metadata-only whole-Space `agent.repair` event, and `space.safe_mode.space_repair_events` lists that event through the same sanitized repair-event path.

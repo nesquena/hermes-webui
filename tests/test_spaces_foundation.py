@@ -7879,6 +7879,99 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
     assert "raw prompt" not in serialized
 
 
+def test_space_tool_adapter_non_current_rollback_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for index, action in enumerate(
+        (
+            "space.recovery.rollback",
+            "space.safe_mode.restore",
+            "space.admin.rollback",
+            "space.admin.recovery.restore",
+        )
+    ):
+        created = spaces.create_space({"space_id": f"noncurrent-rollback-{index}", "name": "Rollback Original"})
+        original_event_id = created["revision_event_id"]
+        updated = spaces.update_space(created["space_id"], {"name": "Rollback Patched"})
+        before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+        for payload in (
+            {
+                "activeSpaceId": created["space_id"],
+                "eventId": original_event_id,
+                "renderer": "<script>should-not-leak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            {
+                "spaceId": created["space_id"],
+                "currentSpaceId": created["space_id"],
+                "eventId": original_event_id,
+                "renderer": "<script>should-not-leak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        ):
+            with pytest.raises(ValueError, match="current-space selectors"):
+                spaces.run_space_tool(action, payload)
+
+        detail = spaces.read_space_detail(created["space_id"])
+        serialized = json.dumps(detail).lower()
+        assert detail["name"] == "Rollback Patched"
+        assert detail["revision_event_id"] == updated["revision_event_id"]
+        assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+        assert "renderer" not in serialized
+        assert "api_key" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+
+
+def test_space_tool_adapter_non_current_widget_restore_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for index, action in enumerate(
+        (
+            "space.recovery.restore_widget",
+            "space.safe_mode.restorewidget",
+            "space.admin.widget.rollback",
+            "space.admin.recovery.restorewidget",
+        )
+    ):
+        created = spaces.create_space({"space_id": f"noncurrent-widget-restore-{index}", "name": "Widget Restore"})
+        original = spaces.upsert_widget(created["space_id"], {"id": "panel", "kind": "markdown", "title": "Panel Original"})
+        spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes Current"})
+        patched = spaces.patch_widget(created["space_id"], "panel", {"title": "Panel Patched"})
+        before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+        for payload in (
+            {
+                "activeSpaceId": created["space_id"],
+                "eventId": original["revision_event_id"],
+                "widgetId": "panel",
+                "renderer": "<script>should-not-leak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            {
+                "spaceId": created["space_id"],
+                "currentSpaceId": created["space_id"],
+                "eventId": original["revision_event_id"],
+                "widgetId": "panel",
+                "renderer": "<script>should-not-leak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        ):
+            with pytest.raises(ValueError, match="current-space selectors"):
+                spaces.run_space_tool(action, payload)
+
+        panel = spaces.read_widget(created["space_id"], "panel")
+        notes = spaces.read_widget(created["space_id"], "notes")
+        serialized = json.dumps({"panel": panel, "notes": notes}).lower()
+        assert panel["title"] == "Panel Patched"
+        assert notes["title"] == "Notes Current"
+        assert patched["revision_event_id"]
+        assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+        assert "renderer" not in serialized
+        assert "api_key" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "<script" not in serialized
+
+
 def test_space_tool_adapter_non_current_repair_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     target = spaces.create_space({"space_id": "noncurrent-repair-target", "name": "Noncurrent Repair Target"})

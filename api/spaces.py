@@ -3109,12 +3109,17 @@ def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: i
 
 def _space_tool_non_current_space_id(payload: dict[str, Any]) -> str:
     """Return an explicit non-current Space target, rejecting ambient current selectors."""
-    for key in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
-        if str(payload.get(key) or "").strip():
-            raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
+    _space_tool_reject_ambient_current_selectors(payload)
     if str(_space_tool_arg(payload, 0) or "").strip():
         raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
     return _space_tool_space_id_alias(payload)
+
+
+def _space_tool_reject_ambient_current_selectors(payload: dict[str, Any]) -> None:
+    """Reject active/current selectors on non-current tool actions."""
+    for key in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
+        if str(payload.get(key) or "").strip():
+            raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
 
 
 def _space_tool_widget_id_alias(payload: dict[str, Any]) -> str:
@@ -3955,9 +3960,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         if not is_current:
+            _space_tool_reject_ambient_current_selectors(data)
             _space_tool_assert_matching_aliases(
                 data,
-                ("space_id", "spaceId", "current_space_id", "currentSpaceId", "active_space_id", "activeSpaceId", "id"),
+                ("space_id", "spaceId", "id"),
                 "Conflicting space selector aliases",
                 _space_tool_arg(data, 0),
             )
@@ -3992,7 +3998,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.restorewidget",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        if is_current:
+            space_id = validate_space_id(_space_tool_current_id(data))
+        else:
+            _space_tool_reject_ambient_current_selectors(data)
+            _space_tool_assert_matching_aliases(
+                data,
+                ("space_id", "spaceId"),
+                "Conflicting space selector aliases",
+                _space_tool_arg(data, 0),
+            )
+            space_id = validate_space_id(str(data.get("space_id") or data.get("spaceId") or _space_tool_arg(data, 0) or "").strip())
         if _space_tool_arg(data, 2) and not any(data.get(key) for key in ("event_id", "eventId", "revision_event_id", "revisionEventId", "widget_id", "widgetId", "id")):
             event_id = str(_space_tool_arg(data, 1) or "").strip()
             widget_id = validate_widget_id(_space_tool_arg(data, 2))
