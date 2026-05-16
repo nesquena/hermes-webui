@@ -25,7 +25,7 @@ def test_load_session_inflight_reattach_merges_pending_user_message_before_rende
     block = _load_session_inflight_branch()
 
     merge_pos = block.find("_mergePendingSessionMessage")
-    render_pos = block.find("renderMessages();appendThinking();")
+    render_pos = block.find("renderMessages();")
 
     assert merge_pos != -1, (
         "loadSession's INFLIGHT reattach branch must merge pending_user_message "
@@ -35,6 +35,10 @@ def test_load_session_inflight_reattach_merges_pending_user_message_before_rende
     assert merge_pos < render_pos, (
         "The pending user row must be present before renderMessages() rebuilds "
         "the active transcript"
+    )
+    assert "restoreLiveTurnHtmlForSession(sid)" in block, (
+        "Session restore may keep a live DOM snapshot instead of always "
+        "recreating a fresh Thinking row after renderMessages()"
     )
     assert "INFLIGHT[sid].messages=S.messages;" in block, (
         "After merging the pending user row, the INFLIGHT cache should be updated "
