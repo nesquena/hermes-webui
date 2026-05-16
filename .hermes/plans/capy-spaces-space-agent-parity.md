@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 03:06 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 06:45 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces non-current whole-Space recovery HTTP routes (`/api/spaces/recovery/disable-space`, `/enable-space`, and `/repair-space`) now reject ambient `activeSpaceId` / `currentSpaceId` selectors before recovery side effects, while preserving explicit `space_id`/`spaceId` contracts and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces non-current Research Harness mutation paths now reject ambient `activeSpaceId` / `currentSpaceId` selectors before progress/artifact side effects, while preserving explicit `space_id`/`spaceId` contracts, active `space.current.*` aliases, and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject ambient research selectors`
+  - Added RED/GREEN backend coverage proving non-current Research Harness tool actions (`space.research.progress.set` and `space.research.artifact.set`) plus direct HTTP routes (`/api/spaces/research/progress` and `/api/spaces/research/artifact`) reject same-valued ambient current selectors before mutating progress widgets or artifact slots.
+  - Hardened the Research tool branches to route non-current actions through the explicit non-current Space selector helper, and added ambient-current guards to the direct Research route handlers while preserving active-current `space.current.research.*` behavior.
+  - Validation at completion: focused RED failed before implementation (`2 failed`); focused GREEN passed (`2 passed`); targeted Research regressions passed (`9 passed, 338 deselected`); full Spaces foundation suite passed (`347 passed`); Spaces UI behavior + demo parity suites passed (`185 passed`); `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static backend-only browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/research-ambient-selector-qa.png`.
 
 - `fix(spaces): reject ambient recovery route selectors`
   - Added RED/GREEN route coverage proving direct whole-Space recovery HTTP routes reject an explicit target `space_id` combined with ambient `activeSpaceId` before disabling, enabling, or queuing repair events; both target and ambient Spaces remain unchanged and hostile renderer/source/secret-looking fixture markers are not echoed.

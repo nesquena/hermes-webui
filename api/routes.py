@@ -5053,6 +5053,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/research/progress":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -5076,6 +5077,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/research/artifact":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")

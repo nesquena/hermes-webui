@@ -5027,6 +5027,49 @@ def test_space_tool_adapter_research_progress_accepts_space_id_alias_metadata_on
     assert "api_key" not in serialized
 
 
+def test_space_tool_adapter_research_actions_reject_ambient_selectors_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    progress_install = spaces.install_template("research", space_id="tool-research-ambient-progress")
+    progress_space_id = progress_install["space"]["space_id"]
+    progress_before_revision = spaces.read_space_detail(progress_space_id)["revision_event_id"]
+
+    with pytest.raises(ValueError, match="Non-current actions require explicit space_id/spaceId"):
+        spaces.run_space_tool(
+            "space.research.progress.set",
+            {
+                "space_id": progress_space_id,
+                "activeSpaceId": progress_space_id,
+                "phase": "ambient source review",
+                "message": "Should not mutate through ambient selector",
+                "notes": ["SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"],
+            },
+        )
+
+    progress_detail = spaces.read_widget_detail(progress_space_id, "research-plan")
+    assert spaces.read_space_detail(progress_space_id)["revision_event_id"] == progress_before_revision
+    assert progress_detail["metadata"].get("status", {}).get("phase") != "ambient source review"
+
+    artifact_install = spaces.install_template("research", space_id="tool-research-ambient-artifact")
+    artifact_space_id = artifact_install["space"]["space_id"]
+    artifact_before_revision = spaces.read_space_detail(artifact_space_id)["revision_event_id"]
+
+    with pytest.raises(ValueError, match="Non-current actions require explicit space_id/spaceId"):
+        spaces.run_space_tool(
+            "space.research.artifact.set",
+            {
+                "spaceId": artifact_space_id,
+                "currentSpaceId": artifact_space_id,
+                "title": "Ambient artifact",
+                "markdown": "# Leak\nSECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            },
+        )
+
+    assert spaces.read_space_detail(artifact_space_id)["revision_event_id"] == artifact_before_revision
+    with pytest.raises(FileNotFoundError):
+        spaces.read_shared_data_slot(artifact_space_id, "research-summary")
+
+
 def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("research", space_id="research-artifact-lab")
@@ -5212,6 +5255,58 @@ def test_spaces_research_routes_accept_space_id_alias_metadata_only(monkeypatch,
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "source=" not in serialized
+
+
+def test_spaces_research_routes_reject_ambient_selectors_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    progress_install = spaces.install_template("research", space_id="route-research-ambient-progress")
+    progress_space_id = progress_install["space"]["space_id"]
+    progress_before_revision = spaces.read_space_detail(progress_space_id)["revision_event_id"]
+
+    handled, status, progress_body = _route_post(
+        "/api/spaces/research/progress",
+        {
+            "space_id": progress_space_id,
+            "activeSpaceId": progress_space_id,
+            "phase": "ambient route source review",
+            "message": "Should reject before mutation",
+            "notes": ["SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"],
+        },
+    )
+
+    progress_detail = spaces.read_widget_detail(progress_space_id, "research-plan")
+    assert handled is None
+    assert status == 400
+    assert "non-current" in progress_body["error"].lower()
+    assert spaces.read_space_detail(progress_space_id)["revision_event_id"] == progress_before_revision
+    assert progress_detail["metadata"].get("status", {}).get("phase") != "ambient route source review"
+
+    artifact_install = spaces.install_template("research", space_id="route-research-ambient-artifact")
+    artifact_space_id = artifact_install["space"]["space_id"]
+    artifact_before_revision = spaces.read_space_detail(artifact_space_id)["revision_event_id"]
+
+    handled_artifact, status_artifact, artifact_body = _route_post(
+        "/api/spaces/research/artifact",
+        {
+            "spaceId": artifact_space_id,
+            "currentSpaceId": artifact_space_id,
+            "title": "Ambient route artifact",
+            "markdown": "# Leak\nSECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        },
+    )
+
+    serialized = json.dumps({"progress": progress_body, "artifact": artifact_body}).lower()
+    assert handled_artifact is None
+    assert status_artifact == 400
+    assert "non-current" in artifact_body["error"].lower()
+    assert spaces.read_space_detail(artifact_space_id)["revision_event_id"] == artifact_before_revision
+    with pytest.raises(FileNotFoundError):
+        spaces.read_shared_data_slot(artifact_space_id, "research-summary")
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "activespaceid" not in serialized
+    assert "currentspaceid" not in serialized
 
 
 def test_spaces_research_routes_reject_conflicting_space_aliases_before_mutation(monkeypatch, tmp_path):

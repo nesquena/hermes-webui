@@ -3910,7 +3910,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         result = set_research_artifact(space_id, data.get("title") or data.get("name"), data.get("markdown") or data.get("content") or "")
         if is_current:
             result["active_space_id"] = space_id
@@ -3922,7 +3922,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.current.research.progress.update",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_space_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         result = set_research_progress(
             space_id,
             phase=data.get("phase") or data.get("status") or "working",
