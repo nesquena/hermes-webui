@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2408** by @Michaelyklam (fixes #2404) — Auto-compression cards now close the current live Activity burst before rendering, so post-compression tools start a fresh `Activity` row instead of joining the pre-compression tool group across a real timeline/context boundary.
+
 ## [v0.51.77] — 2026-05-16 — Release BA (stage-370 — 1-PR follow-up — live Activity grouping boundary fix)
 
 ### Fixed

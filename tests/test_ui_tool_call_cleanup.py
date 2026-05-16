@@ -327,6 +327,19 @@ class TestToolCallGroupingStatic:
             "Tool starts must not split consecutive tools into one-tool Activity rows."
         )
 
+    def test_live_compression_card_splits_current_tool_activity_burst(self):
+        compression_fn = _function_body(UI_JS, "appendLiveCompressionCard")
+        close_fn = _function_body(UI_JS, "closeCurrentLiveActivityGroup")
+        assert "closeCurrentLiveActivityGroup();" in compression_fn, (
+            "Auto-compression cards should close the current live Activity burst so later tools start a fresh group."
+        )
+        assert "data-live-activity-current" in close_fn, (
+            "The live compression boundary helper must clear the current Activity marker."
+        )
+        assert "removeAttribute('data-live-activity-current')" in close_fn, (
+            "Closing a live Activity burst should leave the row rendered but stop later tools from reusing it."
+        )
+
 
 class TestToolCardDesignTokens:
     def test_root_defines_shared_layout_design_tokens(self):
