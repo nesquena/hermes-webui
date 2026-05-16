@@ -17,7 +17,7 @@ class TestIssue907LiveModelDedup:
         fn_idx = UI_JS.find('function _addLiveModelsToSelect(')
         assert fn_idx != -1, "_addLiveModelsToSelect not found"
         # Find the closing brace of the function (~800 chars is enough)
-        fn_body = UI_JS[fn_idx:fn_idx + 2000]
+        fn_body = UI_JS[fn_idx:fn_idx + 2500]
         assert '_normId' in fn_body or 'existingNorm' in fn_body, (
             "_addLiveModelsToSelect must normalise IDs before dedup check (#907)"
         )
@@ -25,7 +25,7 @@ class TestIssue907LiveModelDedup:
     def test_normId_strips_at_prefix(self):
         # The _normId lambda/function must strip @provider: prefix
         fn_idx = UI_JS.find('function _addLiveModelsToSelect(')
-        fn_body = UI_JS[fn_idx:fn_idx + 2000]
+        fn_body = UI_JS[fn_idx:fn_idx + 2500]
         has_at_strip = ("startsWith('@')" in fn_body or "split(':'" in fn_body)
         assert has_at_strip, (
             "_normId in _addLiveModelsToSelect must strip @provider: prefix for dedup (#907)"
@@ -33,7 +33,7 @@ class TestIssue907LiveModelDedup:
 
     def test_existingNorm_used_as_guard(self):
         fn_idx = UI_JS.find('function _addLiveModelsToSelect(')
-        fn_body = UI_JS[fn_idx:fn_idx + 2000]
+        fn_body = UI_JS[fn_idx:fn_idx + 2500]
         assert 'existingNorm.has(' in fn_body, (
             "_addLiveModelsToSelect must check existingNorm before appending (#907)"
         )
@@ -47,7 +47,7 @@ class TestIssue907LiveModelDedup:
         """
         fn_idx = UI_JS.find('function _addLiveModelsToSelect(')
         assert fn_idx != -1
-        fn_body = UI_JS[fn_idx:fn_idx + 2000]
+        fn_body = UI_JS[fn_idx:fn_idx + 2500]
         # The implementation must use indexOf/substring or split().slice(1).join(),
         # not split(':', 2)[1] which truncates the tail.
         good = 'indexOf' in fn_body or "slice(1).join(':')" in fn_body
