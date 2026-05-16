@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.51.72] — 2026-05-16 — Release AV (stage-365 — 2-PR safe-lane batch — #2354 recovered pending turn context fix + #2348 Thinking card interim-text echo suppression)
+
+### Fixed
+
+- **PR #2354** by @franksong2702 (fixes #2353) — Stale stream recovery now keeps a recovered pending user turn in the model context (`context_messages`) as well as the visible transcript. Pre-fix, a server restart during an in-flight turn could restore the user's message in WebUI while omitting it from `context_messages`, so the next agent turn could forget a prompt that was visibly present just above it. The repair path now appends the recovered user turn to both surfaces with 8-message lookback dedup so already-checkpointed entries are not duplicated.
+
+- **PR #2348** by @franksong2702 (fixes #2346) — Thinking cards now suppress exact snippets that are already shown as user-visible interim assistant text, avoiding duplicated progress lines when an agent emits the same sentence through both reasoning and interim-assistant callbacks. Tracks `_liveThinkingText` during the live stream to strip the visible echo from the live Thinking card display; applies the same suppression in the settled-transcript path so reload/session-switch sees the cleaned-up view too.
+
 ## [v0.51.71] — 2026-05-16 — Release AU (stage-364 — 3-PR batch — #2349 stale-stream cleanup non-touching + #2343 profiles vs workspaces help card + #2283 run-event journal replay [refs #1925 RFC slice 1] — with Opus-caught replay double-render fix)
 
 ### Added
@@ -36,8 +44,6 @@
 
 ### Fixed
 
-- **PR TBD** by @franksong2702 — Thinking cards now suppress exact snippets that are already shown as user-visible interim assistant text, avoiding duplicated progress lines when an agent emits the same sentence through both reasoning and interim-assistant callbacks.
-
 - **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
 
 - **PR #2326** by @Michaelyklam (closes #2232) — Legacy `hermes` CLI toolset alias is now normalized to `hermes-cli` + `hermes-api-server` when WebUI resolves CLI toolsets from shared Hermes config. Modern Hermes Agent exposes the composite under those two names; older configs that still contain the legacy `hermes` toolset name no longer surface as "unknown toolset" warnings.
@@ -60,8 +66,6 @@
 - **PR #2319** by @Michaelyklam — Chat file uploads now land in a session-scoped attachment inbox instead of cluttering the active workspace root. By default uploads are stored under `~/.hermes/webui/attachments/<session_id>/`; operators can override the root with `HERMES_WEBUI_ATTACHMENT_DIR`, and the agent still receives the absolute uploaded file path for context. Archive extraction stays workspace-scoped (it's an explicit workspace operation). README updated to document the new default location. **Stage-361 maintainer fix applied inline**: Opus advisor caught that `_build_native_multimodal_message` at `api/streaming.py:787` required uploads to be under `workspace_root`, which would have silently dropped every image upload for vision-capable models once the inbox moved outside the workspace. The fix adds `_attachment_root()` (from `api/upload.py`) as a second allowed location, with 3 regression tests covering the new code path AND verifying the original workspace + cross-root rejection paths still work.
 
 ### Fixed
-
-- Stale stream recovery now keeps a recovered pending user turn in the model context as well as the visible transcript. Before this fix, a server restart during an in-flight turn could restore the user's message in WebUI while omitting it from `context_messages`, so the next agent turn could forget a prompt that was visibly present just above it.
 
 - **PR #2315** by @Michaelyklam (closes #2305, refs #749) — WebUI profile creation now seeds bundled profile skills for newly-created non-cloned profiles, matching the CLI's `hermes profile create` behaviour. Pre-fix, creating a profile via Settings → New Profile (without checking "Clone from active profile") left the profile's `skills/` directory empty, which was inconsistent with CLI-created profiles that get the full bundled-skills overlay. The fix calls `seed_profile_skills(profile_path, quiet=True)` after `profile_path.mkdir()` when `clone_from is None`. Cloned profiles still inherit skills from their source — they don't get a second bundled-skills overlay. Seed failures (e.g. `hermes_cli` unavailable in Docker fallback) are logged as warnings, not fatal — profile creation still succeeds.
 
