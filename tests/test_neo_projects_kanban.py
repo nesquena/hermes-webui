@@ -463,14 +463,15 @@ def test_style_makes_projects_panel_full_height():
 
 
 def test_views_are_mutually_exclusive_on_render():
-    """Both Kanban and List exist in the DOM; CSS hides the inactive one and
+    """Kanban, List and Summary exist in the DOM; CSS hides inactive ones and
     JS renders only the active branch in renderAll()."""
     src_css = _read(STYLE_CSS)
     assert ".projects-kanban[hidden]" in src_css
     assert ".projects-list[hidden]" in src_css
     src_js = _read(KANBAN_JS)
     assert "if (state.view === 'kanban') renderKanban();" in src_js
-    assert "else renderList();" in src_js
+    assert "else if (state.view === 'list') renderList();" in src_js
+    assert "else if (state.view === 'summary') renderSummary();" in src_js
 
 # ── HU-04.9 / 04.10: archive + refs (Sprint 5 P1) ──────────────────────────
 

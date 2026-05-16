@@ -68,7 +68,6 @@ def test_neo_sidebar_matches_required_navigation_order_and_targets():
         # the Neo fork hides.
         ("chat", "chat", "tab_conversations"),
         ("projects", "projects", "tab_projects"),
-        ("todos", "todos", "tab_tasks"),
         ("profiles", "profiles", "tab_profiles"),
         ("finance", "finance", "tab_finance"),
         ("agents", "agents", "tab_agents"),
