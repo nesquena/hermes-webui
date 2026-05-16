@@ -1012,7 +1012,10 @@ def _clear_stale_stream_state(session) -> bool:
         if hasattr(session, "pending_started_at"):
             session.pending_started_at = None
         try:
-            session.save()
+            # Runtime cleanup is not user activity; do not bubble old sessions
+            # to the top of the sidebar just because a stale stream flag was
+            # repaired during a read/list path.
+            session.save(touch_updated_at=False)
         except Exception:
             logger.exception(
                 "_clear_stale_stream_state: save() failed for session %s",
