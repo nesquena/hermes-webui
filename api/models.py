@@ -603,10 +603,11 @@ def _apply_core_sync_or_error_marker(
 
 
 def _repair_stale_pending(session) -> bool:
-    """Recover a sidecar stuck with messages=[] and stale pending state.
+    """Recover a sidecar stuck with stale pending state.
 
-    Fires only when messages is empty, pending_user_message is set,
-    active_stream_id is set, and the stream is no longer alive.
+    Fires when pending_user_message and active_stream_id are set, and the
+    stream is no longer alive.  If messages is non-empty, existing messages are
+    preserved and only the stale pending fields are cleared.
 
     Uses a non-blocking lock acquire so a caller that already holds the
     per-session lock (e.g. retry_last, undo_last, cancel_stream) cannot
@@ -619,8 +620,7 @@ def _repair_stale_pending(session) -> bool:
     # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
     # (e.g. context compression) or a stream that came back alive.
     _seen_stream_id = session.active_stream_id
-    if (len(session.messages) != 0
-            or not session.pending_user_message
+    if (not session.pending_user_message
             or not _seen_stream_id
             or _seen_stream_id in _active_stream_ids()):
         return False

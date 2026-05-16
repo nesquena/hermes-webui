@@ -516,9 +516,36 @@ class TestEmptyMessagesGuard:
 
 
 class TestNonEmptyMessagesPendingCleared:
-    """When messages is non-empty and pending is stuck, _last_resort_sync_from_core
-    clears the pending fields and appends exactly one error marker without
-    clobbering existing messages or syncing from core."""
+    """When messages is non-empty and pending is stuck, repair clears the
+    pending fields and appends exactly one error marker without clobbering
+    existing messages or syncing from core."""
+
+    def test_get_session_repairs_nonempty_messages_stale_pending(self, hermes_home, monkeypatch):
+        """Cache-miss repair must also fix sessions that already have messages.
+
+        Production stale sessions can have a valid transcript plus a dead
+        active_stream_id/pending_user_message from an interrupted later turn.
+        get_session() must clear that state so /api/chat/start does not keep
+        returning 409 Conflict forever.
+        """
+        sid = "stale_nonempty_sid"
+        s = _make_session(session_id=sid, messages=[{"role": "user", "content": "existing turn"}])
+        s.pending_user_message = "Interrupted follow-up"
+        s.active_stream_id = "dead_stream"
+        s.pending_started_at = time.time() - 120
+        s.save()
+        models.SESSIONS.pop(sid, None)
+
+        repaired = models.get_session(sid)
+
+        assert repaired.pending_user_message is None
+        assert repaired.active_stream_id is None
+        assert repaired.pending_started_at is None
+        assert repaired.messages[0]["content"] == "existing turn"
+        error_msgs = [m for m in repaired.messages if m.get("_error")]
+        assert len(error_msgs) == 1
+        assert "Previous turn did not complete" in error_msgs[0]["content"]
+        assert models.SESSIONS.get(sid) is repaired
 
     def test_pending_cleared_when_messages_nonempty(self, hermes_home, monkeypatch):
         """_last_resort_sync_from_core on a session with both messages and
@@ -719,14 +746,20 @@ class TestRepairStalePendingIntegration:
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
 
-    def test_skips_when_messages_nonempty(self, hermes_home, monkeypatch):
-        """Pre-check: if messages is non-empty, repair is skipped entirely."""
+    def test_repairs_when_messages_nonempty_and_stream_dead(self, hermes_home, monkeypatch):
+        """If messages is non-empty but stream is dead, repair clears stale pending state."""
         s = _make_session(messages=[{"role": "user", "content": "hi"}])
         s.pending_user_message = "more"
         s.active_stream_id = "stream_1"
+        s.save()
 
         result = _repair_stale_pending(s)
-        assert result is False
+        assert result is True
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+        assert s.messages[0]["content"] == "hi"
+        error_msgs = [m for m in s.messages if m.get("_error")]
+        assert len(error_msgs) == 1
 
     def test_skips_when_stream_alive(self, hermes_home, monkeypatch):
         """Pre-check: if the stream is still alive in STREAMS, repair is skipped."""
