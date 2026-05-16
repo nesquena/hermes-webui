@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Service worker updates now delete old shell caches before creating the new versioned cache, reducing temporary Cache Storage pressure during frequent releases. Deleting sessions also prunes the localStorage maps that track viewed counts, completion unread state, and observed streaming state so stale per-session entries do not accumulate indefinitely. Closes #2389.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
