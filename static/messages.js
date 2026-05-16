@@ -410,6 +410,16 @@ function closeLiveStream(sessionId, streamId){
   delete LIVE_STREAMS[sessionId];
 }
 
+function closeOtherLiveStreams(activeSid){
+  // Keep the live token SSE connection scoped to the conversation pane the user
+  // is actually viewing. Background sessions still show running/finished state
+  // through the session list and can reattach when selected, but they should not
+  // keep one EventSource each and exhaust the browser connection pool (#2313).
+  for(const sid of Object.keys(LIVE_STREAMS)){
+    if(sid!==activeSid) closeLiveStream(sid);
+  }
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -427,6 +437,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   ){
     return;
   }
+  closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
 
   let assistantText='';
