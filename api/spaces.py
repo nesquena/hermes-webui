@@ -2813,6 +2813,18 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
             if not spaces_enabled():
                 raise RuntimeError("Capy Spaces is disabled")
             existing = read_space(space["space_id"])
+            existing_widgets_by_id = {
+                widget.get("id"): widget
+                for widget in (existing.get("widgets") or [])
+                if isinstance(widget, dict) and widget.get("id")
+            }
+            committed_widgets = []
+            for widget in create_payload["widgets"]:
+                candidate = copy.deepcopy(widget)
+                existing_widget = existing_widgets_by_id.get(candidate.get("id")) if isinstance(candidate, dict) else None
+                if isinstance(existing_widget, dict):
+                    candidate = _preserve_admin_disabled_widget_recovery(existing_widget, candidate)
+                committed_widgets.append(candidate)
             revised_manifest = {
                 "schema_version": SCHEMA_VERSION,
                 "space_id": space["space_id"],
@@ -2823,7 +2835,7 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
                 "created_at": existing.get("created_at") or time.time(),
                 "updated_at": existing.get("updated_at") or time.time(),
                 "layout": create_payload["layout"],
-                "widgets": create_payload["widgets"],
+                "widgets": committed_widgets,
                 "capabilities": create_payload["capabilities"],
                 "recovery": existing.get("recovery") if isinstance(existing.get("recovery"), dict) else {"safe_mode_available": True},
                 "revision_events": list(existing.get("revision_events") or []),

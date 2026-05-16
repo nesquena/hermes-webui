@@ -2270,6 +2270,72 @@ def test_creator_commit_existing_preview_returns_revision_receipt_diff(monkeypat
     assert "secret_source" not in serialized
 
 
+def test_creator_commit_preserves_disabled_widget_recovery_state_until_enable_control(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "creator-quarantine-lab", "name": "Creator Quarantine Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "same-panel",
+            "kind": "html",
+            "title": "Original Panel",
+            "renderer": "<script>breakNormalRoute()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.disable_widget_for_recovery(created["space_id"], "same-panel", reason="manual recovery quarantine")
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "space_id": created["space_id"],
+            "spaceName": "Creator Quarantine Lab Revised",
+            "widgets": [
+                {
+                    "widgetId": "same-panel",
+                    "title": "Revised Panel",
+                    "kind": "status",
+                    "recovery": {"disabled": False, "disabled_reason": "incoming preview must not enable"},
+                    "renderer": "<script>updatedBody()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK_2",
+                }
+            ],
+        },
+    )
+
+    committed = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+
+    stored = spaces.read_widget(created["space_id"], "same-panel")
+    recovery = spaces.recovery_snapshot()
+    serialized_public = json.dumps({"committed": committed, "recovery": recovery}, sort_keys=True).lower()
+
+    assert committed["ok"] is True
+    assert stored["title"] == "Revised Panel"
+    assert stored["kind"] == "status"
+    assert stored["recovery"] == {"disabled": True, "disabled_reason": "manual recovery quarantine"}
+    assert recovery["summary"]["disabled_widget_count"] == 1
+    assert recovery["spaces"][0]["widgets"][0]["id"] == "same-panel"
+    assert recovery["spaces"][0]["widgets"][0]["disabled"] is True
+    assert recovery["spaces"][0]["widgets"][0]["disabled_reason"] == "manual recovery quarantine"
+    assert "incoming preview must not enable" not in serialized_public
+    assert "renderer" not in serialized_public
+    assert "<script" not in serialized_public
+    assert "api_key" not in serialized_public
+    assert "secret_value_do_not_leak" not in serialized_public
+
+    enabled = spaces.enable_widget_for_recovery(created["space_id"], "same-panel")
+    assert enabled["disabled"] is False
+    assert spaces.read_widget(created["space_id"], "same-panel")["recovery"]["disabled"] is False
+
+
 def test_creator_preview_ignores_ambient_current_space_id_for_new_drafts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.create_space({"space_id": "ambient-existing-lab", "name": "Ambient Existing Lab"})
