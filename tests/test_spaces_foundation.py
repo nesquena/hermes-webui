@@ -53,6 +53,73 @@ def test_create_read_list_space_with_schema_version_and_revision_event(monkeypat
     assert event["space_id"] == "research-harness"
 
 
+def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "checkpoint-lab", "name": "Checkpoint Lab"})
+    before_revisions = list(created.get("revision_events") or [])
+
+    result = spaces.run_space_tool(
+        "space.checkpoint",
+        {
+            "spaceId": created["space_id"],
+            "reason": "before rollback renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "space.checkpoint"
+    assert result["space_id"] == created["space_id"]
+    assert result["event_type"] == "space.checkpointed"
+    assert result["metadata_only"] is True
+    assert result["generated_widgets_rendered"] is False
+    assert result["revision_event_id"]
+    assert result["revision_event_id"] not in before_revisions
+
+    loaded = spaces.read_space(created["space_id"])
+    assert loaded["revision_event_id"] == result["revision_event_id"]
+    assert loaded["revision_events"] == before_revisions + [result["revision_event_id"]]
+
+    event_path = spaces.events_dir() / f"{result['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    details = event["details"]
+    assert event["event_type"] == "space.checkpointed"
+    assert event["space_id"] == created["space_id"]
+    assert details["metadata_only"] is True
+    assert details["generated_widgets_rendered"] is False
+    assert details["reason"] == "[REDACTED]"
+    serialized_details = json.dumps(details, sort_keys=True).lower()
+    assert "renderer" not in serialized_details
+    assert "<script" not in serialized_details
+    assert "api_key" not in serialized_details
+    assert "secret_value_do_not_leak" not in serialized_details
+
+
+
+def test_space_checkpoint_route_rejects_ambient_selectors_before_revision(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "checkpoint-route-lab", "name": "Checkpoint Route Lab"})
+    before_revisions = list(created.get("revision_events") or [])
+
+    handled, status, body = _route_post(
+        "/api/spaces/checkpoint",
+        {
+            "spaceId": created["space_id"],
+            "activeSpaceId": created["space_id"],
+            "reason": "renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert "explicit space_id/spaceId" in body["error"]
+    assert spaces.read_space(created["space_id"])["revision_events"] == before_revisions
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

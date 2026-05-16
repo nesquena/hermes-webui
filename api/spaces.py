@@ -3582,6 +3582,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return _space_creator_preview_payload(name, data)
     if name in {"space.creator.commit", "space.creator.spec.commit", "space.spaces.commitcreatorspec"}:
         return _space_creator_commit_payload(name, data)
+    if name in {"space.checkpoint", "space.revision.checkpoint"}:
+        result = create_space_checkpoint(
+            validate_space_id(_space_tool_non_current_space_id(data)),
+            reason=data.get("reason") or "manual checkpoint",
+        )
+        return {"action": name, **result}
+    if name in {"space.current.checkpoint", "space.current.revision.checkpoint"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = create_space_checkpoint(space_id, reason=data.get("reason") or "manual checkpoint")
+        return {"action": name, "active_space_id": space_id, **result}
     if name in {
         "space.get",
         "space.spaces.get",
@@ -4400,6 +4410,30 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = add_camera_stream(space_id, data)
         return {"ok": True, "action": name, **result}
     raise ValueError("Unsupported Capy Spaces tool action")
+
+
+def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint") -> dict[str, Any]:
+    """Create a metadata-only rollback anchor without rendering generated widgets."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    space = read_space(sid)
+    reason_text = _payload_text_summary(reason, 300) or "manual checkpoint"
+    details = {
+        "metadata_only": True,
+        "generated_widgets_rendered": False,
+        "reason": reason_text,
+    }
+    saved = _write_manifest(space, "space.checkpointed", details)
+    return {
+        "ok": True,
+        "space_id": sid,
+        "event_type": "space.checkpointed",
+        "metadata_only": True,
+        "generated_widgets_rendered": False,
+        "reason": reason_text,
+        "revision_event_id": saved["revision_event_id"],
+    }
 
 
 def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:

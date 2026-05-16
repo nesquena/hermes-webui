@@ -4943,6 +4943,21 @@ def handle_post(handler, parsed) -> bool:
         except (ValueError, FileExistsError) as e:
             return bad(handler, str(e))
 
+    if parsed.path == "/api/spaces/checkpoint":
+        from api import spaces as capy_spaces
+        try:
+            _route_reject_ambient_current_selectors()
+            space_id = _route_alias_value("space_id", "spaceId")
+            if not space_id:
+                return bad(handler, "Missing space_id")
+            return j(handler, capy_spaces.create_space_checkpoint(space_id, reason=body.get("reason") or "manual checkpoint"))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/update":
         from api import spaces as capy_spaces
         try:
