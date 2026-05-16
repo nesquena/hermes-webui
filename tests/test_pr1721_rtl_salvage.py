@@ -54,6 +54,28 @@ def test_rtl_css_scoped_to_chat_only():
     assert ".chat-content-rtl html{" not in css
 
 
+def test_rtl_code_blocks_stay_ltr():
+    """Critical: Arabic users still write English code. Code blocks must NOT flip."""
+    css = STYLE.read_text(encoding="utf-8")
+    # Must scope pre/code back to LTR
+    assert ".chat-content-rtl .msg-body pre" in css
+    assert ".chat-content-rtl .msg-body code" in css
+    # Must force direction:ltr inside code containers
+    code_block = css.split(".chat-content-rtl .msg-body pre")[1].split("}")[0]
+    # The chain ends in a single declaration block — find the closest declaration
+    # to confirm direction:ltr is present in the code-scoped rule
+    code_section_start = css.index(".chat-content-rtl .msg-body pre,")
+    code_section_end = css.index("}", code_section_start)
+    code_section = css[code_section_start:code_section_end]
+    assert "direction:ltr" in code_section
+    assert "text-align:left" in code_section
+    # Tool-call content also stays LTR (commands, paths, JSON)
+    tool_section_start = css.index(".chat-content-rtl .tool-call-group-body,")
+    tool_section_end = css.index("}", tool_section_start)
+    tool_section = css[tool_section_start:tool_section_end]
+    assert "direction:ltr" in tool_section
+
+
 def test_rtl_setting_round_trips_through_panels_js():
     js = PANELS.read_text(encoding="utf-8")
     # Load path: read from settings + localStorage, apply class

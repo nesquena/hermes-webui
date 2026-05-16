@@ -1146,6 +1146,19 @@
   .provider-quota-chip:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.35);}
   .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
   .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* Hide the ambient quota chip below 1400px — the composer footer already
+     has profile + workspace + model picker + reasoning + media + send and
+     was getting cramped (model picker truncating from "Claude Sonnet 4 7"
+     to "Claude Sonnet 4", workspace dropping more text) once the chip
+     squeezed in. Mobile users get provider info via the dedicated
+     mobile-config drawer; laptop desktop users can find quota in
+     Settings → Providers (the chip's onclick target). Show only on wide
+     desktop where there's genuine room. Aron's standing position on
+     composer real estate (PR #1721, May 13 2026) reinforces this. */
+  @media (max-width:1400px){
+    .icon-btn.provider-quota-chip,
+    .provider-quota-chip{display:none!important;}
+  }
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */
@@ -4030,6 +4043,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
  * or any other UI element. Direction objection from design review (PR #1721
  * comment by @aronprins, May 13 2026) honored: no composer button — the
  * toggle lives in Settings → Preferences only.
+ *
+ * Code blocks, inline code, and pre-formatted blocks stay LTR even when RTL
+ * is active — Arabic/Hebrew users still write English code, command lines,
+ * URLs, and JSON the same way English users do. Flipping those would render
+ * code mirrored (e.g. `()fn()` instead of `fn()`) which is the salvage's
+ * critical bug fix vs the original PR #1721 implementation.
  */
 .chat-content-rtl .msg-row{
   direction:rtl;
@@ -4052,4 +4071,27 @@ main.main.showing-logs > #mainLogs{display:flex;}
   direction:rtl;
   text-align:right;
   unicode-bidi:plaintext;
+}
+/* Force code/pre/tt back to LTR — Arabic users still write English code. */
+.chat-content-rtl .msg-body pre,
+.chat-content-rtl .msg-body code,
+.chat-content-rtl .msg-body kbd,
+.chat-content-rtl .msg-body samp,
+.chat-content-rtl .msg-body tt,
+.chat-content-rtl .msg-body .hljs,
+.chat-content-rtl .msg-body .code-block,
+.chat-content-rtl .msg-body .code-block *,
+.chat-content-rtl .msg-body pre *{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}
+/* Tool-call content (commands, paths, JSON) stays LTR. */
+.chat-content-rtl .tool-call-group-body,
+.chat-content-rtl .tool-call-group-body *,
+.chat-content-rtl .tool-result,
+.chat-content-rtl .tool-result *{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
 }

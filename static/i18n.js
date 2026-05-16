@@ -1925,7 +1925,7 @@ const LOCALES = {
     clear_conversation_btn_tooltip: 'Cancella tutti i messaggi in questa conversazione',
     // Settings detail
     settings_label_rtl: 'Layout chat da destra a sinistra',
-    settings_desc_rtl: 'Inverte l'allineamento dei messaggi e dell'input del compositore per lingue come arabo o ebraico. Influisce solo sull'area chat — la barra laterale e gli altri pannelli rimangono da sinistra a destra.',
+    settings_desc_rtl: "Inverte l'allineamento dei messaggi e dell'input del compositore per lingue come arabo o ebraico. Influisce solo sull'area chat — la barra laterale e gli altri pannelli rimangono da sinistra a destra.",
     settings_label_sound: 'Suono notifica',
     settings_desc_sound: 'Riproduci un suono quando l\'assistente termina una risposta.',
     // TTS (#499)
@@ -12082,7 +12082,7 @@ const LOCALES = {
     import_session_json_tooltip: 'Importer une session depuis JSON',
     clear_conversation_btn_tooltip: 'Effacer tous les messages de cette conversation',
     settings_label_rtl: 'Mise en page du chat de droite à gauche',
-    settings_desc_rtl: 'Inverse l'alignement des messages du chat et de la saisie du compositeur pour des langues comme l'arabe ou l'hébreu. N'affecte que la zone de chat — la barre latérale et les autres panneaux restent de gauche à droite.',
+    settings_desc_rtl: "Inverse l'alignement des messages du chat et de la saisie du compositeur pour des langues comme l'arabe ou l'hébreu. N'affecte que la zone de chat — la barre latérale et les autres panneaux restent de gauche à droite.",
     settings_label_sound: 'Son de notification',
     settings_desc_sound: 'Jouez un son lorsque l\'assistant termine une réponse.',
     tts_listen: 'Écouter',
