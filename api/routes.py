@@ -1037,6 +1037,22 @@ def _clear_stale_stream_state(session) -> bool:
     return True
 
 
+def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
+    terminal = bool(summary.get("terminal"))
+    terminal_state = summary.get("terminal_state")
+    if not active and not terminal:
+        terminal_state = "stale-from-restart"
+    return {
+        "session_id": summary.get("session_id"),
+        "run_id": summary.get("run_id"),
+        "last_seq": summary.get("last_seq"),
+        "last_event_id": summary.get("last_event_id"),
+        "last_event": summary.get("last_event"),
+        "terminal": terminal,
+        "terminal_state": terminal_state,
+    }
+
+
 def _ensure_full_session_before_mutation(sid: str, session):
     """Reload cached metadata-only sessions before mutating persisted fields.
 
@@ -2010,6 +2026,11 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+)
+from api.run_journal import (
+    find_run_summary,
+    read_run_events,
+    stale_interrupted_event,
 )
 from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -3399,6 +3420,7 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            original_stream_id = getattr(s, "active_stream_id", None)
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
@@ -3550,6 +3572,16 @@ def handle_get(handler, parsed) -> bool:
                 "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
+            if original_stream_id:
+                try:
+                    journal = find_run_summary(original_stream_id)
+                except Exception:
+                    journal = None
+                if journal:
+                    raw["runtime_journal"] = _run_journal_status_payload(
+                        journal,
+                        active=bool(getattr(s, "active_stream_id", None)),
+                    )
             if cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
             # Signal to the frontend that older messages were omitted.
@@ -3887,7 +3919,16 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
-        return j(handler, {"active": stream_id in STREAMS, "stream_id": stream_id})
+        active = stream_id in STREAMS
+        payload = {"active": active, "stream_id": stream_id, "replay_available": False}
+        try:
+            journal = find_run_summary(stream_id) if stream_id else None
+        except Exception:
+            journal = None
+        if journal:
+            payload["replay_available"] = True
+            payload["journal"] = _run_journal_status_payload(journal, active=active)
+        return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -5796,11 +5837,71 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, _sanitize_error(e), 404)
 
 
+def _sse_with_id(handler, event, data, event_id=None):
+    if event_id:
+        handler.wfile.write(f"id: {event_id}\n".encode("utf-8"))
+    _sse(handler, event, data)
+
+
+def _parse_run_journal_after_seq(qs: dict) -> int | None:
+    raw = qs.get("after_seq", [None])[0]
+    if raw in (None, ""):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+    summary = find_run_summary(stream_id)
+    if not summary:
+        return False
+    journal = read_run_events(
+        str(summary.get("session_id") or ""),
+        stream_id,
+        after_seq=after_seq,
+    )
+    for entry in journal.get("events") or []:
+        _sse_with_id(
+            handler,
+            entry.get("event") or entry.get("type") or "message",
+            entry.get("payload"),
+            entry.get("event_id"),
+        )
+    if not summary.get("terminal"):
+        stale = stale_interrupted_event(
+            str(summary.get("session_id") or ""),
+            stream_id,
+            after_seq=after_seq,
+        )
+        if stale:
+            _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
+    return True
+
+
 def _handle_sse_stream(handler, parsed):
-    stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+    qs = parse_qs(parsed.query)
+    stream_id = qs.get("stream_id", [""])[0]
     stream = STREAMS.get(stream_id)
     if stream is None:
-        return j(handler, {"error": "stream not found"}, status=404)
+        try:
+            journal_available = bool(find_run_summary(stream_id)) if stream_id else False
+        except Exception:
+            journal_available = False
+        if not journal_available:
+            return j(handler, {"error": "stream not found"}, status=404)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        try:
+            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
+        return True
     subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")

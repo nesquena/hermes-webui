@@ -664,6 +664,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
+  let _lastRunJournalSeq=0;
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
@@ -1083,6 +1084,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _freshSegment=true;
     _smdEndParser();
     _resetStreamFadeState();
+  }
+  function _rememberRunJournalCursor(e){
+    const raw=String(e&&e.lastEventId||'').trim();
+    if(!raw) return;
+    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
+    const seq=Number.parseInt(tail,10);
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+  }
+  function _runJournalReplayAfterSeq(){
+    return Math.max(0,_lastRunJournalSeq||0);
+  }
+  function _runJournalReplayParams(){
+    // `replay=1` documents frontend intent. The server selects replay when the
+    // stream id no longer has a live worker; `after_seq` prevents duplicated
+    // journal events after this EventSource has already rendered part of a run.
+    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
   }
 
   let _lastRenderMs=0;
@@ -1699,6 +1716,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
+            if(st.replay_available){
+              setComposerStatus('Restoring stream…');
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              return;
+            }
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
@@ -1756,6 +1778,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList();
       _setActivePaneIdleIfOwner();
     });
+
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+    }
   }
 
   async function _restoreSettledSession(){
@@ -1841,10 +1867,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   (async()=>{
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
+    let replayOnly=false;
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active){
+        if(!st.active&&st.replay_available){
+          replayOnly=true;
+        }else if(!st.active){
           _clearOwnerInflightState();
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
@@ -1861,7 +1890,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+    const replayParams=replayOnly?_runJournalReplayParams():'';
+    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
 }
