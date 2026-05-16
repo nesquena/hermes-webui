@@ -948,6 +948,12 @@
       '<div class="capy-spaces-muted">metadata-only rollback anchor'+(eventId ? ' · '+escapeHtml(eventId) : '')+'</div></div></div></div></div>';
   }
 
+  function renderSpaceCheckpointBlockedStatus(){
+    return '<div class="capy-spaces-card"><h3>Checkpoint blocked</h3>' +
+      '<div class="capy-spaces-muted">Shared prompt dialog is unavailable; refresh and try again.</div>' +
+      '<div class="capy-spaces-muted">No rollback checkpoint was written.</div></div>';
+  }
+
   function renderRevisionHistory(spaceId, revisions){
     const safeRevisions = Array.isArray(revisions) ? revisions : [];
     const rows = safeRevisions.length ? safeRevisions.slice(0, 10).map(function(rev){
@@ -2570,7 +2576,12 @@
       return;
     }
     if (action === 'checkpointSpace') {
-      if (!spaceId || typeof showPromptDialog !== 'function') return;
+      if (!spaceId) return;
+      if (typeof showPromptDialog !== 'function') {
+        const root = document.getElementById('capySpacesRoot');
+        if (root) root.innerHTML = renderSpaceCheckpointBlockedStatus() + root.innerHTML;
+        return;
+      }
       const reason = await showPromptDialog({
         title: 'Create rollback checkpoint',
         message: 'Create a metadata-only rollback checkpoint for this Space. The reason is stored by the backend after safety redaction.',

@@ -5316,6 +5316,14 @@ def test_spaces_ui_space_checkpoint_fails_closed_without_or_cancelled_shared_pro
     cancelled = _run_spaces_scenario(driver_path, "checkpointSpaceCancelled")
 
     assert not any(call["path"] == "api/spaces/checkpoint" for call in no_dialog["calls"])
+    assert "Checkpoint blocked" in no_dialog["rootHtml"]
+    assert "Shared prompt dialog is unavailable; refresh and try again." in no_dialog["rootHtml"]
+    assert "before rollback" not in no_dialog["rootHtml"]
+    assert "<script>" not in no_dialog["rootHtml"]
+    assert "renderer" not in no_dialog["rootHtml"].lower()
+    assert "api_key" not in no_dialog["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in no_dialog["rootHtml"]
+
     assert not any(call["path"] == "api/spaces/checkpoint" for call in cancelled["calls"])
 
 
