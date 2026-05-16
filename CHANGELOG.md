@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2393** by @Michaelyklam (refs #2313) — Chat streaming now keeps only the selected conversation's live `/api/chat/stream` EventSource open. Switching into another active session closes background chat SSE transports and relies on existing session-list status plus reattach-on-select behavior, preventing many active sessions from accumulating one long-lived browser connection each.
+
 ## [v0.51.75] — 2026-05-16 — Release AY (stage-368 — 11-PR safe-lane batch — storage + i18n + run-journal parity + attachments + compression sidebar + restart-recovery + text-mode images + tables + settings i18n + German labels)
 
 ### Test infrastructure

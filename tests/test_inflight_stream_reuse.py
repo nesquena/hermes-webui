@@ -45,6 +45,25 @@ def test_attach_live_stream_reuses_existing_same_stream_transport():
     assert "return" in body[reuse_pos:close_pos]
 
 
+def test_attach_live_stream_closes_other_session_streams_before_opening_new_one():
+    """Only the selected conversation pane should hold an open chat SSE transport."""
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    helper = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
+
+    helper_compact = helper.replace(" ", "")
+    assert "Object.keys(LIVE_STREAMS)" in helper
+    assert "if(sid!==activeSid)closeLiveStream(sid)" in helper_compact
+
+    reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
+    close_other_pos = body.find("closeOtherLiveStreams(activeSid)")
+    close_current_pos = body.find("\n  closeLiveStream(activeSid);\n")
+    assert close_other_pos != -1, "attachLiveStream() should prune background chat EventSources"
+    assert reuse_pos < close_other_pos < close_current_pos, (
+        "same-stream reuse should happen before pruning, and pruning should happen "
+        "before replacing the active session transport"
+    )
+
+
 def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
     """Reusing transport must not skip per-session uploaded attachment state."""
     body = _function_body(MESSAGES_JS, "attachLiveStream")
