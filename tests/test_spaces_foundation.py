@@ -7640,6 +7640,55 @@ def test_space_tool_adapter_current_recovery_quarantine_aliases_use_active_space
     assert "bearer" not in serialized
 
 
+def test_space_tool_adapter_safe_mode_widget_aliases_return_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "safe-mode-widget", "name": "Safe Mode Widget"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "source": "generated source should stay quarantined",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.safe_mode.disable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "bad-widget",
+            "reason": "renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        },
+    )
+    snapshot = spaces.run_space_tool("space.safe_mode.snapshot", {})
+    enabled = spaces.run_space_tool(
+        "space.safe_mode.enable_widget",
+        {"space_id": created["space_id"], "widget_id": "bad-widget"},
+    )
+    serialized = json.dumps({"disabled": disabled, "snapshot": snapshot, "enabled": enabled}).lower()
+
+    assert disabled["ok"] is True
+    assert disabled["action"] == "space.safe_mode.disable_widget"
+    assert disabled["disabled"] is True
+    assert disabled["space_id"] == created["space_id"]
+    assert disabled["widget_id"] == "bad-widget"
+    assert snapshot["ok"] is True
+    assert snapshot["action"] == "space.safe_mode.snapshot"
+    assert snapshot["recovery"]["spaces"][0]["widgets"][0]["disabled"] is True
+    assert enabled["ok"] is True
+    assert enabled["action"] == "space.safe_mode.enable_widget"
+    assert enabled["disabled"] is False
+    assert "active_space_id" not in disabled
+    assert "generated source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_recovery_disable_widget_rejects_conflicting_positional_space_alias_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     primary = spaces.create_space({"space_id": "recovery-primary", "name": "Recovery Primary"})
@@ -8270,6 +8319,64 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "bearer" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_safe_mode_module_aliases_return_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "safe-mode-module",
+            "name": "Safe Mode Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.safe_mode.disable_module",
+        {"moduleId": "safe-mode-module", "reason": "renderer api_auth bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    snapshot = spaces.run_space_tool("space.safe_mode.snapshot", {})
+    enabled = spaces.run_space_tool("space.safe_mode.enable_module", {"module_id": "safe-mode-module"})
+    queued = spaces.run_space_tool(
+        "space.safe_mode.repair_module",
+        {
+            "moduleId": "safe-mode-module",
+            "payload": {"action": "repair-module", "renderer": "<script>bad()</script>"},
+            "prompt": "Patch generated source without exposing bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(
+        {"disabled": disabled, "snapshot": snapshot, "enabled": enabled, "queued": queued}
+    ).lower()
+
+    assert disabled["ok"] is True
+    assert disabled["action"] == "space.safe_mode.disable_module"
+    assert disabled["disabled"] is True
+    assert disabled["module_id"] == "safe-mode-module"
+    assert disabled["disabled_reason"] == "[REDACTED]"
+    assert snapshot["ok"] is True
+    assert snapshot["action"] == "space.safe_mode.snapshot"
+    assert snapshot["recovery"]["summary"]["module_count"] == 1
+    assert snapshot["recovery"]["modules"][0]["disabled"] is True
+    assert enabled["ok"] is True
+    assert enabled["action"] == "space.safe_mode.enable_module"
+    assert enabled["disabled"] is False
+    assert queued["ok"] is True
+    assert queued["action"] == "space.safe_mode.repair_module"
+    assert queued["queued"] is True
+    assert queued["module_id"] == "safe-mode-module"
+    assert queued["payload_summary"] == {"action": "repair-module"}
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer" not in serialized
+    assert "api_auth" not in serialized
     assert "<script" not in serialized
 
 

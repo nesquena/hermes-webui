@@ -4098,6 +4098,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.disable_widget",
         "space.recovery.disablewidget",
+        "space.safe_mode.disable_widget",
+        "space.safe_mode.disablewidget",
         "space.widget.recovery.disable",
         "widget.recovery.disable",
         "space.current.disable_widget",
@@ -4122,6 +4124,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.enable_widget",
         "space.recovery.enablewidget",
+        "space.safe_mode.enable_widget",
+        "space.safe_mode.enablewidget",
         "space.widget.recovery.enable",
         "widget.recovery.enable",
         "space.current.enable_widget",
@@ -4146,6 +4150,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.disable_module",
         "space.recovery.disablemodule",
+        "space.safe_mode.disable_module",
+        "space.safe_mode.disablemodule",
         "space.module.recovery.disable",
         "module.recovery.disable",
         "space.admin.disable_module",
@@ -4160,6 +4166,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.enable_module",
         "space.recovery.enablemodule",
+        "space.safe_mode.enable_module",
+        "space.safe_mode.enablemodule",
         "space.module.recovery.enable",
         "module.recovery.enable",
         "space.admin.enable_module",
@@ -4174,6 +4182,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.repair_module",
         "space.recovery.repairmodule",
+        "space.safe_mode.repair_module",
+        "space.safe_mode.repairmodule",
         "space.module.recovery.repair",
         "module.recovery.repair",
         "space.admin.repair_module",
