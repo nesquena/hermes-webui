@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2418** by @Michaelyklam (fixes #2402) — OpenRouter cost-history snapshot updates now take a provider-specific POSIX file lock around the read-modify-write cycle, preserving the existing process-local lock while preventing lost snapshot updates if WebUI is deployed with multiple worker processes sharing one Hermes home/state directory.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.

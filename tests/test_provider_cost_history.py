@@ -260,6 +260,34 @@ def test_cost_snapshot_append_uses_lock(monkeypatch, tmp_path):
     assert snapshots == [{"date": "2030-04-15", "used": 4.0, "limit": 20.0}]
 
 
+def test_cost_snapshot_append_uses_file_lock(monkeypatch, tmp_path):
+    """Snapshot append takes a provider-specific file lock for multi-process workers."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    import api.providers as providers
+
+    calls = []
+
+    class RecordingFcntl:
+        LOCK_EX = 2
+
+        @staticmethod
+        def flock(file_obj, operation):
+            calls.append((Path(file_obj.name).name, operation))
+
+    monkeypatch.setattr(providers, "fcntl", RecordingFcntl, raising=False)
+    monkeypatch.setattr(providers, "datetime", type("DT", (), {
+        "now": staticmethod(lambda tz=None: datetime(2030, 4, 15, 12, 0, 0, tzinfo=tz or timezone.utc)),
+        "strftime": datetime.strftime,
+    }))
+
+    snapshots = providers._append_cost_snapshot("openrouter", 4.0, 20.0)
+
+    assert calls == [("openrouter.lock", RecordingFcntl.LOCK_EX)]
+    assert (tmp_path / "cost-snapshots" / "openrouter.lock").exists()
+    assert snapshots == [{"date": "2030-04-15", "used": 4.0, "limit": 20.0}]
+
+
 # ── Missing credentials ───────────────────────────────────────────────────────
 
 
