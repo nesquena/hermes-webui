@@ -170,6 +170,14 @@ function _clearSessionCompletionUnread(sid) {
   _saveSessionCompletionUnread();
 }
 
+function _clearSessionViewedCount(sid) {
+  if (!sid) return;
+  const counts = _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, sid)) return;
+  delete counts[sid];
+  _saveSessionViewedCounts();
+}
+
 function _hasSessionCompletionUnread(sid) {
   if (!sid) return false;
   return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), sid);
@@ -810,6 +818,12 @@ function _clearHandoffStorageForSession(sid) {
     _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_DISMISSED_AT, null);
     _setHandoffStorageValue(sid, _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT, null);
   } catch {}
+  // Session deletion should also prune per-session tracking maps. Otherwise
+  // heavy users accumulate one localStorage entry per deleted session forever,
+  // which increases quota pressure and can make future UI persistence fail.
+  try { _clearSessionViewedCount(sid); } catch {}
+  try { _clearSessionCompletionUnread(sid); } catch {}
+  try { _forgetObservedStreamingSession(sid); } catch {}
 }
 
 function _getHandoffDismissedAt(sid) {
