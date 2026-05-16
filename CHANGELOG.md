@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [v0.51.77] — 2026-05-16 — Release BA (stage-370 — 1-PR follow-up — live Activity grouping boundary fix)
+
+### Fixed
+
+- **PR #2390** by @franksong2702 (refs #2376, #2344, #2347, #2377) — Live progress Activity grouping no longer degrades consecutive tool calls into repeated `Activity: 1 tool` rows. The frontend was using one reset helper for two different jobs — resetting where the next assistant text segment should render, and closing the current live Activity group — but those are not the same operation. Tool starts now only reset the next-text-segment anchor; the live Activity group closes only when the model emits a visible `interim_assistant` progress update (the actual timeline boundary). The flow stays:
+
+  ```text
+  Thinking card
+  visible progress note
+  Activity: N related tools
+  visible progress note
+  Activity: N related tools
+  final answer
+  ```
+
+  Adds a WebUI-only ephemeral progress contract in `api/streaming.py` that asks multi-step tool-heavy turns to emit concise visible progress notes in the user's language, while explicitly forbidding exposure of hidden reasoning, chain-of-thought, scratchpads, secrets, raw logs, or long tool output. Any selected personality prompt is preserved. New regressions cover the progress-contract reach-through, the interim-assistant split boundary, and the consecutive-tools-in-one-Activity-row invariant.
+
 ## [v0.51.76] — 2026-05-16 — Release AZ (stage-369 — 4-PR safe-lane batch — live timeline preservation + OpenRouter cost history + chat stream cap + credential pool cache)
 
 ### Added
