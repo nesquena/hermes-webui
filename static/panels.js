@@ -6334,6 +6334,16 @@ async function _saveCustomProviderCard(card,providerId){
 
 async function _deleteCustomProviderCard(card,displayName){
   const name=displayName||(card.dataset.provider||'').replace(/^custom:/,'');
+  // If the card was never saved (just added form), simply remove it from DOM
+  if(card.dataset.provider==='custom:new'||!name){
+    card.remove();
+    // If list is now empty, reload to show empty state properly
+    const list=card.parentElement;
+    if(list&&list.querySelectorAll('.provider-card').length===0){
+      await loadProvidersPanel();
+    }
+    return;
+  }
   const confirmed=await showConfirmDialog({
     title:t('providers_delete_confirm_title')||'Delete custom provider',
     message:t('providers_delete_confirm')||'Delete custom provider "'+name+'"? This cannot be undone.',
