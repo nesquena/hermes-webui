@@ -550,8 +550,10 @@ async function loadSession(sid){
     return true;
   }
 
-  // Phase 2a: If session is streaming, restore from INFLIGHT cache before
-  // loading full messages (INFLIGHT state is self-contained and sufficient).
+  // Phase 2a: If session is streaming, restore the persisted transcript first,
+  // then merge the local INFLIGHT live tail. INFLIGHT is a recovery tail, not a
+  // complete transcript; treating it as the full source makes long sessions look
+  // like they lost history after switching away and back.
   if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
@@ -565,8 +567,15 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]){
-    // Streaming session: use cached INFLIGHT messages (already has pending assistant output).
-    S.messages=INFLIGHT[sid].messages;
+    const inflightMessages=INFLIGHT[sid].messages||[];
+    S.messages=[];
+    S.toolCalls=[];
+    try {
+      await _ensureMessagesLoaded(sid);
+    } catch(e) {
+      S.messages=inflightMessages;
+    }
+    S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)){
       INFLIGHT[sid].messages=S.messages;
@@ -576,12 +585,17 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
-    syncTopbar();renderMessages();appendThinking();loadDir('.');
-    clearLiveToolCards();
-    if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
-    for(const tc of (S.toolCalls||[])){
-      if(tc&&tc.name) appendLiveToolCard(tc);
+    syncTopbar();renderMessages();
+    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    if(!restoredLiveTurn){
+      appendThinking();
+      clearLiveToolCards();
+      if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+      for(const tc of (S.toolCalls||[])){
+        if(tc&&tc.name) appendLiveToolCard(tc);
+      }
     }
+    loadDir('.');
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -1126,6 +1140,40 @@ async function _ensureMessagesLoaded(sid) {
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
   }
+}
+
+function _messageComparableText(m){
+  if(!m) return '';
+  if(typeof msgContent==='function'){
+    try{return String(msgContent(m)||'').trim();}
+    catch(_){}
+  }
+  return String(m.content||'').trim();
+}
+
+function _sameTranscriptMessage(a,b){
+  return !!(a&&b) &&
+    String(a.role||'')===String(b.role||'') &&
+    _messageComparableText(a)===_messageComparableText(b);
+}
+
+function _mergeInflightTailMessages(baseMessages, inflightMessages){
+  const base=Array.isArray(baseMessages)?baseMessages:[];
+  const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  let liveIdx=-1;
+  for(let i=inflight.length-1;i>=0;i--){
+    if(inflight[i]&&inflight[i]._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return base;
+  let start=liveIdx;
+  if(liveIdx>0&&inflight[liveIdx-1]&&inflight[liveIdx-1].role==='user') start=liveIdx-1;
+  const tail=inflight.slice(start).filter(m=>m&&m.role);
+  const merged=[...base];
+  for(const msg of tail){
+    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,msg));
+    if(!duplicate) merged.push(msg);
+  }
+  return merged;
 }
 
 // Load older messages when the user scrolls to the top of the conversation.

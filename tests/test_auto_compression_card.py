@@ -67,6 +67,18 @@ def test_auto_compression_completion_transition_is_preserved_after_running_liste
     assert "phase:'done'" in _compressed_listener_block()
 
 
+def test_auto_compression_does_not_rerender_over_live_answer_text():
+    block = _compressing_listener_block()
+    src = _read("static/ui.js")
+
+    assert "const liveAnswerStarted=" in block
+    assert "appendLiveCompressionCard(state)" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("renderMessages({preserveScroll:true})")
+    assert "window._compressionUi=null;" in block
+    assert "function appendLiveCompressionCard(state)" in src
+    assert 'data-live-compression-card' in src
+
+
 def test_auto_compression_sse_uses_transient_card_not_fake_message():
     """Auto compression must not inject display-only text into S.messages."""
     src = _read("static/messages.js")
@@ -78,6 +90,9 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
     assert "phase:'done'" in block
     assert "automatic:true" in block
     assert "_setCompressionSessionLock" in block
+    assert "const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);" in block
+    assert "window._compressionUi=null;" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("window._compressionUi=null;")
 
 
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
