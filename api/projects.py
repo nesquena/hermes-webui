@@ -2,6 +2,7 @@
 
 import json
 import re
+import threading
 import time
 import uuid
 from copy import deepcopy
@@ -18,6 +19,12 @@ DEFAULT_PRIORITY = "media"
 DEFAULT_CATEGORY = "Docs"
 DEFAULT_OWNER = "jr"
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+_PROJECT_STORE_LOCK = threading.RLock()
+
+
+def project_store_lock() -> threading.RLock:
+    """Return the process-wide projects store lock for compound read/write flows."""
+    return _PROJECT_STORE_LOCK
 
 
 def _now() -> float:
@@ -40,7 +47,7 @@ def _normalize_refs(value: Any) -> dict:
 def _normalize_external_ref(value: Any) -> dict | None:
     if not isinstance(value, dict) or not value:
         return None
-    return {
+    ref = {
         "type": str(value.get("type") or "local").strip().lower() or "local",
         "source_id": value.get("source_id") or None,
         "key": str(value.get("key") or "").strip(),
@@ -48,6 +55,12 @@ def _normalize_external_ref(value: Any) -> dict | None:
         "status": str(value.get("status") or "").strip(),
         "synced_at": value.get("synced_at") if value.get("synced_at") else None,
     }
+    # Extra metadata is used by integrations that need stable grouping without
+    # changing the generic projects/tasks schema. Keep it compact and explicit.
+    for field in ("grouping", "parent_key", "parent_url", "name"):
+        if value.get(field):
+            ref[field] = str(value.get(field)).strip()
+    return ref
 
 
 def _normalize_project(project: Any) -> dict | None:
@@ -70,6 +83,7 @@ def _normalize_project(project: Any) -> dict | None:
         "status": "arquivado" if archived else str(project.get("status") or "ativo"),
         "color": color,
         "default_source_id": project.get("default_source_id") or None,
+        "external_ref": _normalize_external_ref(project.get("external_ref")),
         "refs": _normalize_refs(project.get("refs")),
         "created_at": created_at,
         "updated_at": updated_at,
@@ -129,6 +143,9 @@ def _normalize_source(source: Any) -> dict | None:
         "sync_enabled": bool(source.get("sync_enabled", False)),
         "sync_mode": str(source.get("sync_mode") or "read").strip(),
         "status_map": source.get("status_map") if isinstance(source.get("status_map"), dict) else {},
+        "project_groups": source.get("project_groups") if isinstance(source.get("project_groups"), list) else [],
+        "domain": str(source.get("domain") or "projetos")[:64],
+        "project_color": str(source.get("project_color") or "#00E5FF")[:16],
         "last_sync_at": source.get("last_sync_at"),
         "sync_status": str(source.get("sync_status") or "idle"),
         "sync_error": source.get("sync_error"),
@@ -154,20 +171,22 @@ def _normalize_store(raw: Any) -> dict:
 
 
 def load_project_store() -> dict:
-    if not PROJECTS_FILE.exists():
-        return _empty_store()
-    try:
-        raw = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        raw = _empty_store()
-    return _normalize_store(raw)
+    with _PROJECT_STORE_LOCK:
+        if not PROJECTS_FILE.exists():
+            return _empty_store()
+        try:
+            raw = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            raw = _empty_store()
+        return _normalize_store(raw)
 
 
 def save_project_store(store: dict) -> dict:
-    normalized = _normalize_store(store)
-    PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PROJECTS_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-    return normalized
+    with _PROJECT_STORE_LOCK:
+        normalized = _normalize_store(store)
+        PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROJECTS_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        return normalized
 
 
 def _status_counts(tasks: list[dict]) -> dict:
@@ -273,6 +292,7 @@ def create_project(body: dict, *, legacy: bool = False) -> dict:
         "color": color,
         "default_source_id": body.get("default_source_id") or None,
         "refs": body.get("refs") or {},
+        "external_ref": body.get("external_ref"),
         "created_at": now,
         "updated_at": now,
         "archived": False,
@@ -307,6 +327,10 @@ def update_project(project_id: str, body: dict) -> dict:
             raise ValueError("Invalid project status")
         project["status"] = status
         project["archived"] = status == "arquivado"
+    if "refs" in body:
+        project["refs"] = _normalize_refs(body.get("refs"))
+    if "external_ref" in body:
+        project["external_ref"] = _normalize_external_ref(body.get("external_ref"))
     project["updated_at"] = _now()
     save_project_store(store)
     return project

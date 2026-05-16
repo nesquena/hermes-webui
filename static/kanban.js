@@ -125,7 +125,7 @@
     const r = await fetch(path, opts);
     let data = {};
     try { data = await r.json(); } catch (_) { /* empty body is fine */ }
-    if (!r.ok) {
+    if (!r.ok || (data && (data.error || data.ok === false))) {
       const msg = (data && data.error) || ('HTTP ' + r.status);
       throw new Error(msg);
     }

@@ -2252,6 +2252,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Invalid source_id", 404)
         try:
             result = neo_jira.handle_jira_sync(source_id)
+            if result.get("error"):
+                error_code = result.get("error_code")
+                if error_code == "sync_in_progress":
+                    status = 409
+                elif error_code == "source_not_found":
+                    status = 404
+                else:
+                    status = 400
+                return j(handler, {"ok": False, **result}, status=status)
             return j(handler, {"ok": True, **result})
         except ValueError as e:
             return bad(handler, str(e), 404)
