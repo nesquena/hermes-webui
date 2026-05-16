@@ -634,6 +634,75 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
+// ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaRefreshInFlight=false;
+
+function _formatQuotaMoneyShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  if(Math.abs(n)>=100) return '$'+n.toFixed(0);
+  if(Math.abs(n)>=10) return '$'+n.toFixed(1);
+  return '$'+n.toFixed(2);
+}
+function _formatQuotaPercentShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+function _providerQuotaIndicatorText(status){
+  if(!status||status.status!=='available') return null;
+  const provider=status.display_name||status.provider||'Provider';
+  const accountLimits=status.account_limits||null;
+  if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
+    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
+    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+  }
+  const quota=status.quota||null;
+  if(quota){
+    const remaining=_formatQuotaMoneyShort(quota.limit_remaining);
+    const used=_formatQuotaMoneyShort(quota.usage);
+    const limit=_formatQuotaMoneyShort(quota.limit);
+    if(remaining){
+      const parts=[];
+      if(used) parts.push('used '+used);
+      if(limit) parts.push('limit '+limit);
+      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+    }
+  }
+  return null;
+}
+function renderProviderQuotaIndicator(status){
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  if(!chip||!label) return;
+  const text=_providerQuotaIndicatorText(status);
+  if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
+  label.textContent=text.label;
+  chip.title=text.title;
+  chip.hidden=false;
+}
+async function refreshProviderQuotaIndicator(){
+  if(_providerQuotaRefreshInFlight) return;
+  _providerQuotaRefreshInFlight=true;
+  try{
+    const status=await api('/api/provider/quota');
+    renderProviderQuotaIndicator(status);
+  }catch(_e){
+    renderProviderQuotaIndicator(null);
+  }finally{
+    _providerQuotaRefreshInFlight=false;
+  }
+}
+window.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+});
+
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
