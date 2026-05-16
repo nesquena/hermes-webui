@@ -189,6 +189,77 @@ def test_openrouter_cost_history_deltas_from_cumulative(monkeypatch, tmp_path):
     assert snaps[2]["delta"] == 2.5
 
 
+def test_openrouter_cost_history_reset_uses_fresh_series_delta(monkeypatch, tmp_path):
+    """A lower cumulative value starts a fresh series instead of a negative bar."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    (tmp_path / ".env").write_text("OPENROUTER_API_KEY=test-or-key\n", encoding="utf-8")
+    old_cfg, old_mtime = _with_config(model={"provider": "openrouter"})
+
+    import api.providers as providers
+
+    snap_dir = tmp_path / "cost-snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    historical = {
+        "provider": "openrouter",
+        "snapshots": [
+            {"date": "2030-04-13", "used": 9.0, "limit": 20},
+            {"date": "2030-04-14", "used": 12.0, "limit": 20},
+        ],
+    }
+    (snap_dir / "openrouter.json").write_text(json.dumps(historical), encoding="utf-8")
+
+    def fake_urlopen(req, timeout):
+        # Simulate key rotation or provider reset: cumulative usage dropped.
+        payload = {"data": {"usage": 1.25, "limit": 20, "label": "Credits"}}
+        return _FakeResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(providers, "datetime", type("DT", (), {
+        "now": staticmethod(lambda tz=None: datetime(2030, 4, 15, 12, 0, 0, tzinfo=tz or timezone.utc)),
+        "strftime": datetime.strftime,
+    }))
+
+    try:
+        result = providers.get_provider_cost_history("openrouter", days=7)
+    finally:
+        _restore_config(old_cfg, old_mtime)
+
+    assert result["ok"] is True
+    assert result["snapshots"][-1]["date"] == "2030-04-15"
+    assert result["snapshots"][-1]["used"] == 1.25
+    assert result["snapshots"][-1]["delta"] == 1.25
+    assert all(snap["delta"] is None or snap["delta"] >= 0 for snap in result["snapshots"])
+
+
+def test_cost_snapshot_append_uses_lock(monkeypatch, tmp_path):
+    """Snapshot append serializes the read-modify-write critical section."""
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    import api.providers as providers
+
+    entered = {"count": 0}
+
+    class RecordingLock:
+        def __enter__(self):
+            entered["count"] += 1
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(providers, "_COST_SNAPSHOT_LOCK", RecordingLock())
+    monkeypatch.setattr(providers, "datetime", type("DT", (), {
+        "now": staticmethod(lambda tz=None: datetime(2030, 4, 15, 12, 0, 0, tzinfo=tz or timezone.utc)),
+        "strftime": datetime.strftime,
+    }))
+
+    snapshots = providers._append_cost_snapshot("openrouter", 4.0, 20.0)
+
+    assert entered["count"] == 1
+    assert snapshots == [{"date": "2030-04-15", "used": 4.0, "limit": 20.0}]
+
+
 # ── Missing credentials ───────────────────────────────────────────────────────
 
 

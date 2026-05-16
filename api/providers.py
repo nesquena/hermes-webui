@@ -1445,6 +1445,7 @@ def _provider_is_oauth(provider_id: str) -> bool:
 
 _COST_SNAPSHOTS_DIR_NAME = "cost-snapshots"
 _COST_SNAPSHOT_MAX_DAYS = 365  # hard cap to prevent unbounded growth
+_COST_SNAPSHOT_LOCK = threading.Lock()
 
 
 def _cost_snapshots_dir() -> Path:
@@ -1558,23 +1559,28 @@ def _append_cost_snapshot(provider: str, usage: int | float | None, limit: int |
     repeated calls within the same day are idempotent.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    snapshots = _read_cost_snapshots(provider)
-    # Update or append today's entry
-    updated = False
-    for entry in snapshots:
-        if entry["date"] == today:
-            entry["used"] = usage
-            entry["limit"] = limit
-            updated = True
-            break
-    if not updated:
-        snapshots.append({"date": today, "used": usage, "limit": limit})
-    snapshots.sort(key=lambda e: e["date"])
-    # Cap to _COST_SNAPSHOT_MAX_DAYS entries (keep most recent)
-    if len(snapshots) > _COST_SNAPSHOT_MAX_DAYS:
-        snapshots = snapshots[-_COST_SNAPSHOT_MAX_DAYS:]
-    _write_cost_snapshots(provider, snapshots)
-    return snapshots
+    # Serialize the read-modify-write cycle.  The atomic os.replace in
+    # _write_cost_snapshots protects the file write itself, but without this
+    # lock two concurrent requests can both read the same old snapshot list and
+    # race to replace it with stale data.
+    with _COST_SNAPSHOT_LOCK:
+        snapshots = _read_cost_snapshots(provider)
+        # Update or append today's entry
+        updated = False
+        for entry in snapshots:
+            if entry["date"] == today:
+                entry["used"] = usage
+                entry["limit"] = limit
+                updated = True
+                break
+        if not updated:
+            snapshots.append({"date": today, "used": usage, "limit": limit})
+        snapshots.sort(key=lambda e: e["date"])
+        # Cap to _COST_SNAPSHOT_MAX_DAYS entries (keep most recent)
+        if len(snapshots) > _COST_SNAPSHOT_MAX_DAYS:
+            snapshots = snapshots[-_COST_SNAPSHOT_MAX_DAYS:]
+        _write_cost_snapshots(provider, snapshots)
+        return snapshots
 
 
 def _compute_deltas(snapshots: list[dict[str, Any]], window_days: int) -> list[dict[str, Any]]:
@@ -1583,7 +1589,10 @@ def _compute_deltas(snapshots: list[dict[str, Any]], window_days: int) -> list[d
     Each snapshot carries cumulative ``used``; the delta for a day is
     the difference between that day's cumulative value and the previous
     day's.  The oldest day in the window has ``delta=None`` (no
-    previous baseline).
+    previous baseline).  If the cumulative value drops, treat that day
+    as the start of a fresh series (for example after an API-key rotation)
+    and use the current value as that day's delta instead of emitting a
+    negative spend bar.
     """
     # Take only the last *window_days* entries
     window = snapshots[-window_days:] if len(snapshots) > window_days else list(snapshots)
@@ -1592,6 +1601,8 @@ def _compute_deltas(snapshots: list[dict[str, Any]], window_days: int) -> list[d
         delta = None
         if i > 0 and entry.get("used") is not None and window[i - 1].get("used") is not None:
             delta = float(entry["used"]) - float(window[i - 1]["used"])
+            if delta < 0:
+                delta = float(entry["used"])
             # Rounding: avoid -0.0 and tiny floating-point noise
             if abs(delta) < 1e-9:
                 delta = 0.0
