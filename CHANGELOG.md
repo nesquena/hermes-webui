@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Background profile workers now route broad runtime env through thread-local state while setting only `HERMES_HOME` under the narrow process-env lock, preserving `hermes_cli.config.load_config()` compatibility for non-default profiles without leaking profile-specific env keys process-wide.
+- Background profile workers now route broad runtime env through thread-local state and mirror it into process env for the worker body, preserving `hermes_cli.config.load_config()` compatibility plus provider credential readers that still call `os.getenv()` directly, then restoring prior env values after the worker exits.
 
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 

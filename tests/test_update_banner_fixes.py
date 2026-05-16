@@ -569,13 +569,13 @@ class TestUpdateSummaryRouteModelSelection:
         assert captured['aux_task'] == 'compression'
         assert captured['model_resolution_env'] == {
             'HERMES_HOME': str(profile_home),
-            'HERMES_TEST_PROFILE_ENV': 'default-runtime',
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
             'THREAD_HERMES_HOME': str(profile_home),
             'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
         }
         assert captured['aux_env'] == {
             'HERMES_HOME': str(profile_home),
-            'HERMES_TEST_PROFILE_ENV': 'default-runtime',
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
             'THREAD_HERMES_HOME': str(profile_home),
             'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
             'SKILL_MODULE_HOME': profile_home,

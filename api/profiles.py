@@ -716,20 +716,23 @@ def profile_env_for_background_worker(
     thread_env = dict(runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
-    # channel so provider/API-key overrides do not leak through process-global
-    # os.environ, but still set HERMES_HOME under the narrow _ENV_LOCK because
-    # hermes_cli.config.load_config() currently resolves homes from os.environ.
-    # Do not hold _ENV_LOCK across the worker body.
+    # channel for WebUI helpers, and also mirror it into process env for the
+    # worker body because several production Hermes readers still call
+    # os.getenv() directly for provider credentials.  Keep the _ENV_LOCK scope
+    # narrow: serialize only setup/restore, not the whole worker body.
     skill_home_snapshot = None
+    old_runtime_env: dict[str, Optional[str]] = {}
     old_hermes_home = None
     had_hermes_home = False
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     try:
         _set_thread_env(**thread_env)
         with _ENV_LOCK:
+            old_runtime_env = {key: os.environ.get(key) for key in runtime_env}
             had_hermes_home = "HERMES_HOME" in os.environ
             old_hermes_home = os.environ.get("HERMES_HOME")
             skill_home_snapshot = snapshot_skill_home_modules()
+            os.environ.update(runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
             try:
                 patch_skill_home_modules(profile_home_path)
@@ -747,6 +750,11 @@ def profile_env_for_background_worker(
         else:
             _clear_thread_env()
         with _ENV_LOCK:
+            for key, old_value in old_runtime_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
             if had_hermes_home:
                 os.environ["HERMES_HOME"] = old_hermes_home or ""
             else:
