@@ -214,16 +214,31 @@ function _renderOnboardingModelField(){
 }
 
 function _renderOnboardingProviderOAuthField(provider){
-  if(!provider||provider.oauth_provider!=='anthropic')return '';
-  return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
-    <div class="onboarding-oauth-icon">🔑</div>
-    <div style="flex:1">
-      <strong>Use Claude Code OAuth instead</strong>
-      <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code subscription credentials are not the same as an Anthropic API key.</strong> Use this path only when you want Hermes to use Claude Code credentials already available on the server, or start a short polling flow while you complete <code>claude setup-token</code> on the host.</p>
-      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button">Login with Claude Code</button></div>
-      <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
-    </div>
-  </div>`;
+  if(!provider)return '';
+  if(provider.oauth_provider==='anthropic'){
+    return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
+      <div class="onboarding-oauth-icon">🔑</div>
+      <div style="flex:1">
+        <strong>Use Claude Code OAuth instead</strong>
+        <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>Claude Code subscription credentials are not the same as an Anthropic API key.</strong> Use this path only when you want Hermes to use Claude Code credentials already available on the server, or start a short polling flow while you complete <code>claude setup-token</code> on the host.</p>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="anthropicOAuthBtn" onclick="startAnthropicOAuth()" type="button">Login with Claude Code</button></div>
+        <div id="anthropicOAuthFlow" style="display:none;margin-top:12px"></div>
+      </div>
+    </div>`;
+  }
+  if(provider.oauth_provider==='xai-oauth'){
+    const btnLabel=esc(provider.oauth_label||'Sign in with xAI (SuperGrok)');
+    return `<div class="onboarding-oauth-card onboarding-oauth-pending" style="margin-top:12px">
+      <div class="onboarding-oauth-icon">🔑</div>
+      <div style="flex:1">
+        <strong>Use your SuperGrok subscription instead</strong>
+        <p style="margin-top:6px;color:var(--muted);font-size:13px"><strong>SuperGrok subscription credentials are separate from an xAI developer API key.</strong> Use this path if you already pay for SuperGrok on x.ai and want Hermes to run Grok 4.3 against that subscription instead of per-token API usage.</p>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="xaiOAuthBtn" onclick="startXAIOAuth()" type="button">${btnLabel}</button></div>
+        <div id="xaiOAuthFlow" style="display:none;margin-top:12px"></div>
+      </div>
+    </div>`;
+  }
+  return '';
 }
 
 function _providerStatusLabel(system){
@@ -284,7 +299,9 @@ function _renderOnboardingBody(){
       const providerLabel=esc(currentProviderName);
       const codexOauthPendingBody=currentProviderName==='openai-codex'
         ? 'This instance is configured to use <strong>openai-codex</strong>, which uses OAuth rather than an API key. Use the button below to authenticate with ChatGPT, then continue once provider status refreshes.'
-        : t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel);
+        : currentProviderName==='xai-oauth'
+          ? 'This instance is configured to use <strong>xai-oauth</strong>, which signs in with your SuperGrok subscription instead of an API key. Use the button below to authorize Hermes at accounts.x.ai, then paste the callback URL back here to finish.'
+          : t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel);
       if(isReady){
         _setOnboardingNotice(t('onboarding_notice_setup_already_ready'),'success');
         body.innerHTML=`
@@ -312,6 +329,7 @@ function _renderOnboardingBody(){
               <strong>${t('onboarding_oauth_provider_not_ready_title')}</strong>
               <p>${codexOauthPendingBody}</p>
               ${currentProviderName==='openai-codex'?`<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="codexOAuthBtn" onclick="startCodexOAuth()" type="button">${t('oauth_login_codex')}</button></div><div id="codexOAuthFlow" style="display:none;margin-top:12px"></div>`:''}
+              ${currentProviderName==='xai-oauth'?`<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="sm-btn" id="xaiOAuthBtn" onclick="startXAIOAuth()" type="button">Sign in with xAI (SuperGrok)</button></div><div id="xaiOAuthFlow" style="display:none;margin-top:12px"></div>`:''}
             </div>
           </div>
           <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
@@ -884,5 +902,139 @@ async function startAnthropicOAuth(){
     _anthropicOAuthFlowId=null;
     _renderAnthropicOAuthTerminal('error',(e&&e.message)||String(e));
     _setAnthropicOAuthButton(true);
+  }
+}
+
+/* ── xAI Grok OAuth (SuperGrok) — PKCE with paste-back of failed-load URL ── */
+let _xaiOAuthFlowId=null;
+let _xaiOAuthAuthorizeUrl='';
+
+function _setXAIOAuthButton(enabled,label){
+  const btn=$('xaiOAuthBtn');
+  if(btn){btn.disabled=!enabled;btn.textContent=enabled?(label||'Sign in with xAI (SuperGrok)'):'...';}
+}
+
+function _renderXAIOAuthTerminal(status,message){
+  const flowDiv=$('xaiOAuthFlow');
+  if(!flowDiv)return;
+  const ok=status==='success';
+  const icon=ok?'✅':status==='expired'?'⌛':status==='cancelled'?'⏹':'❌';
+  const title=ok?'xAI Grok OAuth linked':(status==='expired'?'xAI OAuth flow expired':(status==='cancelled'?'xAI OAuth cancelled':'xAI OAuth failed'));
+  flowDiv.style.display='block';
+  flowDiv.innerHTML=`
+    <div class="onboarding-oauth-card ${ok?'onboarding-oauth-ready':''}" ${ok?'':'style="border-color:var(--error,#e55)"'}>
+      <div class="onboarding-oauth-icon">${icon}</div>
+      <div><strong>${title}</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">${esc(message||'')}</p></div>
+    </div>`;
+}
+
+async function cancelXAIOAuth(){
+  const flowDiv=$('xaiOAuthFlow');
+  const flowId=_xaiOAuthFlowId;
+  _xaiOAuthFlowId=null;
+  _xaiOAuthAuthorizeUrl='';
+  if(flowId){
+    try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({flow_id:flowId,provider:'xai-oauth'})});}catch(e){}
+  }
+  _setXAIOAuthButton(true);
+  if(flowDiv){
+    flowDiv.innerHTML=`<div class="onboarding-oauth-card"><div class="onboarding-oauth-icon">⏹</div><div><strong>xAI OAuth cancelled</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Start again whenever you're ready.</p></div></div>`;
+  }
+}
+
+function copyXAIOAuthUrl(){
+  const url=_xaiOAuthAuthorizeUrl;
+  if(!url)return;
+  try{
+    navigator.clipboard.writeText(url);
+    showToast('Authorize URL copied');
+  }catch(e){showToast(url);}
+}
+
+async function submitXAIOAuthPaste(){
+  const flowId=_xaiOAuthFlowId;
+  if(!flowId)return;
+  const input=document.getElementById('xaiOAuthPasteInput');
+  if(!input)return;
+  const callbackUrl=(input.value||'').trim();
+  if(!callbackUrl){
+    showToast('Paste the URL from your browser’s failed-load page first.');
+    return;
+  }
+  const errEl=document.getElementById('xaiOAuthPasteError');
+  if(errEl){errEl.textContent='';errEl.style.display='none';}
+  const submitBtn=document.getElementById('xaiOAuthPasteSubmit');
+  if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='Linking...';}
+  try{
+    const resp=await api('/api/onboarding/oauth/paste',{method:'POST',body:JSON.stringify({flow_id:flowId,callback_url:callbackUrl})});
+    if(resp.error) throw new Error(resp.error);
+    const status=(resp&&resp.status)||'error';
+    if(status==='success'){
+      _xaiOAuthFlowId=null;
+      _xaiOAuthAuthorizeUrl='';
+      _setXAIOAuthButton(true);
+      _renderXAIOAuthTerminal('success','SuperGrok credentials saved to the Hermes credential pool. Refreshing provider status…');
+      showToast('xAI Grok OAuth linked');
+      try{await loadOnboardingWizard();}catch(e){}
+    }else if(status==='error'){
+      if(errEl){errEl.textContent=(resp&&resp.error)||'Could not finish the xAI OAuth handshake.';errEl.style.display='block';}
+      if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='Finish login';}
+    }else{
+      _renderXAIOAuthTerminal(status,(resp&&resp.error)||'Unexpected OAuth status: '+status);
+    }
+  }catch(e){
+    if(errEl){errEl.textContent=(e&&e.message)||String(e);errEl.style.display='block';}
+    if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='Finish login';}
+  }
+}
+
+function _renderXAIOAuthPasteCard(authorizeUrl){
+  const flowDiv=$('xaiOAuthFlow');
+  if(!flowDiv)return;
+  flowDiv.innerHTML=`
+    <div class="onboarding-oauth-card onboarding-oauth-pending">
+      <div class="onboarding-oauth-icon">📋</div>
+      <div style="flex:1">
+        <strong>Step 1 — approve Hermes at accounts.x.ai</strong>
+        <p style="margin-top:6px;color:var(--muted);font-size:13px">Open this URL in a new tab, sign in to your xAI account, and click <em>Authorize</em>.</p>
+        <p style="margin-top:6px"><a href="${esc(authorizeUrl)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all">${esc(authorizeUrl)}</a></p>
+        <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sm-btn" type="button" onclick="copyXAIOAuthUrl()">Copy authorize URL</button>
+        </div>
+        <hr style="margin:14px 0;border:none;border-top:1px solid rgba(255,255,255,.08)">
+        <strong>Step 2 — paste the URL from the failed-load page</strong>
+        <p style="margin-top:6px;color:var(--muted);font-size:13px">After you approve, your browser will try to load <code>http://127.0.0.1:56121/callback?…</code> and show <em>this site can’t be reached</em>. <strong>That is expected.</strong> Copy the full URL from the address bar of that failed page and paste it below.</p>
+        <textarea id="xaiOAuthPasteInput" placeholder="http://127.0.0.1:56121/callback?code=…&state=…" style="width:100%;min-height:60px;margin-top:6px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.2);color:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px" spellcheck="false" autocomplete="off"></textarea>
+        <p id="xaiOAuthPasteError" style="display:none;color:var(--error,#e55);margin-top:6px;font-size:13px"></p>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="sm-btn" id="xaiOAuthPasteSubmit" type="button" onclick="submitXAIOAuthPaste()">Finish login</button>
+          <button class="sm-btn" type="button" onclick="cancelXAIOAuth()">Cancel</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function startXAIOAuth(){
+  const flowDiv=$('xaiOAuthFlow');
+  if(!flowDiv)return;
+  _xaiOAuthFlowId=null;
+  _xaiOAuthAuthorizeUrl='';
+  _setXAIOAuthButton(false);
+  flowDiv.style.display='block';
+  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>Starting xAI Grok OAuth…</strong><p style="margin-top:6px;color:var(--muted);font-size:13px">Discovering authorization endpoint at accounts.x.ai…</p></div></div>`;
+  try{
+    const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'xai-oauth'})});
+    if(resp.error) throw new Error(resp.error);
+    const{flow_id,authorize_url}=resp;
+    if(!flow_id||!authorize_url) throw new Error('Invalid xAI OAuth response');
+    _xaiOAuthFlowId=flow_id;
+    _xaiOAuthAuthorizeUrl=authorize_url;
+    _renderXAIOAuthPasteCard(authorize_url);
+    try{window.open(authorize_url,'_blank','noopener');}catch(e){}
+  }catch(e){
+    _xaiOAuthFlowId=null;
+    _xaiOAuthAuthorizeUrl='';
+    _renderXAIOAuthTerminal('error',(e&&e.message)||String(e));
+    _setXAIOAuthButton(true);
   }
 }

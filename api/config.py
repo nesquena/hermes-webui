@@ -659,6 +659,7 @@ _PROVIDER_DISPLAY = {
     "mistralai": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
+    "xai-oauth": "xAI Grok OAuth (SuperGrok)",
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
 }
@@ -1098,7 +1099,17 @@ _PROVIDER_MODELS = {
     ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
-        {"id": "grok-4.20", "label": "Grok 4.20"},
+        {"id": "grok-4.3",                        "label": "Grok 4.3"},
+        {"id": "grok-4.20-0309-reasoning",        "label": "Grok 4.20 (reasoning)"},
+        {"id": "grok-4.20-0309-non-reasoning",    "label": "Grok 4.20 (non-reasoning)"},
+        {"id": "grok-4.20-multi-agent-0309",      "label": "Grok 4.20 (multi-agent)"},
+    ],
+    # xAI Grok OAuth (SuperGrok Subscription) — same catalog as x-ai
+    "xai-oauth": [
+        {"id": "grok-4.3",                        "label": "Grok 4.3"},
+        {"id": "grok-4.20-0309-reasoning",        "label": "Grok 4.20 (reasoning)"},
+        {"id": "grok-4.20-0309-non-reasoning",    "label": "Grok 4.20 (non-reasoning)"},
+        {"id": "grok-4.20-multi-agent-0309",      "label": "Grok 4.20 (multi-agent)"},
     ],
 }
 

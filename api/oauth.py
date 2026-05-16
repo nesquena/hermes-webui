@@ -37,8 +37,29 @@ CODEX_REDIRECT_URI = f"{CODEX_ISSUER}/deviceauth/callback"
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_FLOW_MAX_WAIT_SECONDS = 15 * 60
 
-_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {"openai-codex", "anthropic", "claude", "claude-code"}
+# xAI Grok OAuth (SuperGrok Subscription) — PKCE loopback flow.
+# xAI's OAuth client validates redirect_uri to http://127.0.0.1:* only, so on
+# managed HermesOS VMs the user's browser callback never reaches the VM. The
+# WebUI runs the PKCE handshake itself and the user pastes the resulting
+# callback URL back from the "connection refused" page their browser shows.
+XAI_OAUTH_PROVIDER_ID = "xai-oauth"
+XAI_OAUTH_REDIRECT_URI = "http://127.0.0.1:56121/callback"
+XAI_OAUTH_BASE_URL = "https://api.x.ai/v1"
+XAI_OAUTH_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/guides/xai-grok-oauth"
+XAI_OAUTH_FLOW_MAX_WAIT_SECONDS = 30 * 60
+
+_ALLOWED_ONBOARDING_OAUTH_PROVIDERS = {
+    "openai-codex",
+    "anthropic",
+    "claude",
+    "claude-code",
+    "xai-oauth",
+    "grok-oauth",
+    "x-ai-oauth",
+    "xai-grok-oauth",
+}
 _ANTHROPIC_PROVIDER_ALIASES = {"anthropic", "claude", "claude-code"}
+_XAI_OAUTH_PROVIDER_ALIASES = {"xai-oauth", "grok-oauth", "x-ai-oauth", "xai-grok-oauth"}
 _REJECTED_ONBOARDING_OAUTH_PROVIDERS = {
     "nous",
     "qwen-oauth",
@@ -86,6 +107,8 @@ def _normalize_onboarding_oauth_provider(provider: str) -> str:
     provider = str(provider or "").strip().lower()
     if provider in _ANTHROPIC_PROVIDER_ALIASES:
         return "anthropic"
+    if provider in _XAI_OAUTH_PROVIDER_ALIASES:
+        return XAI_OAUTH_PROVIDER_ID
     return provider or "openai-codex"
 
 
@@ -508,6 +531,345 @@ def _exchange_codex_authorization(authorization_code: str, code_verifier: str) -
     )
 
 
+# ── xAI Grok OAuth (PKCE, paste-back) ───────────────────────────────────────
+
+def _xai_oauth_pkce_pair() -> tuple[str, str]:
+    """RFC 7636 PKCE: returns (code_verifier, code_challenge_S256)."""
+    import base64
+    import hashlib
+    import secrets
+
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _xai_oauth_discover_endpoints() -> dict[str, Any]:
+    """Discover authorize/token endpoints via the agent's helper.
+
+    Calls into hermes_cli.auth so that the host allowlist (*.x.ai) and any
+    malformed-JSON guards live in one place. Returns the discovery dict.
+    """
+    from hermes_cli.auth import _xai_oauth_discovery  # type: ignore
+
+    return _xai_oauth_discovery()
+
+
+def _xai_oauth_build_authorize_url(
+    *,
+    authorization_endpoint: str,
+    code_challenge: str,
+    state: str,
+    nonce: str,
+) -> str:
+    from hermes_cli.auth import _xai_oauth_build_authorize_url as _build  # type: ignore
+
+    return _build(
+        authorization_endpoint=authorization_endpoint,
+        redirect_uri=XAI_OAUTH_REDIRECT_URI,
+        code_challenge=code_challenge,
+        state=state,
+        nonce=nonce,
+    )
+
+
+def _exchange_xai_oauth_authorization(
+    *,
+    token_endpoint: str,
+    code: str,
+    code_verifier: str,
+) -> dict[str, Any]:
+    from hermes_cli.auth import XAI_OAUTH_CLIENT_ID  # type: ignore
+
+    return _json_request(
+        token_endpoint,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": XAI_OAUTH_REDIRECT_URI,
+            "client_id": XAI_OAUTH_CLIENT_ID,
+            "code_verifier": code_verifier,
+        },
+        form=True,
+    )
+
+
+def _persist_xai_oauth_credentials(
+    hermes_home: Path,
+    token_data: dict[str, Any],
+    *,
+    discovery: dict[str, Any] | None = None,
+) -> Path:
+    """Persist xAI Grok OAuth tokens to active-profile auth.json.
+
+    Writes both the agent's singleton ``providers["xai-oauth"]`` state (which
+    is what the agent's resolve_xai_oauth_runtime_credentials reads first) and
+    a mirroring ``credential_pool["xai-oauth"]`` entry so legacy pool readers
+    pick it up immediately without waiting for the agent's sync-back pass.
+    """
+    access_token = str(token_data.get("access_token") or "").strip()
+    refresh_token = str(token_data.get("refresh_token") or "").strip()
+    if not access_token:
+        raise RuntimeError("xAI token exchange did not return an access_token")
+    if not refresh_token:
+        raise RuntimeError("xAI token exchange did not return a refresh_token")
+
+    auth_path = Path(hermes_home) / "auth.json"
+    auth = _read_auth_json(auth_path)
+    auth.setdefault("version", 1)
+    now = _now_iso()
+
+    tokens = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": str(token_data.get("id_token") or "").strip(),
+        "expires_in": token_data.get("expires_in"),
+        "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer",
+    }
+
+    # Agent singleton schema — matches hermes_cli.auth._save_xai_oauth_tokens.
+    providers = auth.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        auth["providers"] = providers
+    state = providers.get(XAI_OAUTH_PROVIDER_ID) or {}
+    if not isinstance(state, dict):
+        state = {}
+    state["tokens"] = tokens
+    state["last_refresh"] = now
+    state["auth_mode"] = "oauth_pkce"
+    if discovery:
+        state["discovery"] = discovery
+    state["redirect_uri"] = XAI_OAUTH_REDIRECT_URI
+    providers[XAI_OAUTH_PROVIDER_ID] = state
+    auth["active_provider"] = XAI_OAUTH_PROVIDER_ID
+
+    # Credential pool mirror — matches the shape used by the Codex/Anthropic
+    # entries written elsewhere in this file. Keeps the pool view consistent
+    # before the agent's next sync-back pass runs.
+    pool = auth.setdefault("credential_pool", {})
+    if not isinstance(pool, dict):
+        pool = {}
+        auth["credential_pool"] = pool
+    entries = pool.setdefault(XAI_OAUTH_PROVIDER_ID, [])
+    if not isinstance(entries, list):
+        entries = []
+        pool[XAI_OAUTH_PROVIDER_ID] = entries
+    entry = None
+    for candidate in entries:
+        if isinstance(candidate, dict) and candidate.get("source") == "oauth-loopback":
+            entry = candidate
+            break
+    if entry is None:
+        entry = {
+            "id": "xai-oauth-" + uuid.uuid4().hex[:12],
+            "label": "xAI Grok OAuth",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "oauth-loopback",
+            "base_url": XAI_OAUTH_BASE_URL,
+            "created_at": now,
+        }
+        entries.insert(0, entry)
+    entry.update(
+        {
+            "label": "xAI Grok OAuth",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "oauth-loopback",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "base_url": XAI_OAUTH_BASE_URL,
+            "last_refresh": now,
+            "updated_at": now,
+        }
+    )
+
+    auth["updated_at"] = now
+    path = _write_auth_json(auth, auth_path)
+
+    # Also update config.yaml so the next chat session routes to xai-oauth.
+    # Mirrors what hermes_cli.auth._login_xai_oauth does after a CLI login.
+    # HERMES_HOME must point at the active profile for the helper to write to
+    # the right config.yaml — set/restore around the call.
+    try:
+        from hermes_cli.auth import _update_config_for_provider  # type: ignore
+
+        prev_home = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = str(hermes_home)
+        try:
+            _update_config_for_provider(XAI_OAUTH_PROVIDER_ID, XAI_OAUTH_BASE_URL)
+        finally:
+            if prev_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = prev_home
+    except Exception:
+        logger.warning("Failed to update config.yaml for xai-oauth", exc_info=True)
+
+    try:
+        from api.config import invalidate_credential_pool_cache
+
+        invalidate_credential_pool_cache(XAI_OAUTH_PROVIDER_ID)
+    except Exception:
+        logger.debug("Failed to invalidate xai-oauth credential cache", exc_info=True)
+
+    return path
+
+
+def _xai_oauth_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "provider": XAI_OAUTH_PROVIDER_ID,
+        "flow_id": flow_id,
+        "status": flow.get("status", "pending"),
+        "authorize_url": flow.get("authorize_url", ""),
+        "redirect_uri": XAI_OAUTH_REDIRECT_URI,
+        "expires_at": flow.get("expires_at"),
+        "docs_url": XAI_OAUTH_DOCS_URL,
+    }
+
+
+def _xai_oauth_public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "ok": True,
+        "provider": XAI_OAUTH_PROVIDER_ID,
+        "flow_id": flow_id,
+        "status": flow.get("status", "error"),
+    }
+    if flow.get("status") == "error" and flow.get("error"):
+        payload["error"] = str(flow.get("error"))[:200]
+    return payload
+
+
+def _start_xai_oauth_flow(hermes_home: Path) -> dict[str, Any]:
+    """Start an xAI Grok OAuth flow.
+
+    The WebUI generates PKCE locally and surfaces the authorize URL plus a
+    paste-box. After the user consents at accounts.x.ai their browser tries
+    to load ``http://127.0.0.1:56121/callback`` and shows "connection
+    refused"; they copy that URL back into the WebUI to complete the flow.
+    """
+    try:
+        discovery = _xai_oauth_discover_endpoints()
+    except Exception as exc:
+        raise RuntimeError(f"xAI OAuth discovery failed: {exc}") from exc
+
+    code_verifier, code_challenge = _xai_oauth_pkce_pair()
+    state = uuid.uuid4().hex
+    nonce = uuid.uuid4().hex
+    authorize_url = _xai_oauth_build_authorize_url(
+        authorization_endpoint=str(discovery.get("authorization_endpoint") or ""),
+        code_challenge=code_challenge,
+        state=state,
+        nonce=nonce,
+    )
+
+    flow_id = uuid.uuid4().hex
+    flow = {
+        "provider": XAI_OAUTH_PROVIDER_ID,
+        "status": "pending",
+        "code_verifier": code_verifier,
+        "state": state,
+        "nonce": nonce,
+        "authorize_url": authorize_url,
+        "token_endpoint": str(discovery.get("token_endpoint") or ""),
+        "discovery": discovery,
+        "hermes_home": str(hermes_home),
+        "expires_at": time.time() + XAI_OAUTH_FLOW_MAX_WAIT_SECONDS,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with _OAUTH_FLOWS_LOCK:
+        _OAUTH_FLOWS[flow_id] = flow
+    return _xai_oauth_public_start_payload(flow_id, flow)
+
+
+def _extract_xai_callback_params(callback_url: str) -> dict[str, str]:
+    """Tolerantly parse a pasted callback URL.
+
+    Accepts the full ``http://127.0.0.1:56121/callback?code=...&state=...``
+    redirect, a bare query string ``?code=...&state=...``, or a query string
+    without the leading ``?``. Returns the parameter dict.
+    """
+    raw = (callback_url or "").strip()
+    if not raw:
+        return {}
+    if "?" in raw and not raw.lower().startswith(("http://", "https://")):
+        raw = "http://127.0.0.1" + raw[raw.index("?"):]
+    elif "=" in raw and not raw.lower().startswith(("http://", "https://")):
+        raw = "http://127.0.0.1/callback?" + raw.lstrip("?")
+    parsed = urllib.parse.urlparse(raw)
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+    return {k: v[0] for k, v in qs.items() if v}
+
+
+def paste_onboarding_oauth_callback(body: dict[str, Any] | None) -> dict[str, Any]:
+    """Complete a pending xAI OAuth flow with the user's pasted callback URL."""
+    fid = str((body or {}).get("flow_id") or "").strip()
+    callback_url = str((body or {}).get("callback_url") or "").strip()
+    if not fid:
+        raise ValueError("flow_id is required")
+    if not callback_url:
+        raise ValueError("callback_url is required")
+
+    with _OAUTH_FLOWS_LOCK:
+        flow = _OAUTH_FLOWS.get(fid)
+        if not flow:
+            raise KeyError("OAuth flow not found")
+        if flow.get("provider") != XAI_OAUTH_PROVIDER_ID:
+            raise ValueError("callback paste is only supported for xAI OAuth flows")
+        if flow.get("status") != "pending":
+            return _xai_oauth_public_status_payload(fid, dict(flow))
+        flow_snapshot = dict(flow)
+
+    params = _extract_xai_callback_params(callback_url)
+    err = params.get("error", "").strip()
+    if err:
+        detail = params.get("error_description", "").strip() or err
+        _set_flow_status(fid, "error", error=f"xAI authorization failed: {detail}")
+        with _OAUTH_FLOWS_LOCK:
+            return _xai_oauth_public_status_payload(fid, dict(_OAUTH_FLOWS.get(fid, flow_snapshot)))
+    code = params.get("code", "").strip()
+    received_state = params.get("state", "").strip()
+    if not code:
+        raise ValueError(
+            "Pasted URL did not contain a 'code' parameter — make sure you "
+            "copied the full URL from the failed-load page in your browser."
+        )
+    if received_state != str(flow_snapshot.get("state") or ""):
+        _set_flow_status(fid, "error", error="OAuth state mismatch — start a new flow")
+        with _OAUTH_FLOWS_LOCK:
+            return _xai_oauth_public_status_payload(fid, dict(_OAUTH_FLOWS.get(fid, flow_snapshot)))
+
+    try:
+        token_data = _exchange_xai_oauth_authorization(
+            token_endpoint=str(flow_snapshot.get("token_endpoint") or ""),
+            code=code,
+            code_verifier=str(flow_snapshot.get("code_verifier") or ""),
+        )
+        _persist_xai_oauth_credentials(
+            Path(flow_snapshot["hermes_home"]),
+            token_data,
+            discovery=flow_snapshot.get("discovery"),
+        )
+        with _OAUTH_FLOWS_LOCK:
+            current = _OAUTH_FLOWS.get(fid)
+            if current and current.get("status") == "pending":
+                current["status"] = "success"
+                current["updated_at"] = time.time()
+                _drop_sensitive_flow_fields(current)
+            return _xai_oauth_public_status_payload(fid, dict(_OAUTH_FLOWS.get(fid, flow_snapshot)))
+    except Exception as exc:
+        logger.warning("xAI OAuth paste exchange failed: %s", exc)
+        _set_flow_status(fid, "error", error=str(exc))
+        with _OAUTH_FLOWS_LOCK:
+            return _xai_oauth_public_status_payload(fid, dict(_OAUTH_FLOWS.get(fid, flow_snapshot)))
+
+
+# ── Public payload routing ──────────────────────────────────────────────────
+
 def _codex_public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
@@ -537,6 +899,8 @@ def _public_start_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]:
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_start_payload(flow_id, flow)
+    if provider == XAI_OAUTH_PROVIDER_ID:
+        return _xai_oauth_public_start_payload(flow_id, flow)
     return _codex_public_start_payload(flow_id, flow)
 
 
@@ -544,6 +908,8 @@ def _public_status_payload(flow_id: str, flow: dict[str, Any]) -> dict[str, Any]
     provider = flow.get("provider", "openai-codex")
     if provider == "anthropic":
         return _anthropic_public_status_payload(flow_id, flow)
+    if provider == XAI_OAUTH_PROVIDER_ID:
+        return _xai_oauth_public_status_payload(flow_id, flow)
     return _codex_public_status_payload(flow_id, flow)
 
 
@@ -692,6 +1058,10 @@ def start_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
     if provider in _ANTHROPIC_PROVIDER_ALIASES:
         return _start_anthropic_flow(_get_active_hermes_home())
 
+    # xAI Grok OAuth (any of the aliases)
+    if provider in _XAI_OAUTH_PROVIDER_ALIASES:
+        return _start_xai_oauth_flow(_get_active_hermes_home())
+
     # Codex flow
     hermes_home = _get_active_hermes_home()
     try:
@@ -746,7 +1116,7 @@ def cancel_onboarding_oauth_flow(body: dict[str, Any] | None) -> dict[str, Any]:
     if not fid:
         raise ValueError("flow_id is required")
     requested_provider = _normalize_onboarding_oauth_provider(str((body or {}).get("provider") or ""))
-    if requested_provider not in {"openai-codex", "anthropic"}:
+    if requested_provider not in {"openai-codex", "anthropic", XAI_OAUTH_PROVIDER_ID}:
         requested_provider = "openai-codex"
     with _OAUTH_FLOWS_LOCK:
         flow = _OAUTH_FLOWS.get(fid)

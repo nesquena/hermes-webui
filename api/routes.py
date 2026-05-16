@@ -1928,6 +1928,7 @@ from api.onboarding import (
 )
 from api.oauth import (
     cancel_onboarding_oauth_flow,
+    paste_onboarding_oauth_callback,
     poll_onboarding_oauth_flow,
     start_onboarding_oauth_flow,
 )
@@ -5082,6 +5083,31 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, cancel_onboarding_oauth_flow(body), extra_headers={"Cache-Control": "no-store"})
         except ValueError as e:
             return bad(handler, str(e))
+
+    if parsed.path == "/api/onboarding/oauth/paste":
+        # Same local-network gate as /oauth/start — writes OAuth tokens to disk.
+        from api.auth import is_auth_enabled
+        import os as _os
+        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
+            import ipaddress
+            try:
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _raw = handler.client_address[0]
+                addr = ipaddress.ip_address(_xff or _xri or _raw)
+                is_local = addr.is_loopback or addr.is_private
+            except ValueError:
+                is_local = False
+            if not is_local:
+                return bad(handler, "Onboarding OAuth is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        try:
+            return j(handler, paste_onboarding_oauth_callback(body), extra_headers={"Cache-Control": "no-store"})
+        except ValueError as e:
+            return bad(handler, str(e))
+        except KeyError as e:
+            return bad(handler, str(e), 404)
+        except RuntimeError as e:
+            return bad(handler, str(e), 500)
 
     if parsed.path == "/api/onboarding/setup":
         # Writing API keys to disk - restrict to local/private networks unless auth is active.

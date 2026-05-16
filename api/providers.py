@@ -423,6 +423,7 @@ _OAUTH_PROVIDERS = frozenset({
     "nous",
     "openai-codex",
     "qwen-oauth",
+    "xai-oauth",
 })
 
 _DASHBOARD_OPENAI_COMPATIBLE_PROVIDERS = frozenset({

@@ -179,13 +179,17 @@ _SUPPORTED_PROVIDER_SETUPS = {
     "x-ai": {
         "label": "xAI (Grok)",
         "env_var": "XAI_API_KEY",
-        "default_model": "grok-4.20",
+        "default_model": "grok-4.3",
         "default_base_url": "https://api.x.ai/v1",
         "requires_base_url": False,
         # Agent normalizes "x-ai" → "xai"; _PROVIDER_MODELS is also keyed "xai"
         # when populated, so check both keys for forward-compatibility.
         "models": list(_PROVIDER_MODELS.get("xai", []) or _PROVIDER_MODELS.get("x-ai", [])),
         "category": "specialized",
+        # SuperGrok subscription OAuth — alternative to pasting a developer
+        # API key. Triggers the xAI Grok OAuth card in the onboarding UI.
+        "oauth_provider": "xai-oauth",
+        "oauth_label": "Sign in with xAI (SuperGrok)",
     },
 }
 
