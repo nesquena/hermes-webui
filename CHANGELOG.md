@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [v0.51.76] — 2026-05-16 — Release AZ (stage-369 — 4-PR safe-lane batch — live timeline preservation + OpenRouter cost history + chat stream cap + credential pool cache)
+
+### Added
+
+- **PR #2195** by @Michaelyklam (refs #692) — OpenRouter cost history backend. New `GET /api/providers/openrouter/cost_history` endpoint backed by daily snapshots from OpenRouter's `/auth/key` cumulative spend. Process-local lock around the snapshot read-modify-write critical section so concurrent dashboard refreshes or multiple tabs cannot overwrite newer reads with stale ones. Delta computation handles cumulative-counter resets (key rotation, OpenRouter-side reset) by starting a fresh series and using the current value as that day's delta rather than emitting negative spend. Backend-only slice; the 7-day daily cost chart UI is a separate follow-up.
+
+### Fixed
+
+- **PR #2347** by @franksong2702 (fixes #2344) — Preserve live agent timeline across session switches. Previously, switching away from an active stream and returning rebuilt the turn from the persisted `INFLIGHT` tail, which is enough to reconnect the stream but is not a full-fidelity DOM timeline — Thinking/tool grouping flattened, interim assistant text moved away from its surrounding context, auto-compression cards could project twice. The restore path now snapshots the live assistant turn DOM during the active stream and, on return, loads the persisted transcript first then merges the live snapshot back in so the on-screen scene is preserved as the user left it. Stamping `row.dataset.sessionId` at turn creation prevents the new live-turn sites from re-triggering the lossy rebuild path.
+
+- **PR #2393** by @Michaelyklam (refs #2313) — Cap live chat stream transports to the selected conversation. Previously, keeping many sessions open accumulated one long-lived `/api/chat/stream` EventSource per session. New `closeOtherLiveStreams(activeSid)` helper in `static/messages.js`; `attachLiveStream()` now reuses an existing same-session transport first, closes other sessions' chat SSE transports, then opens or replaces the selected session's stream. Background sessions still reattach normally when the user selects them — only the SSE transport is pruned, not the server-side stream ownership. New regression test pins the ordering (reuse first, prune background streams next, replace active transport last).
+
+- **PR #2396** by @starship-s — Preserve session agents for credential pools. The per-session `AIAgent` cache signature previously mixed stable agent identity with the volatile resolved API key, so credential-pool providers (where each request can resolve a different runtime token even when provider/model config is unchanged) missed the cache every turn and rebuilt the agent — losing warmed cross-turn state such as memory-provider prefetch results for providers like Hindsight. New credential-aware cache-signature helper uses a stable sentinel for credential-pool routes while preserving hashed API-key identity for non-pool routes; reused cached agents refresh runtime credentials in place; `AIAgent._primary_runtime` stays aligned after refresh so fallback/transport recovery cannot resurrect an old token; agents still in fallback-active state rebuild rather than mutate to avoid mixed primary/fallback runtime state. Static non-pool API keys still participate in the cache signature so explicit credential changes continue to invalidate.
+
 ## [v0.51.75] — 2026-05-16 — Release AY (stage-368 — 11-PR safe-lane batch — storage + i18n + run-journal parity + attachments + compression sidebar + restart-recovery + text-mode images + tables + settings i18n + German labels)
 
 ### Test infrastructure
@@ -91,6 +105,8 @@
 ## [v0.51.69] — 2026-05-15 — Release AT (stage-362 — 8-PR follow-up batch — Ollama routing + legacy toolset + cancel copy + cleanup + custom provider mismatch + cron metadata + dead-code removal; #2323 reverted after Opus-caught silent regression, refiled as #2321 reopen)
 
 ### Added
+
+- **PR #2347** by @franksong2702 — Long tool-heavy streaming turns now preserve the live Thinking / assistant progress / Tool / Command timeline when the user switches away and back. The active stream keeps accumulating token and interim-assistant state while inactive, reloads the persisted transcript before merging the live tail, restores the live turn DOM snapshot instead of replaying tools into a flat list, and anchors automatic compression cards inside the active turn to avoid duplicate cards while an answer is still streaming.
 
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
 

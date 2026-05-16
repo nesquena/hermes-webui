@@ -874,3 +874,139 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
         # Agent was constructed successfully
         self.assertIn("session_id", captured["init_kwargs"])
         self.assertEqual(captured["init_kwargs"]["session_id"], "sess-compat-test")
+
+
+class TestAgentCacheCredentialPoolStability(unittest.TestCase):
+    """Credential-pool token churn must not evict cached WebUI agents."""
+
+    def test_credential_pool_signature_ignores_volatile_runtime_token(self):
+        import api.streaming as streaming
+
+        pool = object()
+        self.assertEqual(
+            streaming._agent_cache_api_key_sig('token-a', pool),
+            streaming._agent_cache_api_key_sig('token-b', pool),
+        )
+        self.assertNotEqual(
+            streaming._agent_cache_api_key_sig('token-a', None),
+            streaming._agent_cache_api_key_sig('token-b', None),
+        )
+
+    def test_cached_agent_runtime_refresh_swaps_key_without_losing_agent_state(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            def __init__(self):
+                self.api_key = 'old-token'
+                self.base_url = 'https://chatgpt.com/backend-api/codex'
+                self.api_mode = 'codex_responses'
+                self._client_kwargs = {
+                    'api_key': 'old-token',
+                    'base_url': self.base_url,
+                    'default_headers': {'old': 'header'},
+                }
+                self._credential_pool = 'old-pool'
+                self.context_compressor = type('Compressor', (), {
+                    'base_url': self.base_url,
+                    'api_key': 'old-token',
+                })()
+                self._primary_runtime = {
+                    'base_url': self.base_url,
+                    'api_key': 'old-token',
+                    'client_kwargs': dict(self._client_kwargs),
+                    'compressor_base_url': self.base_url,
+                    'compressor_api_key': 'old-token',
+                }
+                self.header_refreshes = []
+                self.replacements = []
+                self.prefetch_survives = object()
+
+            def _apply_client_headers_for_base_url(self, base_url):
+                self.header_refreshes.append((base_url, self._client_kwargs['api_key']))
+                self._client_kwargs['default_headers'] = {'refreshed-for': self._client_kwargs['api_key']}
+
+            def _replace_primary_openai_client(self, *, reason):
+                self.replacements.append(reason)
+                return True
+
+        agent = FakeAgent()
+        preserved = agent.prefetch_survives
+        changed = streaming._refresh_cached_agent_runtime(agent, {
+            'api_key': 'new-token',
+            'base_url': 'https://chatgpt.com/backend-api/codex',
+            'credential_pool': 'new-pool',
+        })
+
+        self.assertTrue(changed)
+        self.assertIs(agent.prefetch_survives, preserved)
+        self.assertEqual(agent.api_key, 'new-token')
+        self.assertEqual(agent._client_kwargs['api_key'], 'new-token')
+        self.assertEqual(agent._credential_pool, 'new-pool')
+        self.assertEqual(agent._primary_runtime['api_key'], 'new-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'new-token')
+        self.assertEqual(agent._primary_runtime['compressor_api_key'], 'new-token')
+        self.assertEqual(getattr(agent.context_compressor, 'api_key'), 'new-token')
+        self.assertEqual(agent.header_refreshes, [('https://chatgpt.com/backend-api/codex', 'new-token')])
+        self.assertEqual(agent.replacements, ['webui_credential_refresh'])
+
+    def test_same_key_refresh_repairs_stale_primary_runtime_snapshot(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            api_key = 'current-token'
+            base_url = 'https://chatgpt.com/backend-api/codex'
+            api_mode = 'codex_responses'
+            _client_kwargs = {
+                'api_key': 'current-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+            }
+            _primary_runtime = {
+                'api_key': 'old-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+                'client_kwargs': {
+                    'api_key': 'old-token',
+                    'base_url': 'https://chatgpt.com/backend-api/codex',
+                },
+            }
+
+        agent = FakeAgent()
+        ok = streaming._refresh_cached_agent_runtime(agent, {'api_key': 'current-token'})
+
+        self.assertTrue(ok)
+        self.assertEqual(agent._primary_runtime['api_key'], 'current-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'current-token')
+
+    def test_fallback_active_refresh_requests_rebuild_without_mutating_fallback(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            api_key = 'fallback-token'
+            base_url = 'https://fallback.example/v1'
+            api_mode = 'codex_responses'
+            _fallback_activated = True
+            _client_kwargs = {
+                'api_key': 'fallback-token',
+                'base_url': 'https://fallback.example/v1',
+            }
+            _primary_runtime = {
+                'api_key': 'old-primary-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+                'client_kwargs': {
+                    'api_key': 'old-primary-token',
+                    'base_url': 'https://chatgpt.com/backend-api/codex',
+                },
+                'compressor_api_key': 'old-primary-token',
+                'compressor_base_url': 'https://chatgpt.com/backend-api/codex',
+            }
+
+        agent = FakeAgent()
+        ok = streaming._refresh_cached_agent_runtime(agent, {
+            'api_key': 'new-primary-token',
+            'base_url': 'https://chatgpt.com/backend-api/codex',
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual(agent.api_key, 'fallback-token')
+        self.assertEqual(agent._client_kwargs['api_key'], 'fallback-token')
+        self.assertEqual(agent._primary_runtime['api_key'], 'old-primary-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'old-primary-token')

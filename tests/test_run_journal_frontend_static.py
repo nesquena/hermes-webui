@@ -66,7 +66,15 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
 
     assert "updateThinking(" in wire_block, "reasoning replay should use the live Thinking card path"
     assert "appendLiveToolCard(tc)" in wire_block, "tool replay should use live tool-card rendering"
-    assert "setCompressionUi({" in wire_block, "compression replay should use the compression card path"
+    # Compression replay must dispatch through setCompressionUi(...). The handler
+    # body may build the state object inline (`setCompressionUi({...})`) or hoist
+    # it into a `state` variable first (`setCompressionUi(state)`) — both forms
+    # use the same compression-card path, so accept either. Pinning the literal
+    # `{` after the open-paren was over-specific and broke in v0.51.76 when
+    # PR #2347 hoisted the state object to share it with `appendLiveCompressionCard`.
+    assert ("setCompressionUi({" in wire_block) or ("setCompressionUi(state)" in wire_block), (
+        "compression replay should use the compression card path"
+    )
     assert "_runJournalReplayParams()" in MESSAGES_SRC, "replay attachments should enter _wireSSE via EventSource"
 
 
