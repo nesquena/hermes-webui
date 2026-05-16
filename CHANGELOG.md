@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [v0.51.79] — 2026-05-16 — Release BC (stage-372 — 5-PR batch — text-mode image history fix + Activity-group compression boundary + named custom provider routing + quota chip Settings toggle + RFC docs)
+
+### Added
+
+- **PR #2413** (self-built follow-up to v0.51.78's #2082, closes the quota-chip default-on regression) — New "Show provider quota chip in composer" checkbox in Settings → Preferences, default off. When disabled (the new default), the chip is hidden at all viewports and the `/api/provider/quota` fetch is skipped entirely. When enabled, the existing `@media (max-width:1399.98px)` gate from stage-371 still restricts the chip to wide desktops only. Per Nathan's directive 2026-05-16 immediately after stage-371 shipped — users get explicit agency over an ambient composer-chrome element. Wired through `api/config.py` `_SETTINGS_DEFAULTS`, `static/boot.js`, `static/panels.js` round-trip, `static/ui.js` short-circuit-when-disabled, `static/index.html` Settings field, and 11 locales in `static/i18n.js`.
+
+### Fixed
+
+- **PR #2406** by @Michaelyklam (fixes #2398) — The fallback synchronous `POST /api/chat` route now passes the active WebUI config into the conversation-history sanitizer, so text-mode providers do not receive historical native `image_url` content parts when direct API callers use the legacy chat endpoint. This brings the sync route in line with the streaming chat path fixed for #2297.
+- **PR #2408** by @Michaelyklam (fixes #2404) — Auto-compression cards now close the current live Activity burst before rendering, so post-compression tools start a fresh `Activity` row instead of joining the pre-compression tool group across a real timeline/context boundary. Adds a `closeCurrentLiveActivityGroup()` helper that clears the `data-live-activity-current` marker before `appendLiveCompressionCard()` inserts the compression card. Resolves the DEFER from stage-370 Opus advisor review of PR #2390.
+- **PR #2411** by @Michaelyklam (fixes #2405) — Named `custom:*` providers no longer lose vendor-prefixed model selections when the static model picker has not hydrated that model yet. The frontend now treats named custom providers as routable aggregators for both mismatch-warning suppression and missing-dropdown fallback, and live-fetched models keep explicit `@custom:name:` provider context so selections persist instead of snapping back to the configured default.
+
+### Documentation
+
+- **PR #2407** by @Michaelyklam — Document the #1925 runtime-adapter gate update: Slice 1 run-journal replay has now passed a 100-trial synthetic replay/restart validation pass on current `origin/master`, #2313's selected-session chat SSE cap is shipped, and Slice 2 is ready for a reversible adapter-seam planning PR without moving execution ownership yet.
+
+### Test infrastructure
+
+- New regression test `tests/test_quota_chip_settings_toggle.py` (6 cases) pins the quota-chip toggle invariants: Settings field present with i18n labels, `show_quota_chip` default-`False` in `_SETTINGS_DEFAULTS` + `_SETTINGS_BOOL_KEYS`, render/refresh both short-circuit when disabled (no wasted API calls), boot initializes `window._showQuotaChip` from settings + default-false on settings-fetch failure, full panels.js round-trip, 11 locale strings present.
+
 ## [v0.51.78] — 2026-05-16 — Release BB (stage-371 — stuck-PR sweep salvage — RTL chat + ambient quota chip with composer-clutter gate)
 
 ### Added
