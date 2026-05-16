@@ -502,6 +502,64 @@ class TestBackgroundTitleProfileRouting(unittest.TestCase):
         self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
         self.assertEqual(mock_session.title, 'Profile Routed Title')
 
+    def test_background_profile_env_routes_load_config_and_provider_credentials(self):
+        """Hybrid worker env must satisfy config and os.getenv provider-key readers."""
+        import tempfile
+
+        import pytest
+
+        import api.profiles as profiles
+        from api.config import _thread_ctx
+        try:
+            from hermes_cli import config as hermes_config
+        except ModuleNotFoundError:
+            pytest.skip('hermes_cli is not installed in this CI environment')
+
+        session = types.SimpleNamespace(profile='work')
+        captured = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            default_home = os.path.join(tmp, 'default-home')
+            profile_home = os.path.join(tmp, 'profile-home')
+            os.makedirs(default_home, exist_ok=True)
+            os.makedirs(profile_home, exist_ok=True)
+            with open(os.path.join(default_home, 'config.yaml'), 'w', encoding='utf-8') as f:
+                f.write('model:\n  provider: default-provider\n  default: default-model\n')
+            with open(os.path.join(profile_home, 'config.yaml'), 'w', encoding='utf-8') as f:
+                f.write('model:\n  provider: profile-provider\n  default: profile-model\n')
+
+            with patch('api.profiles.get_hermes_home_for_profile', return_value=profile_home):
+                runtime_env = {
+                    'PROFILE_ONLY_KEY': 'profile-only',
+                    'OPENROUTER_API_KEY': 'profile-openrouter-key',
+                }
+                with patch('api.profiles.get_profile_runtime_env', return_value=runtime_env):
+                    with patch.dict(os.environ, {'HERMES_HOME': default_home, 'OPENROUTER_API_KEY': 'default-openrouter-key'}, clear=False):
+                        os.environ.pop('PROFILE_ONLY_KEY', None)
+                        hermes_config._LOAD_CONFIG_CACHE.clear()
+                        with profiles.profile_env_for_background_worker(session, 'background title'):
+                            loaded = hermes_config.load_config()
+                            captured['loaded_provider'] = loaded.get('model', {}).get('provider')
+                            captured['process_home'] = os.environ.get('HERMES_HOME')
+                            captured['process_runtime_key'] = os.environ.get('PROFILE_ONLY_KEY')
+                            captured['provider_credential'] = os.getenv('OPENROUTER_API_KEY')
+                            captured['thread_home'] = getattr(_thread_ctx, 'env', {}).get('HERMES_HOME')
+                            captured['thread_runtime_key'] = getattr(_thread_ctx, 'env', {}).get('PROFILE_ONLY_KEY')
+                        captured['restored_home'] = os.environ.get('HERMES_HOME')
+                        captured['restored_runtime_key'] = os.environ.get('PROFILE_ONLY_KEY')
+                        captured['restored_provider_credential'] = os.environ.get('OPENROUTER_API_KEY')
+                        hermes_config._LOAD_CONFIG_CACHE.clear()
+
+        self.assertEqual(captured['loaded_provider'], 'profile-provider')
+        self.assertEqual(captured['process_home'], profile_home)
+        self.assertEqual(captured['process_runtime_key'], 'profile-only')
+        self.assertEqual(captured['provider_credential'], 'profile-openrouter-key')
+        self.assertEqual(captured['thread_home'], profile_home)
+        self.assertEqual(captured['thread_runtime_key'], 'profile-only')
+        self.assertEqual(captured['restored_home'], default_home)
+        self.assertIsNone(captured['restored_runtime_key'])
+        self.assertEqual(captured['restored_provider_credential'], 'default-openrouter-key')
+
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
     """_aux_title_timeout must reject zero, negative, and non-numeric values."""
