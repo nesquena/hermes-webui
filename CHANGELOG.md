@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR TBD** by @franksong2702 (refs #2376, refs #1925, refs #2283, refs #2361, refs #2363) — Adds a focused run-journal replay parity check for long tool-heavy turns. The frontend regression coverage now pins that replayed `reasoning`, `interim_assistant`, `tool`, `tool_complete`, `compressing`, `compressed`, `metering`, and terminal events enter the same EventSource timeline handlers as live streaming, and that each user-visible long-task event advances the replay cursor to avoid duplicate replay. The run-state consistency RFC now calls out live/replay timeline parity explicitly.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
