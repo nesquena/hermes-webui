@@ -895,7 +895,7 @@
   .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
   /* #486: inline code inside table cells needs scaled sizing to avoid overflow/clipping */
-  .msg-body td code,.msg-body th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline;}
+  .msg-body td p,.msg-body th p{margin:0;}.msg-body td code,.msg-body th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline;}
   /* KaTeX math rendering */
   .katex-block{display:block;text-align:center;margin:12px 0;overflow-x:auto;}
   .katex-inline{display:inline;}
