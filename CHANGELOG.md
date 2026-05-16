@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v0.51.78] — 2026-05-16 — Release BB (stage-371 — stuck-PR sweep salvage — RTL chat + ambient quota chip with composer-clutter gate)
+
+### Added
+
+- **PR #2409** (maintainer follow-up from 2026-05-16 stuck-PR sweep, co-authored by @malulian and @ai-ag2026, closes #1721 and #2082) — Two stalled contributor PRs absorbed into one self-built release after Telegram UX approval across mobile/laptop/desktop/wide viewports.
+  - **Right-to-left chat layout (salvaged from #1721 by @malulian)** — New Settings → Preferences toggle, default off, flips the chat-area direction for Arabic and Hebrew users. Honors @aronprins' design review on PR #1721 (May 13 2026): drops the contributor's composer footer toggle button to keep composer real estate clean. Implementation includes a flash-prevention bootstrap `<script>` in `<head>` (applies `chat-content-rtl` class synchronously before any chat content paints), scoped CSS that only flips `.msg-row`, `.msg-body` tables, `.tool-call-group-summary`, and the composer `textarea#msg` — the sidebar, workspace panel, settings panel, and any other UI element stay left-to-right. Code blocks (`pre`, `code`, `kbd`, `samp`, `tt`, `.hljs`, `.code-block`) and tool-call group bodies force `direction:ltr; text-align:left; unicode-bidi:isolate` even under RTL, because Arabic and Hebrew developers still write English code, command lines, and JSON the same way English developers do (visually verified with embedded Python in an Arabic SSE conversation). Localized in 11 locales (en, it, ja, ru, es, de, zh-CN, zh-TW, pt, ko, fr).
+  - **Ambient provider quota chip (overridden from #2082 by @ai-ag2026)** — New green pill chip in the composer footer that surfaces the active provider's remaining quota (OpenRouter credit balance shaped as `$X.YZ`, or account-limit-shaped providers as `N%`), with click-through to Settings → Providers. Fetches `/api/provider/quota` on boot and on tab visibility return. Hidden below 1400px viewport via `@media (max-width:1400px) { display:none !important }` because the composer footer at 1280px laptop and 1440px standard desktop was already tight and the chip squeezed adjacent chips (model picker truncated from `Claude Sonnet 4 7` to `Claude Sonnet 4`, workspace dropdown lost text). Mobile users find quota through the dedicated mobile-config drawer; laptop users follow the chip's click-target into Settings → Providers anyway. The chip's value proposition (ambient quota visibility) is preserved on wide displays where there's genuine composer room without trading off existing chip readability.
+
+### Test infrastructure
+
+- New regression test `tests/test_pr1721_rtl_salvage.py` (8 cases) pins the RTL salvage invariants: Settings field + i18n keys present, no composer footer button (negative assertion encoding @aronprins' design objection), bootstrap script runs synchronously in `<head>` before paint, CSS scoped to chat only (negative tests against `.sidebar`, `.settings-panel`, `.workspace-panel`, `html`, `body` rules), code blocks force LTR under RTL, tool-call bodies force LTR under RTL, panels.js load/save round-trip, `rtl` in `api/config.py` DEFAULTS and writable-key allow-list, 11 locale strings present.
+
 ## [v0.51.77] — 2026-05-16 — Release BA (stage-370 — 1-PR follow-up — live Activity grouping boundary fix)
 
 ### Fixed

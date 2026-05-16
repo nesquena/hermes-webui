@@ -4035,6 +4035,7 @@ _SETTINGS_DEFAULTS = {
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
+    "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
@@ -4158,6 +4159,7 @@ _SETTINGS_BOOL_KEYS = {
     "check_for_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
+    "rtl",
     "notifications_enabled",
     "show_thinking",
     "simplified_tool_calling",

@@ -1141,6 +1141,28 @@
   .composer-model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-model-icon,.composer-model-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-model-select{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;}
+  .provider-quota-chip{display:inline-flex;align-items:center;gap:6px;height:34px;max-width:150px;padding:7px 10px;border:1px solid var(--border2);border-radius:999px;background:rgba(34,197,94,.10);color:var(--text);font-size:11px;font-weight:650;line-height:1;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s,color .12s;}
+  .provider-quota-chip[hidden]{display:none!important;}
+  .provider-quota-chip:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.35);}
+  .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
+  .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* Hide the ambient quota chip below 1400px — the composer footer already
+     has profile + workspace + model picker + reasoning + media + send and
+     was getting cramped (model picker truncating from "Claude Sonnet 4 7"
+     to "Claude Sonnet 4", workspace dropping more text) once the chip
+     squeezed in. Mobile users get provider info via the dedicated
+     mobile-config drawer; laptop desktop users can find quota in
+     Settings → Providers (the chip's onclick target). Show only on wide
+     desktop where there's genuine room. Aron's standing position on
+     composer real estate (PR #1721, May 13 2026) reinforces this.
+
+     Using 1399.98px rather than 1400px to avoid the one-pixel boundary
+     overlap with the existing @media (min-width:1400px) `.messages-inner`
+     rule at line 893 — at exactly 1400px both would fire, so the chip
+     was hidden AT the wide-desktop boundary where it should first appear. */
+  @media (max-width:1399.98px){
+    .provider-quota-chip{display:none!important;}
+  }
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */
@@ -4018,3 +4040,81 @@ main.main.showing-logs > #mainLogs{display:flex;}
 @media (prefers-reduced-motion: reduce){.stream-fade-word.is-new{animation:none;will-change:auto;}}
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active > :last-child::after,
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active:not(:has(> *))::after{display:none;content:none;}
+
+/* ── RTL chat layout (salvaged from PR #1721 by @malulian) ────────────────────
+ * Triggered by .chat-content-rtl on <html>. Affects ONLY the chat messages
+ * area and composer input, not the sidebar, workspace panel, settings panel,
+ * or any other UI element. Direction objection from design review (PR #1721
+ * comment by @aronprins, May 13 2026) honored: no composer button — the
+ * toggle lives in Settings → Preferences only.
+ *
+ * Code blocks, inline code, and pre-formatted blocks stay LTR even when RTL
+ * is active — Arabic/Hebrew users still write English code, command lines,
+ * URLs, and JSON the same way English users do. Flipping those would render
+ * code mirrored (e.g. `()fn()` instead of `fn()`) which is the salvage's
+ * critical bug fix vs the original PR #1721 implementation.
+ */
+.chat-content-rtl .msg-row{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+.chat-content-rtl .msg-body{
+  text-align:start;
+}
+.chat-content-rtl .msg-body th,
+.chat-content-rtl .csv-table th,
+.chat-content-rtl .csv-table td{
+  text-align:right;
+}
+.chat-content-rtl .tool-call-group-summary{
+  text-align:right;
+}
+.chat-content-rtl textarea#msg,
+.chat-content-rtl #msg{
+  direction:rtl;
+  text-align:right;
+  unicode-bidi:plaintext;
+}
+/* Force code/pre/tt back to LTR — Arabic users still write English code. */
+.chat-content-rtl .msg-body pre,
+.chat-content-rtl .msg-body code,
+.chat-content-rtl .msg-body kbd,
+.chat-content-rtl .msg-body samp,
+.chat-content-rtl .msg-body tt,
+.chat-content-rtl .msg-body .hljs,
+.chat-content-rtl .msg-body .code-block,
+.chat-content-rtl .msg-body .code-block *,
+.chat-content-rtl .msg-body pre *{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}
+/* Force LTR for content classes that render English-by-design even in chat:
+   KaTeX equations (math is LTR-only in standard notation), diff hunks
+   (file paths + line numbers), CSV tables (column order must stay
+   left-to-right), and skill file paths. */
+.chat-content-rtl .msg-body .katex,
+.chat-content-rtl .msg-body .katex-block,
+.chat-content-rtl .msg-body .katex-display,
+.chat-content-rtl .msg-body .katex-html,
+.chat-content-rtl .msg-body .katex-inline,
+.chat-content-rtl .msg-body .diff-block,
+.chat-content-rtl .msg-body .diff-block *,
+.chat-content-rtl .msg-body .csv-table-wrap,
+.chat-content-rtl .msg-body .csv-table,
+.chat-content-rtl .msg-body .csv-table *,
+.chat-content-rtl .msg-body .skill-file-path{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}
+/* Tool-call content (commands, paths, JSON) stays LTR. */
+.chat-content-rtl .tool-call-group-body,
+.chat-content-rtl .tool-call-group-body *,
+.chat-content-rtl .tool-result,
+.chat-content-rtl .tool-result *{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}
