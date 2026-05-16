@@ -676,6 +676,15 @@ function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
   if(!chip||!label) return;
+  // Hide entirely when the user has disabled the ambient quota chip in Settings.
+  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
+  // never see the chip unless they opt in.
+  if(window._showQuotaChip!==true){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
     chip.hidden=true;
@@ -688,6 +697,13 @@ function renderProviderQuotaIndicator(status){
   chip.hidden=false;
 }
 async function refreshProviderQuotaIndicator(){
+  // Short-circuit before the fetch when the chip is disabled — no point asking
+  // the server for quota data the UI will throw away.
+  if(window._showQuotaChip!==true){
+    const chip=$('providerQuotaChip');
+    if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    return;
+  }
   if(_providerQuotaRefreshInFlight) return;
   _providerQuotaRefreshInFlight=true;
   try{

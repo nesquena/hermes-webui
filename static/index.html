@@ -1023,6 +1023,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowQuotaChip" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_quota_chip">Show provider quota chip in composer</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_quota_chip">Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowTps" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span>Show token speed (TPS)</span>
               </label>
