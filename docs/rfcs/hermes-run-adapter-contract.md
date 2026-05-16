@@ -306,6 +306,103 @@ Scope:
 
 Revert path: switch the feature flag back to direct legacy path.
 
+#### Slice 2 interface contract
+
+The Slice 2 seam should introduce a deliberately small `RuntimeAdapter` boundary
+without changing the execution backend. The first implementation is a
+`LegacyJournalRuntimeAdapter` that delegates to the existing WebUI-owned
+streaming path and reads the Slice 1 journal for status/replay. That makes the
+adapter a protocol translator over the current backend, not a new runtime owner.
+
+Minimal interface shape:
+
+```python
+class RuntimeAdapter:
+    def start_run(self, request: StartRunRequest) -> RunStartResult: ...
+    def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream: ...
+    def get_run(self, run_id: str) -> RunStatus: ...
+    def cancel_run(self, run_id: str) -> ControlResult: ...
+    def respond_approval(self, run_id: str, approval_id: str, choice: str) -> ControlResult: ...
+    def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> ControlResult: ...
+```
+
+Required data classes / payload fields:
+
+| Type | Required fields | Notes |
+|---|---|---|
+| `StartRunRequest` | `session_id`, `message`, `attachments`, `workspace`, `profile`, `provider`, `model`, `toolsets`, `source`, `metadata` | Mirrors current `/api/chat/start` inputs without introducing new behavior. |
+| `RunStartResult` | `run_id`, `session_id`, `stream_id`, `status`, `started_at`, `cursor`, `active_controls` | `stream_id` may remain the legacy stream id during Slice 2. |
+| `RunStatus` | `run_id`, `session_id`, `status`, `last_event_id`, `terminal_state`, `active_controls`, `pending_approval_id`, `pending_clarify_id` | Backed by live legacy state plus journal/session metadata. |
+| `RunEventStream` | ordered events matching Artifact 1, resumable from cursor | Can be implemented by existing SSE + journal replay at first. |
+| `ControlResult` | `accepted`, `status`, `event_id`, `safe_message` | Controls may still call existing handlers in Slice 2. |
+
+The interface is intentionally narrower than a runner. It does not own `AIAgent`,
+tool execution, callback queues, cancellation flags, approval callbacks, or
+clarify callbacks in Slice 2. Those remain in the legacy path until their
+individual migration slices.
+
+#### Slice 2 feature flag and revert contract
+
+Slice 2 should be guarded by one WebUI-local setting/environment flag, for
+example `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` with default
+`legacy-direct` until the seam is proven. The flag selects only the route/adapter
+entry point:
+
+```text
+legacy-direct   -> current /api/chat/start and /api/chat/stream path
+legacy-journal  -> RuntimeAdapter facade over the same legacy execution path + journal
+```
+
+Reverting must be operationally boring:
+
+1. set the flag back to `legacy-direct`,
+2. restart WebUI if needed,
+3. existing session transcripts and journal files remain readable,
+4. no migration or data deletion is required.
+
+The PR that introduces the seam should include a source-level regression that
+the default path remains `legacy-direct` and that the adapter flag is the only
+way the new entry point is selected.
+
+#### Slice 2 backend mapping
+
+| Adapter method | Slice 2 backend | Explicit non-goal |
+|---|---|---|
+| `start_run` | call the existing chat-start preparation and legacy `_run_agent_streaming` path | do not move `AIAgent` construction or thread ownership |
+| `observe_run` | combine existing live SSE fan-out with journal replay cursor semantics | do not build a second renderer or event protocol |
+| `get_run` | derive status from session metadata, live stream presence, and journal terminal state | do not make `STREAMS` authoritative for durable run existence |
+| `cancel_run` | delegate to existing cancel handler/control path | do not redesign cancellation semantics yet |
+| `respond_approval` | delegate to existing approval response path | do not persist approval callbacks in the main server as a new adapter-owned queue |
+| `respond_clarify` | delegate to existing clarify response path | do not persist clarify callbacks in the main server as a new adapter-owned queue |
+
+Any implementation that needs a new long-lived queue, agent cache, cancellation
+registry, or callback registry inside the main WebUI process is out of scope for
+Slice 2 and should become a spec amendment before code lands.
+
+#### Slice 2 acceptance tests
+
+Before the seam is enabled by default, tests should prove at least:
+
+- the `RuntimeAdapter` interface exists and all methods are implemented by the
+  `LegacyJournalRuntimeAdapter`;
+- the default route remains the legacy direct path unless the adapter flag is
+  explicitly enabled;
+- `start_run` returns the same browser-facing `stream_id` / `session_id` shape as
+  `/api/chat/start` for a synthetic request;
+- `observe_run(..., cursor=...)` preserves the existing journal replay ordering
+  and duplicate-prevention behavior;
+- `get_run` distinguishes live stream, completed, failed, cancelled, and stale /
+  interrupted states using current live state plus journal/session metadata;
+- `cancel_run` delegates to the current cancellation path and still emits one
+  terminal result;
+- approval and clarify methods are present but documented as delegated legacy
+  controls until their migration slices;
+- disabling the flag returns to the old route path without changing session or
+  journal data.
+
+These tests are adapter-seam tests, not runner-survives-restart tests. The
+execution-survives-WebUI-restart gate remains deferred to Slice 4.
+
 ### Slice 3: Control migration
 
 Scope:
