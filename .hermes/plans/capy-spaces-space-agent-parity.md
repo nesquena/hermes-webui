@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-15 18:21 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-15 23:20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces session route receipts now stay metadata-only across create-from-session, activate, and deactivate, while create-from-session accepts Space-Agent-style `sessionId` and rejects conflicting `session_id` / `sessionId` selectors before Space creation or active-session mutation. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces safe-mode whole-Space repair aliases now match the recovery/current/admin repair paths: `space.safe_mode.repair` queues metadata-only `agent.repair` events through the shared recovery helper, and `space.safe_mode.space_repair_events` lists the same sanitized repair-event summaries without returning `active_space_id`. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): add safe mode repair aliases`
+  - Added RED/GREEN backend coverage proving `space.safe_mode.repair` accepts Space-Agent-style `spaceId`, queues a metadata-only whole-Space `agent.repair` event, and `space.safe_mode.space_repair_events` lists that event through the same sanitized repair-event path.
+  - Hardened `run_space_tool(...)` by extending the existing safe recovery repair queue/list allowlists rather than creating a parallel sanitizer path; safe-mode repair receipts omit active-current metadata and redact generated renderer/source/API-auth markers, script tags, prompt/body/session sentinels, and secret-looking values.
+  - Validation at completion: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`); targeted safe-mode/current/admin/recovery repair regressions passed (`7 passed, 324 deselected`, reviewer recheck `5 passed`); full Spaces foundation suite passed (`331 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality subagent reviews, and `/tmp` real-static browser QA leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/safe-mode-repair-alias-qa.png`.
 
 - `fix(spaces): sanitize session route receipts`
   - Added RED/GREEN backend route coverage proving `/api/spaces/activate` and `/api/spaces/deactivate` omit pending prompt/draft metadata from session receipts, and `/api/spaces/create-from-session` accepts camelCase `sessionId` while rejecting conflicting `session_id` / `sessionId` aliases before creating or activating a Space.

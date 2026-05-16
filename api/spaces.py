@@ -4008,6 +4008,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.recovery.repair_space",
         "space.recovery.repair",
         "space.safe_mode.repair_space",
+        "space.safe_mode.repair",
         "space.current.repair_space",
         "space.current.repair",
         "space.admin.repair_space",
@@ -4030,6 +4031,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {
         "space.recovery.space_repair_events",
         "space.recovery.repair_events",
+        "space.safe_mode.space_repair_events",
         "space.safe_mode.repair_events",
         "space.current.repair_events",
         "space.admin.repair_events",

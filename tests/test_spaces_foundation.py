@@ -7879,6 +7879,70 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
     assert "raw prompt" not in serialized
 
 
+def test_space_tool_adapter_safe_mode_repair_aliases_queue_and_list_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "safe-mode-space-repair", "name": "Safe Mode Space Repair"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "source": "generated code raw prompt should stay quarantined",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    queued = spaces.run_space_tool(
+        "space.safe_mode.repair",
+        {
+            "spaceId": created["space_id"],
+            "prompt": "Repair renderer/source/data with SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "action": "repair-space",
+                "scope": "space-shell",
+                "safe_note": "safe mode repair",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "body": "<div>generated body</div>",
+            },
+            "session_id": "SECRET_SESSION_VALUE_DO_NOT_LEAK",
+        },
+    )
+    listed = spaces.run_space_tool(
+        "space.safe_mode.space_repair_events",
+        {"spaceId": created["space_id"], "limit": 5},
+    )
+    serialized = json.dumps({"queued": queued, "listed": listed}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.safe_mode.repair"
+    assert queued["space_id"] == created["space_id"]
+    assert queued["queued"] is True
+    assert queued["event_name"] == "agent.repair"
+    assert queued["prompt_preview"] == "[REDACTED]"
+    assert queued["payload_summary"] == {
+        "action": "repair-space",
+        "scope": "space-shell",
+        "safe_note": "safe mode repair",
+    }
+    assert listed["ok"] is True
+    assert listed["action"] == "space.safe_mode.space_repair_events"
+    assert listed["space_id"] == created["space_id"]
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert "active_space_id" not in queued
+    assert "active_space_id" not in listed
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_session_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "generated body" not in serialized
+    assert "raw prompt" not in serialized
+
+
 def test_space_tool_adapter_current_repair_aliases_use_active_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "current-space-repair", "name": "Current Space Repair"})
