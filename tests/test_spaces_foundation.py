@@ -11811,6 +11811,134 @@ def test_recovery_space_routes_reject_ambient_current_selectors_before_side_effe
     assert "source" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("route", "payload", "pre_disable", "expected_disabled"),
+    [
+        (
+            "/api/spaces/recovery/disable-widget",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            False,
+            False,
+        ),
+        (
+            "/api/spaces/recovery/enable-widget",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            True,
+            True,
+        ),
+    ],
+)
+def test_recovery_widget_routes_reject_ambient_current_selectors_before_side_effects(
+    monkeypatch, tmp_path, route, payload, pre_disable, expected_disabled
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "recovery-widget-route-target", "name": "Recovery Widget Route Target"})
+    ambient = spaces.create_space({"space_id": "ambient-widget-current", "name": "Ambient Widget Current"})
+    spaces.upsert_widget(
+        target["space_id"],
+        {
+            "id": "target-widget",
+            "kind": "html",
+            "title": "Target Widget",
+            "renderer": "<script>ambientWidget()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    if pre_disable:
+        spaces.disable_widget_for_recovery(
+            target["space_id"], "target-widget", reason="pre-disabled for route test"
+        )
+
+    handled, status, body = _route_post(
+        route,
+        {
+            "space_id": target["space_id"],
+            "widget_id": "target-widget",
+            "activeSpaceId": ambient["space_id"],
+            **payload,
+        },
+    )
+    serialized = json.dumps(body).lower()
+    target_widget = spaces.read_widget(target["space_id"], "target-widget")
+
+    assert handled is None
+    assert status == 400
+    assert target_widget.get("recovery", {}).get("disabled", False) is expected_disabled
+    assert spaces.read_space(ambient["space_id"]).get("recovery", {}).get("disabled", False) is False
+    assert "activeSpaceId" not in json.dumps(body)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("route", "payload", "pre_disable", "expected_disabled"),
+    [
+        (
+            "/api/spaces/recovery/disable-module",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            False,
+            False,
+        ),
+        (
+            "/api/spaces/recovery/enable-module",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            True,
+            True,
+        ),
+        (
+            "/api/spaces/recovery/repair-module",
+            {
+                "prompt": "Repair renderer/source data SECRET_VALUE_DO_NOT_LEAK",
+                "payload": {"action": "repair-module", "source": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+            False,
+            False,
+        ),
+    ],
+)
+def test_recovery_module_routes_reject_ambient_current_selectors_before_side_effects(
+    monkeypatch, tmp_path, route, payload, pre_disable, expected_disabled
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    ambient = spaces.create_space({"space_id": "ambient-module-current", "name": "Ambient Module Current"})
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "ambient-route-module",
+            "name": "Ambient Route Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "export const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>ambientModule()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+    if pre_disable:
+        spaces.disable_module_for_recovery("ambient-route-module", reason="pre-disabled for route test")
+
+    handled, status, body = _route_post(
+        route,
+        {
+            "module_id": "ambient-route-module",
+            "activeSpaceId": ambient["space_id"],
+            **payload,
+        },
+    )
+    serialized = json.dumps(body).lower()
+    snapshot = spaces.recovery_snapshot()
+    module_summary = next(module for module in snapshot["modules"] if module["module_id"] == "ambient-route-module")
+
+    assert handled is None
+    assert status == 400
+    assert module_summary.get("disabled", False) is expected_disabled
+    assert spaces.list_recovery_module_repair_events("ambient-route-module") == []
+    assert spaces.read_space(ambient["space_id"]).get("recovery", {}).get("disabled", False) is False
+    assert "activeSpaceId" not in json.dumps(body)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+
+
 def test_recovery_repair_space_route_queues_metadata_only_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

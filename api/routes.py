@@ -5321,6 +5321,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/disable-widget":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
@@ -5343,6 +5344,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/enable-widget":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
@@ -5365,6 +5367,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/disable-module":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             module_id = _route_alias_value("module_id", "moduleId", "id")
             if not module_id:
                 return bad(handler, "Missing module_id")
@@ -5385,6 +5388,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/enable-module":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             module_id = _route_alias_value("module_id", "moduleId", "id")
             if not module_id:
                 return bad(handler, "Missing module_id")
@@ -5405,6 +5409,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/repair-module":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             module_id = _route_alias_value("module_id", "moduleId", "id")
             if not module_id:
                 return bad(handler, "Missing module_id")
