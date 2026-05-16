@@ -2430,6 +2430,145 @@ def _attempt_credential_self_heal(
         return None
 
 
+def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
+    """Return the cache-signature component for runtime credentials.
+
+    Credential-pool providers can legitimately hand WebUI a different runtime
+    token on each request (round-robin pools, OAuth refresh, auth self-heal).
+    The AIAgent object is also where cross-turn memory-provider state lives, so
+    using the volatile token itself in the cache signature silently defeats the
+    per-session agent cache and drops warmed Hindsight prefetch results.
+    """
+    if credential_pool is not None:
+        return 'credential-pool'
+    import hashlib as _hashlib
+    return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
+
+
+def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
+    """Refresh volatile runtime credentials on a reused cached AIAgent.
+
+    The cache key intentionally ignores credential-pool token churn, but the
+    cached agent's LLM client still needs the latest selected/refreshed runtime
+    key. Keep long-lived provider/session state (memory prefetch, turn counters,
+    tool state) while swapping only the runtime credential/client.
+    """
+    if agent is None or not isinstance(agent_kwargs, dict):
+        return False
+
+    new_pool = agent_kwargs.get('credential_pool')
+    if new_pool is not None:
+        try:
+            agent._credential_pool = new_pool
+        except Exception:
+            pass
+
+    new_key = agent_kwargs.get('api_key') or ''
+    if not new_key:
+        return True
+
+    new_base = agent_kwargs.get('base_url') or getattr(agent, 'base_url', '') or ''
+    if getattr(agent, '_fallback_activated', False):
+        # Avoid mixing a refreshed primary credential into a live fallback
+        # runtime. Rebuilding is safer than mutating a fallback-active agent
+        # whose restore/cooldown state has not run yet for this turn.
+        return False
+
+    if new_key == (getattr(agent, 'api_key', '') or ''):
+        _refresh_cached_agent_primary_runtime_snapshot(agent)
+        return True
+
+    try:
+        if getattr(agent, 'api_mode', None) == 'anthropic_messages':
+            # Native Anthropic-style clients have their own construction path;
+            # switch_model() already handles token/client refresh there.
+            if hasattr(agent, 'switch_model'):
+                agent.switch_model(
+                    agent_kwargs.get('model') or getattr(agent, 'model', None),
+                    agent_kwargs.get('provider') or getattr(agent, 'provider', None),
+                    api_key=new_key,
+                    base_url=new_base,
+                    api_mode=agent_kwargs.get('api_mode') or getattr(agent, 'api_mode', ''),
+                )
+                return True
+            return False
+
+        if not hasattr(agent, '_client_kwargs') or not hasattr(agent, '_replace_primary_openai_client'):
+            # Test/fake-agent fallback: keep metadata accurate even if no real
+            # OpenAI client exists to rebuild.
+            agent.api_key = new_key
+            if new_base:
+                agent.base_url = new_base
+            _refresh_cached_agent_primary_runtime_snapshot(agent)
+            return True
+
+        client_kwargs = dict(getattr(agent, '_client_kwargs', {}) or {})
+        client_kwargs['api_key'] = new_key
+        if new_base:
+            client_kwargs['base_url'] = new_base
+        agent._client_kwargs = client_kwargs
+        agent.api_key = new_key
+        if new_base:
+            agent.base_url = new_base
+        if hasattr(agent, '_apply_client_headers_for_base_url'):
+            agent._apply_client_headers_for_base_url(agent.base_url)
+        rebuilt = bool(agent._replace_primary_openai_client(reason='webui_credential_refresh'))
+        if rebuilt:
+            _refresh_cached_agent_primary_runtime_snapshot(agent)
+        return rebuilt
+    except Exception:
+        logger.debug('[webui] Failed to refresh cached agent runtime credentials', exc_info=True)
+        return False
+
+
+def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
+    """Keep AIAgent's primary-runtime snapshot aligned with refreshed creds.
+
+    Long-lived AIAgent instances use `_primary_runtime` to restore the preferred
+    provider after fallback/transport recovery. If WebUI refreshes a cached
+    agent's runtime token but leaves that snapshot stale, a later restore can
+    resurrect the old credential and undo the refresh.
+    """
+    rt = getattr(agent, '_primary_runtime', None)
+    if not isinstance(rt, dict):
+        return
+
+    base_url = getattr(agent, 'base_url', rt.get('base_url'))
+    api_key = getattr(agent, 'api_key', rt.get('api_key', ''))
+    client_kwargs = dict(getattr(agent, '_client_kwargs', None) or rt.get('client_kwargs', {}) or {})
+
+    rt['base_url'] = base_url
+    rt['api_key'] = api_key
+    rt['client_kwargs'] = client_kwargs
+
+    # The default context compressor usually tracks the primary runtime too;
+    # keep both the live compressor fields and the fallback-restoration
+    # snapshot aligned when those attributes exist.
+    cc = getattr(agent, 'context_compressor', None)
+    if cc is not None:
+        if hasattr(cc, 'base_url'):
+            cc.base_url = base_url
+        if hasattr(cc, 'api_key'):
+            cc.api_key = api_key
+        if 'compressor_base_url' in rt:
+            rt['compressor_base_url'] = getattr(cc, 'base_url', base_url)
+        if 'compressor_api_key' in rt:
+            rt['compressor_api_key'] = getattr(cc, 'api_key', api_key)
+    else:
+        if 'compressor_base_url' in rt:
+            rt['compressor_base_url'] = base_url
+        if 'compressor_api_key' in rt:
+            rt['compressor_api_key'] = api_key
+
+    if getattr(agent, 'api_mode', None) == 'anthropic_messages':
+        if hasattr(agent, '_anthropic_api_key'):
+            rt['anthropic_api_key'] = getattr(agent, '_anthropic_api_key')
+        if hasattr(agent, '_anthropic_base_url'):
+            rt['anthropic_base_url'] = getattr(agent, '_anthropic_base_url')
+        if hasattr(agent, '_is_anthropic_oauth'):
+            rt['is_anthropic_oauth'] = getattr(agent, '_is_anthropic_oauth')
+
+
 def _run_agent_streaming(
     session_id,
     msg_text,
@@ -3315,11 +3454,16 @@ def _run_agent_streaming(
                 import hashlib as _hashlib
                 import json as _json
                 from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                _credential_pool = _rt.get('credential_pool')
                 _sig_blob = _json.dumps([
                     resolved_model or '',
-                    _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16],
+                    _agent_cache_api_key_sig(resolved_api_key, _credential_pool),
                     resolved_base_url or '',
                     resolved_provider or '',
+                    _rt.get('api_mode') or '',
+                    _rt.get('command') or '',
+                    _rt.get('args') or [],
+                    bool(_credential_pool),
                     _max_iterations_cfg or '',
                     _max_tokens_cfg or '',
                     _fallback_resolved or {},
@@ -3342,6 +3486,23 @@ def _run_agent_streaming(
                         agent = _cached[0]
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         logger.debug('[webui] Reusing cached agent for session %s', session_id)
+
+                if agent is not None:
+                    # Refresh volatile runtime credentials selected from provider
+                    # pools without discarding cross-turn agent/provider state.
+                    if not _refresh_cached_agent_runtime(agent, _agent_kwargs):
+                        logger.warning(
+                            '[webui] Cached agent runtime could not be safely refreshed; rebuilding agent for session %s',
+                            session_id,
+                        )
+                        try:
+                            if getattr(agent, '_session_db', None) is not None:
+                                agent._session_db.close()
+                        except Exception:
+                            pass
+                        with SESSION_AGENT_CACHE_LOCK:
+                            SESSION_AGENT_CACHE.pop(session_id, None)
+                        agent = None
 
                 if agent is not None:
                     # Refresh per-turn callbacks — these close over request-scoped
@@ -3392,7 +3553,6 @@ def _run_agent_streaming(
                             # released until GC finalizes the agent, which on a
                             # long-running server may be never. Close it
                             # explicitly so the WAL handles release immediately.
-                            # (Opus pre-release follow-up to #1421.)
                             try:
                                 _evicted_agent = evicted_entry[0] if isinstance(evicted_entry, tuple) else None
                                 if _evicted_agent is not None and getattr(_evicted_agent, '_session_db', None) is not None:
