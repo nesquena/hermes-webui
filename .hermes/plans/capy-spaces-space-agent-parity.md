@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 01:50 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 03:06 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces non-current recovery/safe-mode/admin rollback and widget-restore aliases now reject ambient `activeSpaceId` / `currentSpaceId` selectors before restoring revisions, while preserving explicit `spaceId` and existing positional rollback contracts. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces non-current whole-Space recovery HTTP routes (`/api/spaces/recovery/disable-space`, `/enable-space`, and `/repair-space`) now reject ambient `activeSpaceId` / `currentSpaceId` selectors before recovery side effects, while preserving explicit `space_id`/`spaceId` contracts and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject ambient recovery route selectors`
+  - Added RED/GREEN route coverage proving direct whole-Space recovery HTTP routes reject an explicit target `space_id` combined with ambient `activeSpaceId` before disabling, enabling, or queuing repair events; both target and ambient Spaces remain unchanged and hostile renderer/source/secret-looking fixture markers are not echoed.
+  - Hardened the three direct recovery route handlers with a shared ambient-current selector guard reserved for non-current HTTP recovery/admin routes, keeping current-space selectors scoped to current-space paths.
+  - Validation at completion: focused RED failed before implementation (`3 failed` with status `200` instead of expected `400`); focused GREEN passed (`3 passed`); related recovery route regressions passed (`6 passed, 332 deselected`); full Spaces foundation suite passed (`338 passed`); Spaces UI behavior + demo parity suites passed (`185 passed`); `node --check static/spaces.js`, `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery/admin browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-ambient-route-qa.png`.
 
 - `fix(spaces): reject ambient rollback selectors`
   - Added RED/GREEN backend coverage proving non-current rollback aliases (`space.recovery.rollback`, `space.safe_mode.restore`, `space.admin.rollback`, and `space.admin.recovery.restore`) and non-current widget-restore aliases (`space.recovery.restore_widget`, `space.safe_mode.restorewidget`, `space.admin.widget.rollback`, and `space.admin.recovery.restorewidget`) reject ambient current-space selectors before full-Space or widget restore side effects.

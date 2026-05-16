@@ -4114,6 +4114,14 @@ def handle_post(handler, parsed) -> bool:
             raise ValueError("Conflicting Capy Spaces route selector aliases")
         return values[0] if values else ""
 
+    def _route_reject_ambient_current_selectors():
+        for name in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
+            value = body.get(name) if name in body else None
+            if value is not None and str(value).strip():
+                raise ValueError(
+                    "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+                )
+
     def _capy_spaces_session_receipt(session):
         receipt = session.compact()
         for key in ("pending_user_message", "pending_attachments", "composer_draft"):
@@ -5247,6 +5255,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/disable-space":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -5267,6 +5276,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/enable-space":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -5287,6 +5297,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/recovery/repair-space":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")

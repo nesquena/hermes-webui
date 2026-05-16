@@ -11755,6 +11755,62 @@ def test_recovery_disable_enable_space_routes_return_metadata_only(monkeypatch, 
     assert "<script" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("route", "payload", "pre_disable", "expected_disabled"),
+    [
+        (
+            "/api/spaces/recovery/disable-space",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            False,
+            False,
+        ),
+        (
+            "/api/spaces/recovery/enable-space",
+            {"reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK"},
+            True,
+            True,
+        ),
+        (
+            "/api/spaces/recovery/repair-space",
+            {
+                "prompt": "Repair renderer/source data SECRET_VALUE_DO_NOT_LEAK",
+                "payload": {"action": "repair-space", "source": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+            False,
+            False,
+        ),
+    ],
+)
+def test_recovery_space_routes_reject_ambient_current_selectors_before_side_effects(
+    monkeypatch, tmp_path, route, payload, pre_disable, expected_disabled
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "recovery-route-target", "name": "Recovery Route Target"})
+    ambient = spaces.create_space({"space_id": "ambient-current-space", "name": "Ambient Current Space"})
+    if pre_disable:
+        spaces.disable_space_for_recovery(target["space_id"], reason="pre-disabled for route test")
+
+    handled, status, body = _route_post(
+        route,
+        {
+            "space_id": target["space_id"],
+            "activeSpaceId": ambient["space_id"],
+            **payload,
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 400
+    assert spaces.read_space(target["space_id"]).get("recovery", {}).get("disabled", False) is expected_disabled
+    assert spaces.read_space(ambient["space_id"]).get("recovery", {}).get("disabled", False) is False
+    assert spaces.list_space_repair_events(target["space_id"]) == []
+    assert "activeSpaceId" not in json.dumps(body)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+
+
 def test_recovery_repair_space_route_queues_metadata_only_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
