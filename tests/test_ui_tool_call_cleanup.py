@@ -282,15 +282,12 @@ class TestToolCallGroupingStatic:
             "The non-simplified path should preserve standalone settled thinking cards."
         )
 
-    def test_live_thinking_is_shown_while_still_splitting_tool_bursts(self):
+    def test_live_visible_interim_text_splits_tool_bursts_not_thinking(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
         live_tool_fn = _function_body(UI_JS, "appendLiveToolCard")
         helper = _function_body(UI_JS, "ensureActivityGroup")
         assert "isSimplifiedToolCalling()" in live_thinking_fn, (
             "Live thinking should branch on the Compact tool activity toggle."
-        )
-        assert 'data-live-activity-current' in live_thinking_fn, (
-            "Starting a new live thinking block should close the previous live tool burst."
         )
         assert "body.insertBefore(row, body.firstChild)" not in live_thinking_fn, (
             "Live thinking should not be moved into the top Activity dropdown."
@@ -298,11 +295,36 @@ class TestToolCallGroupingStatic:
         assert "_thinkingActivityNode(thinkingText, false)" in live_thinking_fn, (
             "Compact live thinking should render a collapsed Thinking card in the timeline."
         )
-        assert '[data-live-activity-current="1"]' in live_thinking_fn, (
-            "Starting a new Thinking card should mark the previous live tool burst as no longer current."
+        assert "removeAttribute('data-live-activity-current')" not in live_thinking_fn, (
+            "Reasoning/Thinking updates alone should not split consecutive tools into one-tool Activity rows."
+        )
+        assert '.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]' in helper, (
+            "Live tool cards should only reuse the current Activity burst, not the first group in the turn."
+        )
+        assert "group.setAttribute('data-live-activity-current','1')" in helper, (
+            "New live Activity bursts must be marked current so later tools append to the right group."
         )
         assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
             "tool_complete must still update its current live Activity burst by tool id."
+        )
+        close_activity_fn = _function_body(MESSAGES_JS, "_closeCurrentLiveActivityGroup")
+        assert "data-live-activity-current" in close_activity_fn, (
+            "Visible interim assistant boundaries should close the previous live Activity burst."
+        )
+        reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
+        assert "closeActivity" in reset_fn and "_closeCurrentLiveActivityGroup()" in reset_fn, (
+            "Assistant text reset and Activity burst closing should stay separate."
+        )
+        interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
+        assert interim_match and "_resetAssistantSegment({closeActivity:true});" in interim_match.group(1), (
+            "Visible interim assistant text should split the previous tool burst before the next tool starts."
+        )
+        tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
+        assert "_resetAssistantSegment();" in tool_start_segment, (
+            "Tool starts should reset the next assistant text segment without closing the current Activity burst."
+        )
+        assert "_resetAssistantSegment({closeActivity:true});" not in tool_start_segment, (
+            "Tool starts must not split consecutive tools into one-tool Activity rows."
         )
 
 

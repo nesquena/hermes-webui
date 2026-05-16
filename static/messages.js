@@ -1094,7 +1094,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     step();
   }
+  function _closeCurrentLiveActivityGroup(){
+    const turn=$('liveAssistantTurn');
+    if(turn){
+      turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+        group.removeAttribute('data-live-activity-current');
+      });
+    }
+  }
   function _resetAssistantSegment(){
+    const options=arguments[0]||{};
+    const closeActivity=!!(options&&options.closeActivity);
+    if(closeActivity) _closeCurrentLiveActivityGroup();
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
@@ -1221,7 +1232,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid) return;
-        _resetAssistantSegment();
+        _resetAssistantSegment({closeActivity:true});
         return;
       }
       assistantText += assistantText ? `\n\n${visible}` : visible;
@@ -1233,6 +1244,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         else appendThinking(_liveThinkingText());
       }
       ensureAssistantRow(true);
+      _resetAssistantSegment({closeActivity:true});
       _scheduleRender();
     });
 

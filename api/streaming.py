@@ -137,6 +137,25 @@ def _clarify_timeout_seconds(default: int = 120) -> int:
 _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrupted')
 
 
+_WEBUI_VISIBLE_PROGRESS_PROMPT = """
+WebUI progress contract:
+- For multi-step work that uses tools, provide brief user-visible progress updates as normal assistant content before continuing with tool calls.
+- Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
+- Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
+- Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
+- For direct answers or very short tasks, skip progress updates and answer normally.
+""".strip()
+
+
+def _webui_ephemeral_system_prompt(personality_prompt: Optional[str]) -> str:
+    """Build WebUI-only runtime instructions that are not persisted to history."""
+    parts = []
+    if personality_prompt:
+        parts.append(str(personality_prompt).strip())
+    parts.append(_WEBUI_VISIBLE_PROGRESS_PROMPT)
+    return "\n\n".join(part for part in parts if part)
+
+
 def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     """Return True if *new* messages (beyond ``prev_count``) contain an
     assistant message with non-empty content.
@@ -3449,9 +3468,11 @@ def _run_agent_streaming(
                         _personality_prompt = '\n'.join(p for p in _parts if p)
                     else:
                         _personality_prompt = str(_pval)
-            # Pass personality via ephemeral_system_prompt (agent's own mechanism)
-            if _personality_prompt:
-                agent.ephemeral_system_prompt = _personality_prompt
+            # Pass WebUI-only runtime guidance via ephemeral_system_prompt
+            # (agent's own mechanism). This preserves any selected personality
+            # while making long tool runs emit real user-visible interim text
+            # through interim_assistant_callback instead of frontend guesses.
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(_personality_prompt)
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent

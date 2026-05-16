@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2390** by @franksong2702 (refs #2376, refs #2344) — Live long-task Activity groups now split only on user-visible interim assistant progress text, not on hidden reasoning updates or each tool start. This keeps Codex-like progress turns readable as "progress note -> grouped tools -> next progress note" instead of degrading into repeated one-tool Activity rows, and WebUI-created agent turns now receive an explicit progress contract that asks for concise user-visible updates before tool-heavy steps.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added

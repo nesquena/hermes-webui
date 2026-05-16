@@ -299,6 +299,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 self.ephemeral_system_prompt = None
                 self._last_error = None
                 self.interim_assistant_callback = interim_assistant_callback
+                captured["agent"] = self
 
             def run_conversation(self, **kwargs):
                 if self.interim_assistant_callback:
@@ -388,6 +389,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         init_kwargs = captured["init_kwargs"]
         self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
+        self.assertIn("WebUI progress contract", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []
         while not fake_queue.empty():
