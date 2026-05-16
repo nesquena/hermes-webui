@@ -73,7 +73,7 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
 def test_run_journal_cursor_tracks_every_long_task_timeline_event():
     """Every user-visible long-task event needs cursor tracking for parity replay."""
     cursor_loop_pos = MESSAGES_SRC.index("for(const _runJournalEventName of [")
-    cursor_loop = MESSAGES_SRC[cursor_loop_pos : cursor_loop_pos + 700]
+    cursor_loop = MESSAGES_SRC[cursor_loop_pos : MESSAGES_SRC.index("]", cursor_loop_pos)]
     timeline_events = [
         "token",
         "interim_assistant",
