@@ -697,7 +697,8 @@ def profile_env_for_background_worker(
         return
 
     try:
-        # Lazy import avoids a module-load cycle: streaming imports this helper.
+        # Lazy imports avoid a module-load cycle: streaming imports this helper.
+        from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
         from api.streaming import _ENV_LOCK
 
         profile_home_path = Path(get_hermes_home_for_profile(profile))
@@ -712,23 +713,23 @@ def profile_env_for_background_worker(
         yield
         return
 
-    env_keys = set(runtime_env.keys()) | {"HERMES_HOME"}
-    # Stage-360 maintainer fix: narrow the _ENV_LOCK critical section to just
-    # the env mutation (and the env restoration). Pre-fix, this held _ENV_LOCK
-    # for the entire `yield` duration — i.e. the whole background worker's
-    # runtime (title generation, compression, update summary). That caused
-    # _ENV_LOCK to be held for many seconds, blocking ALL other sessions and
-    # surfacing as the QA `test_third_message_completes` timeout. The fix
-    # mirrors the narrow-lock pattern in _run_agent_streaming: acquire briefly
-    # to set env, run worker without holding the lock, reacquire to restore.
-    # See also QA `test_finally_restores_env_with_lock`.
+    thread_env = dict(runtime_env)
+    thread_env["HERMES_HOME"] = str(profile_home_path)
+    # Hybrid profile routing: keep the broad runtime env in WebUI's thread-local
+    # channel so provider/API-key overrides do not leak through process-global
+    # os.environ, but still set HERMES_HOME under the narrow _ENV_LOCK because
+    # hermes_cli.config.load_config() currently resolves homes from os.environ.
+    # Do not hold _ENV_LOCK across the worker body.
     skill_home_snapshot = None
-    old_env = {}
+    old_hermes_home = None
+    had_hermes_home = False
+    previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     try:
+        _set_thread_env(**thread_env)
         with _ENV_LOCK:
-            old_env = {key: os.environ.get(key) for key in env_keys}
+            had_hermes_home = "HERMES_HOME" in os.environ
+            old_hermes_home = os.environ.get("HERMES_HOME")
             skill_home_snapshot = snapshot_skill_home_modules()
-            os.environ.update(runtime_env)
             os.environ["HERMES_HOME"] = str(profile_home_path)
             try:
                 patch_skill_home_modules(profile_home_path)
@@ -741,12 +742,15 @@ def profile_env_for_background_worker(
                 )
         yield
     finally:
+        if previous_thread_env:
+            _set_thread_env(**previous_thread_env)
+        else:
+            _clear_thread_env()
         with _ENV_LOCK:
-            for key, old_value in old_env.items():
-                if old_value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old_value
+            if had_hermes_home:
+                os.environ["HERMES_HOME"] = old_hermes_home or ""
+            else:
+                os.environ.pop("HERMES_HOME", None)
             if skill_home_snapshot is not None:
                 restore_skill_home_modules(skill_home_snapshot)
 
