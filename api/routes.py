@@ -1954,8 +1954,15 @@ def _messaging_source_key(session: dict) -> str | None:
     return _messaging_session_identity(session, raw)
 
 
-def _keep_latest_messaging_session_per_source(sessions: list[dict]) -> list[dict]:
+def _keep_latest_messaging_session_per_source(
+    sessions: list[dict],
+    *,
+    show_previous_messaging_sessions: bool = False,
+) -> list[dict]:
     """Keep only the newest sidebar row per messaging session identity."""
+    if show_previous_messaging_sessions:
+        return sorted(sessions, key=_session_sort_timestamp, reverse=True)
+
     gateway_metadata = _load_gateway_session_identity_map()
     active_gateway_session_ids = {str(sid) for sid in gateway_metadata.keys() if sid}
     active_gateway_sources = {
@@ -3770,7 +3777,12 @@ def handle_get(handler, parsed) -> bool:
                           if _profiles_match(s.get("profile"), active_profile)]
                 other_profile_count = len(merged) - len(scoped)
             diag.stage("messaging_dedupe")
-            scoped = _keep_latest_messaging_session_per_source(scoped)
+            scoped = _keep_latest_messaging_session_per_source(
+                scoped,
+                show_previous_messaging_sessions=bool(
+                    settings.get("show_previous_messaging_sessions")
+                ),
+            )
             if show_cli_sessions:
                 diag.stage("cli_cap")
                 scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
