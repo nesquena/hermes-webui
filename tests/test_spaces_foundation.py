@@ -5782,6 +5782,97 @@ layout:
     assert "secret_source_value_do_not_leak" not in serialized
 
 
+def test_space_tool_package_actions_accept_camelcase_space_id_and_reject_conflicts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.run_space_tool(
+        "space.import",
+        {
+            "space_yaml": """
+id: yaml-import-source
+name: YAML Import Source
+""",
+            "space_id": "   ",
+            "spaceId": "package-tool-camel-import",
+            "widgets": {
+                "widgets/panel.yaml": """
+id: safe-panel
+title: Safe Panel
+type: markdown
+renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>"
+source: SECRET_SOURCE_VALUE_DO_NOT_LEAK
+data:
+  api_key: SECRET_VALUE_DO_NOT_LEAK
+""",
+            },
+            "renderer": "<script>requestImportLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    exported = spaces.run_space_tool(
+        "space.export",
+        {
+            "spaceId": "package-tool-camel-import",
+            "format": "yaml",
+            "renderer": "<script>requestExportLeak()</script>",
+            "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"imported": imported, "exported": exported}).lower()
+
+    assert imported["ok"] is True
+    assert imported["space"]["space_id"] == "package-tool-camel-import"
+    assert "package-tool-camel-import" in exported["space_yaml"]
+    assert exported["ok"] is True
+    assert exported["source"] == "capy-space"
+    assert exported["format"] == "space-agent-yaml"
+    assert "yaml-import-source" not in [space["space_id"] for space in spaces.list_spaces()]
+    assert "requestimportleak" not in serialized
+    assert "requestexportleak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_value_do_not_leak" not in serialized
+
+    spaces.create_space({"space_id": "package-tool-conflict-a", "name": "Package Conflict A"})
+    spaces.create_space({"space_id": "package-tool-conflict-b", "name": "Package Conflict B"})
+    spaces_before = sorted(space["space_id"] for space in spaces.list_spaces())
+    events_before = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="selector aliases") as import_exc:
+        spaces.run_space_tool(
+            "space.import",
+            {
+                "space_yaml": """
+id: package-tool-conflict-created
+name: Should Not Import
+""",
+                "space_id": "package-tool-conflict-a",
+                "spaceId": "package-tool-conflict-b",
+                "renderer": "<script>conflictImportLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+    with pytest.raises(ValueError, match="selector aliases") as export_exc:
+        spaces.run_space_tool(
+            "space.export",
+            {
+                "space_id": "package-tool-conflict-a",
+                "spaceId": "package-tool-conflict-b",
+                "source": "SECRET_SOURCE_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    assert sorted(space["space_id"] for space in spaces.list_spaces()) == spaces_before
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == events_before
+    with pytest.raises(FileNotFoundError):
+        spaces.read_space("package-tool-conflict-created")
+    assert "secret_value_do_not_leak" not in str(import_exc.value).lower()
+    assert "secret_source_value_do_not_leak" not in str(export_exc.value).lower()
+
+
 def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-rollback", "name": "Tool Rollback"})
