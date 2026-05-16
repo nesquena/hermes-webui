@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2411** by @Michaelyklam (fixes #2405) — Named `custom:*` providers no longer lose vendor-prefixed model selections when the static model picker has not hydrated that model yet. The frontend now treats named custom providers as routable aggregators for both mismatch-warning suppression and missing-dropdown fallback, and live-fetched models keep explicit `@custom:name:` provider context so selections persist instead of snapping back to the configured default.
+
 ## [v0.51.78] — 2026-05-16 — Release BB (stage-371 — stuck-PR sweep salvage — RTL chat + ambient quota chip with composer-clutter gate)
 
 ### Added
