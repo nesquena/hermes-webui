@@ -11669,6 +11669,63 @@ def test_revision_restore_routes_accept_camelcase_ids_metadata_only(monkeypatch,
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_revision_restore_routes_reject_ambient_current_selectors_before_restore(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "route-ambient-restore", "name": "Route Ambient Restore"})
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "route-widget",
+            "kind": "html",
+            "title": "Route widget original",
+            "renderer": "<script>ambientLeak()</script>",
+            "source": "api_key = 'SECRET_VALUE_DO_NOT_LEAK'",
+        },
+    )
+    spaces.update_space(created["space_id"], {"name": "Route Ambient Patched"})
+    spaces.patch_widget(created["space_id"], "route-widget", {"title": "Route widget patched"})
+
+    full_handled, full_status, full_body = _route_post(
+        "/api/spaces/revision/restore",
+        {
+            "spaceId": created["space_id"],
+            "activeSpaceId": created["space_id"],
+            "revisionEventId": created["revision_event_id"],
+            "renderer": "<script>ambientRouteLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    widget_handled, widget_status, widget_body = _route_post(
+        "/api/spaces/revision/restore-widget",
+        {
+            "spaceId": created["space_id"],
+            "currentSpaceId": created["space_id"],
+            "eventId": upserted["revision_event_id"],
+            "widgetId": "route-widget",
+            "source": "raw prompt renderer body",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert full_handled is None
+    assert widget_handled is None
+    assert full_status == 400
+    assert widget_status == 400
+    assert full_body["error"] == "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+    assert widget_body["error"] == "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+    assert spaces.read_space(created["space_id"])["name"] == "Route Ambient Patched"
+    assert spaces.read_widget_detail(created["space_id"], "route-widget")["title"] == "Route widget patched"
+    serialized = json.dumps({"full": full_body, "widget": widget_body}).lower()
+    assert "ambientleak" not in serialized
+    assert "ambientrouteleak" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_revision_restore_routes_reject_conflicting_camelcase_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "camel-route-conflict", "name": "Camel Route Conflict"})

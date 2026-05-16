@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 06:45 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 15:01 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces non-current Research Harness mutation paths now reject ambient `activeSpaceId` / `currentSpaceId` selectors before progress/artifact side effects, while preserving explicit `space_id`/`spaceId` contracts, active `space.current.*` aliases, and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces direct non-current rollback HTTP routes now reject ambient `activeSpaceId` / `currentSpaceId` selectors before full-Space or widget restore side effects, while preserving explicit `space_id`/`spaceId` rollback contracts and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject ambient rollback route selectors`
+  - Added RED/GREEN route coverage proving `POST /api/spaces/revision/restore` and `POST /api/spaces/revision/restore-widget` reject same-valued ambient current selectors before restoring a full Space or widget from revision history.
+  - Hardened both direct revision restore route handlers with the shared non-current ambient-selector guard, matching recovery/research route behavior and the already-hardened Space-tool rollback aliases.
+  - Validation at completion: focused RED failed before implementation (`1 failed` with status `200` instead of expected `400`); focused GREEN passed (`1 passed`); related rollback route regressions passed (`16 passed, 334 deselected`); full Spaces foundation suite passed (`350 passed`); Spaces UI behavior + demo parity suites passed (`187 passed`); `py_compile api/routes.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static recovery/rollback/sandbox browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/recovery-rollback-sandbox.png`.
 
 - `fix(spaces): reject ambient research selectors`
   - Added RED/GREEN backend coverage proving non-current Research Harness tool actions (`space.research.progress.set` and `space.research.artifact.set`) plus direct HTTP routes (`/api/spaces/research/progress` and `/api/spaces/research/artifact`) reject same-valued ambient current selectors before mutating progress widgets or artifact slots.
