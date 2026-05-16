@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- Document the #1925 runtime-adapter gate update: Slice 1 run-journal replay has now passed a 100-trial synthetic replay/restart validation pass on current `origin/master`, #2313's selected-session chat SSE cap is shipped, and Slice 2 is ready for a reversible adapter-seam planning PR without moving execution ownership yet.
+
 ## [v0.51.78] — 2026-05-16 — Release BB (stage-371 — stuck-PR sweep salvage — RTL chat + ambient quota chip with composer-clutter gate)
 
 ### Added
