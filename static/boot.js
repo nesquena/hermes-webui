@@ -82,6 +82,7 @@ function _workspacePanelEls(){
     layout: document.querySelector('.layout'),
     panel: document.querySelector('.rightpanel'),
     toggleBtn: $('btnWorkspacePanelToggle'),
+    edgeToggleBtn: $('btnWorkspacePanelEdgeToggle'),
     collapseBtn: $('btnCollapseWorkspacePanel'),
   };
 }
@@ -176,7 +177,7 @@ function _setButtonTooltip(btn, text){
 }
 
 function syncWorkspacePanelUI(){
-  const {layout,panel,toggleBtn,collapseBtn}= _workspacePanelEls();
+  const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
   const desktopOpen=_workspacePanelMode!=='closed';
   const mobileOpen=panel.classList.contains('mobile-open');
@@ -189,6 +190,12 @@ function syncWorkspacePanelUI(){
     toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
     _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
     toggleBtn.disabled=!canBrowse;
+  }
+  if(edgeToggleBtn){
+    edgeToggleBtn.classList.toggle('active',isOpen);
+    edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
+    _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    edgeToggleBtn.disabled=!canBrowse;
   }
   if(collapseBtn){
     _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');

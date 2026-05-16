@@ -4,6 +4,8 @@
 
 ### Added
 
+- **PR #2339** by @Michaelyklam (refs #2211) — The workspace panel now has a small desktop edge toggle that remains clickable after the right panel is hidden, making it possible to reopen the workspace browser without returning to Settings. The existing panel close button and composer workspace button remain unchanged; the new affordance only appears when the workspace panel is closed on desktop widths.
+
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
 
 ### Fixed
