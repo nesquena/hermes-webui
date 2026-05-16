@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [v0.51.72] — 2026-05-16 — Release AV (stage-365 — 2-PR safe-lane batch — #2354 recovered pending turn context fix + #2348 Thinking card interim-text echo suppression)
+
+### Fixed
+
+- **PR #2354** by @franksong2702 (fixes #2353) — Stale stream recovery now keeps a recovered pending user turn in the model context (`context_messages`) as well as the visible transcript. Pre-fix, a server restart during an in-flight turn could restore the user's message in WebUI while omitting it from `context_messages`, so the next agent turn could forget a prompt that was visibly present just above it. The repair path now appends the recovered user turn to both surfaces with 8-message lookback dedup so already-checkpointed entries are not duplicated.
+
+- **PR #2348** by @franksong2702 (fixes #2346) — Thinking cards now suppress exact snippets that are already shown as user-visible interim assistant text, avoiding duplicated progress lines when an agent emits the same sentence through both reasoning and interim-assistant callbacks. Tracks `_liveThinkingText` during the live stream to strip the visible echo from the live Thinking card display; applies the same suppression in the settled-transcript path so reload/session-switch sees the cleaned-up view too.
+
 ## [v0.51.71] — 2026-05-16 — Release AU (stage-364 — 3-PR batch — #2349 stale-stream cleanup non-touching + #2343 profiles vs workspaces help card + #2283 run-event journal replay [refs #1925 RFC slice 1] — with Opus-caught replay double-render fix)
 
 ### Added
