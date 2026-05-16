@@ -6402,6 +6402,8 @@ async function _showAddCustomProviderForm(){
     nameInput.placeholder=t('providers_name_placeholder')||'e.g. my-provider';
     nameInput.autocomplete='off';
     nameInput.style.cssText='width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;font-weight:600';
+    // Prevent click on input from toggling the parent card header
+    nameInput.addEventListener('click',e=>e.stopPropagation());
     nameEl.innerHTML='';
     nameEl.appendChild(nameInput);
   }
