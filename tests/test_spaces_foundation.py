@@ -8918,6 +8918,70 @@ def test_space_tool_adapter_rejects_conflicting_recovery_module_selector_aliases
     assert "<script" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("action", "ambient_key", "pre_disable", "expected_disabled"),
+    [
+        ("space.recovery.disable_module", "activeSpaceId", False, False),
+        ("space.safe_mode.disable_module", "currentSpaceId", False, False),
+        ("space.admin.recovery.disable_module", "active_space_id", False, False),
+        ("space.recovery.enable_module", "current_space_id", True, True),
+        ("space.admin.enable_module", "activeSpaceId", True, True),
+        ("space.recovery.repair_module", "currentSpaceId", False, False),
+        ("space.admin.recovery.repair_module", "active_space_id", False, False),
+        ("space.recovery.module_repair_events", "activeSpaceId", False, False),
+        ("space.admin.recovery.module_repair_events", "currentSpaceId", False, False),
+    ],
+)
+def test_space_tool_adapter_recovery_module_aliases_reject_ambient_current_selectors_before_side_effects(
+    monkeypatch,
+    tmp_path,
+    action,
+    ambient_key,
+    pre_disable,
+    expected_disabled,
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    ambient = spaces.create_space({"space_id": "ambient-module-tool-current", "name": "Ambient Module Tool Current"})
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "ambient-tool-module",
+            "name": "Ambient Tool Module",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "export const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>ambientModule()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+    if pre_disable:
+        spaces.disable_module_for_recovery("ambient-tool-module", reason="pre-disabled for tool test")
+    baseline_event_files = {path.name for path in spaces.events_dir().glob("*.json")}
+
+    payload = {
+        "module_id": "ambient-tool-module",
+        ambient_key: ambient["space_id"],
+        "reason": "renderer/source SECRET_VALUE_DO_NOT_LEAK",
+        "prompt": "Repair renderer/source data SECRET_VALUE_DO_NOT_LEAK",
+        "payload": {"action": "repair-module", "source": "SECRET_VALUE_DO_NOT_LEAK"},
+    }
+
+    with pytest.raises(ValueError, match="current-space selectors") as exc:
+        spaces.run_space_tool(action, payload)
+
+    snapshot = spaces.recovery_snapshot()
+    module_summary = next(module for module in snapshot["modules"] if module["module_id"] == "ambient-tool-module")
+    serialized = json.dumps({"error": str(exc.value), "snapshot": snapshot}).lower()
+    assert module_summary.get("disabled", False) is expected_disabled
+    assert spaces.list_recovery_module_repair_events("ambient-tool-module") == []
+    assert {path.name for path in spaces.events_dir().glob("*.json")} == baseline_event_files
+    assert spaces.read_space(ambient["space_id"]).get("recovery", {}).get("disabled", False) is False
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_recovery_snapshot_redacts_camelcase_unsafe_module_ids(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(

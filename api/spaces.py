@@ -3196,6 +3196,7 @@ def _space_tool_space_widget_positional_indexes(payload: dict[str, Any]) -> tupl
 
 def _space_tool_module_id(payload: dict[str, Any]) -> str:
     """Return a recovery module id from tool payload aliases, rejecting conflicts."""
+    _space_tool_reject_ambient_current_selectors(payload)
     _space_tool_assert_matching_aliases(
         payload,
         ("module_id", "moduleId", "id"),
