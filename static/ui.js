@@ -4848,6 +4848,13 @@ function appendLiveCompressionCard(state){
   const node=_compressionCardsNode(state);
   if(!node) return false;
   node.setAttribute('data-live-compression-card','1');
+  // Close any open live Activity group BEFORE inserting the compression card
+  // so the next tool call after compression starts a fresh Activity row rather
+  // than joining the pre-compression group. Compression mid-turn is a real
+  // timeline boundary (context changed) — surface it that way. #2404.
+  inner.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(g=>{
+    g.removeAttribute('data-live-activity-current');
+  });
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
   else inner.appendChild(node);
