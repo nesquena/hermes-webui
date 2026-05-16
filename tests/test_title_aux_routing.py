@@ -6,6 +6,7 @@ Covers:
   - aux→agent fallback triggers on 'llm_invalid_aux' status
   - _aux_title_timeout rejects zero, negative, and non-numeric values
 """
+import os
 import sys
 import types
 import unittest
@@ -376,6 +377,130 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         self.assertEqual(mock_session.title, provisional_title)
         self.assertFalse(mock_session.llm_title_generated)
         mock_session.save.assert_not_called()
+
+
+class TestBackgroundTitleProfileRouting(unittest.TestCase):
+    def test_profile_env_context_logs_fail_open_resolution_errors(self):
+        """Profile env setup failures should be diagnosable without breaking workers."""
+        import api.profiles as profiles
+
+        session = types.SimpleNamespace(profile='work')
+        captured = {}
+
+        with patch.object(
+            profiles,
+            'get_hermes_home_for_profile',
+            side_effect=RuntimeError('profile lookup failed'),
+        ):
+            with patch.dict(os.environ, {'HERMES_HOME': 'default-home'}, clear=False):
+                with self.assertLogs('api.profiles', level='DEBUG') as logs:
+                    with profiles.profile_env_for_background_worker(session, 'background title'):
+                        captured['HERMES_HOME'] = os.environ.get('HERMES_HOME')
+
+        message_found = any(
+            'Failed to resolve profile env for background title profile work' in record.getMessage()
+            for record in logs.records
+        )
+        self.assertEqual(captured['HERMES_HOME'], 'default-home')
+        self.assertTrue(message_found)
+        self.assertTrue(any(record.exc_info for record in logs.records))
+
+    def test_skill_home_snapshot_removes_modules_imported_during_context(self):
+        """Modules first imported inside a temporary profile context must not leak."""
+        import api.profiles as profiles
+
+        original_parent = sys.modules.get('tools')
+        original_skill_module = sys.modules.get('tools.skills_tool')
+        original_manager_module = sys.modules.get('tools.skill_manager_tool')
+
+        sys.modules.pop('tools.skills_tool', None)
+        sys.modules.pop('tools.skill_manager_tool', None)
+        tools_parent = types.ModuleType('tools')
+        sys.modules['tools'] = tools_parent
+        try:
+            snapshot = profiles.snapshot_skill_home_modules()
+
+            imported_during_context = types.ModuleType('tools.skills_tool')
+            setattr(imported_during_context, 'HERMES_HOME', 'profile-home')
+            setattr(imported_during_context, 'SKILLS_DIR', 'profile-home/skills')
+            sys.modules['tools.skills_tool'] = imported_during_context
+            setattr(tools_parent, 'skills_tool', imported_during_context)
+
+            profiles.restore_skill_home_modules(snapshot)
+
+            self.assertNotIn('tools.skills_tool', sys.modules)
+            self.assertFalse(hasattr(tools_parent, 'skills_tool'))
+        finally:
+            sys.modules.pop('tools.skills_tool', None)
+            sys.modules.pop('tools.skill_manager_tool', None)
+            if original_parent is None:
+                sys.modules.pop('tools', None)
+            else:
+                sys.modules['tools'] = original_parent
+            if original_skill_module is not None:
+                sys.modules['tools.skills_tool'] = original_skill_module
+            if original_manager_module is not None:
+                sys.modules['tools.skill_manager_tool'] = original_manager_module
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming.get_session')
+    def test_background_title_generation_uses_session_profile_home(
+        self, mock_get_session, mock_configured,
+    ):
+        """A background title worker for a non-default profile must resolve aux config from that profile."""
+        from api.streaming import _run_background_title_update
+
+        mock_session = MagicMock()
+        mock_session.title = 'Untitled'
+        mock_session.profile = 'work'
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': 'This is a test message'},
+            {'role': 'assistant', 'content': 'Received.'},
+        ]
+        mock_get_session.return_value = mock_session
+
+        captured = {}
+
+        original_skill_module = sys.modules.get('tools.skills_tool')
+        fake_skill_module = types.ModuleType('tools.skills_tool')
+        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
+        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        sys.modules['tools.skills_tool'] = fake_skill_module
+
+        def fake_aux_title(*args, **kwargs):
+            captured['hermes_home'] = os.environ.get('HERMES_HOME')
+            captured['skill_module_home'] = getattr(fake_skill_module, 'HERMES_HOME')
+            captured['skill_module_dir'] = getattr(fake_skill_module, 'SKILLS_DIR')
+            return ('Profile Routed Title', 'llm_aux', '')
+
+        events = []
+        try:
+            with patch('api.profiles.get_hermes_home_for_profile', return_value='profile-home'):
+                with patch('api.streaming._generate_llm_session_title_via_aux', side_effect=fake_aux_title):
+                    with patch.dict(os.environ, {'HERMES_HOME': 'default-home'}, clear=False):
+                        _run_background_title_update(
+                            session_id='profile-title-session',
+                            user_text='This is a test message',
+                            assistant_text='Received.',
+                            placeholder_title='Untitled',
+                            put_event=lambda event_type, data: events.append((event_type, data)),
+                            agent=None,
+                        )
+                        captured['restored_hermes_home'] = os.environ.get('HERMES_HOME')
+        finally:
+            if original_skill_module is None:
+                sys.modules.pop('tools.skills_tool', None)
+            else:
+                sys.modules['tools.skills_tool'] = original_skill_module
+
+        self.assertEqual(captured.get('hermes_home'), 'profile-home')
+        self.assertEqual(str(captured.get('skill_module_home')), 'profile-home')
+        self.assertEqual(str(captured.get('skill_module_dir')), 'profile-home/skills')
+        self.assertEqual(captured.get('restored_hermes_home'), 'default-home')
+        self.assertEqual(getattr(fake_skill_module, 'HERMES_HOME'), 'default-home')
+        self.assertEqual(getattr(fake_skill_module, 'SKILLS_DIR'), 'default-home/skills')
+        self.assertEqual(mock_session.title, 'Profile Routed Title')
 
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):

@@ -5,6 +5,7 @@ Sprint 46 Tests: manual session compression with optional focus topic.
 import contextlib
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -404,6 +405,71 @@ def test_session_compress_async_reports_stream_state_guard(monkeypatch, cleanup_
     assert error_payload["error_status"] == 409
     assert "stream state changed" in error_payload["error"]
     assert get_session(sid).active_stream_id == "stream-concurrent"
+
+
+def test_manual_compress_worker_uses_session_profile_env(monkeypatch, tmp_path, cleanup_test_sessions):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    class EnvAssertingAgent:
+        seen_env = None
+
+        def __init__(self, **kwargs):
+            skill_module = sys.modules.get("tools.skills_tool")
+            EnvAssertingAgent.seen_env = {
+                "HERMES_HOME": os.environ.get("HERMES_HOME"),
+                "HERMES_TEST_PROFILE_ENV": os.environ.get("HERMES_TEST_PROFILE_ENV"),
+                "SKILL_MODULE_HOME": getattr(skill_module, "HERMES_HOME", None),
+                "SKILL_MODULE_DIR": getattr(skill_module, "SKILLS_DIR", None),
+            }
+            self.context_compressor = _FakeCompressor()
+
+    created = cleanup_test_sessions
+    sid = _make_session()
+    created.append(sid)
+    session = get_session(sid)
+    session.profile = "work"
+    session.model_provider = "profile-provider"
+    session.save(touch_updated_at=False)
+
+    profile_home = tmp_path / "work-profile-home"
+    fake_skill_module = types.ModuleType("tools.skills_tool")
+    setattr(fake_skill_module, "HERMES_HOME", "default-home")
+    setattr(fake_skill_module, "SKILLS_DIR", "default-home/skills")
+    monkeypatch.setitem(sys.modules, "tools.skills_tool", fake_skill_module)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda profile: profile_home)
+    monkeypatch.setattr(
+        profiles,
+        "get_profile_runtime_env",
+        lambda home: {"HERMES_TEST_PROFILE_ENV": "work-runtime"},
+    )
+    monkeypatch.setenv("HERMES_HOME", "default-home")
+    monkeypatch.delenv("HERMES_TEST_PROFILE_ENV", raising=False)
+    _install_fake_compression_runtime(monkeypatch, EnvAssertingAgent)
+
+    with routes._MANUAL_COMPRESSION_JOBS_LOCK:
+        routes._MANUAL_COMPRESSION_JOBS[sid] = {
+            "session_id": sid,
+            "focus_topic": None,
+            "status": "running",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+        }
+
+    routes._run_manual_compression_job(sid, {"session_id": sid})
+
+    assert EnvAssertingAgent.seen_env == {
+        "HERMES_HOME": str(profile_home),
+        "HERMES_TEST_PROFILE_ENV": "work-runtime",
+        "SKILL_MODULE_HOME": profile_home,
+        "SKILL_MODULE_DIR": profile_home / "skills",
+    }
+    assert str(getattr(fake_skill_module, "HERMES_HOME")) == "default-home"
+    assert str(getattr(fake_skill_module, "SKILLS_DIR")) == "default-home/skills"
+    assert os.environ.get("HERMES_HOME") == "default-home"
+    assert os.environ.get("HERMES_TEST_PROFILE_ENV") is None
+    with routes._MANUAL_COMPRESSION_JOBS_LOCK:
+        assert routes._MANUAL_COMPRESSION_JOBS[sid]["status"] == "done"
 
 
 def test_static_commands_js_registers_compress_alias(cleanup_test_sessions):

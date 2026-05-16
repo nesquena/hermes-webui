@@ -378,3 +378,105 @@ class TestIsValidImage:
             p = Path(d) / 'a.png'
             _make_png(p)
             assert _is_valid_image(p, 'image/png; charset=utf-8')
+
+
+class TestAttachmentRootIntegration:
+    """Stage-361 regression: #2319 moved chat uploads to ~/.hermes/webui/attachments/<sid>/.
+
+    Pre-fix, _build_native_multimodal_message required uploads to be under
+    workspace_root, which silently rejected every image upload from the new
+    attachment inbox (vision models silently lost image context).
+
+    The fix adds the configured attachment root as a second allowed location
+    via _attachment_root() from api.upload, single source of truth.
+    """
+
+    def test_attachment_root_path_allowed_for_native_multimodal(self, tmp_path, monkeypatch):
+        """Image landing in the attachment inbox is accepted, not silently dropped."""
+        # Set up isolated attachment root
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        # The image lives in the attachment inbox, NOT in the workspace
+        session_inbox = attachment_root / "sess123"
+        session_inbox.mkdir()
+        image_path = session_inbox / "photo.png"
+        _make_png(image_path)
+
+        # Workspace is a different, unrelated directory
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        atts = _normalize_chat_attachments([{
+            "name": "photo.png",
+            "path": str(image_path),
+            "mime": "image/png",
+            "size": image_path.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "describe this", atts, str(workspace))
+
+        # PRE-FIX: result would be a plain string (image silently rejected).
+        # POST-FIX: result is a list with the image_url part included.
+        assert isinstance(result, list), (
+            "Stage-361 regression: image in attachment inbox was silently rejected. "
+            "Expected list with image_url part, got string fallback. "
+            "The pre-fix workspace_root-only guard at api/streaming.py needs to also "
+            "allow paths under _attachment_root() (api/upload.py)."
+        )
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_path_outside_both_workspace_and_attachment_root_still_rejected(self, tmp_path, monkeypatch):
+        """Paths outside BOTH allowed roots remain rejected — no security regression."""
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        # Image in /tmp or wherever — neither under workspace nor attachment root
+        rogue_dir = tmp_path / "rogue"
+        rogue_dir.mkdir()
+        rogue_image = rogue_dir / "bad.png"
+        _make_png(rogue_image)
+
+        atts = _normalize_chat_attachments([{
+            "name": "bad.png",
+            "path": str(rogue_image),
+            "mime": "image/png",
+            "size": rogue_image.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "hi", atts, str(workspace))
+
+        # Should fall back to string — rogue path rejected by both root checks
+        assert isinstance(result, str), (
+            "Security regression: path outside both workspace and attachment "
+            "root was accepted. The _allowed_roots check should reject."
+        )
+
+    def test_workspace_path_still_allowed(self, tmp_path, monkeypatch):
+        """Workspace-resident images still work (backward compat with pre-#2319 uploads)."""
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        image_path = workspace / "ws-image.png"
+        _make_png(image_path)
+
+        atts = _normalize_chat_attachments([{
+            "name": "ws-image.png",
+            "path": str(image_path),
+            "mime": "image/png",
+            "size": image_path.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "describe", atts, str(workspace))
+
+        assert isinstance(result, list)
+        assert result[1]["type"] == "image_url"

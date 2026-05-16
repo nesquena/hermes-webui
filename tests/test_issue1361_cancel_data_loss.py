@@ -445,6 +445,35 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
 
 
 
+def test_cancel_copy_uses_configured_bot_name(monkeypatch):
+    """Cancellation copy should use the configured assistant display name."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': 'Obryn'})
+
+    assert streaming._cancelled_turn_hint() == (
+        'The run was cancelled by the user before Obryn finished. '
+        'No provider failure occurred.'
+    )
+    assert 'before Obryn finished' in streaming._cancelled_turn_content()
+    assert streaming._classify_provider_error('Task cancelled by user')['hint'] == (
+        'The run was cancelled by the user before Obryn finished. '
+        'No provider failure occurred.'
+    )
+
+
+def test_cancel_copy_falls_back_to_hermes_for_blank_bot_name(monkeypatch):
+    """Blank or missing bot_name should not leak old persona copy."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': '   '})
+
+    assert streaming._cancelled_turn_hint() == (
+        'The run was cancelled by the user before Hermes finished. '
+        'No provider failure occurred.'
+    )
+
+
 class TestCancelStreamIdempotentWithWorkerFinalizer:
     """The worker and explicit cancel endpoint can both finalize the same turn."""
 
@@ -455,7 +484,7 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             session_id=sid,
             messages=[
                 {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
-                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
+                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Hermes finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
             ],
         )
         _setup_cancel_state(sid, stream_id)

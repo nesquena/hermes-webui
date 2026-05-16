@@ -274,6 +274,19 @@ def test_reference_message_uses_raw_transcript_position_before_anchor_fallback()
     assert "else _insertCompressionLikeNode(referenceNode);" in src
 
 
+def test_reference_message_inserted_before_future_assistant_anchor():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode", start)
+    assert end != -1, "raw-index insertion helper end marker not found"
+    helper = src[start:end]
+
+    assert "const anchorSeg=assistantSegments.get(anchorRawIdx);" in helper
+    assert "blocks.insertBefore(node, anchorSeg);" in helper
+    assert helper.index("blocks.insertBefore(node, anchorSeg);") < helper.index("const userRow=userRows.get(anchorRawIdx);")
+
+
 def test_reference_message_selection_prefers_latest_matching_marker():
     src = _read("static/ui.js")
     start = src.find("function _latestCompressionReferenceMessage")

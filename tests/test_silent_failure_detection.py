@@ -95,12 +95,12 @@ class TestHasNewAssistantReply:
         assert _has_new_assistant_reply(all_msgs, len(prev)) is False
 
     # Scenario 8 ──────────────────────────────────────────────────────────
-    def test_result_shorter_than_prev_len_fallback(self):
-        """Edge-case: result messages < prev_count → fallback to scanning all.
+    def test_result_shorter_than_prev_len_returns_false(self):
+        """Edge-case: result messages < prev_count cannot prove a new reply.
 
-        The helper falls back to scanning all messages when the slice would
-        be empty.  In this scenario, if an assistant message exists in the
-        (shorter) result it should still be detected.
+        Shrunken result history has no reliable new-message slice. Scanning
+        the shorter list can mistake an older assistant reply for a current
+        turn reply, which would hide the silent-failure banner.
         """
         prev_count = 5
         # Only 3 messages in result — shorter than prev_count
@@ -109,10 +109,8 @@ class TestHasNewAssistantReply:
             _msg("assistant", "b"),
             _msg("user", "c"),
         ]
-        # Fallback scans all → assistant with content "b" is found
-        assert _has_new_assistant_reply(all_msgs, prev_count) is True
+        assert _has_new_assistant_reply(all_msgs, prev_count) is False
 
-        # But if no assistant content in the shorter result → False
         all_msgs_no_asst = [
             _msg("user", "a"),
             _msg("user", "b"),

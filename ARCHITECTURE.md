@@ -322,7 +322,7 @@ POST /api/approval/respond:
 ### 4.6 File Upload Parser
 
 parse_multipart(rfile, content_type, content_length):
-    - Reads all content_length bytes from rfile into memory (up to MAX_UPLOAD_BYTES = 20MB)
+    - Reads all content_length bytes from rfile into memory (up to MAX_UPLOAD_BYTES, default 20MB, env-overridable via HERMES_WEBUI_MAX_UPLOAD_MB)
     - Extracts boundary from Content-Type header
     - Splits raw bytes on b'--' + boundary
     - For each part: parses MIME headers via email.parser.HeaderParser

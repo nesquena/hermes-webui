@@ -141,6 +141,15 @@ class TestCheckProviderMismatch:
             "_checkProviderMismatch must skip the check for custom provider"
         )
 
+    def test_skips_check_for_named_custom_provider(self):
+        """Named custom providers are aggregators too — skip the warning."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "startsWith('custom:')" in block, (
+            "_checkProviderMismatch must skip named custom providers like custom:zenmux"
+        )
+
     def test_active_provider_stored_on_model_load(self):
         """populateModelDropdown must store active_provider from /api/models."""
         src = _read("static/ui.js")

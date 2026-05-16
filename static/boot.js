@@ -82,6 +82,7 @@ function _workspacePanelEls(){
     layout: document.querySelector('.layout'),
     panel: document.querySelector('.rightpanel'),
     toggleBtn: $('btnWorkspacePanelToggle'),
+    edgeToggleBtn: $('btnWorkspacePanelEdgeToggle'),
     collapseBtn: $('btnCollapseWorkspacePanel'),
   };
 }
@@ -176,7 +177,7 @@ function _setButtonTooltip(btn, text){
 }
 
 function syncWorkspacePanelUI(){
-  const {layout,panel,toggleBtn,collapseBtn}= _workspacePanelEls();
+  const {layout,panel,toggleBtn,edgeToggleBtn,collapseBtn}= _workspacePanelEls();
   if(!layout||!panel)return;
   const desktopOpen=_workspacePanelMode!=='closed';
   const mobileOpen=panel.classList.contains('mobile-open');
@@ -190,6 +191,12 @@ function syncWorkspacePanelUI(){
     _setButtonTooltip(toggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
     toggleBtn.disabled=!canBrowse;
   }
+  if(edgeToggleBtn){
+    edgeToggleBtn.classList.toggle('active',isOpen);
+    edgeToggleBtn.setAttribute('aria-expanded',isOpen?'true':'false');
+    _setButtonTooltip(edgeToggleBtn, isOpen?'Hide workspace panel':'Show workspace panel');
+    edgeToggleBtn.disabled=!canBrowse;
+  }
   if(collapseBtn){
     _setButtonTooltip(collapseBtn, isCompact?'Close workspace panel':'Hide workspace panel');
   }
@@ -201,11 +208,8 @@ function syncWorkspacePanelUI(){
   const clearBtn=$('btnClearPreview');
   if(clearBtn){
     clearBtn.disabled=!isOpen;
-    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Hide workspace panel');
-    // On desktop, only show the X button when a file preview is open.
-    // In browse mode the chevron (btnCollapseWorkspacePanel) already serves
-    // as the close control, so showing both produces a duplicate X.
-    if(!isCompact) clearBtn.style.display=hasPreview?'':'none';
+    _setButtonTooltip(clearBtn, hasPreview?'Close preview':'Close');
+    if(!isCompact) clearBtn.style.display='';
   }
 }
 
@@ -282,6 +286,12 @@ function expandSidebar(){
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
+function closeMobileWorkspacePanelFromChat(e){
+  if(!_isCompactWorkspaceViewport()||_workspacePanelMode==='closed') return;
+  const panel=document.querySelector('.rightpanel');
+  if(panel&&panel.contains(e.target)) return;
+  closeWorkspacePanel();
+}
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();
   if(!panel)return;
@@ -323,6 +333,7 @@ $('btnSend').onclick=()=>{
   }
   send();
 };
+$('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
 $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
@@ -1168,6 +1179,7 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
+  {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
@@ -1392,11 +1404,38 @@ function applyBotName(){
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
-    const appearance=_normalizeAppearance(s.theme,s.skin);
-    localStorage.setItem('hermes-theme',appearance.theme);
-    _applyTheme(appearance.theme);
-    localStorage.setItem('hermes-skin',appearance.skin);
-    _applySkin(appearance.skin);
+    // Reconcile appearance: prefer localStorage (what the user last saw) over
+    // the server.  If they diverge (e.g. a previous autosave POST failed),
+    // push the localStorage values back to the server so settings.json stays
+    // in sync without ever clobbering the user's chosen theme/skin.
+    //
+    // Caveat: the pre-paint inline script in index.html normalises empty
+    // localStorage into 'dark'/'default' BEFORE this code runs, so a truly
+    // empty (new-browser) state is indistinguishable from a user who chose
+    // the defaults.  To avoid blocking server→client sync on first visit we
+    // only let localStorage override the server when it carries an explicit
+    // user-selectable theme value or a NON-DEFAULT skin.  That keeps the
+    // server in charge for empty first-visit state while preserving explicit
+    // light/dark/system choices after a failed autosave.
+    const srvAppearance=_normalizeAppearance(s.theme,s.skin);
+    const lsTheme=(localStorage.getItem('hermes-theme')||'').trim().toLowerCase();
+    const lsSkin=(localStorage.getItem('hermes-skin')||'').trim().toLowerCase();
+    const lsAppearance=_normalizeAppearance(lsTheme||null,lsSkin||null);
+    const lsHasExplicitSkin=lsSkin&&lsSkin!=='default';
+    const lsHasExplicitTheme=lsTheme&&['system','light','dark'].includes(lsTheme);
+    const theme=lsHasExplicitTheme?lsAppearance.theme:srvAppearance.theme;
+    const skin=lsHasExplicitSkin?lsAppearance.skin:srvAppearance.skin;
+    localStorage.setItem('hermes-theme',theme);
+    _applyTheme(theme);
+    localStorage.setItem('hermes-skin',skin);
+    _applySkin(skin);
+    // Reconcile: if localStorage and server disagree, push localStorage
+    // values to the server so the next refresh won't revert.
+    if((lsHasExplicitTheme||lsHasExplicitSkin)&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
+      try{
+        api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
+      }catch(_){}
+    }
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
@@ -1520,7 +1559,7 @@ function applyBotName(){
         // even though there is no active session (#workspace-persist).
         const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-        if(_ephPanelPref) _workspacePanelMode='browse';
+        if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -1531,7 +1570,7 @@ function applyBotName(){
       // the panel via toolbar X doesn't suppress the "keep open" setting.
       const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
         || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-      if(S.session&&S.session.workspace&&panelPref){
+      if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
@@ -1545,7 +1584,7 @@ function applyBotName(){
   // user had it open during their last session (#workspace-persist).
   const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
     || localStorage.getItem('hermes-webui-workspace-panel')==='open';
-  if(_freshPanelPref) _workspacePanelMode='browse';
+  if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();

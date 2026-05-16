@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +43,24 @@ _tls = threading.local()
 _SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
 
 
+def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
+    """Snapshot imported skill-module path globals before a temporary patch."""
+    snapshot: dict[str, dict[str, object]] = {}
+    for module_name in _SKILL_HOME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            snapshot[module_name] = {"module_present": False}
+            continue
+        snapshot[module_name] = {
+            "module_present": True,
+            "has_HERMES_HOME": hasattr(module, "HERMES_HOME"),
+            "HERMES_HOME": getattr(module, "HERMES_HOME", None),
+            "has_SKILLS_DIR": hasattr(module, "SKILLS_DIR"),
+            "SKILLS_DIR": getattr(module, "SKILLS_DIR", None),
+        }
+    return snapshot
+
+
 def patch_skill_home_modules(home: Path) -> None:
     """Patch imported skill modules that cache HERMES_HOME at import time."""
     for module_name in _SKILL_HOME_MODULES:
@@ -53,6 +72,37 @@ def patch_skill_home_modules(home: Path) -> None:
             module.SKILLS_DIR = home / "skills"
         except AttributeError:
             logger.debug("Failed to patch %s module", module_name)
+
+
+def restore_skill_home_modules(snapshot: dict[str, dict[str, object]]) -> None:
+    """Restore skill-module globals captured by snapshot_skill_home_modules()."""
+    for module_name, values in snapshot.items():
+        module = sys.modules.get(module_name)
+        if not values.get("module_present"):
+            if module is not None:
+                sys.modules.pop(module_name, None)
+                parent_name, _, child_name = module_name.rpartition(".")
+                parent = sys.modules.get(parent_name)
+                if parent is not None:
+                    try:
+                        delattr(parent, child_name)
+                    except AttributeError:
+                        pass
+            continue
+        if module is None:
+            continue
+        for attr in ("HERMES_HOME", "SKILLS_DIR"):
+            has_attr = bool(values.get(f"has_{attr}"))
+            try:
+                if has_attr:
+                    setattr(module, attr, values.get(attr))
+                else:
+                    try:
+                        delattr(module, attr)
+                    except AttributeError:
+                        pass
+            except AttributeError:
+                logger.debug("Failed to restore %s.%s", module_name, attr)
 
 
 def _unwrap_profile_home_to_base(home: Path) -> Path:
@@ -625,6 +675,82 @@ def get_profile_runtime_env(home: Path) -> dict[str, str]:
     return env
 
 
+@contextmanager
+def profile_env_for_background_worker(
+    session,
+    purpose: str = "background worker",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Temporarily route detached worker config reads through a profile.
+
+    Background WebUI workers run outside the request/streaming thread that
+    established the profile-scoped environment.  Workers that read agent config,
+    runtime provider settings, or skill paths must temporarily apply the
+    session/request profile env or they can fall back to the server-default
+    profile. Pass either a session-like object with `.profile` or a profile name.
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or profile == "default":
+        yield
+        return
+
+    try:
+        # Lazy import avoids a module-load cycle: streaming imports this helper.
+        from api.streaming import _ENV_LOCK
+
+        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        runtime_env = get_profile_runtime_env(profile_home_path)
+    except Exception:
+        log.debug(
+            "Failed to resolve profile env for %s profile %s; falling back to current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+
+    env_keys = set(runtime_env.keys()) | {"HERMES_HOME"}
+    # Stage-360 maintainer fix: narrow the _ENV_LOCK critical section to just
+    # the env mutation (and the env restoration). Pre-fix, this held _ENV_LOCK
+    # for the entire `yield` duration — i.e. the whole background worker's
+    # runtime (title generation, compression, update summary). That caused
+    # _ENV_LOCK to be held for many seconds, blocking ALL other sessions and
+    # surfacing as the QA `test_third_message_completes` timeout. The fix
+    # mirrors the narrow-lock pattern in _run_agent_streaming: acquire briefly
+    # to set env, run worker without holding the lock, reacquire to restore.
+    # See also QA `test_finally_restores_env_with_lock`.
+    skill_home_snapshot = None
+    old_env = {}
+    try:
+        with _ENV_LOCK:
+            old_env = {key: os.environ.get(key) for key in env_keys}
+            skill_home_snapshot = snapshot_skill_home_modules()
+            os.environ.update(runtime_env)
+            os.environ["HERMES_HOME"] = str(profile_home_path)
+            try:
+                patch_skill_home_modules(profile_home_path)
+            except Exception:
+                log.debug(
+                    "Failed to patch skill modules for %s profile %s",
+                    purpose,
+                    profile,
+                    exc_info=True,
+                )
+        yield
+    finally:
+        with _ENV_LOCK:
+            for key, old_value in old_env.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+            if skill_home_snapshot is not None:
+                restore_skill_home_modules(skill_home_snapshot)
+
+
 def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)
@@ -986,6 +1112,85 @@ def _split_webui_provider_model_value(default_model: Optional[str], model_provid
     return model, provider
 
 
+def _strip_webui_provider_prefix(model_id: object) -> str:
+    value = str(model_id or "").strip()
+    if value.startswith("@") and ":" in value:
+        return value.rsplit(":", 1)[1]
+    return value
+
+
+def _profile_model_selection_exists(
+    available_models: object,
+    default_model: Optional[str],
+    model_provider: Optional[str],
+) -> bool:
+    """Return True when a profile default model/provider exists in /api/models."""
+    if not default_model and not model_provider:
+        return True
+    if not isinstance(available_models, dict):
+        return False
+
+    provider_seen = False
+    model_seen = False
+    for group in available_models.get("groups", []) or []:
+        if not isinstance(group, dict):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip()
+        if model_provider and provider_id != model_provider:
+            continue
+        if model_provider and provider_id == model_provider:
+            provider_seen = True
+        for model in group.get("models", []) or []:
+            if not isinstance(model, dict):
+                continue
+            model_id = str(model.get("id") or "").strip()
+            if not model_id:
+                continue
+            if default_model and (
+                model_id == default_model
+                or _strip_webui_provider_prefix(model_id) == default_model
+            ):
+                model_seen = True
+                if model_provider:
+                    return True
+        if not default_model and provider_seen:
+            return True
+
+    if model_provider and not provider_seen:
+        return False
+    return bool(model_seen)
+
+
+def _get_available_models_for_profile_validation() -> dict:
+    from api.config import get_available_models
+
+    return get_available_models()
+
+
+def _validate_profile_model_selection(
+    default_model: Optional[str],
+    model_provider: Optional[str],
+    available_models: Optional[dict] = None,
+) -> None:
+    """Reject profile model defaults that do not exist in the server catalog."""
+    if not default_model and not model_provider:
+        return
+    catalog = (
+        available_models
+        if available_models is not None
+        else _get_available_models_for_profile_validation()
+    )
+    if _profile_model_selection_exists(catalog, default_model, model_provider):
+        return
+    if default_model and model_provider:
+        raise ValueError(
+            f"Selected model '{default_model}' is not available for provider '{model_provider}'"
+        )
+    if default_model:
+        raise ValueError(f"Selected model '{default_model}' is not available")
+    raise ValueError(f"Selected model provider '{model_provider}' is not available")
+
+
 def _write_model_defaults_to_config(
     profile_dir: Path,
     *,
@@ -1033,6 +1238,7 @@ def create_profile_api(name: str, clone_from: str = None,
     if clone_from is not None and not _is_root_profile(clone_from):
         _validate_profile_name(clone_from)
     default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
+    _validate_profile_model_selection(default_model, model_provider)
 
     try:
         from hermes_cli.profiles import create_profile
@@ -1060,6 +1266,28 @@ def create_profile_api(name: str, clone_from: str = None,
             break
 
     profile_path.mkdir(parents=True, exist_ok=True)
+
+    # Seed bundled skills for non-cloned profiles (#2305).
+    # Cloned profiles should preserve the clone-source behaviour and must not
+    # receive a second bundled-skill overlay.
+    if clone_from is None:
+        try:
+            from hermes_cli.profiles import seed_profile_skills
+            seed_profile_skills(profile_path, quiet=True)
+        except ImportError:
+            logger.debug(
+                'seed_profile_skills unavailable — bundled skills not seeded '
+                'for profile %s (hermes_cli not in path)',
+                name,
+            )
+        except Exception:
+            logger.warning(
+                'Bundled skills could not be seeded for profile %s; '
+                'profile created successfully anyway',
+                name,
+                exc_info=True,
+            )
+
     _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
     _write_model_defaults_to_config(
         profile_path,

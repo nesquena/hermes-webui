@@ -2,15 +2,171 @@
 
 ## [Unreleased]
 
+## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
+
 ### Added
 
-- **PR #2099** by @dobby-d-elf — Adds an opt-in `Settings → Preferences → Fade text effect` toggle (off by default). When enabled, newly streamed output tokens are revealed through an adaptive playout buffer and animated with an opacity-only fade similar to ChatGPT and other frontier LLM apps. Implementation details: fade locked per stream to avoid mid-stream toggle rewind; reduced-motion users get non-animated text; live cursor hidden while fade is active; custom renderer on `streaming-markdown` parser wraps only newly-appended words; animated spans replace themselves with plain text on `animationend` (no long-lived wrapper buildup in long responses); unsafe streamed `href`/`src` values blocked in fade renderer `set_attr` path. Performance tuning: 200ms base fade duration scaling to 350ms for fast output, 16ms word stagger, 320ms done-drain wait cap, 160 wps visual cap, max 2-3 words/frame, brief pauses after sentence punctuation. Default-off means existing users see no change. 293-line regression test pinning the contract.
+- **PR #2363** by @franksong2702 (refs #2361, refs #1925) — Adds `docs/rfcs/webui-run-state-consistency-contract.md` as a documentation companion to the #1925 runtime-boundary RFC. Documents the shared coherence contract across visible transcript, model context, pending turn metadata, live stream, run journal, compression handoff, browser timeline cache, and sidebar metadata. Complementary to #1925: that RFC says where execution ownership should move, this one says what must stay coherent across the current and future state layers.
 
-- **PR #2165** by @starship-s — Pooled OpenAI Codex quota status surfaced in the Providers panel. Pre-fix, the Providers page presented Codex quota as if there were only one credential/account state, which was misleading when users authenticate through a credential pool with several usable credentials, temporarily exhausted credentials, failed probes, and different reset windows. Now the active provider quota card includes a credential-pool summary (available / exhausted / failed / checked counts), displays the best currently-available pool windows in the collapsed view as "Best of N", and exposes per-credential detail behind an expandable section. Exhausted credentials are intentionally NOT re-probed while their cooldown is active (matches credential-pool selection behavior, avoids generating failed quota calls from a status page). Manual refresh still means "probe now" but transient refresh failures preserve the last known-good snapshot. JWT decode (`_decode_jwt_claims_unverified`) is used only for token-shape classification (Codex OAuth JWT vs raw OpenAI API key), explicitly NOT for authorization — documented in the function docstring. Per-row plan labels only shown when verified account-limit data is available. Concurrent probing capped at `min(_CODEX_POOL_MAX_WORKERS=6, len(probe_items))` so page render time stays bounded on large pools. Transient `None` probe results are NOT cached (only known unavailable/exhausted states are cached); 32-test regression suite covering pool snapshot, concurrent probe, JWT detection, cache invalidation, transient-vs-known cache distinction, and i18n parity across all currently-supported locales. Scoped to OpenAI Codex (the only provider with the credential-pool/account-limit path needed to surface this accurately).
+### Fixed
+
+- **PR #2362** by @franksong2702 (fixes #2360) — Markdown table rows no longer become too tall when cell text is wrapped in paragraph tags by the renderer. Adds a table-specific CSS reset for `.msg-body td p` and `.msg-body th p` so the global `margin-bottom: 10px` rule on `.msg-body p` doesn't add unwanted vertical space inside table cells. Especially visible on narrow viewports such as iPad Safari/Chrome.
+
+- **PR #2365** by @mccxj (fixes #1106) — `get_available_models()` now handles YAML-list format `custom_providers.models` entries in addition to dict format. Pre-fix, declaring models as a list (`[m1, m2]`) or list-of-dicts (`[{id: m1, label: ...}]`) in `config.yaml` silently discarded every model from that provider in the picker dropdown because the code only recognized dict shape (`{model_id: {}}`). Now supports all three YAML shapes consistently with existing provider-config and live-models-fallback handlers.
+
+- **PR #2367** by @mccxj — Settings sidebar menu items (Conversation, Appearance, Preferences, Plugins, System) now respect locale selection. Pre-fix these were hardcoded English; only Providers had `data-i18n`. Adds `data-i18n` attributes plus the missing `settings_tab_plugins` key. **Stage-367 maintainer fix applied inline**: the PR only added the new key to English, breaking 5 locale-parity tests. Added `settings_tab_plugins` translations to all 10 non-English locales (it/ja/ru/es/de/zh/zh-TW/pt/ko/fr).
+
+## [v0.51.73] — 2026-05-16 — Release AW (stage-366 — 1-PR safe-lane batch — #2357 compression reference card anchoring fix)
+
+### Fixed
+
+- **PR #2357** by @franksong2702 (fixes #2355) — Auto-compression reference cards no longer get mixed into the final answer turn after a session rotation. Pre-fix, `_insertCompressionLikeNodeByRawIdx()` appended the compression-reference node to the future assistant anchor turn's blocks, which projected the `[CONTEXT COMPACTION — REFERENCE ONLY]` card into the live tail. The fix inserts the node *before* the anchor segment so the reference card stays a sibling, not a child of the answer turn.
+
+## [v0.51.72] — 2026-05-16 — Release AV (stage-365 — 2-PR safe-lane batch — #2354 recovered pending turn context fix + #2348 Thinking card interim-text echo suppression)
+
+### Fixed
+
+- **PR #2354** by @franksong2702 (fixes #2353) — Stale stream recovery now keeps a recovered pending user turn in the model context (`context_messages`) as well as the visible transcript. Pre-fix, a server restart during an in-flight turn could restore the user's message in WebUI while omitting it from `context_messages`, so the next agent turn could forget a prompt that was visibly present just above it. The repair path now appends the recovered user turn to both surfaces with 8-message lookback dedup so already-checkpointed entries are not duplicated.
+
+- **PR #2348** by @franksong2702 (fixes #2346) — Thinking cards now suppress exact snippets that are already shown as user-visible interim assistant text, avoiding duplicated progress lines when an agent emits the same sentence through both reasoning and interim-assistant callbacks. Tracks `_liveThinkingText` during the live stream to strip the visible echo from the live Thinking card display; applies the same suppression in the settled-transcript path so reload/session-switch sees the cleaned-up view too.
+
+## [v0.51.71] — 2026-05-16 — Release AU (stage-364 — 3-PR batch — #2349 stale-stream cleanup non-touching + #2343 profiles vs workspaces help card + #2283 run-event journal replay [refs #1925 RFC slice 1] — with Opus-caught replay double-render fix)
+
+### Added
+
+- **PR #2343** by @Michaelyklam (refs #2147) — The Profiles panel now includes an inline "Profiles vs workspaces" explainer. The copy clarifies that profiles control how the agent works — identity, memory, skills, model/provider config, and tools — while workspaces control what project/files a session operates on, making the OpenClaw-style role/profile mental model easier to map onto Hermes WebUI.
+
+- **PR #2283** by @franksong2702 (refs #1925) — Adds an append-only WebUI run event journal for browser-originated chat streams (refs #1925). Every SSE event emitted by the legacy in-process runner is mirrored to a per-session JSONL file, `/api/chat/stream/status` reports when replay is available for a dead stream, `/api/chat/stream` can replay journaled events with SSE event IDs and a clear stale-restart diagnostic, and the frontend reattach path uses that replay before clearing local running state. Reconnect replay uses the last rendered SSE event id as its `after_seq` cursor so it does not replay already-rendered events, and journal fsync defaults to terminal events only (`HERMES_WEBUI_RUN_JOURNAL_FSYNC=eager` restores per-event fsync). This is the first compatibility slice only: it preserves the existing WebUI runner and does not make active execution survive a WebUI restart. **Stage-364 maintainer fix applied inline**: Opus advisor caught that live SSE frames emitted by `_sse()` in `api/streaming.py:2296` carry no `id:` field, so the frontend's `_lastRunJournalSeq` cursor stayed at 0 during live streaming and a mid-stream error→replay would arrive with `after_seq=0`, replaying every journaled event from seq 1 and double-rendering tokens. The fix adds `STREAM_LAST_EVENT_ID: dict = {}` as a per-stream side-channel in `api/config.py`; `put()` writes the journal's `event_id` to that dict on every event; `_handle_sse_stream` reads it at SSE emit time and uses `_sse_with_id(handler, event, data, event_id)` when present. The queue tuple shape is preserved as `(event, data)` so existing queue consumers (cancel sentinel, sprint42/51 tests, etc.) are not broken. Cleaned up in the worker's finally block alongside the other STREAM_* dicts. 6 regression tests added covering side-channel dict declaration, writer/reader paths, tuple shape preservation, and cleanup.
+
+### Fixed
+
+- **PR #2349** by @franksong2702 (fixes #2345) — Clearing stale stream runtime flags no longer refreshes a session's `updated_at`, so old compressed continuations should not jump back to the top of the sidebar just because WebUI repaired a dead `active_stream_id` during a read/list request.
+
+## [v0.51.70] — 2026-05-16 — Release AS (stage-363 — 4-PR snapshot+journal+UI batch — #2337 compression snapshot runtime-clear + #2334 turn-journal fcntl lock + #2342 INFLIGHT reattach pending row + #2339 workspace panel edge toggle)
+
+### Added
+
+- **PR #2339** by @Michaelyklam (refs #2211) — The workspace panel now has a small desktop edge toggle that remains clickable after the right panel is hidden, making it possible to reopen the workspace browser without returning to Settings. The existing panel close button and composer workspace button remain unchanged; the new affordance only appears when the workspace panel is closed on desktop widths.
+
+### Fixed
+
+- **PR #2337** by @Michaelyklam (closes #2336) — Pre-compression snapshot preservation now also clears stale runtime stream fields when the existing on-disk snapshot is already as complete as the in-memory session. This keeps the load-and-mark branch aligned with the full-save branch and adds regression coverage so archived parent snapshots cannot retain stale `active_stream_id` / `pending_*` state.
+
+- **PR #2342** by @franksong2702 (fixes #2341) — Reattaching to an active streaming session now keeps the user prompt that started the running turn visible. Pre-fix, reload/session-switch restore could hydrate from the browser's INFLIGHT stream cache while the backend still held the initiating prompt only as `pending_user_message`, so the transcript showed assistant Thinking/Tool activity without the user's just-submitted message. The restore path now merges that pending user row into the live transcript before rendering and updates the INFLIGHT cache, while duplicate suppression checks the current message array so final session payloads do not show the prompt twice.
+
+- **PR #2334** by @Michaelyklam (refs #2097) — Turn journal appends now take an advisory `flock` around each JSONL event write and fsync when Unix file locks are available. This keeps oversized submitted-message events from interleaving at the byte level if a future deployment runs multiple WebUI worker processes against the same state directory, while preserving the previous best-effort append path on platforms without `fcntl`.
+
+## [v0.51.69] — 2026-05-15 — Release AT (stage-362 — 8-PR follow-up batch — Ollama routing + legacy toolset + cancel copy + cleanup + custom provider mismatch + cron metadata + dead-code removal; #2323 reverted after Opus-caught silent regression, refiled as #2321 reopen)
+
+### Added
+
+- **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
+
+### Fixed
+
+- **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
+
+- **PR #2326** by @Michaelyklam (closes #2232) — Legacy `hermes` CLI toolset alias is now normalized to `hermes-cli` + `hermes-api-server` when WebUI resolves CLI toolsets from shared Hermes config. Modern Hermes Agent exposes the composite under those two names; older configs that still contain the legacy `hermes` toolset name no longer surface as "unknown toolset" warnings.
+
+- **PR #2327** by @dotBeeps — Cancel-mid-stream messaging now uses the user's configured assistant name (e.g. "Hermes") instead of hardcoded "Skyly". Preferences allow defining an Assistant Name that persists throughout the UI; the cancel copy was the last place still showing the persona placeholder. Backend persisted-cancelled-turn text and frontend live-cancel toast both now read from the same `botName` setting.
+
+- **PR #2328** by @Michaelyklam (closes #2325) — Two cleanup follow-ups from v0.51.68 stage-361 review: (a) when a session is deleted via `/api/session/delete`, its `~/.hermes/webui/attachments/<sid>/` inbox is also removed (orphan accumulation prevention); (b) the deferred stream-recovery listener bound by `_deferStreamErrorIfPageHidden()` now bails out when the user switches sessions in the same tab — the recovery would otherwise fire `setComposerStatus('Reconnected')` for a stream the user has moved past. Both fixes are narrow cleanup with regression tests.
+
+- **PR #2330** by @Michaelyklam (closes #2329) — Provider mismatch warnings now skip named custom providers such as `custom:zenmux`. Custom aggregators can legitimately route vendor-prefixed models like `google/gemini-3.1-flash-lite`, so `_checkProviderMismatch()` now treats `custom:<name>` the same as bare `custom` and avoids false-positive "may not work with your configured provider" warnings.
+
+- **PR #2331** by @Michaelyklam — Live activity row now shows a transient human-readable progress phrase derived from the current tool category (e.g. "Reading file…", "Searching files…", "Running command…") instead of only the elapsed-time counter `Working 1m 23s`. Compact transcript view unchanged.
+
+- **PR #2333** by @Michaelyklam (closes #2312 follow-up #1) — Removed dead production helper `_save_pre_compression_snapshot()` at `api/streaming.py:1945`. The production path now uses `_preserve_pre_compression_snapshot()` exclusively (which must index snapshots with `skip_index=False` for sidebar filtering). The dead helper was only called from `tests/test_compression_snapshot_runtime_clear.py`; the test is retargeted to exercise the actual production helper instead. Closes follow-up item #1 from the v0.51.66 review (#2312).
+
+## [v0.51.68] — 2026-05-15 — Release AR (stage-361 — 4-PR follow-up batch — #2315 profile skill seeding + #2317 theme fallback + #2318 mobile stream defer + #2319 chat upload relocation — with Opus-caught vision-model regression fix)
+
+### Added
+
+
+- **PR #2319** by @Michaelyklam — Chat file uploads now land in a session-scoped attachment inbox instead of cluttering the active workspace root. By default uploads are stored under `~/.hermes/webui/attachments/<session_id>/`; operators can override the root with `HERMES_WEBUI_ATTACHMENT_DIR`, and the agent still receives the absolute uploaded file path for context. Archive extraction stays workspace-scoped (it's an explicit workspace operation). README updated to document the new default location. **Stage-361 maintainer fix applied inline**: Opus advisor caught that `_build_native_multimodal_message` at `api/streaming.py:787` required uploads to be under `workspace_root`, which would have silently dropped every image upload for vision-capable models once the inbox moved outside the workspace. The fix adds `_attachment_root()` (from `api/upload.py`) as a second allowed location, with 3 regression tests covering the new code path AND verifying the original workspace + cross-root rejection paths still work.
+
+### Fixed
+
+- **PR #2315** by @Michaelyklam (closes #2305, refs #749) — WebUI profile creation now seeds bundled profile skills for newly-created non-cloned profiles, matching the CLI's `hermes profile create` behaviour. Pre-fix, creating a profile via Settings → New Profile (without checking "Clone from active profile") left the profile's `skills/` directory empty, which was inconsistent with CLI-created profiles that get the full bundled-skills overlay. The fix calls `seed_profile_skills(profile_path, quiet=True)` after `profile_path.mkdir()` when `clone_from is None`. Cloned profiles still inherit skills from their source — they don't get a second bundled-skills overlay. Seed failures (e.g. `hermes_cli` unavailable in Docker fallback) are logged as warnings, not fatal — profile creation still succeeds.
+
+- **PR #2317** by @Michaelyklam (refs #2312 follow-up #2) — Appearance boot reconciliation now treats explicit `light`, `dark`, and `system` localStorage theme values as user selections when a prior Settings autosave failed. Pre-fix, the predicate `lsHasExplicitTheme = lsTheme === 'system'` only treated 'system' as explicit, so a user who picked `light` on a server defaulted to `dark` (or vice versa) with a failed autosave still reverted to the server default on refresh. Now broadened to `['system','light','dark'].includes(lsTheme)`. Skin handling was already correct (`lsSkin !== 'default'`). Closes follow-up item #2 from the v0.51.66 review (#2312).
+
+- **PR #2318** by @Michaelyklam (closes #2307) — Mobile/Android backgrounded tabs no longer show a permanent `**Error:** Connection lost` banner when the backend stream is still alive and able to replay buffered events. Pre-fix, the SSE error finalization fired regardless of page visibility state, so any tab discarded by the mobile OS (battery saver, tab compression, brief switch to another app) showed a permanent error even though the stream could be re-attached on visibility return. The fix defers inline stream error rendering while `document.visibilityState === 'hidden'` or `document.wasDiscarded === true`, then on visibility return polls `/api/chat/stream/status?stream_id=...`. If the stream is still active, reattaches with a fresh `EventSource`. If not, falls back to the settled-session restore path. If both paths fail, falls back to the original error rendering. Behaviour on desktop and on tabs that ARE visible is unchanged.
+
+## [v0.51.67] — 2026-05-15 — Release AQ (stage-360 — 3-PR streaming-lane batch — #2279 stream completion recovery + #2299 profile-scoped aux routing + #2306 workspace panel polish — with _ENV_LOCK narrow-lock architectural fix)
+
+### Fixed
+
+- LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. Refs #2271.
+
+- **PR #2279** by @franksong2702 (closes #2262 + refs #2168) — WebUI stream completion recovery gaps closed for both `notify_on_complete` background tasks and the preserved-task-list compression marker UI. Pre-fix, completions held in the agent process registry were never drained by the WebUI gateway session because the gateway session platform was unset. The fix routes the completion queue by process session key before injecting any notification into a WebUI turn. Separately, the preserved-task-list compression marker — an internal sentinel — was sometimes the only assistant text rendered after a context compression turn timed out, leaving a confusing "preserved tasks" message with no actual response. The frontend now suppresses the marker when it's the only assistant content and the run state is terminal.
+
+- **PR #2299** by @starship-s — Background workers (title generation, manual session compression, update-summary generation) now correctly inherit profile-scoped configuration when a profile-scoped chat triggers them. Pre-fix, those workers read default-profile configuration instead of the session/request profile, so auxiliary model routing silently used the wrong configured model or failed provider resolution entirely. The fix threads the active profile context through `_run_background_title_update`, `_run_background_title_refresh`, and the manual compression and update-summary helpers, with regression tests covering all three paths.
+
+- **PR #2306** by @dobby-d-elf (follow-up to v0.51.66) — Workspace panel header polish + test cleanup. Single close button on the workspace panel (was double in some states), tooltip now reads "Close" (was inconsistent label), `.close-preview` opacity removed so the X button matches other panel icon styling. Companion test cleanup removes ~293 lines of stale assertions in `test_issue781.py`, `test_sprint41.py`, `test_sprint44.py`, and `test_workspace_panel_session_list.py` that tested behavior either no longer present after #2238 or covered redundantly by other test files.
+
+## [v0.51.66] — 2026-05-15 — Release AP (stage-359 — 17-PR safe-lane batch — Docker fixes + UI polish + compression snapshot improvements + i18n parity + profile validation)
+
+### Added
+
+
+- **PR #2287** by @mslovy (refs #2284) — Upload size limit is now runtime-configurable via the `HERMES_WEBUI_MAX_UPLOAD_MB` environment variable. Previously the effective 20 MB cap was hard-coded across multiple layers. Server-side upload limit moves to runtime config; browser-side preflight check stays aligned with the effective backend limit; archive extraction guard continues to scale with the same configured cap. New `_env_mb_bytes()` helper in `api/config.py` parses `HERMES_WEBUI_MAX_UPLOAD_MB`.
+
+- **PR #2291** by @linuxid10t — New "Nous Research" skin option in the Settings → Appearance picker, inspired by [nousresearch.com](https://nousresearch.com). Monospace typography, steel blue (#4682B4) accent, cool gray text, sharp 1-2px corners, thin dashed borders, technical aesthetic.
+
+- **PR #2301** by @franksong2702 (fixes #2289) — Cron detail Prompt and Output panels now have explicit expand/collapse controls in addition to the default capped scroll view. User preference (per-panel) persists across sessions. Narrow accordion-style expansion, not drag-resize, per maintainer direction.
+
+- **PR #2303** by @franksong2702 (fixes #2246) — New per-turn assistant question jump button in the assistant message footer. Allows quick navigation back to the user question that started a long answer. Desktop-only, hidden during live streaming.
+
+### Fixed
+
+
+- **PR #2275** by @ai-ag2026 — CLI/messaging continuation sessions (sessions stitched from a `parent_session_id` chain) now return their full transcript instead of an empty list. Pre-fix, `get_cli_session_messages()` called `_is_continuation_session()` while walking the parent chain, but `api/models.py` didn't import that helper. The exception was swallowed by `except Exception: return []`, so valid external sessions could fall through silently. Adds regression coverage that a stitched continuation chain returns a non-empty transcript.
+
+- **PR #2277** by @eleboucher — Rootless container runtimes (k8s `runAsNonRoot: true`, OpenShift restricted SCC, `docker --user`, rootless Podman) no longer hit a cascade of permission errors at startup. Pre-fix, the rootless branch skipped the root init phase entirely, but root init also did rsync, `/uv_cache` permissions, `~/hermeswebui` home directory creation, and `/workspace` writability. `docker_init.bash` now distinguishes "no root init available" from "root init available but skipped", running the work that doesn't need root in the rootless branch too.
+
+- **PR #2280** by @franksong2702 (closes #2276 — partial) — Adds missing Italian and French translations for `settings_label_fade_text_effect` + `settings_desc_fade_text_effect` (added in v0.51.65 PR #2099). Also extends the i18n parity regression test from covering only `provider_quota_*` keys to also cover settings labels/descriptions, so future PRs that add a new setting label automatically fail CI if they skip a locale.
+
+- **PR #2281** by @franksong2702 (refs #2260) — Onboarding DNS probe now classifies failures consistently as `dns` for `socket.gaierror`, `URLError`/`OSError` wrappers around DNS failures, and reserved non-resolvable TLDs (`.local`, `.invalid`, `.test`, `.example`). Pre-fix, real platform/proxy stacks that wrapped DNS failures as generic exceptions were misreported as `unreachable`. Maintainer direction on #2260 was to tighten product classification rather than relax the e2e test.
+
+- **PR #2282** by @franksong2702 (refs #2264) — Update summary parsing now keeps "unknown-prefix" bullets like `Caveat:` or `Important:` as regular notice bullets instead of silently dropping them. Pre-fix, once the LLM returned at least one recognized `Notice:` bullet, other unrecognized-prefix bullets fell through and disappeared (only the empty-notice fallback at api/updates.py:466 caught them, which never fired when notice_items was non-empty). Preserves existing sentence-splitting fallback for plain prose responses.
+
+- **PR #2285** by @dso2ng (closes #2230 — partial) — Pre-compression snapshots (preserved by PR #2227's compression rotation fix) are no longer shown as duplicate active sidebar rows. Adds a `Session.pre_compression_snapshot` marker; backend stamps it when saving the archived old_sid; sidebar projection in `api/models.py` filters out marker-tagged snapshots from active rows. JSON stays on disk for lineage traversal so the snapshot is still recoverable. Resolves the long-running #2230 follow-up about preserved snapshots accumulating in the sidebar.
+
+- **PR #2288** by @linuxid10t — Theme/skin no longer reset to server defaults on page refresh when the appearance autosave POST silently fails (network glitch, transient error). Pre-fix, the async boot IIFE in `boot.js` unconditionally overwrote `localStorage` with whatever `settings.json` had on the server. Now `localStorage` wins when it has a non-default theme/skin and the autosave is known to have failed.
+
+- **PR #2293** by @franksong2702 (fixes #2237) — Docker startup no longer fails when a bind-mounted `~/.hermes/hermes-agent/.git/objects` tree contains read-only git object packs. The root init ownership pass now skips that git object subtree while still chowning the rest of `/home/hermeswebui`. macOS Docker Desktop bind mounts can now start WebUI without requiring writable ownership over agent git internals.
+
+- **PR #2295** by @ai-ag2026 — Context-compression snapshot preservation now clears archived parent runtime fields (`active_stream_id`, `pending_user_message`, `pending_attachments`, `pending_started_at`) before saving the old session id. Pre-fix, a completed continuation session could leave its archived parent looking permanently active/running after compression (sidebar showed the parent as if it had a live in-flight turn). Continuation session's live state is restored from saved locals after the snapshot write so the active turn is not affected. Stage-359 maintainer fix integrated this runtime-clearing into the `_preserve_pre_compression_snapshot()` helper from #2285 — both PRs touch the same compression rotation block. Stage-359 Opus SHOULD-FIX applied inline: the second branch of `_preserve_pre_compression_snapshot()` (when an existing on-disk file is at-least-as-complete-as memory) now also clears runtime fields on the loaded snapshot before saving — keeps the contract symmetric so snapshot files never contain live runtime state even via the load-and-mark-only path.
+
+- **PR #2296** by @Jordan-SkyLF — Offline/recovery banner now follows the active theme palette via `--warning-*` tokens instead of mixing warning colors with a hard-coded `--bg-1` fallback. Light/custom skins (Sienna, Poseidon, etc.) no longer show a banner that looks detached from the selected palette. Behavior-neutral: offline detection and recovery flow unchanged.
+
+- **PR #2300** by @franksong2702 (refs #2240) — `_has_new_assistant_reply()` shrink-case detection in `api/streaming.py` now returns `False` instead of scanning all messages when `len(result_messages) < prev_count`. Pre-fix, an older assistant reply could hide the current turn's silent-failure banner if the agent dropped history mid-turn. Fail-closed in the exotic shrink case; normal appended-message path unchanged.
+
+- **PR #2302** by @franksong2702 (closes #2240 — partial, refs #749 follow-up) — Profile create API now validates `default_model` / `model_provider` against `/api/models` server-side, returning 400 on invalid values instead of writing them to the new profile's config.yaml. Pre-fix, ordinary browser users were protected by the picker, but hand-crafted API requests could create a profile that looked valid until the agent later tried to resolve a nonexistent model.
+
+- **PR #2306** by @dobby-d-elf — iPhone PWA mobile shell no longer renders broken/unusable. Restores the pre-#2238 iPhone PWA viewport contract by removing the global `viewport-fit=cover` shell change, returning standalone top safe-area scoping, and restoring the proven mobile composer padding. Keeps the useful phone-sidebar improvements from #2238 while scoping its 44px `panel-icon-btn` sizing to sidebar controls so the workspace header no longer collapses on narrow panels. Mobile workspace panel header refined into two rows. Tested on both Desktop and iOS.
+
+## [v0.51.65] — 2026-05-14 — Release AO (stage-358 — 2-PR held-PR clearance — #2099 opt-in streaming text fade + #2165 pooled Codex quota status)
+
+### Added
+
+- **PR #2099** by @dobby-d-elf — Adds an opt-in `Settings → Preferences → Fade text effect` toggle (off by default). When enabled, newly streamed output tokens are revealed through an adaptive playout buffer and animated with an opacity-only fade similar to ChatGPT and other frontier LLM apps. Fade locked per stream to avoid mid-stream toggle rewind; reduced-motion users get non-animated text; live cursor hidden while fade is active; custom renderer on `streaming-markdown` parser wraps only newly-appended words; animated spans replace themselves with plain text on `animationend` (event-delegated, no listener leakage); unsafe streamed `href`/`src` values blocked via allowlist regex (rejects `javascript:`, `data:`, `vbscript:`). 200-350ms fade duration scaling with playback speed, 16ms word stagger, 320ms done-drain cap, 160 wps visual cap. Default-off means existing users see no change. 293-line regression test pinning the contract.
+
+- **PR #2165** by @starship-s — Pooled OpenAI Codex quota status surfaced in the Providers panel. Collapsed view shows "Best of N" pool summary (available / exhausted / failed / checked counts); expandable per-credential rows. Concurrent probing capped at `min(_CODEX_POOL_MAX_WORKERS=6, len(probe_items))`. Exhausted credentials NOT re-probed during cooldown. Manual refresh = "probe now", but transient `None` probe results are NOT cached (preserves last-known-good warm snapshot); only known-exhausted snapshot objects are cached. JWT decode (`_decode_jwt_claims_unverified`) is documented as classification-only (Codex OAuth JWT vs raw OpenAI API key), explicitly NOT for authorization. Per-row plan labels only shown when verified account-limit data is available. 32-test regression suite + 11-locale i18n parity assertion.
+
+### Fixed
+
+- WebUI agent turns now inherit `HERMES_SESSION_PLATFORM=webui` and drain matching `notify_on_complete` background-process completions into the next model input. Completion events are filtered by the process session key before delivery, so another tab/session's background process output remains queued for its owner instead of being injected into the wrong conversation.
+
+- Marker-only preserved-task-list compression sentinels no longer render as standalone assistant responses after stream recovery or timeout paths. If the frontend receives only that internal marker as assistant content, it replaces it with an explicit "No response received after context compression" error and shows an error toast.
 
 ## [v0.51.64] — 2026-05-14 — Release AN (stage-357 — 3-PR small batch — docker_init k8s whoami fallback + PWA manifest session routes (closes #2226) + aux title test coverage)
 
 ### Fixed
+
+- Silent-failure detection no longer treats old assistant messages in a shrunk
+  result history as proof that the current turn produced a new assistant reply.
 
 - **PR #2270** by @Michaelyklam (closes #2226) — Firefox Android PWA installs from `/session/<id>` pages now resolve the Hermes manifest and icons instead of falling back to a generated letter icon. The dynamic `<base href>` script now runs before manifest/favicon links, `/session/manifest.json` and `/session/manifest.webmanifest` return the real manifest JSON, and session-prefixed manifest routes are now marked as public auth-skip routes. Adds 211 lines of regression coverage for the manifest responses and the session-prefixed 512px icon path.
 

@@ -417,6 +417,8 @@ def _categorized_summary_bullets_from_text(text: str) -> tuple[list[str], list[s
             notice_items.append(body)
         elif category == 'worth':
             worth_items.append(body)
+        elif re.match(r'^\s*(?:[-*•]+|\d+[.)])?\s*[A-Za-z][A-Za-z ]{1,32}\s*:', str(line or '')):
+            notice_items.append(body)
     return _unique_summary_bullets(notice_items), _unique_summary_bullets(worth_items)
 
 

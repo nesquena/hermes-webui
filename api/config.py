@@ -55,6 +55,36 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 logger = logging.getLogger(__name__)
 
 
+def _env_mb_bytes(name: str, default_mb: int) -> int:
+    """Parse an optional megabyte environment variable into bytes.
+
+    Accepts values like ``200``, ``200MB``, or ``200MiB``. Invalid or
+    non-positive values fall back to the provided default.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default_mb * 1024 * 1024
+    m = re.match(r"^(\d+)\s*(?:m|mb|mib)?$", raw, re.IGNORECASE)
+    if not m:
+        logger.warning(
+            "Invalid %s=%r; expected a positive integer in MB. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    value_mb = int(m.group(1))
+    if value_mb <= 0:
+        logger.warning(
+            "Invalid %s=%r; expected a value greater than zero. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    return value_mb * 1024 * 1024
+
+
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discover_agent_dir() -> Path:
     """
@@ -485,7 +515,7 @@ def verify_hermes_imports() -> tuple:
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = 200_000
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
@@ -566,6 +596,28 @@ _DEFAULT_TOOLSETS = [
     "web",
     "webhook",
 ]
+
+_LEGACY_CLI_TOOLSET_ALIASES = {
+    # Older Hermes configs used "hermes" as the CLI composite toolset. Modern
+    # Hermes Agent exposes that split as these two registered composites; keep
+    # WebUI sessions usable when pointed at an older shared config.yaml.
+    "hermes": ("hermes-cli", "hermes-api-server"),
+}
+
+
+def _normalize_cli_toolsets(toolsets):
+    """Expand legacy CLI toolset aliases while preserving order and de-duping."""
+    normalized = []
+    seen = set()
+    for name in toolsets or []:
+        replacements = _LEGACY_CLI_TOOLSET_ALIASES.get(name, (name,))
+        for replacement in replacements:
+            if replacement and replacement not in seen:
+                seen.add(replacement)
+                normalized.append(replacement)
+    return normalized
+
+
 def _resolve_cli_toolsets(cfg=None):
     """Resolve CLI toolsets using the agent's _get_platform_tools() so that
     MCP server toolsets are automatically included, matching CLI behaviour."""
@@ -573,10 +625,10 @@ def _resolve_cli_toolsets(cfg=None):
         cfg = get_config()
     try:
         from hermes_cli.tools_config import _get_platform_tools
-        return list(_get_platform_tools(cfg, "cli"))
+        return _normalize_cli_toolsets(_get_platform_tools(cfg, "cli"))
     except Exception:
         # Fallback: read raw list from config (MCP toolsets will be missing)
-        return cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+        return _normalize_cli_toolsets(cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS))
 
 CLI_TOOLSETS = _resolve_cli_toolsets()
 
@@ -893,6 +945,30 @@ def _normalize_base_url_for_match(value: object) -> str:
     if not parsed_url.netloc:
         path = ""
     return f"{scheme}://{netloc}{path}"
+
+
+def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
+    """Return custom provider slugs that WebUI may derive from a base URL.
+
+    Model picker values for endpoint-discovered models have historically used
+    both ``custom:<host>:<port>`` and ``custom:<host>-<port>`` forms. When the
+    active config already names a local-server provider such as Ollama for that
+    same base URL, those endpoint slugs are just UI routing hints and should
+    resolve back to the configured provider rather than requiring a CUSTOM_* API
+    key.
+    """
+    url = str(value or "").strip().rstrip("/")
+    if not url:
+        return set()
+    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    host = (parsed_url.hostname or "").strip().lower()
+    if not host:
+        return set()
+    port = parsed_url.port
+    if port is None:
+        scheme = (parsed_url.scheme or "http").lower()
+        port = 443 if scheme == "https" else 80
+    return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
 def _named_custom_provider_slug_for_base_url(
@@ -1651,6 +1727,13 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
+        if (
+            provider_hint.startswith("custom:")
+            and config_base_url
+            and _is_local_server_provider(config_provider)
+            and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
+        ):
+            return bare_model, config_provider, config_base_url
         return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:
@@ -3111,6 +3194,16 @@ def get_available_models() -> dict:
                     for _m_id in _cp_models_dict:
                         if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
                             _cp_model_ids.append(_m_id.strip())
+                elif isinstance(_cp_models_dict, list):
+                    for _item in _cp_models_dict:
+                        if isinstance(_item, str):
+                            _mid = _item.strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
+                        elif isinstance(_item, dict):
+                            _mid = str(_item.get("id") or _item.get("model") or _item.get("name") or "").strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
@@ -3815,6 +3908,7 @@ STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulate
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
+STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
@@ -3960,6 +4054,8 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    "sienna",
+    "nous",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
