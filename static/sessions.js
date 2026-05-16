@@ -416,7 +416,7 @@ async function newSession(flash, options={}){
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
   _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
   // Sync chat-header dropdown to the session's model so the UI reflects
@@ -526,7 +526,7 @@ async function loadSession(sid){
   if(typeof syncTopbar==='function') syncTopbar();
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   _clearSessionCompletionUnread(S.session.session_id);
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
