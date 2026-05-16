@@ -3107,6 +3107,20 @@ def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: i
     return str(raw or "").strip()
 
 
+def _space_tool_widget_id_alias(payload: dict[str, Any]) -> str:
+    """Return an explicit widget id from named snake/camel/legacy aliases only."""
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("widget_id", "widgetId", "id"),
+        "Conflicting widget selector aliases",
+    )
+    for key in ("widget_id", "widgetId", "id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _space_tool_widget_id(payload: dict[str, Any], *, positional_widget_index: int | None = None) -> str:
     """Return a widget id from Hermes or Space Agent-style payloads."""
     positional_values = ()
@@ -4199,8 +4213,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         return {"ok": True, "action": name, "widget": read_widget_detail(space_id, widget_id)}
     if name in {"widget.patch", "space.widget.patch", "space.current.widget.patch"}:
-        space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.patch" else data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        space_id = validate_space_id(
+            _space_tool_current_id(data) if name == "space.current.widget.patch" else _space_tool_space_id_alias(data)
+        )
+        widget_id = validate_widget_id(_space_tool_widget_id_alias(data))
         result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
         return {"ok": True, "action": name, **result}
     if name in {

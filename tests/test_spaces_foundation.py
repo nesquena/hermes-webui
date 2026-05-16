@@ -11122,8 +11122,8 @@ def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkey
         "/api/spaces/tool",
         {
             "action": "widget.patch",
-            "space_id": created["space_id"],
-            "widget_id": "unsafe-widget",
+            "spaceId": created["space_id"],
+            "widgetId": "unsafe-widget",
             "patch": {
                 "title": "Patched safely",
                 "renderer": "<script>newLeak()</script>",
@@ -11145,6 +11145,86 @@ def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkey
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_route_rejects_widget_patch_alias_conflicts_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    first = spaces.create_space({"space_id": "tool-patch-first", "name": "Tool Patch First"})
+    second = spaces.create_space({"space_id": "tool-patch-second", "name": "Tool Patch Second"})
+    spaces.upsert_widget(first["space_id"], {"id": "first-widget", "kind": "markdown", "title": "First original"})
+    spaces.upsert_widget(second["space_id"], {"id": "second-widget", "kind": "markdown", "title": "Second original"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/tool",
+        {
+            "action": "widget.patch",
+            "space_id": first["space_id"],
+            "spaceId": second["space_id"],
+            "widget_id": "first-widget",
+            "widgetId": "second-widget",
+            "patch": {
+                "title": "ConflictLeak SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>newLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting space selector aliases"
+    first_widget = spaces.read_widget_detail(first["space_id"], "first-widget")
+    second_widget = spaces.read_widget_detail(second["space_id"], "second-widget")
+    serialized = json.dumps({"body": body, "first": first_widget, "second": second_widget}).lower()
+    assert first_widget["title"] == "First original"
+    assert second_widget["title"] == "Second original"
+    assert "conflictleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+    handled, status, body = _route_post(
+        "/api/spaces/tool",
+        {
+            "action": "widget.patch",
+            "space_id": first["space_id"],
+            "widget_id": "first-widget",
+            "widgetId": "second-widget",
+            "patch": {"title": "WidgetConflictLeak SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Conflicting widget selector aliases"
+    assert spaces.read_widget_detail(first["space_id"], "first-widget")["title"] == "First original"
+    assert spaces.read_widget_detail(second["space_id"], "second-widget")["title"] == "Second original"
+    assert "widgetconflictleak" not in json.dumps(body).lower()
+
+
+def test_space_tool_route_widget_patch_requires_explicit_widget_selector(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-patch-args", "name": "Tool Patch Args"})
+    spaces.upsert_widget(created["space_id"], {"id": "args-widget", "kind": "markdown", "title": "Args original"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/tool",
+        {
+            "action": "widget.patch",
+            "space_id": created["space_id"],
+            "args": ["args-widget"],
+            "patch": {"title": "ArgsLeak SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    assert handled is None
+    assert status == 400
+    assert body["error"] == "Invalid widget_id"
+    widget = spaces.read_widget_detail(created["space_id"], "args-widget")
+    serialized = json.dumps({"body": body, "widget": widget}).lower()
+    assert widget["title"] == "Args original"
+    assert "argsleak" not in serialized
     assert "secret_value_do_not_leak" not in serialized
 
 
