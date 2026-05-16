@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2378** by @Michaelyklam (closes #2297) — Text-mode image handling now strips historical native `image_url` parts from provider-facing conversation replay. Current-turn uploads already respected `agent.image_input_mode: text`; this closes the remaining gap where an older image in the saved transcript could keep making text-only providers such as DeepSeek reject every later turn with `unknown variant image_url, expected text`.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
