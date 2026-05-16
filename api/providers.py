@@ -1883,6 +1883,11 @@ def set_custom_provider(
     if not raw_name:
         return {"ok": False, "error": "Provider name is required."}
 
+    # Save original sentinel BEFORE the or [] conversion:
+    #   None  = not provided → preserve existing models during update
+    #   []    = explicitly empty → remove models
+    #   [...] = specific models → overwrite
+    _provided_models = models
     models = models or []
     if isinstance(models, list):
         models = [str(m).strip() for m in models if m and str(m).strip()]
@@ -1934,8 +1939,24 @@ def set_custom_provider(
             found = False
             for i, cp in enumerate(custom_providers):
                 if isinstance(cp, dict) and str(cp.get("name", "")).strip() == raw_name:
-                    # Update in-place
-                    custom_providers[i] = new_entry
+                    # Update in-place — merge into old entry to preserve fields
+                    # the user didn't send (e.g. existing api_key when the key
+                    # field was left empty in the UI).
+                    old_entry = dict(cp)
+                    old_entry["name"] = raw_name
+                    old_entry["base_url"] = base_url
+                    old_entry["api_mode"] = api_mode
+                    if api_key:
+                        old_entry["api_key"] = api_key
+                    # else: preserve existing api_key if already there
+                    # (old_entry is a copy of the current config entry, so
+                    # any existing api_key carries over automatically)
+                    if _provided_models is not None:
+                        if models:
+                            old_entry["models"] = models
+                        else:
+                            old_entry.pop("models", None)
+                    custom_providers[i] = old_entry
                     found = True
                     changed = True
                     break

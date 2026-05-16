@@ -246,6 +246,109 @@ class TestSetCustomProvider:
         assert cps[1]["base_url"] == "https://b-updated.com/v1"
         assert cps[1]["api_key"] == "sk-b-333"
 
+    def test_update_preserves_existing_api_key(self, monkeypatch, tmp_path):
+        """Updating without providing api_key preserves the existing one."""
+        _install_fake_hermes_cli(monkeypatch)
+        profile_home = tmp_path / ".hermes"
+        profile_home.mkdir(parents=True, exist_ok=True)
+        cfg_file = profile_home / "config.yaml"
+
+        import yaml as _yaml
+        initial_data = {
+            "model": {"provider": "openai"},
+            "custom_providers": [
+                {
+                    "name": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "api_key": "sk-deepseek-original",
+                    "api_mode": "openai_compatible",
+                    "models": ["deepseek-v4-flash"],
+                },
+            ],
+        }
+        cfg_file.write_text(
+            _yaml.safe_dump(initial_data, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        import api.config as config
+        monkeypatch.setattr(config, "_get_config_path", lambda: cfg_file)
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "openai"}
+        config.cfg["custom_providers"] = list(initial_data["custom_providers"])
+        config._cfg_mtime = 0.0
+
+        from api.providers import set_custom_provider
+
+        # Update with empty api_key (simulating user not touching key field)
+        result = set_custom_provider(
+            name="deepseek",
+            base_url="https://api.deepseek.com/v1",
+            api_key="",  # empty — preserve the old key
+            api_mode="openai_compatible",
+        )
+        assert result["ok"] is True
+        assert result["action"] == "updated"
+
+        cfg = _yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+        entry = cfg["custom_providers"][0]
+        assert entry["base_url"] == "https://api.deepseek.com/v1"
+        assert entry["api_key"] == "sk-deepseek-original", (
+            f"Expected existing api_key preserved, got {entry.get('api_key')!r}"
+        )
+        assert entry["api_mode"] == "openai_compatible"
+        assert entry["models"] == ["deepseek-v4-flash"]
+
+    def test_update_can_clear_models(self, monkeypatch, tmp_path):
+        """Explicitly passing models=[] should remove existing models."""
+        _install_fake_hermes_cli(monkeypatch)
+        profile_home = tmp_path / ".hermes"
+        profile_home.mkdir(parents=True, exist_ok=True)
+        cfg_file = profile_home / "config.yaml"
+
+        import yaml as _yaml
+        initial_data = {
+            "model": {"provider": "openai"},
+            "custom_providers": [
+                {
+                    "name": "test-llm",
+                    "base_url": "https://test.com/v1",
+                    "api_key": "sk-test",
+                    "models": ["model-a", "model-b"],
+                },
+            ],
+        }
+        cfg_file.write_text(
+            _yaml.safe_dump(initial_data, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        import api.config as config
+        monkeypatch.setattr(config, "_get_config_path", lambda: cfg_file)
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "openai"}
+        config.cfg["custom_providers"] = list(initial_data["custom_providers"])
+        config._cfg_mtime = 0.0
+
+        from api.providers import set_custom_provider
+
+        # Explicitly pass empty list to clear models
+        result = set_custom_provider(
+            name="test-llm",
+            base_url="https://test.com/v1",
+            api_key="sk-test",
+            api_mode="openai_compatible",
+            models=[],
+        )
+        assert result["ok"] is True
+        assert result["action"] == "updated"
+
+        cfg = _yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+        entry = cfg["custom_providers"][0]
+        assert "models" not in entry, (
+            f"Expected models removed, got {entry.get('models')!r}"
+        )
+
     def test_create_empty_name_fails(self, monkeypatch, tmp_path):
         """set_custom_provider with empty name should return error."""
         _install_fake_hermes_cli(monkeypatch)
