@@ -247,9 +247,13 @@
     const projName = _projectName(task.project_id) || _t('projects_unassigned', 'Sem projeto');
 
     const ext = task.external_ref;
-    const extLabel = ext && (ext.key || ext.type)
-      ? `<span class="kanban-card-ref" data-ref-type="${_esc(ext.type || 'local')}">${_esc((ext.type || 'local').toUpperCase())}${ext.key ? ' · ' + _esc(ext.key) : ''}</span>`
-      : '';
+    let extLabel = '';
+    if (ext && (ext.key || ext.type)) {
+      const chip = `<span class="kanban-card-ref" data-ref-type="${_esc(ext.type || 'local')}">${_esc((ext.type || 'local').toUpperCase())}${ext.key ? ' · ' + _esc(ext.key) : ''}</span>`;
+      extLabel = ext.url
+        ? `<a href="${_esc(ext.url)}" target="_blank" rel="noopener" class="kanban-card-ref-link">${chip}</a>`
+        : chip;
+    }
 
     const isDone = task.status === 'concluido';
     const progressBlock = isDone
@@ -502,19 +506,143 @@
     const empty = $id('projectsEmptyState');
     const kanban = $id('projectsKanban');
     const list = $id('projectsList');
+    const summary = $id('projectsSummary');
     const noProjects = state.projects.filter(p => !p.archived).length === 0;
-    // Empty notice is now a discreet inline strip; kanban/list stay visible
-    // so the user keeps the columns and can drop a task as soon as a project exists.
     if (empty) empty.hidden = !noProjects;
     if (kanban) kanban.hidden = state.view !== 'kanban';
     if (list) list.hidden = state.view !== 'list';
+    if (summary) summary.hidden = state.view !== 'summary';
+  }
+
+  // ── Summary view ────────────────────────────────────────────────────────
+  async function renderSummary() {
+    const container = $id('projectsSummary');
+    if (!container) return;
+
+    const selectedProjects = [...state.filters.project_id];
+
+    if (selectedProjects.length === 1) {
+      await _renderProjectDetail(container, selectedProjects[0]);
+    } else {
+      _renderProjectsGrid(container);
+    }
+  }
+
+  function _renderProjectsGrid(container) {
+    const active = state.projects.filter(p => !p.archived);
+    if (!active.length) {
+      container.innerHTML = '<p class="projects-summary-empty">' + _esc(_t('projects_summary_no_tasks', 'Nenhuma tarefa ainda')) + '</p>';
+      return;
+    }
+    const cards = active.map(p => {
+      const tasks = state.tasks.filter(t => t.project_id === p.project_id && !t.archived);
+      const done = tasks.filter(t => t.status === 'concluido').length;
+      const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+      return '<article class="project-summary-card" data-project-id="' + _esc(p.project_id) + '" tabindex="0" role="button">'
+        + '<div class="project-summary-card-color" style="background:' + _esc(p.color) + '"></div>'
+        + '<h3>' + _esc(p.name) + '</h3>'
+        + '<p class="project-summary-card-desc">' + _esc(p.description || p.domain) + '</p>'
+        + '<div class="project-summary-card-bar"><div class="project-summary-card-bar-fill" style="width:' + pct + '%"></div></div>'
+        + '<span class="project-summary-card-pct">' + pct + '% ' + _esc(_t('projects_summary_completion', 'concluído')) + '</span>'
+        + '<span class="project-summary-card-count">' + tasks.length + ' tasks</span>'
+        + '</article>';
+    }).join('');
+    container.innerHTML = '<div class="projects-summary-grid">' + cards + '</div>';
+
+    container.querySelectorAll('.project-summary-card').forEach(function(card) {
+      card.addEventListener('click', function() {
+        var pid = card.dataset.projectId;
+        state.filters.project_id.clear();
+        state.filters.project_id.add(pid);
+        _updateFiltersBadge();
+        renderAll();
+      });
+      card.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); card.click(); }
+      });
+    });
+  }
+
+  async function _renderProjectDetail(container, projectId) {
+    container.innerHTML = '<div class="projects-summary-loading">…</div>';
+    try {
+      var data = await _api('GET', '/api/projects/' + encodeURIComponent(projectId) + '/summary');
+      var p = data.project;
+      var s = data.stats;
+      var pct = s.completion_pct || 0;
+      var createdDate = new Date(p.created_at * 1000).toLocaleDateString();
+
+      var linksHtml = _renderSummaryLinks(p);
+      var recentHtml = _renderRecentTasks(data.recent_tasks || []);
+      var sourceHtml = data.source ? _renderSourceStatus(data.source) : '';
+
+      container.innerHTML = '<div class="projects-summary-detail">'
+        + '<div class="projects-summary-row">'
+        + '<section class="projects-summary-info"><h3>' + _esc(_t('projects_summary_info', 'Info do Projeto')) + '</h3>'
+        + '<dl>'
+        + '<dt>' + _esc(_t('projects_create_name', 'Nome')) + '</dt><dd>' + _esc(p.name) + '</dd>'
+        + '<dt>' + _esc(_t('projects_summary_domain', 'Domínio')) + '</dt><dd>' + _esc(p.domain) + '</dd>'
+        + '<dt>' + _esc(_t('projects_summary_status', 'Status')) + '</dt><dd>' + _esc(p.status) + '</dd>'
+        + '<dt>' + _esc(_t('projects_summary_created', 'Criado em')) + '</dt><dd>' + _esc(createdDate) + '</dd>'
+        + (data.source ? '<dt>' + _esc(_t('projects_summary_source', 'Fonte')) + '</dt><dd>' + _esc(data.source.name) + '</dd>' : '')
+        + '</dl></section>'
+        + '<section class="projects-summary-kpis"><h3>' + _esc(_t('projects_summary_kpis', 'KPIs')) + '</h3>'
+        + '<div class="projects-summary-bar"><div class="projects-summary-bar-fill" style="width:' + pct + '%"></div></div>'
+        + '<span class="projects-summary-pct">' + pct.toFixed(1) + '% ' + _esc(_t('projects_summary_completion', 'concluído')) + '</span>'
+        + '<ul class="projects-summary-counts">'
+        + '<li>Backlog: ' + (s.by_status.backlog || 0) + '</li>'
+        + '<li>' + _esc(_t('projects_col_in_progress', 'Em andamento')) + ': ' + (s.by_status.em_andamento || 0) + '</li>'
+        + '<li>' + _esc(_t('projects_col_in_review', 'Em revisão')) + ': ' + (s.by_status.em_revisao || 0) + '</li>'
+        + '<li>' + _esc(_t('projects_col_completed', 'Concluído')) + ': ' + (s.by_status.concluido || 0) + '</li>'
+        + '</ul></section>'
+        + '</div>'
+        + linksHtml
+        + recentHtml
+        + sourceHtml
+        + '</div>';
+    } catch (err) {
+      container.innerHTML = '<p class="projects-summary-error">' + _esc(err.message) + '</p>';
+    }
+  }
+
+  function _renderSummaryLinks(project) {
+    var refs = project.refs || {};
+    var links = [];
+    (refs.github || []).forEach(function(url) { links.push('<a href="' + _esc(url) + '" target="_blank" rel="noopener">🔗 GitHub</a>'); });
+    (refs.obsidian || []).forEach(function(path) { links.push('<span>📓 ' + _esc(path) + '</span>'); });
+    if (!links.length) return '';
+    return '<section class="projects-summary-links"><h3>' + _esc(_t('projects_summary_links', 'Links Externos')) + '</h3>'
+      + '<div class="projects-summary-links-list">' + links.join('') + '</div></section>';
+  }
+
+  function _renderRecentTasks(tasks) {
+    if (!tasks.length) return '';
+    var rows = tasks.map(function(t) {
+      var extChip = t.external_ref && t.external_ref.key
+        ? '<span class="kanban-card-ref">' + _esc(t.external_ref.key) + '</span> ' : '';
+      return '<li>' + extChip + _esc(t.title) + ' <span class="projects-summary-task-status">[' + _esc(_statusLabel(t.status)) + ']</span></li>';
+    }).join('');
+    return '<section class="projects-summary-recent"><h3>' + _esc(_t('projects_summary_recent', 'Atividade Recente')) + '</h3>'
+      + '<ul>' + rows + '</ul></section>';
+  }
+
+  function _renderSourceStatus(source) {
+    var lastSync = source.last_sync_at
+      ? new Date(source.last_sync_at).toLocaleString()
+      : _t('jira_never_synced', 'Nunca sincronizado');
+    return '<section class="projects-summary-source"><h3>' + _esc(_t('projects_summary_jira_issues', 'Issues Jira')) + '</h3>'
+      + '<div class="projects-summary-source-header">'
+      + '<span>' + _esc(_t('jira_last_sync', 'Última sincronização')) + ': ' + _esc(lastSync) + '</span>'
+      + '<button class="btn-jira-sync" data-source-id="' + _esc(source.source_id) + '">' + _esc(_t('jira_sync', 'Sincronizar')) + '</button>'
+      + '</div></section>';
   }
 
   function renderAll() {
     renderEmptyState();
     renderStatusPills();
     if (state.view === 'kanban') renderKanban();
-    else renderList();
+    else if (state.view === 'list') renderList();
+    else if (state.view === 'summary') renderSummary();
   }
 
   // ── Drag and drop ───────────────────────────────────────────────────────
@@ -912,7 +1040,8 @@
 
   // ── View toggle, filters, pills binding ─────────────────────────────────
   function _setView(view) {
-    state.view = view === 'list' ? 'list' : 'kanban';
+    const valid = ['kanban', 'list', 'summary'];
+    state.view = valid.includes(view) ? view : 'kanban';
     document.querySelectorAll('.projects-view-btn').forEach(btn => {
       const active = btn.dataset.view === state.view;
       btn.classList.toggle('active', active);
@@ -1214,6 +1343,27 @@
         return;
       }
       document.querySelectorAll('.projects-modal:not([hidden])').forEach(_closeModal);
+    });
+
+    // Jira sync button (delegated — button is rendered dynamically)
+    document.addEventListener('click', async function(ev) {
+      var btn = ev.target.closest('.btn-jira-sync');
+      if (!btn) return;
+      var sourceId = btn.dataset.sourceId;
+      if (!sourceId) return;
+      btn.disabled = true;
+      btn.textContent = _t('jira_syncing', 'Sincronizando…');
+      try {
+        await _api('POST', '/api/jira/sync/' + encodeURIComponent(sourceId));
+        _toast(_t('jira_sync_success', 'Sincronização concluída'), 'success');
+        await fetchSnapshot();
+        renderAll();
+      } catch (err) {
+        _toast(_t('jira_sync_error', 'Falha na sincronização') + ': ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = _t('jira_sync', 'Sincronizar');
+      }
     });
 
     _bindDropTargets();

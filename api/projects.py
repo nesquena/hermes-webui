@@ -125,7 +125,13 @@ def _normalize_source(source: Any) -> dict | None:
         "type": str(source.get("type") or "local").strip().lower(),
         "name": name[:128],
         "base_url": str(source.get("base_url") or "").strip(),
+        "project_key": str(source.get("project_key") or "").strip(),
         "sync_enabled": bool(source.get("sync_enabled", False)),
+        "sync_mode": str(source.get("sync_mode") or "read").strip(),
+        "status_map": source.get("status_map") if isinstance(source.get("status_map"), dict) else {},
+        "last_sync_at": source.get("last_sync_at"),
+        "sync_status": str(source.get("sync_status") or "idle"),
+        "sync_error": source.get("sync_error"),
     }
 
 
@@ -195,6 +201,47 @@ def snapshot(*, include_archived: bool = False) -> dict:
         # so the status pills don't suddenly inflate when the user toggles
         # "show archived" — archived items get a badge but don't count.
         "counts": _status_counts([t for t in store["tasks"] if not t.get("archived")]),
+    }
+
+
+def project_summary(project_id: str) -> dict:
+    """Return summary data for a single project: info, stats, recent tasks."""
+    store = load_project_store()
+    project = next((p for p in store["projects"] if p["project_id"] == project_id), None)
+    if not project:
+        raise KeyError("Project not found")
+
+    tasks = [t for t in store["tasks"] if t["project_id"] == project_id and not t.get("archived")]
+    by_status = {"backlog": 0, "em_andamento": 0, "em_revisao": 0, "concluido": 0}
+    for t in tasks:
+        by_status[t["status"]] = by_status.get(t["status"], 0) + 1
+    total = sum(by_status.values())
+    completion_pct = round((by_status["concluido"] / total) * 100, 1) if total > 0 else 0.0
+
+    recent_tasks = sorted(tasks, key=lambda t: t.get("updated_at", 0), reverse=True)[:10]
+    last_activity = recent_tasks[0]["updated_at"] if recent_tasks else None
+
+    source = next((s for s in store["sources"] if s["source_id"] == project.get("default_source_id")), None)
+
+    return {
+        "project": project,
+        "stats": {
+            "total": total,
+            "by_status": by_status,
+            "completion_pct": completion_pct,
+            "last_activity": last_activity,
+        },
+        "recent_tasks": [
+            {"task_id": t["task_id"], "title": t["title"], "status": t["status"],
+             "priority": t["priority"], "external_ref": t.get("external_ref"), "updated_at": t["updated_at"]}
+            for t in recent_tasks
+        ],
+        "source": {
+            "source_id": source["source_id"],
+            "name": source["name"],
+            "sync_status": source.get("sync_status", "idle"),
+            "last_sync_at": source.get("last_sync_at"),
+        } if source else None,
     }
 
 

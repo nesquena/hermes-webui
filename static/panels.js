@@ -21,7 +21,7 @@ const APP_TITLEBAR_KEYS = {
   projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
 };
 
-const NEO_SHELL_PANELS = new Set(['dashboard', 'chat', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings', 'skills', 'tasks']);
+const NEO_SHELL_PANELS = new Set(['dashboard', 'chat', 'projects', 'profiles', 'finance', 'agents', 'settings', 'skills', 'tasks']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',

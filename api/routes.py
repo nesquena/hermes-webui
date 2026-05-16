@@ -495,6 +495,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
 
 # NEO Sprint 5: local-first Projects Command Center module.
 from api import projects as neo_projects
+from api import jira as neo_jira
 from api.models import (
     Session,
     get_session,
@@ -1241,6 +1242,38 @@ def handle_get(handler, parsed) -> bool:
         except Exception:
             logger.exception("NEO projects snapshot failed; falling back to legacy list")
             return j(handler, {"projects": load_projects()})
+
+    if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/summary"):
+        project_id = parsed.path[len("/api/projects/"):-len("/summary")]
+        if not project_id or "/" in project_id:
+            return bad(handler, "Invalid project_id", 404)
+        try:
+            return j(handler, neo_projects.project_summary(project_id))
+        except KeyError:
+            return bad(handler, "Project not found", 404)
+        except Exception as e:
+            logger.exception("Project summary failed")
+            return bad(handler, str(e))
+
+    if parsed.path == "/api/jira/status":
+        try:
+            return j(handler, {"sources": neo_jira.get_sources_status()})
+        except Exception as e:
+            logger.exception("Jira status failed")
+            return bad(handler, str(e))
+
+    if parsed.path.startswith("/api/jira/issues/"):
+        source_id = parsed.path[len("/api/jira/issues/"):]
+        if not source_id or "/" in source_id:
+            return bad(handler, "Invalid source_id", 404)
+        try:
+            issues = neo_jira.get_issues_for_source(source_id)
+            return j(handler, {"issues": issues})
+        except ValueError as e:
+            return bad(handler, str(e), 404)
+        except Exception as e:
+            logger.exception("Jira issues fetch failed")
+            return bad(handler, str(e))
 
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
@@ -2212,6 +2245,33 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Task not found", 404)
         return j(handler, {"ok": True, "task": task})
+
+    if parsed.path.startswith("/api/jira/sync/"):
+        source_id = parsed.path[len("/api/jira/sync/"):]
+        if not source_id or "/" in source_id:
+            return bad(handler, "Invalid source_id", 404)
+        try:
+            result = neo_jira.handle_jira_sync(source_id)
+            return j(handler, {"ok": True, **result})
+        except ValueError as e:
+            return bad(handler, str(e), 404)
+        except Exception as e:
+            logger.exception("Jira sync failed")
+            return bad(handler, str(e))
+
+    if parsed.path == "/api/jira/create-issue":
+        try:
+            require(body, "source_id", "summary")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            result = neo_jira.handle_create_issue(body["source_id"], body["summary"])
+            return j(handler, {"ok": True, **result})
+        except ValueError as e:
+            return bad(handler, str(e), 404)
+        except Exception as e:
+            logger.exception("Jira create issue failed")
+            return bad(handler, str(e))
 
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":

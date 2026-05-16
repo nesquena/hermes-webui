@@ -4336,6 +4336,107 @@ body.projects-modal-open{ overflow:hidden; }
   border:1px dashed var(--border);
 }
 
+/* ── Projects Summary view ─────────────────────────────────── */
+.projects-summary { padding: 1rem; }
+.projects-summary-loading { text-align: center; padding: 2rem; opacity: .6; }
+.projects-summary-error { color: var(--error); padding: 1rem; }
+.projects-summary-empty { text-align: center; padding: 2rem; opacity: .6; }
+
+.projects-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+}
+.project-summary-card {
+  background: var(--surface-1, #1e1e2e);
+  border-radius: 12px;
+  padding: 1rem;
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s;
+  position: relative;
+  overflow: hidden;
+}
+.project-summary-card:hover,
+.project-summary-card:focus-visible {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0,0,0,.3);
+  outline: 2px solid var(--accent, #00E5FF);
+}
+.project-summary-card-color {
+  position: absolute; top: 0; left: 0; right: 0; height: 4px;
+}
+.project-summary-card h3 { margin: .5rem 0 .25rem; font-size: .95rem; }
+.project-summary-card-desc { font-size: .8rem; opacity: .7; margin-bottom: .75rem; }
+.project-summary-card-bar {
+  height: 6px; border-radius: 3px; background: var(--surface-2, #2a2a3e); overflow: hidden;
+}
+.project-summary-card-bar-fill {
+  height: 100%; background: var(--accent, #00E5FF); border-radius: 3px;
+  transition: width .3s;
+}
+.project-summary-card-pct { font-size: .75rem; opacity: .8; }
+.project-summary-card-count { font-size: .75rem; opacity: .6; float: right; }
+
+/* Detail view */
+.projects-summary-detail { max-width: 900px; }
+.projects-summary-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem;
+}
+@media (max-width: 600px) {
+  .projects-summary-row { grid-template-columns: 1fr; }
+}
+.projects-summary-info,
+.projects-summary-kpis,
+.projects-summary-links,
+.projects-summary-recent,
+.projects-summary-source {
+  background: var(--surface-1, #1e1e2e);
+  border-radius: 12px;
+  padding: 1rem;
+}
+.projects-summary-info h3,
+.projects-summary-kpis h3,
+.projects-summary-links h3,
+.projects-summary-recent h3,
+.projects-summary-source h3 {
+  font-size: .85rem; text-transform: uppercase; letter-spacing: .05em;
+  opacity: .7; margin-bottom: .75rem;
+}
+.projects-summary-info dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; font-size: .85rem; }
+.projects-summary-info dt { opacity: .6; }
+.projects-summary-bar {
+  height: 8px; border-radius: 4px; background: var(--surface-2, #2a2a3e); overflow: hidden; margin-bottom: .5rem;
+}
+.projects-summary-bar-fill {
+  height: 100%; background: var(--accent, #00E5FF); border-radius: 4px; transition: width .3s;
+}
+.projects-summary-pct { font-size: .85rem; font-weight: 600; }
+.projects-summary-counts { list-style: none; padding: 0; margin: .75rem 0 0; font-size: .8rem; }
+.projects-summary-counts li { padding: .15rem 0; }
+.projects-summary-links-list { display: flex; flex-wrap: wrap; gap: .5rem; }
+.projects-summary-links-list a,
+.projects-summary-links-list span { font-size: .8rem; }
+.projects-summary-recent ul { list-style: none; padding: 0; margin: 0; font-size: .8rem; }
+.projects-summary-recent li { padding: .3rem 0; border-bottom: 1px solid var(--surface-2, #2a2a3e); }
+.projects-summary-task-status { opacity: .6; font-size: .75rem; }
+
+/* Jira sync */
+.projects-summary-source-header {
+  display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+  font-size: .8rem;
+}
+.btn-jira-sync {
+  background: var(--accent, #00E5FF); color: #000; border: none; border-radius: 6px;
+  padding: .35rem .75rem; font-size: .75rem; font-weight: 600; cursor: pointer;
+  transition: opacity .15s;
+}
+.btn-jira-sync:hover { opacity: .85; }
+.btn-jira-sync:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Jira ref link on cards */
+.kanban-card-ref-link { text-decoration: none; }
+.kanban-card-ref-link:hover .kanban-card-ref { opacity: .8; text-decoration: underline; }
+
 /* ── Agents App (Escritório) ─────────────────────────────────── */
 .agents-app-container {
   position: relative;
