@@ -260,35 +260,49 @@ class TestToolCallGroupingStatic:
             "Thinking echo suppression should remove exact visible assistant snippets from reasoning display."
         )
 
-    def test_tools_and_thinking_share_one_collapsed_activity_dropdown(self):
+    def test_compact_activity_keeps_thinking_cards_after_session_switch(self):
         ui_min = re.sub(r"\s+", "", UI_JS)
         assert "functionensureActivityGroup(" in ui_min, (
-            "Tool calls and thinking should share one agent-activity disclosure helper."
+            "Tool calls should still use the shared Activity disclosure helper."
         )
         assert "data-agent-activity-group" in UI_JS, (
-            "The shared tools/thinking disclosure needs a stable data-agent-activity-group hook."
-        )
-        assert "agent-activity-thinking" in UI_JS, (
-            "Thinking content should be nested inside the shared activity dropdown, not rendered separately."
+            "The Activity disclosure needs a stable data-agent-activity-group hook."
         )
         render_fn = _function_body(UI_JS, "renderMessages")
         assert "isSimplifiedToolCalling()" in render_fn and "assistantThinking.set(rawIdx, thinkingText)" in render_fn, (
-            "Settled thinking should move into the shared activity dropdown only when Compact tool activity is enabled."
+            "Compact settled transcript rendering should preserve Thinking cards after switching sessions."
+        )
+        assert "_thinkingActivityNode(thinkingText, false)" in render_fn, (
+            "Settled Thinking cards should render as collapsed timeline entries before related tools."
+        )
+        assert "anchorParent.insertBefore(thinkingNode, anchorRow)" in render_fn, (
+            "Settled Thinking cards should appear before their visible assistant process text."
         )
         assert "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))" in render_fn, (
             "The non-simplified path should preserve standalone settled thinking cards."
         )
 
-    def test_live_thinking_uses_shared_activity_dropdown_only_when_simplified(self):
+    def test_live_thinking_is_shown_while_still_splitting_tool_bursts(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
+        live_tool_fn = _function_body(UI_JS, "appendLiveToolCard")
+        helper = _function_body(UI_JS, "ensureActivityGroup")
         assert "isSimplifiedToolCalling()" in live_thinking_fn, (
             "Live thinking should branch on the Compact tool activity toggle."
         )
-        assert "ensureActivityGroup" in live_thinking_fn, (
-            "Compact live thinking should be inserted into the shared activity dropdown."
+        assert 'data-live-activity-current' in live_thinking_fn, (
+            "Starting a new live thinking block should close the previous live tool burst."
         )
-        assert "thinkingRow" in live_thinking_fn, (
-            "The non-simplified live thinking path should preserve the upstream #thinkingRow card."
+        assert "body.insertBefore(row, body.firstChild)" not in live_thinking_fn, (
+            "Live thinking should not be moved into the top Activity dropdown."
+        )
+        assert "_thinkingActivityNode(thinkingText, false)" in live_thinking_fn, (
+            "Compact live thinking should render a collapsed Thinking card in the timeline."
+        )
+        assert '[data-live-activity-current="1"]' in live_thinking_fn, (
+            "Starting a new Thinking card should mark the previous live tool burst as no longer current."
+        )
+        assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
+            "tool_complete must still update its current live Activity burst by tool id."
         )
 
 

@@ -513,6 +513,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
     });
   }
+  function snapshotLiveTurn(){
+    if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
+  }
   // Throttled variant for token-by-token updates. persistInflightState()
   // calls saveInflightState() which does JSON.parse + JSON.stringify + write
   // on the entire inflight map every call. On a fast model at 60 tok/s with
@@ -1170,6 +1173,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       scrollIfPinned();
+      snapshotLiveTurn();
     };
     const frameIntervalMs=_shouldUseStreamFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
@@ -1197,19 +1201,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       const parsed=_parseStreamState();
+      if(_freshSegment&&window._showThinking!==false) appendThinking(_liveThinkingText());
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -1217,19 +1220,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       if(alreadyStreamed){
+        if(!S.session||S.session.session_id!==activeSid) return;
         _resetAssistantSegment();
         return;
       }
-      assistantText+=visible;
+      assistantText += assistantText ? `\n\n${visible}` : visible;
       visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
-      const parsed=_parseStreamState();
       if(window._showThinking!==false){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
       }
-      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
+      ensureAssistantRow(true);
       _scheduleRender();
     });
 
@@ -1274,6 +1277,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
+      snapshotLiveTurn();
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
@@ -1310,6 +1314,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
+      snapshotLiveTurn();
       scrollIfPinned();
     });
 
@@ -1603,14 +1608,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
       if(typeof setCompressionUi==='function'){
-        setCompressionUi({
+        const state={
           sessionId:activeSid,
           phase:'running',
           automatic:true,
           message:d.message||'Auto-compressing context...',
-        });
+        };
+        setCompressionUi(state);
+        const liveAnswerStarted=!!(assistantRow||String(((_parseStreamState&&_parseStreamState())||{}).displayText||'').trim());
+        if(liveAnswerStarted&&typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state)){
+          // The live card is now anchored in the turn. Keeping the same running
+          // state in global transient UI makes later renderMessages() calls insert
+          // a duplicate Automatic Compression card.
+          window._compressionUi=null;
+          snapshotLiveTurn();
+          return;
+        }
       }
       if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+      snapshotLiveTurn();
     });
 
     source.addEventListener('compressed',e=>{
@@ -1627,13 +1643,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _syncCtxIndicator(S.lastUsage);
       }
       if(typeof setCompressionUi==='function'){
-        setCompressionUi({
+        const state={
           sessionId:activeSid,
           phase:'done',
           automatic:true,
           message,
           summary:{headline:message},
-        });
+        };
+        setCompressionUi(state);
+        const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);
+        if(appended){
+          // The live card is now anchored in the turn. Do not keep the automatic
+          // completion state as global transient UI, otherwise every subsequent
+          // render projects the same Auto Compression card again.
+          window._compressionUi=null;
+          snapshotLiveTurn();
+        }
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();

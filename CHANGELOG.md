@@ -92,6 +92,8 @@
 
 ### Added
 
+- **PR TBD** by @franksong2702 — Long tool-heavy streaming turns now preserve the live Thinking / assistant progress / Tool / Command timeline when the user switches away and back. The active stream keeps accumulating token and interim-assistant state while inactive, reloads the persisted transcript before merging the live tail, restores the live turn DOM snapshot instead of replaying tools into a flat list, and anchors automatic compression cards inside the active turn to avoid duplicate cards while an answer is still streaming.
+
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
 
 ### Fixed
