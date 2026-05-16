@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2406** by @Michaelyklam (fixes #2398) — The fallback synchronous `POST /api/chat` route now passes the active WebUI config into the conversation-history sanitizer, so text-mode providers do not receive historical native `image_url` content parts when direct API callers use the legacy chat endpoint. This brings the sync route in line with the streaming chat path fixed for #2297.
+
 ## [v0.51.77] — 2026-05-16 — Release BA (stage-370 — 1-PR follow-up — live Activity grouping boundary fix)
 
 ### Fixed
