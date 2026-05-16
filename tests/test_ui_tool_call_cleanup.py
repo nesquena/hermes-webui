@@ -11,6 +11,7 @@ REPO = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
@@ -231,6 +232,32 @@ class TestToolCallGroupingStatic:
         )
         assert "tool-call-group-list" not in sync_fn, (
             "Readable progress must not reintroduce the noisy secondary tool-name list."
+        )
+
+    def test_live_thinking_suppresses_visible_interim_echoes(self):
+        interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
+        assert interim_match, "interim_assistant listener not found"
+        interim_fn = interim_match.group(1)
+        live_thinking_fn = _function_body(MESSAGES_JS, "_liveThinkingText")
+
+        assert "visibleInterimSnippets.push(visible)" in interim_fn, (
+            "Visible interim commentary should be remembered so the live Thinking card does not echo it."
+        )
+        assert "_stripLiveVisibleAssistantEchoFromThinking" in live_thinking_fn, (
+            "Live Thinking text should suppress exact visible interim commentary echoes."
+        )
+
+    def test_settled_thinking_suppresses_visible_assistant_echoes(self):
+        render_fn = _function_body(UI_JS, "renderMessages")
+        helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
+        assert "_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent)" in render_fn, (
+            "Settled Thinking cards should not repeat text already rendered as visible assistant content."
+        )
+        assert "s.length>=20" in helper, (
+            "Thinking echo suppression should ignore tiny snippets to avoid over-stripping reasoning."
+        )
+        assert "out.split(snippet).join('')" in helper, (
+            "Thinking echo suppression should remove exact visible assistant snippets from reasoning display."
         )
 
     def test_tools_and_thinking_share_one_collapsed_activity_dropdown(self):

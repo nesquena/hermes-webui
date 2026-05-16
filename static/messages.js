@@ -432,6 +432,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   let liveReasoningText='';
+  let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
   let assistantRow=null;
@@ -526,6 +527,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
+  }
+  function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
+    let out=String(text||'');
+    (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
+      const visible=String(snippet||'').trim();
+      if(visible.length<20) return;
+      out=out.split(visible).join('');
+    });
+    return out.trim();
+  }
+  function _liveThinkingText(){
+    const clean=_stripLiveVisibleAssistantEchoFromThinking(liveReasoningText, visibleInterimSnippets);
+    return clean || 'Thinking…';
   }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
@@ -1207,9 +1221,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       assistantText+=visible;
+      visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       const parsed=_parseStreamState();
+      if(window._showThinking!==false){
+        if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
+        else appendThinking(_liveThinkingText());
+      }
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
@@ -1226,8 +1245,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // finalizeThinkingCard(). The old rAF-only path caused a race where
       // the thinking row was still a spinner when finalized.
       if(window._showThinking!==false){
-        if(typeof updateThinking==='function') updateThinking(liveReasoningText||'Thinking…');
-        else appendThinking(liveReasoningText);
+        if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
+        else appendThinking(_liveThinkingText());
       }
       _scheduleRender();
     });
