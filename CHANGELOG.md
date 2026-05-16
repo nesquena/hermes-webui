@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [v0.51.71] — 2026-05-16 — Release AU (stage-364 — 3-PR batch — #2349 stale-stream cleanup non-touching + #2343 profiles vs workspaces help card + #2283 run-event journal replay [refs #1925 RFC slice 1] — with Opus-caught replay double-render fix)
+
+### Added
+
+- **PR #2343** by @Michaelyklam (refs #2147) — The Profiles panel now includes an inline "Profiles vs workspaces" explainer. The copy clarifies that profiles control how the agent works — identity, memory, skills, model/provider config, and tools — while workspaces control what project/files a session operates on, making the OpenClaw-style role/profile mental model easier to map onto Hermes WebUI.
+
+- **PR #2283** by @franksong2702 (refs #1925) — Adds an append-only WebUI run event journal for browser-originated chat streams (refs #1925). Every SSE event emitted by the legacy in-process runner is mirrored to a per-session JSONL file, `/api/chat/stream/status` reports when replay is available for a dead stream, `/api/chat/stream` can replay journaled events with SSE event IDs and a clear stale-restart diagnostic, and the frontend reattach path uses that replay before clearing local running state. Reconnect replay uses the last rendered SSE event id as its `after_seq` cursor so it does not replay already-rendered events, and journal fsync defaults to terminal events only (`HERMES_WEBUI_RUN_JOURNAL_FSYNC=eager` restores per-event fsync). This is the first compatibility slice only: it preserves the existing WebUI runner and does not make active execution survive a WebUI restart. **Stage-364 maintainer fix applied inline**: Opus advisor caught that live SSE frames emitted by `_sse()` in `api/streaming.py:2296` carry no `id:` field, so the frontend's `_lastRunJournalSeq` cursor stayed at 0 during live streaming and a mid-stream error→replay would arrive with `after_seq=0`, replaying every journaled event from seq 1 and double-rendering tokens. The fix adds `STREAM_LAST_EVENT_ID: dict = {}` as a per-stream side-channel in `api/config.py`; `put()` writes the journal's `event_id` to that dict on every event; `_handle_sse_stream` reads it at SSE emit time and uses `_sse_with_id(handler, event, data, event_id)` when present. The queue tuple shape is preserved as `(event, data)` so existing queue consumers (cancel sentinel, sprint42/51 tests, etc.) are not broken. Cleaned up in the worker's finally block alongside the other STREAM_* dicts. 6 regression tests added covering side-channel dict declaration, writer/reader paths, tuple shape preservation, and cleanup.
+
+### Fixed
+
+- **PR #2349** by @franksong2702 (fixes #2345) — Clearing stale stream runtime flags no longer refreshes a session's `updated_at`, so old compressed continuations should not jump back to the top of the sidebar just because WebUI repaired a dead `active_stream_id` during a read/list request.
+
 ## [v0.51.70] — 2026-05-16 — Release AS (stage-363 — 4-PR snapshot+journal+UI batch — #2337 compression snapshot runtime-clear + #2334 turn-journal fcntl lock + #2342 INFLIGHT reattach pending row + #2339 workspace panel edge toggle)
 
 ### Added
