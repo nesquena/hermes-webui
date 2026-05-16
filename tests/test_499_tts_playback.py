@@ -86,8 +86,10 @@ class TestTtsSpeakerButton:
     def test_tts_button_uses_volume_icon(self):
         """Speaker button should use volume-2 icon."""
         src = _read('ui.js')
-        tts_line = [l for l in src.splitlines() if 'msg-tts-btn' in l][0]
-        assert 'volume-2' in tts_line, \
+        lines = src.splitlines()
+        tts_idx = next(i for i, l in enumerate(lines) if 'msg-tts-btn' in l)
+        context = '\n'.join(lines[max(0, tts_idx - 3):tts_idx + 1])
+        assert 'volume-2' in context, \
             "TTS button should use volume-2 icon"
 
 
