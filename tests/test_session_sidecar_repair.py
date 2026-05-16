@@ -231,7 +231,7 @@ class TestRepairStalePendingNoDeadlock:
 class TestDraftRecovery:
     """When no core transcript exists, the pending user message is restored as
     a recovered user turn (_recovered=True) and the error marker says
-    'Previous turn did not complete.' — NOT 'preserved as a draft'."""
+    a clear restart interruption marker — NOT 'preserved as a draft'."""
 
     def test_pending_message_recovered_as_user_turn(self, hermes_home, monkeypatch):
         """When core transcript is missing, the pending_user_message is appended
@@ -310,7 +310,10 @@ class TestDraftRecovery:
         assert "preserved as a draft" not in content, (
             f"Error marker should not say 'preserved as a draft', got: {content}"
         )
-        assert "Previous turn did not complete" in content
+        assert "Response interrupted" in content
+        assert "WebUI process restarted" in content
+        assert "user message above was preserved" in content
+        assert error_msgs[0].get("type") == "interrupted"
 
     def test_pending_attachments_recovered(self, hermes_home, monkeypatch):
         """Attachments on the pending message are carried over to the recovered turn."""
@@ -604,7 +607,9 @@ class TestNonEmptyMessagesPendingCleared:
         # Exactly one error marker
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        assert "Previous turn did not complete" in error_msgs[0]["content"]
+        assert "Response interrupted" in error_msgs[0]["content"]
+        assert "WebUI process restarted" in error_msgs[0]["content"]
+        assert error_msgs[0].get("type") == "interrupted"
 
         # Pending fields fully cleared
         assert s.pending_user_message is None

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR TBD** by @franksong2702 (fixes #2370) — Recovered interrupted turns now explain that the WebUI process restarted before the agent finished, that the user message above was preserved, and that no agent output was recovered. Pre-fix, stale pending-turn repair appended the vague `Previous turn did not complete` marker, which looked like an unexplained assistant response after a WebUI restart killed the in-process worker.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
