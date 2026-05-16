@@ -203,6 +203,42 @@ def _active_stream_ids():
         return set(STREAMS.keys())
 
 
+def _append_recovered_turn_to_context(session, recovered: dict) -> None:
+    context_messages = getattr(session, 'context_messages', None)
+    if not isinstance(context_messages, list) or not context_messages:
+        return
+    recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if recovered_text:
+        for existing in reversed(context_messages[-8:]):
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            existing_text = " ".join(str(existing.get('content') or '').split())
+            if existing_text == recovered_text:
+                return
+    context_entry = {k: v for k, v in recovered.items() if k != 'timestamp'}
+    context_messages.append(context_entry)
+
+
+def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+    pending_text = str(session.pending_user_message or '')
+    if not pending_text:
+        return None
+    recovered_ts = int(time.time())
+    if isinstance(timestamp, (int, float)) and timestamp > 0:
+        recovered_ts = int(timestamp)
+    recovered: dict = {
+        'role': 'user',
+        'content': session.pending_user_message,
+        'timestamp': recovered_ts,
+        '_recovered': True,
+    }
+    if session.pending_attachments:
+        recovered['attachments'] = list(session.pending_attachments)
+    session.messages.append(recovered)
+    _append_recovered_turn_to_context(session, recovered)
+    return recovered
+
+
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
@@ -695,15 +731,16 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         if not _already_checkpointed:
+            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
                 '_recovered': True,
             }
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
-            session.messages.append(recovered)
+            _append_recovered_turn_to_context(session, recovered)
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
@@ -752,15 +789,7 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        recovered: dict = {
-            'role': 'user',
-            'content': session.pending_user_message,
-            'timestamp': _recovered_ts,
-            '_recovered': True,
-        }
-        if session.pending_attachments:
-            recovered['attachments'] = list(session.pending_attachments)
-        session.messages.append(recovered)
+        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
