@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Context-compaction reference cards are now inserted before the future assistant anchor when rendering compressed continuation tails, so auto-compression session rotation does not place reference-only cards inside the final answer turn. Fixes #2355.
+
 ## [v0.51.71] — 2026-05-16 — Release AU (stage-364 — 3-PR batch — #2349 stale-stream cleanup non-touching + #2343 profiles vs workspaces help card + #2283 run-event journal replay [refs #1925 RFC slice 1] — with Opus-caught replay double-render fix)
 
 ### Added

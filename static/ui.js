@@ -5549,7 +5549,7 @@ function renderMessages(options){
       const turn=anchorSeg.closest('.assistant-turn');
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
-        blocks.appendChild(node);
+        blocks.insertBefore(node, anchorSeg);
         return;
       }
       const turnParent=turn && turn.parentElement;
