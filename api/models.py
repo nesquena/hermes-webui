@@ -1016,7 +1016,110 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
-    return bool(session.get('pre_compression_snapshot')) or source == 'cron' or sid.startswith('cron_')
+    if source == 'cron' or sid.startswith('cron_'):
+        return True
+    if bool(session.get('pre_compression_snapshot')):
+        return not bool(session.get('_show_pre_compression_snapshot'))
+    return False
+
+
+def _sidebar_message_count(session: dict) -> int:
+    for key in ('message_count', 'actual_message_count'):
+        try:
+            value = int(session.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _sidebar_lineage_root_id(session: dict, sessions_by_id: dict[str, dict]) -> str:
+    sid = str(session.get('session_id') or '')
+    root = sid
+    parent = session.get('parent_session_id')
+    seen = {sid}
+    while parent and parent not in seen and parent in sessions_by_id:
+        root = str(parent)
+        seen.add(root)
+        parent = sessions_by_id.get(root, {}).get('parent_session_id')
+    return root
+
+
+def _has_live_sidebar_state(session: dict) -> bool:
+    return bool(
+        session.get('active_stream_id')
+        or session.get('has_pending_user_message')
+        or session.get('pending_user_message')
+    )
+
+
+def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
+    """Expose a hidden snapshot when it is the fuller transcript for a lineage.
+
+    Pre-compression snapshots are normally hidden so archived compression
+    segments do not duplicate the current continuation in the sidebar. If a
+    snapshot row has more messages than the visible continuation for the same
+    lineage, hiding it makes the conversation look truncated. In that case,
+    show the fuller snapshot and suppress the shorter inactive continuation.
+    """
+    sessions_by_id = {
+        str(session.get('session_id')): session
+        for session in sessions
+        if session.get('session_id')
+    }
+    groups: dict[str, list[dict]] = {}
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        source = session.get('source_tag') or session.get('source')
+        if source == 'cron' or sid.startswith('cron_'):
+            continue
+        root = _sidebar_lineage_root_id(session, sessions_by_id)
+        groups.setdefault(root, []).append(session)
+
+    snapshot_ids_to_show: set[str] = set()
+    continuation_ids_to_hide: set[str] = set()
+    for group in groups.values():
+        visible = [session for session in group if not session.get('pre_compression_snapshot')]
+        snapshots = [session for session in group if session.get('pre_compression_snapshot')]
+        if not visible or not snapshots:
+            continue
+        if any(_has_live_sidebar_state(session) for session in visible):
+            continue
+
+        best_visible_count = max(_sidebar_message_count(session) for session in visible)
+        best_snapshot = max(
+            snapshots,
+            key=lambda session: (_sidebar_message_count(session), _session_sort_timestamp(session)),
+        )
+        if _sidebar_message_count(best_snapshot) <= best_visible_count:
+            continue
+
+        snapshot_ids_to_show.add(str(best_snapshot.get('session_id')))
+        continuation_ids_to_hide.update(
+            str(session.get('session_id'))
+            for session in visible
+            if session.get('session_id')
+        )
+
+    if not snapshot_ids_to_show and not continuation_ids_to_hide:
+        return sessions
+
+    out = []
+    for session in sessions:
+        sid = str(session.get('session_id') or '')
+        if sid in continuation_ids_to_hide:
+            continue
+        if sid in snapshot_ids_to_show:
+            session = dict(session)
+            session['_show_pre_compression_snapshot'] = True
+        out.append(session)
+    return out
+
+
+def _strip_sidebar_internal_flags(sessions: list[dict]) -> None:
+    for session in sessions:
+        session.pop('_show_pre_compression_snapshot', None)
 
 
 def _active_state_db_path() -> Path:
@@ -1135,7 +1238,9 @@ def all_sessions(diag=None):
                 and not s.get('has_pending_user_message')
                 and not s.get('worktree_path')
             )]
+            result = _prefer_fuller_snapshots_for_sidebar(result)
             result = [s for s in result if not _hide_from_default_sidebar(s)]
+            _strip_sidebar_internal_flags(result)
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -1171,7 +1276,9 @@ def all_sessions(diag=None):
         and not s.pending_user_message
         and not getattr(s, 'worktree_path', None)
     )]
+    result = _prefer_fuller_snapshots_for_sidebar(result)
     result = [s for s in result if not _hide_from_default_sidebar(s)]
+    _strip_sidebar_internal_flags(result)
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
