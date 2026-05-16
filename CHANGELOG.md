@@ -2,7 +2,35 @@
 
 ## [Unreleased]
 
+## [v0.51.75] — 2026-05-16 — Release AY (stage-368 — 11-PR safe-lane batch — storage + i18n + run-journal parity + attachments + compression sidebar + restart-recovery + text-mode images + tables + settings i18n + German labels)
+
+### Test infrastructure
+
+- Stage-368 maintainer fix — pytest no longer self-loops on the `_schedule_restart` daemon thread. Several existing tests in `tests/test_update_banner_fixes.py` call `api.updates._schedule_restart()`, which spawns a daemon thread that eventually calls `os.execv()`. Those tests monkeypatch `os.execv` for the test scope, but monkeypatch teardown can win the race against the daemon thread, restoring the real `os.execv` before the thread fires it — at which point the daemon re-execs the entire pytest process with the original argv, looking from the outside like pytest hangs at 99 % then restarts the suite from 0 % in an infinite loop. `tests/conftest.py` now installs a permanent no-op wrapper on `os.execv` at module-import time so late-firing daemon threads cannot re-exec pytest. New `tests/test_pytest_execv_guard.py` pins the guard against future regressions.
+
+### Added
+
+- **PR #2377** by @franksong2702 (refs #2283, refs #2363, refs #1925) — Run-journal replay timeline parity checks. After #2283 shipped the first run-journal replay slice and #2363 documented the cross-layer state consistency contract, this PR adds explicit parity assertions over the replayed timeline so divergences between the journal and the visible transcript (Thinking → tool calls → assistant text) surface as test failures instead of silent drift.
+
 ### Fixed
+
+- **PR #2391** by @Michaelyklam (fixes #2389) — Reduce browser storage pressure during service-worker updates and over long-running sessions. `static/sw.js` now calls `deleteOldShellCaches()` BEFORE `caches.open(CACHE_NAME)` in the install handler so the new ~2.2 MB shell cache no longer overlaps the old one during a version bump (especially painful on shared-origin quota accounting). A new `_clearSessionViewedCount()` helper plus extended `_clearHandoffStorageForSession()` prune `hermes-session-viewed-counts`, `hermes-session-completion-unread`, and `hermes-session-observed-streaming` on every single-session delete and batch-delete so per-session tracking maps no longer grow unbounded.
+
+- **PR #2387** by @Michaelyklam (fixes #2386) — Guard `localStorage.setItem('hermes-webui-session', ...)` and workspace-panel runtime-state writes with `try { … } catch (_) {}` across `static/boot.js`, `static/sessions.js`, `static/commands.js`, and `static/messages.js`. These convenience writes were previously fatal UI operations on quota-exhausted browsers (especially Firefox public-domain setups where shared quota fills up after a service-worker shell rotation).
+
+- **PR #2368** by @Michaelyklam — Hybridize background profile env routing so background title generation, manual compression, and update-summary workers honor a session's non-default profile. The pure thread-local refactor for #2321 was reverted because `hermes_cli.config.load_config()` still reads `HERMES_HOME` from process env. This PR keeps the thread-local layer for WebUI helpers and adds an `os.environ.update(runtime_env)` mirror under a narrow `_ENV_LOCK` for the worker body, with proper restore of prior values. New test asserts `OPENROUTER_API_KEY` is visible from the worker against a non-default profile.
+
+- **PR #2382** by @Michaelyklam (fixes #2380) — Serve raw chat attachments from the per-session inbox in addition to the session workspace. Chat uploads were intentionally moved out of workspaces into a per-session attachment inbox in an earlier release; the transcript renderer still emits stable `api/file/raw?session_id=...&path=<filename>` URLs, but `_handle_file_raw` only checked `session.workspace` so inbox-backed uploads rendered as broken images. The URL surface is preserved and a session-attachment fallback is added with path-traversal guards intact.
+
+- **PR #2385** by @franksong2702 — Keep fuller compression snapshots reachable in the sidebar. The default behavior hides `pre_compression_snapshot: true` rows so archived compression segments do not duplicate the active continuation. A real long Kanban session exposed a narrower failure: the fuller transcript was still present on disk but remained marked as `pre_compression_snapshot`, so the sidebar surfaced a shorter row and the fuller transcript became unreachable. The fix preserves discoverability without re-introducing duplication in normal cases.
+
+- **PR #2371** by @franksong2702 — Clarify interrupted turn recovery after a WebUI restart. WebUI executes browser-originated agent turns inside the WebUI process; if that process restarts mid-turn, the worker dies with it. Run journal replay can only replay events that were already emitted, so the stale-pending repair path is now annotated and refined to make the post-restart state explicit (interrupted, recoverable, or terminal) instead of leaving the user with a half-rendered turn and no signal.
+
+- **PR #2378** by @Michaelyklam — Strip historical images in text-only mode. Current-turn uploads already respect `agent.image_input_mode: text`, but saved conversation history still passed native `image_url` content parts back into later provider calls, breaking text-only providers on replayed turns. `_sanitize_messages_for_api()` gains a `cfg=` keyword argument so the API-history sanitizer can strip historical native image parts when the mode is text. Default `cfg=None` preserves prior behavior for callers that don't pass the new argument.
+
+- **PR #2375** by @Michaelyklam — Keep Markdown tables block-level. Pipe tables were already converted to `<table>` markup, but the final paragraph pass did not treat generated tables as block-level output, occasionally wrapping them in `<p>` and breaking the surrounding layout. The fix isolates generated tables and adds `table` to the paragraph-wrap skip list so valid CommonMark tables render predictably.
+
+- **PR #2372** by @mccxj — Settings → Conversation page action buttons now respect locale selection. Pre-fix, the JSON export, MD export, and Copy buttons had hardcoded English labels/titles. Adds `data-i18n` / `data-i18n-title` attributes plus the missing translation keys so non-English locales no longer see English labels stuck in the middle of a translated screen.
 
 - **PR #2381** by @Michaelyklam (fixes #2379) — German relative session-time labels now interpolate the elapsed value instead of rendering the literal `{n}` placeholder in the sidebar/header. The German locale now uses function-valued translations for minutes, hours, and days, matching the other locale bundles.
 
