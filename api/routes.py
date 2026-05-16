@@ -6360,8 +6360,32 @@ def _handle_media(handler, parsed):
             or html_inline_ok
         )
     ) else "attachment"
+    # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
     return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
+
+
+def _file_raw_target(session, sid: str, rel: str) -> Path | None:
+    """Resolve /api/file/raw paths from the workspace or this session's uploads."""
+    try:
+        target = safe_resolve(Path(session.workspace), rel)
+    except ValueError:
+        target = None
+    if target and target.exists() and target.is_file():
+        return target
+
+    # Chat uploads now live in a per-session attachment inbox outside the
+    # workspace. Keep the public URL stable while scoping fallback lookup to
+    # the requesting session's own attachment directory.
+    try:
+        from api.upload import _session_attachment_dir
+
+        attachment_target = safe_resolve(_session_attachment_dir(sid), rel)
+    except Exception:
+        return None
+    if attachment_target.exists() and attachment_target.is_file():
+        return attachment_target
+    return None
 
 
 def _handle_file_raw(handler, parsed):
@@ -6375,8 +6399,8 @@ def _handle_file_raw(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
-    target = safe_resolve(Path(s.workspace), rel)
-    if not target.exists() or not target.is_file():
+    target = _file_raw_target(s, sid, rel)
+    if target is None:
         return j(handler, {"error": "not found"}, status=404)
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")

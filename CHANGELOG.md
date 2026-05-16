@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2382** by @Michaelyklam (closes #2380) — `api/file/raw` now falls back to the requesting session's attachment inbox when a chat-upload filename is not present in the workspace. This keeps existing `api/file/raw?session_id=...&path=<filename>` image URLs working after uploads moved under `~/.hermes/webui/attachments/<session_id>/`, while preserving traversal protection and cross-session isolation.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added

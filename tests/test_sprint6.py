@@ -1,5 +1,5 @@
 """Sprint 6 tests: Escape from editor, Phase D validation, HTML extraction, cron create, session export."""
-import json, uuid, pathlib, urllib.request, urllib.error
+import json, uuid, pathlib, urllib.parse, urllib.request, urllib.error
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 from tests._pytest_port import BASE
@@ -70,6 +70,37 @@ def test_file_raw_requires_session_id():
 def test_file_raw_unknown_session():
     try:
         get_raw("/api/file/raw?session_id=nosuchsession&path=test.png")
+        assert False, "Expected 404"
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+def test_file_raw_serves_session_attachment_inbox(cleanup_test_sessions):
+    from api.upload import _session_attachment_dir
+
+    sid, workspace = make_session_tracked(cleanup_test_sessions)
+    filename = f"uploaded-chat-image-{uuid.uuid4().hex}.png"
+    attachment_dir = _session_attachment_dir(sid)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    payload = b"fake-png-bytes"
+    (attachment_dir / filename).write_bytes(payload)
+
+    assert not (workspace / filename).exists(), "regression must exercise attachment fallback"
+    raw, headers, status = get_raw(
+        f"/api/file/raw?session_id={sid}&path={urllib.parse.quote(filename)}"
+    )
+    assert status == 200
+    assert raw == payload
+    assert "image/png" in headers.get("Content-Type", "")
+
+def test_file_raw_attachment_fallback_rejects_traversal(cleanup_test_sessions):
+    from api.upload import _session_attachment_dir
+
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+    attachment_dir = _session_attachment_dir(sid)
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    (attachment_dir / "safe.txt").write_text("safe", encoding="utf-8")
+    try:
+        get_raw(f"/api/file/raw?session_id={sid}&path={urllib.parse.quote('../../safe.txt')}")
         assert False, "Expected 404"
     except urllib.error.HTTPError as e:
         assert e.code == 404
