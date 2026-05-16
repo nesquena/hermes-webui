@@ -4,7 +4,7 @@
 - **Author:** @Michaelyklam
 - **Updated by:** @franksong2702
 - **Created:** 2026-05-11
-- **Revised:** 2026-05-14
+- **Revised:** 2026-05-16
 - **Tracking issue:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925)
 
 ## Credit and Scope
@@ -48,6 +48,29 @@ truth. Consequences include:
 The immediate goal is not to build a sidecar. The immediate goal is to define the
 browser contract, classify current runtime state, and gate the first reversible
 journal slice.
+
+## Current Gate State — 2026-05-16
+
+Slice 1 is now past the first active validation gate:
+
+- #2283 shipped the run-journal replay layer in v0.51.71.
+- A 100-trial synthetic replay/restart validation pass against current
+  `origin/master` passed on 2026-05-16. The matrix covered completed-run replay,
+  interrupted stale-pending recovery, fresh-pending grace handling, StreamChannel
+  reconnect ordering, duplicate-prevention merge behavior, many-session recovery,
+  large-journal derivation, and stream-to-turn-id lifecycle linking.
+- The focused regression set
+  `tests/test_turn_journal.py tests/test_turn_journal_lifecycle.py tests/test_stale_stream_pending_recovery.py`
+  also passed on the same worktree.
+- #2393, shipped through v0.51.76, capped live chat token SSE transports to the
+  selected conversation pane. Background sessions now rely on existing
+  status/replay/reattach behavior instead of keeping one live `/api/chat/stream`
+  EventSource per active session.
+
+This evidence does not prove the future runner/sidecar path. It does mean the
+project should stop treating Slice 1 as purely passive observation and can move to
+Slice 2 planning: introduce the adapter seam over the still-legacy journaled path
+without moving execution ownership yet.
 
 ## Goals
 
@@ -268,6 +291,10 @@ Success criterion:
    kept executing.
 
 ### Slice 2: Adapter interface over the journaled legacy path
+
+Status as of 2026-05-16: ready for a planning/adapter-seam PR after the active
+Slice 1 validation pass and the #2313 selected-session stream cap. Slice 2 should
+still be a reversible boundary change, not a sidecar or execution-ownership move.
 
 Scope:
 
