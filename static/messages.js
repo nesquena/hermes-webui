@@ -1718,6 +1718,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
             if(st.replay_available){
               setComposerStatus('Restoring stream…');
+              // Reset accumulators before replay: live SSE frames carry no `id:`
+              // (see api/streaming.py:2296 _sse), so `_lastRunJournalSeq` stays at 0
+              // during live streaming and replay arrives with `after_seq=0` —
+              // i.e. the server replays every journaled event from seq 1.
+              // `assistantText`/`reasoningText` carry over from the live phase
+              // (closure scope), so without resetting we'd double-render every
+              // token frame. `_smdReconnect=true` then forces `assistantBody.innerHTML=''`
+              // on the next live token so the DOM matches the reset accumulator.
+              assistantText='';
+              reasoningText='';
+              liveReasoningText='';
+              segmentStart=0;
+              _smdReconnect=true;
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
