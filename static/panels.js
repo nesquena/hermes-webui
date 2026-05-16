@@ -5255,6 +5255,8 @@ function _preferencesPayloadFromUi(){
   if(langSel) payload.language=langSel.value;
   const showUsageCb=$('settingsShowTokenUsage');
   if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
+  const showQuotaChipCb=$('settingsShowQuotaChip');
+  if(showQuotaChipCb) payload.show_quota_chip=showQuotaChipCb.checked;
   const showTpsCb=$('settingsShowTps');
   if(showTpsCb) payload.show_tps=showTpsCb.checked;
   const fadeTextCb=$('settingsFadeTextEffect');
@@ -5495,6 +5497,18 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    // Ambient provider quota chip toggle — default off; only shows at ≥1400px viewport
+    // when enabled (see style.css @media (max-width:1399.98px) rule).
+    const showQuotaChipCb=$('settingsShowQuotaChip');
+    if(showQuotaChipCb){
+      showQuotaChipCb.checked=settings.show_quota_chip===true;
+      window._showQuotaChip=showQuotaChipCb.checked;
+      showQuotaChipCb.addEventListener('change',()=>{
+        window._showQuotaChip=showQuotaChipCb.checked;
+        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const showTpsCb=$('settingsShowTps');
     if(showTpsCb){showTpsCb.checked=!!settings.show_tps;showTpsCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const fadeTextCb=$('settingsFadeTextEffect');
@@ -6261,9 +6275,10 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
+  window._showQuotaChip=showQuotaChip===true;
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
@@ -6358,6 +6373,7 @@ async function saveSettings(andClose){
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
+  const showQuotaChip=!!($('settingsShowQuotaChip')||{}).checked;
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
@@ -6378,6 +6394,7 @@ async function saveSettings(andClose){
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  body.show_quota_chip=showQuotaChip===true;
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
@@ -6407,7 +6424,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _settingsDirty=false;
       _resetSettingsPanelState();
@@ -6426,7 +6443,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();
