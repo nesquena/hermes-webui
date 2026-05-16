@@ -679,6 +679,20 @@ def _get_profile_home(profile) -> Path:
         return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
 
 
+def _interrupted_recovery_marker() -> dict:
+    return {
+        'role': 'assistant',
+        'content': (
+            '**Response interrupted.**\n\n'
+            'The WebUI process restarted before this turn finished. '
+            'The user message above was preserved, but no agent output was recovered.'
+        ),
+        'timestamp': int(time.time()),
+        '_error': True,
+        'type': 'interrupted',
+    }
+
+
 def _apply_core_sync_or_error_marker(
     session,
     core_path,
@@ -745,12 +759,7 @@ def _apply_core_sync_or_error_marker(
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
-        session.messages.append({
-            'role': 'assistant',
-            'content': '**Previous turn did not complete.**',
-            'timestamp': int(time.time()),
-            '_error': True,
-        })
+        session.messages.append(_interrupted_recovery_marker())
         session.save()
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
@@ -794,12 +803,7 @@ def _apply_core_sync_or_error_marker(
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
-    session.messages.append({
-        'role': 'assistant',
-        'content': '**Previous turn did not complete.**',
-        'timestamp': int(time.time()),
-        '_error': True,
-    })
+    session.messages.append(_interrupted_recovery_marker())
     session.save()
     logger.info("Session %s: no core transcript found, added error marker", sid)
     return True
@@ -811,7 +815,7 @@ def _apply_core_sync_or_error_marker(
 # pending_user_message and STREAMS.pop(stream_id). Without this guard, any
 # fast turn (e.g. command approval) that exits the thread before the on-disk
 # pending clear has flushed gets misdiagnosed as a crashed turn, producing a
-# spurious "Previous turn did not complete." marker.
+# spurious "Response interrupted." marker.
 #
 # 30s covers the worst-case post-loop persistence window: LLM finishing a tool
 # batch + lock contention with the checkpoint thread + a multi-MB session.save.
