@@ -736,6 +736,8 @@ const LOCALES = {
     import_session_json_tooltip: 'Import session from JSON',
     clear_conversation_btn_tooltip: 'Clear all messages in this conversation',
     // Settings detail
+    settings_label_rtl: 'Right-to-left chat layout',
+    settings_desc_rtl: 'Flips alignment of chat messages and the composer input for languages like Arabic or Hebrew. Affects only the chat area — sidebar and other panels stay left-to-right.',
     settings_label_sound: 'Notification sound',
     settings_desc_sound: 'Play a sound when the assistant finishes a response.',
     // TTS (#499)
@@ -1922,6 +1924,8 @@ const LOCALES = {
     import_session_json_tooltip: 'Importa sessione da JSON',
     clear_conversation_btn_tooltip: 'Cancella tutti i messaggi in questa conversazione',
     // Settings detail
+    settings_label_rtl: 'Layout chat da destra a sinistra',
+    settings_desc_rtl: 'Inverte l'allineamento dei messaggi e dell'input del compositore per lingue come arabo o ebraico. Influisce solo sull'area chat — la barra laterale e gli altri pannelli rimangono da sinistra a destra.',
     settings_label_sound: 'Suono notifica',
     settings_desc_sound: 'Riproduci un suono quando l\'assistente termina una risposta.',
     // TTS (#499)
@@ -3113,6 +3117,8 @@ const LOCALES = {
     import_session_json_tooltip: 'JSONからセッションをインポート',
     clear_conversation_btn_tooltip: 'この会話のすべてのメッセージをクリア',
     // Settings detail
+    settings_label_rtl: 'チャットの右から左へのレイアウト',
+    settings_desc_rtl: 'アラビア語やヘブライ語のような言語向けに、チャットメッセージとコンポーザー入力の配置を反転します。チャット領域のみに影響し、サイドバーや他のパネルは左から右のままです。',
     settings_label_sound: '通知音',
     settings_desc_sound: 'アシスタントが応答を完了したときに音を鳴らします。',
     // TTS (#499)
@@ -4088,6 +4094,8 @@ const LOCALES = {
     export_session_json_tooltip: 'Экспортировать сессию как JSON',
     import_session_json_tooltip: 'Импортировать сессию из JSON',
     clear_conversation_btn_tooltip: 'Очистить все сообщения в этой беседе',
+    settings_label_rtl: 'Раскладка чата справа налево',
+    settings_desc_rtl: 'Переворачивает выравнивание сообщений чата и поля ввода для языков вроде арабского или иврита. Влияет только на область чата — боковая панель и другие панели остаются слева направо.',
     settings_label_sound: 'Звук уведомления',
     settings_desc_sound: 'Проигрывать звук, когда помощник завершает ответ.',
     settings_label_notifications: 'Уведомления браузера',
@@ -5214,6 +5222,8 @@ const LOCALES = {
     import_session_json_tooltip: 'Importar sesión desde JSON',
     clear_conversation_btn_tooltip: 'Borrar todos los mensajes de esta conversación',
     // Settings detail
+    settings_label_rtl: 'Diseño de chat de derecha a izquierda',
+    settings_desc_rtl: 'Invierte la alineación de los mensajes y la entrada del compositor para idiomas como árabe o hebreo. Afecta solo al área del chat — la barra lateral y otros paneles siguen de izquierda a derecha.',
     settings_label_sound: 'Sonido de notificación',
     settings_desc_sound: 'Reproduce un sonido cuando el asistente termina una respuesta.',
     settings_label_notifications: 'Notificaciones del navegador',
@@ -6312,6 +6322,8 @@ const LOCALES = {
     import_session_json_tooltip: 'Sitzung aus JSON importieren',
     clear_conversation_btn_tooltip: 'Alle Nachrichten in dieser Konversation löschen',
     // Settings detail
+    settings_label_rtl: 'Chat-Layout von rechts nach links',
+    settings_desc_rtl: 'Kehrt die Ausrichtung von Chat-Nachrichten und Eingabefeld für Sprachen wie Arabisch oder Hebräisch um. Betrifft nur den Chat-Bereich — Seitenleiste und andere Panels bleiben von links nach rechts.',
     settings_label_sound: 'Benachrichtigungston',
     settings_desc_sound: 'Spielt einen Ton ab, wenn der Assistent eine Antwort beendet.',
     settings_label_notifications: 'Browser-Benachrichtigungen',
@@ -7534,6 +7546,8 @@ const LOCALES = {
     password_env_var_locked: '当前已设置 HERMES_WEBUI_PASSWORD 环境变量并具有优先级。请取消该变量并重启服务器，才能在此管理密码。',
     password_env_var_locked_placeholder: '已锁定：已设置 HERMES_WEBUI_PASSWORD 环境变量',
     disable_auth: '停用认证',
+    settings_label_rtl: '从右到左聊天布局',
+    settings_desc_rtl: '为阿拉伯语或希伯来语等语言翻转聊天消息和编辑器输入的对齐方式。仅影响聊天区域 — 侧边栏和其他面板保持从左到右。',
     settings_label_sound: '通知声音',
     settings_label_notifications: '浏览器通知',
     settings_desc_sound: '助手完成回复时播放提示音。',
@@ -8591,6 +8605,8 @@ const LOCALES = {
     password_env_var_locked: '\u76ee\u524d\u5df2\u8a2d\u5b9a HERMES_WEBUI_PASSWORD \u74b0\u5883\u8b8a\u6578\u4e14\u512a\u5148\u751f\u6548\u3002\u8acb\u53d6\u6d88\u8a2d\u5b9a\u4e26\u91cd\u65b0\u555f\u52d5\u4f3a\u670d\u5668\uff0c\u624d\u80fd\u5728\u6b64\u7ba1\u7406\u5bc6\u78bc\u3002',
     password_env_var_locked_placeholder: '\u5df2\u9396\u5b9a\uff1a\u5df2\u8a2d\u5b9a HERMES_WEBUI_PASSWORD \u74b0\u5883\u8b8a\u6578',
     disable_auth: '\u505c\u7528\u9a57\u8b49',
+    settings_label_rtl: '從右到左聊天版面',
+    settings_desc_rtl: '為阿拉伯語或希伯來語等語言翻轉聊天訊息和編輯器輸入的對齊方式。僅影響聊天區域 — 側邊欄和其他面板保持從左到右。',
     settings_label_sound: '\u901a\u77e5\u8072\u97f3',
     settings_label_notifications: '\u700f\u89bd\u901a\u77e5',
     settings_desc_sound: '助手完成回答時播放聲音。',
@@ -9871,6 +9887,8 @@ const LOCALES = {
     import_session_json_tooltip: 'Importar sessão de JSON',
     clear_conversation_btn_tooltip: 'Limpar todas as mensagens nesta conversa',
     // Settings detail
+    settings_label_rtl: 'Layout de chat da direita para a esquerda',
+    settings_desc_rtl: 'Inverte o alinhamento das mensagens do chat e da entrada do compositor para idiomas como árabe ou hebraico. Afeta apenas a área do chat — a barra lateral e outros painéis permanecem da esquerda para a direita.',
     settings_label_sound: 'Som de notificação',
     settings_desc_sound: 'Tocar som quando assistente finalizar resposta.',
     settings_label_notifications: 'Notificações do navegador',
@@ -10959,6 +10977,8 @@ const LOCALES = {
     import_session_json_tooltip: 'JSON에서 세션 가져오기',
     clear_conversation_btn_tooltip: '이 대화의 모든 메시지 지우기',
     // Settings detail
+    settings_label_rtl: '오른쪽에서 왼쪽 채팅 레이아웃',
+    settings_desc_rtl: '아랍어나 히브리어 같은 언어를 위해 채팅 메시지와 작성 입력의 정렬을 뒤집습니다. 채팅 영역에만 영향을 주며, 사이드바와 다른 패널은 왼쪽에서 오른쪽으로 유지됩니다.',
     settings_label_sound: '알림음',
     settings_desc_sound: 'Assistant 응답이 끝나면 소리를 재생합니다.',
     settings_label_notifications: '브라우저 알림',
@@ -12061,6 +12081,8 @@ const LOCALES = {
     export_session_json_tooltip: 'Exporter la session complète en JSON',
     import_session_json_tooltip: 'Importer une session depuis JSON',
     clear_conversation_btn_tooltip: 'Effacer tous les messages de cette conversation',
+    settings_label_rtl: 'Mise en page du chat de droite à gauche',
+    settings_desc_rtl: 'Inverse l'alignement des messages du chat et de la saisie du compositeur pour des langues comme l'arabe ou l'hébreu. N'affecte que la zone de chat — la barre latérale et les autres panneaux restent de gauche à droite.',
     settings_label_sound: 'Son de notification',
     settings_desc_sound: 'Jouez un son lorsque l\'assistant termine une réponse.',
     tts_listen: 'Écouter',

@@ -62,6 +62,18 @@
       });
     }
   </script>
+  <script>
+    // Salvaged from PR #1721 (@malulian) — RTL bootstrap.
+    // Apply saved RTL state synchronously before any chat content paints, so
+    // RTL users don't see an LTR flash on initial load.
+    (function(){
+      try{
+        if(localStorage.getItem('hermes-rtl')==='true'){
+          document.documentElement.classList.add('chat-content-rtl');
+        }
+      }catch(_){}
+    })();
+  </script>
 </head>
 <body>
 <header class="app-titlebar" role="banner">
@@ -938,6 +950,13 @@
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsRtl" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_rtl">Right-to-left chat layout</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_rtl">Flips alignment of chat messages and the composer input for languages like Arabic or Hebrew. Affects only the chat area — sidebar and other panels stay left-to-right.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
