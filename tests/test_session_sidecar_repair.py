@@ -257,6 +257,44 @@ class TestDraftRecovery:
             f"got {user_msgs[0]['timestamp']}"
         )
 
+    def test_pending_message_recovered_into_context_messages(self, hermes_home, monkeypatch):
+        """A recovered pending prompt must remain visible to the next agent turn.
+
+        Sessions that have been auto-compressed feed context_messages to the
+        model, not the full display transcript. If stale-stream repair appends
+        the recovered user prompt only to messages, the user can see the prompt
+        in WebUI but the next agent turn cannot.
+        """
+        s = _make_session(
+            messages=[{"role": "user", "content": "older visible turn"}],
+            context_messages=[
+                {"role": "user", "content": "older context turn"},
+                {"role": "assistant", "content": "older context answer"},
+            ],
+        )
+        s.pending_user_message = "Clip this article https://example.com/post"
+        s.active_stream_id = "stream_1"
+        lock = config._get_session_agent_lock(s.session_id)
+
+        with lock:
+            core_path = hermes_home / "sessions" / f"session_{s.session_id}.json"
+            result = _apply_core_sync_or_error_marker(
+                s, core_path, stream_id_for_recheck="stream_1",
+            )
+
+        assert result is True
+        assert any(
+            m.get("role") == "user"
+            and m.get("content") == "Clip this article https://example.com/post"
+            and m.get("_recovered") is True
+            for m in s.messages
+        )
+        assert any(
+            m.get("role") == "user"
+            and m.get("content") == "Clip this article https://example.com/post"
+            for m in s.context_messages
+        ), "Recovered pending user turn must be included in model context."
+
     def test_error_marker_no_preserved_as_draft(self, hermes_home, monkeypatch):
         """Error marker text must NOT say 'preserved as a draft'."""
         s = _make_stale_session()
