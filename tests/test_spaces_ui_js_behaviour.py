@@ -994,6 +994,21 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/data/delete') {
     return response({ deleted: true, space_id: 'lab', key: 'research-summary', revision_event_id: 'rev-data-delete', renderer: '<script>bad()</script>', api_key: 'SECRET' });
   }
+  if (path === 'api/spaces/checkpoint') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      ok: true,
+      action: 'space.checkpoint',
+      space_id: body.space_id || 'lab',
+      event_type: 'space.checkpointed',
+      metadata_only: true,
+      generated_widgets_rendered: false,
+      revision_event_id: '0123456789abcdef0123456789abcdef',
+      reason: 'renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK',
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
+  }
   if (path === 'api/spaces/widget/event') {
     const eventBody = opts.body ? JSON.parse(opts.body) : {};
     return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
@@ -2061,6 +2076,23 @@ async function dispatchWindowMessage(data, opts) {
     await click('openSpace', { spaceId: 'lab' });
     beforeHtml = root.innerHTML;
     await click('deleteSharedData', { spaceId: 'lab', dataKey: 'research-summary' });
+  } else if (scenario === 'checkpointSpaceConfirmed') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'before rollback renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK'; };
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('checkpointSpace', { spaceId: 'lab' });
+  } else if (scenario === 'checkpointSpaceNoDialog') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('checkpointSpace', { spaceId: 'lab' });
+  } else if (scenario === 'checkpointSpaceCancelled') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return ''; };
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('checkpointSpace', { spaceId: 'lab' });
   } else if (scenario === 'restoreRevisionConfirmed') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
@@ -5253,6 +5285,38 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_space_detail_checkpoints_explicit_space_with_shared_prompt_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "checkpointSpaceConfirmed")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/checkpoint")
+
+    assert "Checkpoint" in out["beforeHtml"]
+    assert 'data-capy-action="checkpointSpace" data-space-id="lab"' in out["beforeHtml"]
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Create rollback checkpoint"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "reason": "before rollback renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK",
+    }
+    assert "Checkpoint saved" in out["rootHtml"]
+    assert "space.checkpointed" in out["rootHtml"]
+    assert "metadata-only rollback anchor" in out["rootHtml"]
+    assert "0123456789abcdef0123456789abcdef" in out["rootHtml"]
+    assert "before rollback" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+
+
+def test_spaces_ui_space_checkpoint_fails_closed_without_or_cancelled_shared_prompt(driver_path):
+    no_dialog = _run_spaces_scenario(driver_path, "checkpointSpaceNoDialog")
+    cancelled = _run_spaces_scenario(driver_path, "checkpointSpaceCancelled")
+
+    assert not any(call["path"] == "api/spaces/checkpoint" for call in no_dialog["calls"])
+    assert not any(call["path"] == "api/spaces/checkpoint" for call in cancelled["calls"])
 
 
 def test_spaces_ui_restore_revision_uses_shared_confirm_and_reload_without_widget_code(driver_path):

@@ -765,7 +765,7 @@
       '<h3>'+escapeHtml(name)+'</h3>' +
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(safeSpaceRevisionLabel(space.revision_event_id, 'none'))+'</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="checkpointSpace" data-space-id="'+escapeHtml(spaceId)+'">Checkpoint</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderSharedDataSlots(spaceId, space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
@@ -937,6 +937,15 @@
   function renderSpaceImportError(message){
     return '<div class="capy-spaces-card"><h3>Space Agent import blocked</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(message || 'Import payload could not be parsed safely.')+'</div></div>';
+  }
+
+  function renderSpaceCheckpointStatus(data){
+    const eventId = safeSpaceRevisionLabel((data && (data.revision_event_id || data.event_id)) || '', '');
+    const eventType = safeDisplayMetadataText((data && data.event_type) || 'space.checkpointed', 'space.checkpointed') || 'space.checkpointed';
+    return '<div class="capy-spaces-card"><h3>Checkpoint saved</h3>' +
+      '<div class="capy-spaces-muted">Metadata-only rollback anchor recorded. Widget execution remains disabled.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
+      '<div class="capy-spaces-muted">metadata-only rollback anchor'+(eventId ? ' · '+escapeHtml(eventId) : '')+'</div></div></div></div></div>';
   }
 
   function renderRevisionHistory(spaceId, revisions){
@@ -2558,6 +2567,21 @@
       if (!ok) return;
       await postSpacesJson('api/spaces/data/delete', {space_id: spaceId, key: dataKey});
       await openSpaceDetail(spaceId);
+      return;
+    }
+    if (action === 'checkpointSpace') {
+      if (!spaceId || typeof showPromptDialog !== 'function') return;
+      const reason = await showPromptDialog({
+        title: 'Create rollback checkpoint',
+        message: 'Create a metadata-only rollback checkpoint for this Space. The reason is stored by the backend after safety redaction.',
+        placeholder: 'Brief reason for this checkpoint',
+        confirmLabel: 'Create checkpoint',
+      });
+      if (!reason) return;
+      const result = await postSpacesJson('api/spaces/checkpoint', {space_id: spaceId, reason: reason});
+      await openSpaceDetail(spaceId);
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderSpaceCheckpointStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'viewWidgetDetails') {
