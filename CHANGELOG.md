@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sidebar session lists now keep the fuller transcript reachable when an auto-compression snapshot has more messages than the visible continuation segment. Ordinary pre-compression snapshots remain hidden, but if hiding the snapshot would leave the user on a shorter segment, the sidebar prefers the fuller row so recent conversation content does not appear to vanish.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
