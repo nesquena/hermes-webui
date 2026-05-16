@@ -243,7 +243,7 @@ class TestToolCallGroupingStatic:
         assert "visibleInterimSnippets.push(visible)" in interim_fn, (
             "Visible interim commentary should be remembered so the live Thinking card does not echo it."
         )
-        assert "_stripVisibleAssistantEchoFromThinking" in live_thinking_fn, (
+        assert "_stripLiveVisibleAssistantEchoFromThinking" in live_thinking_fn, (
             "Live Thinking text should suppress exact visible interim commentary echoes."
         )
 

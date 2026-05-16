@@ -528,7 +528,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
   }
-  function _stripVisibleAssistantEchoFromThinking(text, snippets){
+  function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
     (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
       const visible=String(snippet||'').trim();
@@ -538,7 +538,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return out.trim();
   }
   function _liveThinkingText(){
-    const clean=_stripVisibleAssistantEchoFromThinking(liveReasoningText, visibleInterimSnippets);
+    const clean=_stripLiveVisibleAssistantEchoFromThinking(liveReasoningText, visibleInterimSnippets);
     return clean || 'Thinking…';
   }
   function syncInflightAssistantMessage(){
