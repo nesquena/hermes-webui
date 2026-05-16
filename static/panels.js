@@ -4470,11 +4470,11 @@ async function loadProfilesPanel() {
     explainer.innerHTML = `
       <div class="profile-card-header">
         <div style="min-width:0;flex:1">
-          <div class="profile-card-name">Profiles vs workspaces</div>
-          <div class="profile-card-meta">Use profiles for how the agent works; use workspaces for what files it works on.</div>
+          <div class="profile-card-name">${esc(t('profiles_vs_workspaces_title'))}</div>
+          <div class="profile-card-meta">${esc(t('profiles_vs_workspaces_subtitle'))}</div>
         </div>
       </div>`;
-    explainer.onclick = () => _renderProfileConceptHelp(data.active || 'default');
+    explainer.onclick = () => _renderProfileConceptHelp();
     panel.appendChild(explainer);
     if (!data.profiles || !data.profiles.length) {
       const emptyMsg = document.createElement('div');
@@ -4523,19 +4523,19 @@ async function loadProfilesPanel() {
   }
 }
 
-function _renderProfileConceptHelp(activeName){
+function _renderProfileConceptHelp(){
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (!title || !body) return;
-  title.textContent = 'Profiles vs workspaces';
+  title.textContent = t('profiles_vs_workspaces_title');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
-        <div class="detail-card-title">Use profiles for how; workspaces for what</div>
-        <div class="detail-row"><div class="detail-row-label">Profiles</div><div class="detail-row-value">Agent identity, memory, skills, model/provider config, and connected tools. Create profiles for roles like researcher, writer, marketer, or developer when those roles should carry different context or capabilities.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Workspaces</div><div class="detail-row-value">Project or product folders on disk. Use one workspace per repo/product so chat, terminal, and file browsing point at the right files.</div></div>
-        <div class="detail-row"><div class="detail-row-label">Together</div><div class="detail-row-value">A profile can have a default workspace, but you can still switch workspaces for a session. Profiles answer “who is working?”; workspaces answer “where are they working?”</div></div>
+        <div class="detail-card-title">${esc(t('profiles_vs_workspaces_heading'))}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profiles_vs_workspaces_profiles_label'))}</div><div class="detail-row-value">${esc(t('profiles_vs_workspaces_profiles_body'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profiles_vs_workspaces_workspaces_label'))}</div><div class="detail-row-value">${esc(t('profiles_vs_workspaces_workspaces_body'))}</div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('profiles_vs_workspaces_together_label'))}</div><div class="detail-row-value">${esc(t('profiles_vs_workspaces_together_body'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';

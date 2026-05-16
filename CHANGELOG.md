@@ -4,7 +4,7 @@
 
 ### Added
 
-- **PR #2343** by @Michaelyklam (refs #2147) — The Profiles panel now includes an inline "Profiles vs workspaces" explainer. The copy clarifies that profiles control how the agent works — identity, memory, skills, model/provider config, and tools — while workspaces control what project/files a session operates on, making the OpenClaw-style role/profile mental model easier to map onto Hermes WebUI.
+- **PR #2343** by @Michaelyklam (refs #2147) — The Profiles panel now includes an inline localized "Profiles vs workspaces" explainer. The copy clarifies that profiles control how the agent works — identity, memory, skills, model/provider config, and tools — while workspaces control what project/files a session operates on, making the OpenClaw-style role/profile mental model easier to map onto Hermes WebUI.
 
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
 

@@ -1737,6 +1737,8 @@
 .profile-card{padding:8px 10px;margin-bottom:2px;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--muted);transition:background .15s,border-color .15s,color .15s;}
 .profile-card:hover{background:var(--surface);color:var(--text);}
 .profile-card.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.profile-help-card{background:var(--hover-bg);border-color:var(--border2);color:var(--text);}
+.profile-help-card:hover{background:var(--surface);border-color:var(--accent-bg-strong);}
 .profile-card-header{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .profile-card-name{font-size:13px;font-weight:600;color:inherit;}
 .profile-card-name.is-active{color:var(--accent-text);}
