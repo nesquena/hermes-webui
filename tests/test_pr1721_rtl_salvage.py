@@ -61,9 +61,6 @@ def test_rtl_code_blocks_stay_ltr():
     assert ".chat-content-rtl .msg-body pre" in css
     assert ".chat-content-rtl .msg-body code" in css
     # Must force direction:ltr inside code containers
-    code_block = css.split(".chat-content-rtl .msg-body pre")[1].split("}")[0]
-    # The chain ends in a single declaration block — find the closest declaration
-    # to confirm direction:ltr is present in the code-scoped rule
     code_section_start = css.index(".chat-content-rtl .msg-body pre,")
     code_section_end = css.index("}", code_section_start)
     code_section = css[code_section_start:code_section_end]
@@ -74,6 +71,24 @@ def test_rtl_code_blocks_stay_ltr():
     tool_section_end = css.index("}", tool_section_start)
     tool_section = css[tool_section_start:tool_section_end]
     assert "direction:ltr" in tool_section
+
+
+def test_rtl_math_and_tables_stay_ltr():
+    """KaTeX math, diff blocks, CSV tables, and file paths stay LTR even under RTL.
+    Opus advisor catch on stage-371 (2026-05-16): math is LTR-only in standard
+    notation, CSV columns must read left-to-right regardless of locale."""
+    css = STYLE.read_text(encoding="utf-8")
+    katex_section_start = css.index(".chat-content-rtl .msg-body .katex,")
+    katex_section_end = css.index("}", katex_section_start)
+    katex_section = css[katex_section_start:katex_section_end]
+    # Must include all four key surfaces
+    assert ".katex-display" in katex_section
+    assert ".diff-block" in katex_section
+    assert ".csv-table" in katex_section
+    assert ".skill-file-path" in katex_section
+    # Must force direction:ltr
+    assert "direction:ltr" in katex_section
+    assert "text-align:left" in katex_section
 
 
 def test_rtl_setting_round_trips_through_panels_js():

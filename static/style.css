@@ -1154,9 +1154,13 @@
      mobile-config drawer; laptop desktop users can find quota in
      Settings → Providers (the chip's onclick target). Show only on wide
      desktop where there's genuine room. Aron's standing position on
-     composer real estate (PR #1721, May 13 2026) reinforces this. */
-  @media (max-width:1400px){
-    .icon-btn.provider-quota-chip,
+     composer real estate (PR #1721, May 13 2026) reinforces this.
+
+     Using 1399.98px rather than 1400px to avoid the one-pixel boundary
+     overlap with the existing @media (min-width:1400px) `.messages-inner`
+     rule at line 893 — at exactly 1400px both would fire, so the chip
+     was hidden AT the wide-desktop boundary where it should first appear. */
+  @media (max-width:1399.98px){
     .provider-quota-chip{display:none!important;}
   }
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
@@ -4082,6 +4086,25 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .chat-content-rtl .msg-body .code-block,
 .chat-content-rtl .msg-body .code-block *,
 .chat-content-rtl .msg-body pre *{
+  direction:ltr;
+  text-align:left;
+  unicode-bidi:isolate;
+}
+/* Force LTR for content classes that render English-by-design even in chat:
+   KaTeX equations (math is LTR-only in standard notation), diff hunks
+   (file paths + line numbers), CSV tables (column order must stay
+   left-to-right), and skill file paths. */
+.chat-content-rtl .msg-body .katex,
+.chat-content-rtl .msg-body .katex-block,
+.chat-content-rtl .msg-body .katex-display,
+.chat-content-rtl .msg-body .katex-html,
+.chat-content-rtl .msg-body .katex-inline,
+.chat-content-rtl .msg-body .diff-block,
+.chat-content-rtl .msg-body .diff-block *,
+.chat-content-rtl .msg-body .csv-table-wrap,
+.chat-content-rtl .msg-body .csv-table,
+.chat-content-rtl .msg-body .csv-table *,
+.chat-content-rtl .msg-body .skill-file-path{
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
