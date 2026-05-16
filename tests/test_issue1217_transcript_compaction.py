@@ -223,6 +223,41 @@ def test_explicit_continue_keeps_compacted_active_task_context(tmp_path):
     assert _context_messages_for_new_turn(session, "继续") == compacted_task_context
 
 
+def test_all_cjk_greetings_drop_stale_compaction_context(tmp_path):
+    """Pin every CJK greeting in the casual-fresh-chat set against a stale
+    compaction context. Catches typos like \\u5616 (嘖, "click of tongue")
+    or \\u5582 (喂, "hey on phone") slipping into the greeting set where
+    \\u55c9 (嗨, "hai") and \\u55bd (喽, "luo") were intended."""
+    compacted_task_context = [
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] active task: X — resume exactly. in_progress."
+            ),
+        },
+        {"role": "assistant", "content": "I will continue task X"},
+    ]
+    session = Session(
+        session_id="issue2308-cjk-all",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+        context_messages=compacted_task_context,
+    )
+
+    # Every CJK greeting in _is_casual_fresh_chat_message must drop the stale context.
+    # If a typo lands a wrong codepoint here, the user's greeting won't be recognized
+    # and the stale "resume active task" prompt will silently leak back through.
+    for greeting in ("你好", "您好", "嗨", "哈喽", "在吗", "在么"):
+        assert _context_messages_for_new_turn(session, greeting) == [], (
+            f"CJK greeting {greeting!r} (U+{ord(greeting[0]):04X}"
+            f"{'+'+'U+%04X' % ord(greeting[1]) if len(greeting) > 1 else ''}) "
+            f"was not recognized as a casual fresh chat — stale compaction context leaked"
+        )
+
+
 def test_retry_truncates_model_context_when_it_is_separate(monkeypatch, tmp_path):
     import api.session_ops as session_ops
 

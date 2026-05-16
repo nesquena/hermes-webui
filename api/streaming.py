@@ -2172,12 +2172,12 @@ def _is_casual_fresh_chat_message(msg_text):
         "hi there",
         # CJK greetings (zh-CN): nihao, ninhao, hai, haluo, zaima, zaime.
         # Same escape-sequence rationale as the continuation block above.
-        "\u4f60\u597d",
-        "\u60a8\u597d",
-        "\u5616",
-        "\u54c8\u5582",
-        "\u5728\u5417",
-        "\u5728\u4e48",
+        "\u4f60\u597d",         # nihao
+        "\u60a8\u597d",         # ninhao
+        "\u55e8",               # hai (was \u5616 = "click of tongue", not a greeting)
+        "\u54c8\u55bd",         # haluo (was \u54c8\u5582 = uncommon "ha-wei" variant)
+        "\u5728\u5417",         # zaima
+        "\u5728\u4e48",         # zaime
     }
 
 
