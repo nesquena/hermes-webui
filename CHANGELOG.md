@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2375** by @Michaelyklam (closes #2374) — Markdown tables rendered by chat messages now stay as block-level `<table>` elements instead of being wrapped in paragraph tags by the renderer's final paragraph pass. This keeps CommonMark-style pipe tables visible as tables across browsers.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
