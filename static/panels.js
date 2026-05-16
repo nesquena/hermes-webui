@@ -5669,7 +5669,7 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
     list.innerHTML='';
     _providerCardEls.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
@@ -5682,8 +5682,15 @@ async function loadProvidersPanel(){
     if(empty) empty.style.display='none';
     list.style.display='';
     for(const p of providers){
-      list.appendChild(_buildProviderCard(p));
+      list.appendChild(p.is_custom?_buildCustomProviderCard(p):_buildProviderCard(p));
     }
+    // Add custom provider button
+    const addBtn=document.createElement('button');
+    addBtn.className='sm-btn';
+    addBtn.style.cssText='margin-top:8px;width:100%;padding:8px;font-weight:600';
+    addBtn.textContent=t('add_custom_provider')||'+ Add Custom Provider';
+    addBtn.onclick=_showAddCustomProviderForm;
+    list.appendChild(addBtn);
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
@@ -6159,6 +6166,252 @@ async function _removeProviderKey(providerId){
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
   }
 }
+
+/**
+ * Build an editable card for a custom (config.yaml) provider.
+ */
+function _buildCustomProviderCard(p){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.provider=p.id;
+
+  const modelCount=Number.isFinite(p.models_total)?p.models_total:(Array.isArray(p.models)?p.models.length:0);
+
+  // Header
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(p.display_name)}</div>
+      <div class="provider-card-meta">${esc(t('providers_custom_provider')||'Custom')} ${modelCount>0?'· '+modelCount+(modelCount===1?' model':' models'):''} · ${p.has_key?esc(t('providers_status_configured'))||'Configured':esc(t('providers_status_not_configured_label'))||'No key'}</div>
+    </div>
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
+  card.appendChild(header);
+
+  // Body
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // Base URL field
+  _appendFieldRow(body,t('providers_base_url')||'Base URL','url',p.base_url||'');
+  // API Mode field
+  _appendFieldRow(body,t('providers_api_mode')||'API Mode','mode',p.api_mode||'openai_compatible');
+  // API Key field
+  _appendFieldRow(body,t('providers_api_key')||'API Key','key','');
+  // Models field
+  const modelsStr=Array.isArray(p.models)?p.models.map(m=>m.id||m.label||m).join(', '):'';
+  _appendFieldRow(body,t('providers_models')||'Models','models',modelsStr);
+
+  // Buttons row
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.cssText='display:flex;gap:6px;margin-top:8px';
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('providers_save');
+  saveBtn.onclick=()=>_saveCustomProviderCard(card,p.id);
+  btnRow.appendChild(saveBtn);
+
+  const deleteBtn=document.createElement('button');
+  deleteBtn.type='button';
+  deleteBtn.className='provider-card-btn provider-card-btn-danger';
+  deleteBtn.textContent=t('providers_remove')||'Delete';
+  deleteBtn.onclick=()=>_deleteCustomProviderCard(card,p.display_name);
+  btnRow.appendChild(deleteBtn);
+
+  body.appendChild(btnRow);
+  card.appendChild(body);
+
+  // Toggle
+  header.addEventListener('click',()=>card.classList.toggle('open'));
+  return card;
+}
+
+function _appendFieldRow(container,label,name,value){
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  const lbl=document.createElement('label');
+  lbl.className='provider-card-label';
+  lbl.textContent=label;
+  field.appendChild(lbl);
+
+  if(name==='mode'){
+    const sel=document.createElement('select');
+    sel.className='provider-card-input';
+    sel.name=name;
+    sel.style.cssText='width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px';
+    const modes=['openai_compatible','anthropic_messages','codex_responses'];
+    for(const m of modes){
+      const opt=document.createElement('option');
+      opt.value=m;
+      opt.textContent=m;
+      if(m===value) opt.selected=true;
+      sel.appendChild(opt);
+    }
+    field.appendChild(sel);
+  } else if(name==='key'){
+    const row=document.createElement('div');
+    row.className='provider-card-row';
+    const input=document.createElement('input');
+    input.type='password';
+    input.className='provider-card-input';
+    input.name=name;
+    input.placeholder=t('providers_key_placeholder_new')||'Enter API key';
+    input.autocomplete='off';
+    const toggleBtn=document.createElement('button');
+    toggleBtn.type='button';
+    toggleBtn.className='provider-card-btn provider-card-btn-ghost';
+    toggleBtn.textContent='Show';
+    toggleBtn.onclick=()=>{
+      const revealed=input.type==='text';
+      input.type=revealed?'password':'text';
+      toggleBtn.textContent=revealed?'Show':'Hide';
+    };
+    row.appendChild(input);
+    row.appendChild(toggleBtn);
+    field.appendChild(row);
+  } else {
+    const input=document.createElement('input');
+    input.type=name==='url'?'url':'text';
+    input.className='provider-card-input';
+    input.name=name;
+    input.value=value;
+    input.autocomplete='off';
+    input.style.cssText='width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px';
+    field.appendChild(input);
+  }
+  container.appendChild(field);
+}
+
+function _getCustomProviderCardData(card){
+  const name=card.querySelector('[data-provider]')?card.dataset.provider:'';
+  const inputs=card.querySelectorAll('input[name], select[name]');
+  const data={name:'',base_url:'',api_key:'',api_mode:'openai_compatible',models:[]};
+  for(const el of inputs){
+    if(el.name==='url') data.base_url=el.value.trim();
+    else if(el.name==='key') data.api_key=el.value.trim();
+    else if(el.name==='mode') data.api_mode=el.value;
+    else if(el.name==='models'){
+      data.models=el.value.split(',').map(s=>s.trim()).filter(Boolean);
+    }
+  }
+  // Get display_name from the card header
+  const nameEl=card.querySelector('.provider-card-name');
+  if(nameEl) data.name=nameEl.textContent;
+  return data;
+}
+
+async function _saveCustomProviderCard(card,providerId){
+  const data=_getCustomProviderCardData(card);
+  // Use the display_name from header as the name to match config.yaml entries
+  data.name=data.name||(card.dataset.provider||'').replace(/^custom:/,'');
+  const saveBtn=card.querySelector('.provider-card-btn-primary');
+  if(saveBtn){
+    saveBtn.disabled=true;
+    saveBtn.textContent=t('providers_saving');
+  }
+  try{
+    const res=await api('/api/custom-providers',{
+      method:'POST',
+      body:JSON.stringify(data)
+    });
+    if(res.ok){
+      showToast(data.name+' '+res.action);
+      await loadProvidersPanel();
+    }else{
+      showToast(res.error||'Failed to save custom provider');
+      if(saveBtn){saveBtn.disabled=false;saveBtn.textContent=t('providers_save');}
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    if(saveBtn){saveBtn.disabled=false;saveBtn.textContent=t('providers_save');}
+  }
+}
+
+async function _deleteCustomProviderCard(card,displayName){
+  const name=displayName||(card.dataset.provider||'').replace(/^custom:/,'');
+  const confirmed=await showConfirmDialog({
+    title:t('providers_delete_confirm_title')||'Delete custom provider',
+    message:t('providers_delete_confirm')||'Delete custom provider "'+name+'"? This cannot be undone.',
+    confirmLabel:t('providers_delete')||'Delete',
+    danger:true,
+    focusCancel:true
+  });
+  if(!confirmed) return;
+  const deleteBtn=card.querySelector('.provider-card-btn-danger');
+  if(deleteBtn){
+    deleteBtn.disabled=true;
+    deleteBtn.textContent=t('providers_removing')||'Removing...';
+  }
+  try{
+    const res=await api('/api/custom-providers',{
+      method:'DELETE',
+      body:JSON.stringify({name:name})
+    });
+    if(res.ok){
+      showToast(name+' '+t('providers_key_removed')||'deleted');
+      await loadProvidersPanel();
+    }else{
+      showToast(res.error||'Failed to delete custom provider');
+      if(deleteBtn){deleteBtn.disabled=false;deleteBtn.textContent=t('providers_remove')||'Delete';}
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    if(deleteBtn){deleteBtn.disabled=false;deleteBtn.textContent=t('providers_remove')||'Delete';}
+  }
+}
+
+async function _showAddCustomProviderForm(){
+  // Dummy provider object with empty fields for the card builder
+  const dummy={
+    id:'custom:new',
+    display_name:'',
+    base_url:'https://',
+    api_mode:'openai_compatible',
+    has_key:false,
+    models:[],
+    models_total:0,
+    is_custom:true,
+  };
+  const list=$('providersList');
+  if(!list) return;
+  const card=_buildCustomProviderCard(dummy);
+  card.classList.add('open');
+
+  // Make name editable — replace the display_name with an input
+  const nameEl=card.querySelector('.provider-card-name');
+  if(nameEl){
+    const nameInput=document.createElement('input');
+    nameInput.type='text';
+    nameInput.className='provider-card-input';
+    nameInput.name='display_name';
+    nameInput.placeholder=t('providers_name_placeholder')||'e.g. my-provider';
+    nameInput.autocomplete='off';
+    nameInput.style.cssText='width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px;font-weight:600';
+    nameEl.innerHTML='';
+    nameEl.appendChild(nameInput);
+  }
+
+  // Insert before the add button
+  const addBtn=list.querySelector('.sm-btn:last-child');
+  if(addBtn) list.insertBefore(card,addBtn);
+  else list.appendChild(card);
+
+  card.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+// Override _getCustomProviderCardData for new providers to read the name input
+const _origGetData=_getCustomProviderCardData;
+_getCustomProviderCardData=function(card){
+  const data=_origGetData(card);
+  const nameInput=card.querySelector('input[name="display_name"]');
+  if(nameInput) data.name=nameInput.value.trim();
+  return data;
+};
 
 // Shared dropdown-cache flush invoked after a provider add/remove. The
 // server-side TTL cache is already invalidated by /api/providers and

@@ -88,11 +88,23 @@ class TestCustomProvidersInGetProviders:
             assert glmcode["has_key"] is True, (
                 "glmcode should detect key from ${GLMCODE_API_KEY} env var"
             )
-            assert glmcode["configurable"] is False, (
-                "custom providers should not be configurable via WebUI"
+            assert glmcode["configurable"] is True, (
+                "custom providers should now be configurable via WebUI"
             )
             assert glmcode["key_source"] == "config_yaml"
             assert glmcode["display_name"] == "glmcode"
+            assert glmcode["is_custom"] is True, (
+                "custom providers should be flagged as is_custom"
+            )
+            assert glmcode["base_url"] == "https://open.bigmodel.cn/api/coding/paas/v4", (
+                f"Expected base_url, got: {glmcode['base_url']}"
+            )
+            assert glmcode["api_mode"] == "openai_compatible", (
+                f"Expected api_mode openai_compatible, got: {glmcode['api_mode']}"
+            )
+            assert glmcode["models_total"] == 1, (
+                f"Expected models_total is 1, got: {glmcode['models_total']}"
+            )
 
             # Model list — single model entry
             model_ids = {m["id"] for m in glmcode["models"]}

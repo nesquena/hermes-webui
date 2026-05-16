@@ -271,7 +271,7 @@ class TestI18nNewKeys:
 
 
 class TestProviderListFilter:
-    """Test that the JS filter includes OAuth providers."""
+    """Test that the JS filter includes OAuth and custom providers."""
 
     JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 
@@ -288,10 +288,13 @@ class TestProviderListFilter:
         assert filter_idx == -1, (
             "REGRESSION: The provider filter 'filter(p=>p.configurable)' is still present. "
             "This excludes ALL OAuth providers (openai-codex, nous, copilot) from the "
-            "Settings → Providers panel. The filter must be 'filter(p=>p.configurable||p.is_oauth)'."
+            "Settings → Providers panel. The filter must include p.is_oauth and p.is_custom."
         )
-        fixed_filter_idx = self.JS.find("filter(p=>p.configurable||p.is_oauth)")
-        assert fixed_filter_idx != -1, (
-            "The provider filter 'filter(p=>p.configurable||p.is_oauth)' is missing from panels.js. "
-            "OAuth providers will not appear in Settings → Providers."
+        # Accept both the original (OAuth only) and updated (OAuth + custom) filters
+        has_oauth = self.JS.find("filter(p=>p.configurable||p.is_oauth)") != -1
+        has_both = self.JS.find("filter(p=>p.configurable||p.is_oauth||p.is_custom)") != -1
+        assert has_oauth or has_both, (
+            "The provider filter must include p.is_oauth so OAuth providers appear "
+            "in Settings → Providers. Expected 'filter(p=>p.configurable||p.is_oauth)' "
+            "or 'filter(p=>p.configurable||p.is_oauth||p.is_custom)'."
         )

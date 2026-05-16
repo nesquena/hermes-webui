@@ -2008,7 +2008,7 @@ from api.streaming import (
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
-from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
+from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key, set_custom_provider, delete_custom_provider
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -4355,6 +4355,39 @@ def handle_post(handler, parsed) -> bool:
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
+
+    # ── Custom Providers (POST) ──
+    if parsed.path == "/api/custom-providers":
+        if handler.command == "POST":
+            cp_name = (body.get("name") or "").strip()
+            cp_base_url = (body.get("base_url") or "").strip()
+            cp_api_key = body.get("api_key") or ""
+            cp_api_mode = (body.get("api_mode") or "openai_compatible").strip()
+            cp_models = body.get("models")
+            if isinstance(cp_models, list):
+                cp_models = [str(m).strip() for m in cp_models if m]
+            elif isinstance(cp_models, str):
+                cp_models = [m.strip() for m in cp_models.split(",") if m.strip()]
+
+            result = set_custom_provider(
+                name=cp_name,
+                base_url=cp_base_url,
+                api_key=cp_api_key,
+                api_mode=cp_api_mode,
+                models=cp_models,
+            )
+            if not result.get("ok"):
+                return bad(handler, result.get("error", "Unknown error"))
+            return j(handler, result)
+
+        elif handler.command == "DELETE":
+            cp_name = (body.get("name") or "").strip()
+            if not cp_name:
+                return bad(handler, "name is required")
+            result = delete_custom_provider(cp_name)
+            if not result.get("ok"):
+                return bad(handler, result.get("error", "Unknown error"))
+            return j(handler, result)
 
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys

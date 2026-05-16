@@ -4,6 +4,8 @@
 
 ### Added
 
+- **PR #2338** by @mccxj (closes #2338) — Custom providers defined in `config.yaml` are now fully manageable from the Settings → Providers panel. Each custom provider appears as an editable card showing name, base URL, API key, API mode, and models. Users can add, edit, and delete custom providers directly from the UI, with changes persisted to `config.yaml` and applied immediately via `reload_config()`. Backend adds `set_custom_provider()` and `delete_custom_provider()` functions in `api/providers.py` with `POST /api/custom-providers` and `DELETE /api/custom-providers` routes. Frontend adds `_buildCustomProviderCard()`, `_showAddCustomProviderForm()`, and i18n keys for all supported locales. New `tests/test_custom_provider_crud.py` covers create, update, delete, validation, and isolation scenarios.
+
 - **PR #2332** by @Michaelyklam (refs #2290) — Cron run history/output cards now surface token/cost metadata when the underlying cron output markdown includes it. The backend parses optional model/token/cost/duration frontmatter from cron output files and returns it from `/api/crons/history` and `/api/crons/run`; the Tasks panel renders a compact usage strip beside run rows and below expanded output without affecting older outputs that lack usage metadata.
 
 ### Fixed

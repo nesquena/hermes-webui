@@ -1689,9 +1689,13 @@ def get_providers() -> dict[str, Any]:
                 "id": cp_id,
                 "display_name": cp_name,
                 "has_key": cp_has_key,
-                "configurable": False,  # custom providers managed via config.yaml
+                "configurable": True,  # custom providers are now manageable via WebUI
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
+                "models_total": len(cp_models),
+                "is_custom": True,
+                "base_url": str(cp.get("base_url", "") or ""),
+                "api_mode": str(cp.get("api_mode", "openai_compatible") or ""),
             })
 
     # Determine active provider
@@ -1859,3 +1863,156 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             reload_config()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
+
+
+def set_custom_provider(
+    name: str,
+    base_url: str = "",
+    api_key: str = "",
+    api_mode: str = "openai_compatible",
+    models: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update a custom provider in config.yaml.
+
+    If a custom provider with the same name already exists, its fields are
+    updated in-place. Otherwise a new entry is appended.
+
+    Returns a status dict with the operation result.
+    """
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return {"ok": False, "error": "Provider name is required."}
+
+    models = models or []
+    if isinstance(models, list):
+        models = [str(m).strip() for m in models if m and str(m).strip()]
+
+    base_url = (base_url or "").strip()
+    if not base_url:
+        return {"ok": False, "error": "Base URL is required."}
+
+    if not api_key:
+        api_key = ""  # allow empty key (for keyless providers like local ollama)
+
+    api_mode = (api_mode or "openai_compatible").strip()
+
+    from api.config import _cfg_lock
+
+    try:
+        import api.config as _config
+
+        config_path = _config._get_config_path()
+    except Exception:
+        return {"ok": False, "error": "Failed to locate config.yaml"}
+
+    try:
+        import yaml as _yaml
+
+        changed = False
+        new_entry = {
+            "name": raw_name,
+            "base_url": base_url,
+            "api_mode": api_mode,
+        }
+        if api_key:
+            new_entry["api_key"] = api_key
+        if models:
+            new_entry["models"] = models
+
+        with _cfg_lock:
+            raw = config_path.read_text(encoding="utf-8")
+            cfg = _yaml.safe_load(raw)
+            if not isinstance(cfg, dict):
+                cfg = {}
+
+            # Ensure custom_providers is a list
+            custom_providers = cfg.get("custom_providers", [])
+            if not isinstance(custom_providers, list):
+                custom_providers = []
+
+            # Try to find existing entry with the same name
+            found = False
+            for i, cp in enumerate(custom_providers):
+                if isinstance(cp, dict) and str(cp.get("name", "")).strip() == raw_name:
+                    # Update in-place
+                    custom_providers[i] = new_entry
+                    found = True
+                    changed = True
+                    break
+
+            if not found:
+                custom_providers.append(new_entry)
+                changed = True
+
+            cfg["custom_providers"] = custom_providers
+
+            if changed:
+                _save_yaml_config_file(config_path, cfg)
+
+        if changed:
+            reload_config()
+
+        return {
+            "ok": True,
+            "name": raw_name,
+            "action": "updated" if found else "created",
+        }
+    except Exception as exc:
+        logger.exception("Failed to save custom provider %s", raw_name)
+        return {"ok": False, "error": f"Failed to save custom provider: {exc}"}
+
+
+def delete_custom_provider(name: str) -> dict[str, Any]:
+    """Remove a custom provider from config.yaml.
+
+    Returns a status dict with the operation result.
+    """
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return {"ok": False, "error": "Provider name is required."}
+
+    from api.config import _cfg_lock
+
+    try:
+        import api.config as _config
+
+        config_path = _config._get_config_path()
+    except Exception:
+        return {"ok": False, "error": "Failed to locate config.yaml"}
+
+    try:
+        import yaml as _yaml
+
+        changed = False
+
+        with _cfg_lock:
+            raw = config_path.read_text(encoding="utf-8")
+            cfg = _yaml.safe_load(raw)
+            if not isinstance(cfg, dict):
+                return {"ok": False, "error": "Invalid config.yaml"}
+
+            custom_providers = cfg.get("custom_providers", [])
+            if not isinstance(custom_providers, list):
+                return {"ok": False, "error": "No custom providers found"}
+
+            new_custom_providers = [
+                cp
+                for cp in custom_providers
+                if not (isinstance(cp, dict) and str(cp.get("name", "")).strip() == raw_name)
+            ]
+            if len(new_custom_providers) < len(custom_providers):
+                cfg["custom_providers"] = new_custom_providers
+                changed = True
+
+            if not changed:
+                return {"ok": False, "error": f"Custom provider '{raw_name}' not found"}
+
+            _save_yaml_config_file(config_path, cfg)
+
+        if changed:
+            reload_config()
+
+        return {"ok": True, "name": raw_name, "action": "deleted"}
+    except Exception as exc:
+        logger.exception("Failed to delete custom provider %s", raw_name)
+        return {"ok": False, "error": f"Failed to delete custom provider: {exc}"}
