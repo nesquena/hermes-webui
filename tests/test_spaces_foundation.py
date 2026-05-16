@@ -7879,6 +7879,102 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
     assert "raw prompt" not in serialized
 
 
+def test_space_tool_adapter_non_current_repair_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "noncurrent-repair-target", "name": "Noncurrent Repair Target"})
+    before_manifest = spaces.read_space(target["space_id"])
+    before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    for action in (
+        "space.recovery.repair_space",
+        "space.safe_mode.repair",
+        "space.admin.repair",
+        "space.admin.recovery.repair_space",
+        "space.recovery.space_repair_events",
+        "space.safe_mode.repair_events",
+        "space.admin.recovery.space_repair_events",
+    ):
+        for payload in (
+            {
+                "activeSpaceId": target["space_id"],
+                "prompt": "repair renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {"safe_note": "must not queue"},
+                "limit": 5,
+            },
+            {
+                "spaceId": target["space_id"],
+                "currentSpaceId": target["space_id"],
+                "prompt": "repair renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {"safe_note": "must not queue"},
+                "limit": 5,
+            },
+        ):
+            with pytest.raises(ValueError, match="current-space selectors"):
+                spaces.run_space_tool(action, payload)
+
+    serialized = json.dumps(spaces.recovery_snapshot()).lower()
+    assert spaces.read_space(target["space_id"]) == before_manifest
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+    assert spaces.list_space_repair_events(target["space_id"]) == []
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_non_current_quarantine_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for index, action in enumerate(
+        (
+            "space.recovery.disable",
+            "space.safe_mode.disable",
+            "space.admin.disable_space",
+            "space.admin.recovery.disable_space",
+        )
+    ):
+        created = spaces.create_space({"space_id": f"noncurrent-disable-{index}", "name": f"Noncurrent Disable {index}"})
+        before_manifest = spaces.read_space(created["space_id"])
+        for payload in (
+            {"activeSpaceId": created["space_id"], "reason": "renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>"},
+            {
+                "spaceId": created["space_id"],
+                "currentSpaceId": created["space_id"],
+                "reason": "renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            },
+        ):
+            with pytest.raises(ValueError, match="current-space selectors"):
+                spaces.run_space_tool(action, payload)
+        assert spaces.read_space(created["space_id"]) == before_manifest
+        assert spaces.read_space(created["space_id"]).get("recovery", {}).get("disabled") is not True
+
+    for index, action in enumerate(
+        (
+            "space.recovery.enable",
+            "space.safe_mode.enable",
+            "space.admin.enable_space",
+            "space.admin.recovery.enable_space",
+        )
+    ):
+        created = spaces.create_space({"space_id": f"noncurrent-enable-{index}", "name": f"Noncurrent Enable {index}"})
+        spaces.disable_space_for_recovery(created["space_id"], reason="trusted baseline quarantine")
+        before_manifest = spaces.read_space(created["space_id"])
+        for payload in (
+            {"activeSpaceId": created["space_id"]},
+            {"spaceId": created["space_id"], "currentSpaceId": created["space_id"]},
+        ):
+            with pytest.raises(ValueError, match="current-space selectors"):
+                spaces.run_space_tool(action, payload)
+        assert spaces.read_space(created["space_id"]) == before_manifest
+        assert spaces.read_space(created["space_id"]).get("recovery", {}).get("disabled") is True
+
+    serialized = json.dumps(spaces.recovery_snapshot()).lower()
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_safe_mode_repair_aliases_queue_and_list_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "safe-mode-space-repair", "name": "Safe Mode Space Repair"})

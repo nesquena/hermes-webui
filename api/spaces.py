@@ -3107,6 +3107,16 @@ def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: i
     return str(raw or "").strip()
 
 
+def _space_tool_non_current_space_id(payload: dict[str, Any]) -> str:
+    """Return an explicit non-current Space target, rejecting ambient current selectors."""
+    for key in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
+        if str(payload.get(key) or "").strip():
+            raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
+    if str(_space_tool_arg(payload, 0) or "").strip():
+        raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
+    return _space_tool_space_id_alias(payload)
+
+
 def _space_tool_widget_id_alias(payload: dict[str, Any]) -> str:
     """Return an explicit widget id from named snake/camel/legacy aliases only."""
     _space_tool_assert_matching_aliases(
@@ -4017,7 +4027,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.repair",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         result = queue_space_repair_event(
             space_id,
             data.get("payload") if "payload" in data else {},
@@ -4039,7 +4049,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.space_repair_events",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         response = {
             "ok": True,
             "action": name,
@@ -4067,7 +4077,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.disablespace",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
         if is_current:
@@ -4091,7 +4101,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.enablespace",
     }:
         is_current = name.startswith("space.current.")
-        space_id = validate_space_id(_space_tool_current_id(data))
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
         result = enable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
         if is_current:
