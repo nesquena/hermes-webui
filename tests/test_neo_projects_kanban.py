@@ -405,6 +405,28 @@ def test_kanban_js_pills_drive_status_filter_state():
     assert "state.filters.status" in src
 
 
+def test_kanban_js_filters_jira_by_tenant_source_id():
+    """Jira tenant filtering must use external_ref.source_id, not only type='jira'."""
+    src = _read(KANBAN_JS)
+    assert "function _taskSourceId" in src
+    assert "ext.source_id" in src
+    assert "f.source.size && !f.source.has(_taskSourceId(task))" in src
+    assert "state.sources" in src
+    assert "sourceLabelById" in src
+    assert "jira_cotin_delog" not in src, "tenant ids must be data-driven, not hardcoded"
+    assert "jira_300solucoes_kan" not in src, "tenant ids must be data-driven, not hardcoded"
+    assert "jira_melojrxdev_fin" not in src, "tenant ids must be data-driven, not hardcoded"
+
+
+def test_kanban_js_summary_respects_active_task_filters():
+    """Resumo must not show projects/cards with no tasks matching the active tenant filter."""
+    src = _read(KANBAN_JS)
+    assert "function _visibleTasks" in src
+    assert "state.tasks.filter(t => (state.showArchived || !t.archived) && _matchesFilters(t))" in src
+    assert "const visibleTasks = _visibleTasks();" in src
+    assert "visibleTasks.some(t => t.project_id === p.project_id)" in src
+
+
 @pytest.mark.parametrize(
     "selector",
     [

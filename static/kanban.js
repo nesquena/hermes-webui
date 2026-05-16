@@ -153,7 +153,7 @@
     if (f.status.size && !f.status.has(task.status)) return false;
     if (f.project_id.size && !f.project_id.has(task.project_id)) return false;
     if (f.priority.size && !f.priority.has(task.priority)) return false;
-    if (f.source.size && !f.source.has(_taskSource(task))) return false;
+    if (f.source.size && !f.source.has(_taskSourceId(task))) return false;
     if (f.owner.size && !f.owner.has(task.owner || '')) return false;
     if (f.due && !_matchesDueFilter(task, f.due)) return false;
     if (f.text) {
@@ -169,9 +169,34 @@
     return true;
   }
 
-  function _taskSource(task) {
+  function _taskSourceId(task) {
     const ext = task && task.external_ref;
-    return ext && ext.type ? String(ext.type).trim().toLowerCase() : 'local';
+    if (ext && ext.source_id) return String(ext.source_id).trim();
+    if (ext && ext.type) return String(ext.type).trim().toLowerCase();
+    return 'local';
+  }
+
+  function _taskSource(task) {
+    return _taskSourceId(task);
+  }
+
+  function _sourceLabelById() {
+    const sourceLabelById = new Map();
+    state.sources.forEach(src => {
+      if (src && src.source_id) sourceLabelById.set(String(src.source_id), src.name || src.source_id);
+    });
+    sourceLabelById.set('local', _t('projects_source_local', 'Local'));
+    return sourceLabelById;
+  }
+
+  function _sourceLabel(sourceId) {
+    const sourceLabelById = _sourceLabelById();
+    if (sourceLabelById.has(sourceId)) return sourceLabelById.get(sourceId);
+    return sourceId === 'local' ? _t('projects_source_local', 'Local') : String(sourceId || '').toUpperCase();
+  }
+
+  function _visibleTasks() {
+    return state.tasks.filter(t => (state.showArchived || !t.archived) && _matchesFilters(t));
   }
 
   function _parseDateOnly(value) {
@@ -248,8 +273,8 @@
 
     const ext = task.external_ref;
     let extLabel = '';
-    if (ext && (ext.key || ext.type)) {
-      const chip = `<span class="kanban-card-ref" data-ref-type="${_esc(ext.type || 'local')}">${_esc((ext.type || 'local').toUpperCase())}${ext.key ? ' · ' + _esc(ext.key) : ''}</span>`;
+    if (ext && (ext.key || ext.type || ext.source_id)) {
+      const chip = `<span class="kanban-card-ref" data-ref-type="${_esc(_taskSourceId(task))}">${_esc(_sourceLabel(_taskSourceId(task)))}${ext.key ? ' · ' + _esc(ext.key) : ''}</span>`;
       extLabel = ext.url
         ? `<a href="${_esc(ext.url)}" target="_blank" rel="noopener" class="kanban-card-ref-link">${chip}</a>`
         : chip;
@@ -307,7 +332,7 @@
   function renderKanban() {
     const root = $id('projectsKanban');
     if (!root) return;
-    const visible = state.tasks.filter(t => (state.showArchived || !t.archived) && _matchesFilters(t));
+    const visible = _visibleTasks();
     const byStatus = { backlog: [], em_andamento: [], em_revisao: [], concluido: [] };
     visible.forEach(t => { (byStatus[t.status] || (byStatus[t.status] = [])).push(t); });
 
@@ -333,8 +358,7 @@
       case 'owner':    return String(task.owner || '').toLowerCase();
       case 'status':   return STATUS_RANK[task.status] != null ? STATUS_RANK[task.status] : 99;
       case 'source': {
-        const ref = task.external_ref;
-        return ref && ref.type ? String(ref.type).toLowerCase() : 'local';
+        return _taskSourceId(task).toLowerCase();
       }
       default: return '';
     }
@@ -406,7 +430,7 @@
   function renderList() {
     const tbody = $id('projectsListBody');
     if (!tbody) return;
-    const visible = state.tasks.filter(t => (state.showArchived || !t.archived) && _matchesFilters(t));
+    const visible = _visibleTasks();
 
     // Sort.
     const sortKey = state.list.sortKey;
@@ -429,8 +453,9 @@
       tr.dataset.taskId = task.task_id;
       tr.addEventListener('click', () => openTaskModal(task));
       const ext = task.external_ref;
-      const refLabel = ext && ext.type
-        ? `${_esc((ext.type || '').toUpperCase())}${ext.key ? ' · ' + _esc(ext.key) : ''}`
+      const sourceLabel = _sourceLabel(_taskSourceId(task));
+      const refLabel = ext && (ext.type || ext.source_id)
+        ? `${_esc(sourceLabel)}${ext.key ? ' · ' + _esc(ext.key) : ''}`
         : _t('projects_source_local', 'Local');
       const statusLabel = _t('projects_col_' + (task.status === 'em_andamento' ? 'in_progress' : task.status === 'em_revisao' ? 'in_review' : task.status === 'concluido' ? 'completed' : 'backlog'), task.status);
       tr.innerHTML = `
@@ -529,13 +554,14 @@
   }
 
   function _renderProjectsGrid(container) {
-    const active = state.projects.filter(p => !p.archived);
+    const visibleTasks = _visibleTasks();
+    const active = state.projects.filter(p => !p.archived && visibleTasks.some(t => t.project_id === p.project_id));
     if (!active.length) {
       container.innerHTML = '<p class="projects-summary-empty">' + _esc(_t('projects_summary_no_tasks', 'Nenhuma tarefa ainda')) + '</p>';
       return;
     }
     const cards = active.map(p => {
-      const tasks = state.tasks.filter(t => t.project_id === p.project_id && !t.archived);
+      const tasks = visibleTasks.filter(t => t.project_id === p.project_id);
       const done = tasks.filter(t => t.status === 'concluido').length;
       const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
       return '<article class="project-summary-card" data-project-id="' + _esc(p.project_id) + '" tabindex="0" role="button">'
@@ -1108,9 +1134,9 @@
     if (srcBox) {
       srcBox.innerHTML = '';
       const sources = Array.from(new Set(
-        ['local'].concat(state.tasks.filter(t => !t.archived).map(_taskSource).filter(Boolean))
-      )).sort((a, b) => (a === 'local' ? -1 : b === 'local' ? 1 : a.localeCompare(b)));
-      sources.forEach(s => _renderFilterCheckbox(srcBox, 'source', s, s === 'local' ? _t('projects_source_local', 'Local') : s.toUpperCase()));
+        ['local'].concat(state.tasks.filter(t => !t.archived).map(_taskSourceId).filter(Boolean))
+      )).sort((a, b) => (a === 'local' ? -1 : b === 'local' ? 1 : _sourceLabel(a).localeCompare(_sourceLabel(b))));
+      sources.forEach(s => _renderFilterCheckbox(srcBox, 'source', s, _sourceLabel(s)));
     }
     // Owners (distinct, sorted)
     const ownBox = $id('projectsFilterDimOwners');
