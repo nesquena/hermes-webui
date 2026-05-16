@@ -1019,6 +1019,10 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/recovery/repair-module') {
     return response({ queued: true, module_id: 'safe-module', event_name: 'agent.repair', event_id: 'evt-module-repair', renderer: '<script>bad()</script>', api_key: 'SECRET' });
   }
+  if (path === 'api/spaces/recovery/repair-widget') {
+    const eventBody = opts.body ? JSON.parse(opts.body) : {};
+    return response({ queued: true, space_id: eventBody.space_id || 'broken', widget_id: eventBody.widget_id || 'bad-widget', event_name: 'agent.repair', event_id: 'evt-widget-repair', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
@@ -4961,17 +4965,17 @@ def test_spaces_ui_recovery_disable_widget_fails_closed_without_shared_dialog(dr
 
 def test_spaces_ui_recovery_repair_widget_queues_agent_event_from_safe_panel(driver_path):
     out = _run_spaces_scenario(driver_path, "repairRecoveryWidget")
-    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/repair-widget")
     body = json.loads(post["body"])
 
     assert "Ask Capy to repair" in out["beforeHtml"]
     assert out["dialogs"]
     assert out["dialogs"][0]["title"] == "Ask Capy to repair widget"
+    assert out["dialogs"][0]["confirmLabel"] == "Queue repair"
     assert post["method"] == "POST"
     assert body == {
         "space_id": "broken",
         "widget_id": "bad-widget",
-        "event_name": "agent.repair",
         "prompt": "Patch the broken renderer without exposing secrets",
         "payload": {"source": "recovery-panel", "action": "repair", "widget_title": "Bad <Widget>"},
     }
@@ -4984,6 +4988,7 @@ def test_spaces_ui_recovery_repair_widget_queues_agent_event_from_safe_panel(dri
 def test_spaces_ui_recovery_repair_widget_fails_closed_without_shared_prompt(driver_path):
     out = _run_spaces_scenario(driver_path, "repairRecoveryWidgetNoPrompt")
 
+    assert not any(call["path"] == "api/spaces/recovery/repair-widget" for call in out["calls"])
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
 
 

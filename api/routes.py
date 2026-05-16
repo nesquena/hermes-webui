@@ -5381,6 +5381,32 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Widget not found", 404)
 
+    if parsed.path == "/api/spaces/recovery/repair-widget":
+        from api import spaces as capy_spaces
+        try:
+            _route_reject_ambient_current_selectors()
+            space_id = _route_alias_value("space_id", "spaceId")
+            widget_id = _route_alias_value("widget_id", "widgetId", "id")
+            if not space_id or not widget_id:
+                return bad(handler, "Missing space_id or widget_id")
+            payload = body["payload"] if "payload" in body else {}
+            return j(
+                handler,
+                capy_spaces.queue_recovery_widget_repair_event(
+                    space_id,
+                    widget_id,
+                    payload,
+                    prompt=body.get("prompt") or "",
+                    session_id=body.get("session_id") or "",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Widget not found", 404)
+
     if parsed.path == "/api/spaces/recovery/disable-module":
         from api import spaces as capy_spaces
         try:

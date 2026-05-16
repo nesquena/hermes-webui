@@ -2989,10 +2989,9 @@
         confirmLabel: 'Queue repair',
       });
       if (!promptText) return;
-      await postSpacesJson('api/spaces/widget/event', {
+      await postSpacesJson('api/spaces/recovery/repair-widget', {
         space_id: spaceId,
         widget_id: widgetId,
-        event_name: 'agent.repair',
         prompt: promptText,
         payload: {source: 'recovery-panel', action: 'repair', widget_title: widgetTitle},
       });

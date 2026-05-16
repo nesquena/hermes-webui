@@ -6967,6 +6967,55 @@ def queue_space_repair_event(
     }
 
 
+def queue_recovery_widget_repair_event(
+    space_id: str,
+    widget_id: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    prompt: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Queue a metadata-only widget repair request from recovery/admin UI.
+
+    This intentionally bypasses the ordinary widget-event recovery quarantine
+    rejection after validating the target, because disabled widgets are the
+    objects the safe recovery panel needs to repair.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    wid = validate_widget_id(widget_id)
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    space = read_space(sid)
+    _widget_index(space, wid)
+    name = "agent.repair"
+    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    event_id = _record_event(
+        sid,
+        "widget.event.queued",
+        {
+            "widget_id": wid,
+            "event_name": name,
+            "prompt_preview": prompt_preview,
+            "payload_summary": payload_summary,
+            "session_id": _space_repair_text_summary(session_id, 120),
+            "status": "queued",
+        },
+    )
+    return {
+        "queued": True,
+        "status": "queued",
+        "space_id": sid,
+        "widget_id": wid,
+        "event_name": name,
+        "event_id": event_id,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+    }
+
+
 def _recovery_safe_admin_contract() -> dict[str, Any]:
     return {
         "metadata_only": True,

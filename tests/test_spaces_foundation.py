@@ -12192,6 +12192,90 @@ def test_recovery_repair_space_route_rejects_non_object_payload(monkeypatch, tmp
     assert not spaces.list_space_repair_events(created["space_id"])
 
 
+def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_widget(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "repair-widget-route", "name": "Repair Widget Route"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakWidgetRepair()</script>",
+            "source": "token SECRET_VALUE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "bad-widget",
+        reason="renderer api_key SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/repair-widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "bad-widget",
+            "prompt": "Patch renderer source html data generated widget body SECRET_VALUE_DO_NOT_LEAK",
+            "payload": {
+                "action": "repair",
+                "source": "recovery-panel",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "body": "raw generated widget body",
+            },
+            "session_id": "session token SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["status"] == "queued"
+    assert body["space_id"] == created["space_id"]
+    assert body["widget_id"] == "bad-widget"
+    assert body["event_name"] == "agent.repair"
+    assert body["prompt_preview"] == "[REDACTED]"
+    assert body["payload_summary"] == {"action": "repair"}
+
+    serialized_body = json.dumps(body).lower()
+    assert "secret_value_do_not_leak" not in serialized_body
+    assert "generated widget body" not in serialized_body
+    assert "renderer" not in serialized_body
+    assert "source" not in serialized_body
+    assert "api_key" not in serialized_body
+    assert "<script" not in serialized_body
+
+    persisted_event = json.loads((spaces.events_dir() / f"{body['event_id']}.json").read_text(encoding="utf-8"))
+    serialized_event = json.dumps(persisted_event).lower()
+    assert "secret_value_do_not_leak" not in serialized_event
+    assert "generated widget body" not in serialized_event
+    assert "renderer" not in serialized_event
+    assert "source" not in serialized_event
+    assert "api_key" not in serialized_event
+    assert "<script" not in serialized_event
+
+    stored = spaces.read_space(created["space_id"])
+    stored_widget = next(widget for widget in stored["widgets"] if widget["id"] == "bad-widget")
+    assert stored_widget["recovery"]["disabled"] is True
+
+    recovery = spaces.recovery_snapshot()
+    repair_space = next(space for space in recovery["spaces"] if space["space_id"] == created["space_id"])
+    repair_widget = next(widget for widget in repair_space["widgets"] if widget["id"] == "bad-widget")
+    assert recovery["summary"]["queued_event_count"] == 1
+    assert repair_widget["queued_event_count"] == 1
+    assert repair_widget["latest_queued_event"]["event_name"] == "agent.repair"
+    assert repair_widget["latest_queued_event"]["status"] == "queued"
+    serialized_recovery = json.dumps(recovery).lower()
+    assert "breakwidgetrepair" not in serialized_recovery
+    assert "secret_value_do_not_leak" not in serialized_recovery
+    assert "renderer" not in serialized_recovery
+    assert "source" not in serialized_recovery
+    assert "api_key" not in serialized_recovery
+    assert "<script" not in serialized_recovery
+
+
 def test_recovery_disable_enable_module_routes_return_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
