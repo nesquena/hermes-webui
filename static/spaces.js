@@ -2953,10 +2953,10 @@
     const action = button.dataset.capyAction;
     if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoverySpace' && action !== 'exportRecoverySpaceYaml' && action !== 'exportRecoverySpaceZip' && action !== 'disableRecoveryModule' && action !== 'enableRecoveryModule' && action !== 'repairRecoveryModule' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision' && action !== 'restoreRecoveryWidgetRevision') return;
     if (action === 'repairRecoveryModule') {
-      if (typeof showPromptDialog !== 'function') return;
-      const moduleId = button.dataset.moduleId || '';
-      const moduleName = button.dataset.moduleName || moduleId;
+      const moduleId = safeCreatorIdText(button.dataset.moduleId || '');
       if (!moduleId) return;
+      if (typeof showPromptDialog !== 'function') return;
+      const moduleName = safeDisplayMetadataText(button.dataset.moduleName || moduleId, moduleId) || moduleId;
       const promptText = await showPromptDialog({
         title: 'Ask Capy to repair module',
         placeholder: 'Describe what is broken in '+moduleName,
@@ -2972,9 +2972,9 @@
       return;
     }
     if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
-      if (typeof showConfirmDialog !== 'function') return;
-      const moduleId = button.dataset.moduleId || '';
+      const moduleId = safeCreatorIdText(button.dataset.moduleId || '');
       if (!moduleId) return;
+      if (typeof showConfirmDialog !== 'function') return;
       if (action === 'disableRecoveryModule') {
         const ok = await showConfirmDialog({title: 'Disable module?', message: 'Disable quarantined module "'+moduleId+'" from safe recovery? The raw body is preserved only for repair/rollback.', confirmLabel: 'Disable module', danger: true, focusCancel: true});
         if (!ok) return;

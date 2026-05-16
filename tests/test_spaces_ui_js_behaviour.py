@@ -2289,6 +2289,19 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
+  } else if (scenario === 'disableRecoveryModuleUnsafeId') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'disableRecoveryModule', moduleId: 'source/../api_key-SECRET_VALUE_DO_NOT_LEAK' } };
+        }
+      }
+    });
   } else if (scenario === 'enableRecoveryModule') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpacesRecovery();
@@ -2315,6 +2328,19 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
+  } else if (scenario === 'enableRecoveryModuleUnsafeId') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'enableRecoveryModule', moduleId: 'source/../api_key-SECRET_VALUE_DO_NOT_LEAK' } };
+        }
+      }
+    });
   } else if (scenario === 'repairRecoveryModule') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Repair module renderer without exposing secrets'; };
     await window.loadCapySpacesRecovery();
@@ -2326,6 +2352,19 @@ async function dispatchWindowMessage(data, opts) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'repairRecoveryModule', moduleId: 'safe-module', moduleName: 'Safe Module' } };
+        }
+      }
+    });
+  } else if (scenario === 'repairRecoveryModuleUnsafeId') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Repair module renderer without exposing secrets'; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'repairRecoveryModule', moduleId: 'source/../api_key-SECRET_VALUE_DO_NOT_LEAK', moduleName: 'source module SECRET_VALUE_DO_NOT_LEAK' } };
         }
       }
     });
@@ -4923,6 +4962,25 @@ def test_spaces_ui_recovery_disable_module_fails_closed_without_shared_dialog(dr
     out = _run_spaces_scenario(driver_path, "disableRecoveryModuleNoDialog")
 
     assert not any(call["path"] == "api/spaces/recovery/disable-module" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_module_actions_reject_unsafe_module_ids_before_dialogs_or_posts(driver_path):
+    scenarios_and_paths = [
+        ("disableRecoveryModuleUnsafeId", "api/spaces/recovery/disable-module"),
+        ("enableRecoveryModuleUnsafeId", "api/spaces/recovery/enable-module"),
+        ("repairRecoveryModuleUnsafeId", "api/spaces/recovery/repair-module"),
+    ]
+
+    for scenario, path in scenarios_and_paths:
+        out = _run_spaces_scenario(driver_path, scenario)
+        combined = out["recoveryHtml"] + json.dumps(out["dialogs"]) + json.dumps(out["calls"])
+
+        assert out["dialogs"] == []
+        assert not any(call["path"] == path for call in out["calls"])
+        assert "source/../api_key" not in combined
+        assert "SECRET_VALUE_DO_NOT_LEAK" not in combined
+        assert "<script>" not in combined
+        assert "renderer" not in combined.lower()
 
 
 def test_spaces_ui_recovery_enable_module_uses_shared_confirm_and_refresh(driver_path):

@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 15:01 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 17:41 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces direct non-current rollback HTTP routes now reject ambient `activeSpaceId` / `currentSpaceId` selectors before full-Space or widget restore side effects, while preserving explicit `space_id`/`spaceId` rollback contracts and metadata-only errors. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces static safe-recovery module actions now reject unsafe/path-like or secret-looking `data-module-id` values before opening shared dialogs or posting recovery module disable/enable/repair requests, while preserving safe module controls and metadata-only recovery rendering. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): guard recovery module actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving forged recovery module disable/enable/repair clicks with an unsafe path/API-auth-looking module id fail closed before dialogs or POSTs.
+  - Hardened static recovery module action handlers to path-sanitize `data-module-id` with the strict action-id helper before confirmation/prompt copy or route calls, and sanitized repair prompt placeholders to avoid reflecting unsafe module names.
+  - Validation at completion: focused RED failed before implementation (`1 failed` with the unsafe id reflected in a dialog); focused GREEN passed (`1 passed`); targeted module UI regressions passed (`8 passed, 168 deselected`); Spaces UI behavior + demo parity suites passed (`188 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static safe-recovery module browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/module-id-guard-qa.png`.
 
 - `fix(spaces): reject ambient rollback route selectors`
   - Added RED/GREEN route coverage proving `POST /api/spaces/revision/restore` and `POST /api/spaces/revision/restore-widget` reject same-valued ambient current selectors before restoring a full Space or widget from revision history.
