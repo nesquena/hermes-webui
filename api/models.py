@@ -815,7 +815,7 @@ def _apply_core_sync_or_error_marker(
 # pending_user_message and STREAMS.pop(stream_id). Without this guard, any
 # fast turn (e.g. command approval) that exits the thread before the on-disk
 # pending clear has flushed gets misdiagnosed as a crashed turn, producing a
-# spurious "Previous turn did not complete." marker.
+# spurious "Response interrupted." marker.
 #
 # 30s covers the worst-case post-loop persistence window: LLM finishing a tool
 # batch + lock contention with the checkpoint thread + a multi-MB session.save.
