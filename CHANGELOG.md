@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- **PR TBD** by @franksong2702 — Thinking cards now suppress exact snippets that are already shown as user-visible interim assistant text, avoiding duplicated progress lines when an agent emits the same sentence through both reasoning and interim-assistant callbacks.
+
 - **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
 
 
