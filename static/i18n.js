@@ -6581,9 +6581,9 @@ const LOCALES = {
     session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     session_time_unknown: 'Unbekannt',
-    session_time_minutes_ago: 'Vor {n} Minuten',
-    session_time_hours_ago: 'Vor {n} Stunden',
-    session_time_days_ago: 'Vor {n} Tagen',
+    session_time_minutes_ago: (n) => `Vor ${n} Minuten`,
+    session_time_hours_ago: (n) => `Vor ${n} Stunden`,
+    session_time_days_ago: (n) => `Vor ${n} Tagen`,
     session_time_last_week: 'Letzte Woche',
     session_time_bucket_today: 'Heute',
     session_time_bucket_yesterday: 'Gestern',

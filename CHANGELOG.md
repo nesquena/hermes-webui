@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2381** by @Michaelyklam (fixes #2379) — German relative session-time labels now interpolate the elapsed value instead of rendering the literal `{n}` placeholder in the sidebar/header. The German locale now uses function-valued translations for minutes, hours, and days, matching the other locale bundles.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added
