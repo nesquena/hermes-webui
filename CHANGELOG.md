@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2406** by @Michaelyklam (fixes #2398) — The fallback synchronous `POST /api/chat` route now passes the active WebUI config into the conversation-history sanitizer, so text-mode providers do not receive historical native `image_url` content parts when direct API callers use the legacy chat endpoint. This brings the sync route in line with the streaming chat path fixed for #2297.
+
 ### Documentation
 
 - Document the #1925 runtime-adapter gate update: Slice 1 run-journal replay has now passed a 100-trial synthetic replay/restart validation pass on current `origin/master`, #2313's selected-session chat SSE cap is shipped, and Slice 2 is ready for a reversible adapter-seam planning PR without moving execution ownership yet.

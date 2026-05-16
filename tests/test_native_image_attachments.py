@@ -354,6 +354,16 @@ class TestBuildNativeMultimodalMessage:
 
         assert sanitized == [{'role': 'user', 'content': content}]
 
+    def test_sync_chat_history_sanitizer_receives_config(self):
+        """#2398: fallback POST /api/chat must use the text-mode history sanitizer too."""
+        src = Path('api/routes.py').read_text()
+        call = 'conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config())'
+        assert call in src, (
+            'The legacy synchronous /api/chat endpoint must pass current config into '
+            '_sanitize_messages_for_api so historical image_url parts are stripped '
+            'for text-mode providers just like the streaming endpoint.'
+        )
+
     def test_fake_png_rejected_by_magic_bytes(self):
         """A file named .png that is not actually an image must be rejected."""
         with TemporaryDirectory() as d:
