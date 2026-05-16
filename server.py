@@ -18,6 +18,13 @@ from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post, handle_patch
+
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+)
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 
@@ -93,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
@@ -111,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_post(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
@@ -130,6 +141,8 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_patch(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
         except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
