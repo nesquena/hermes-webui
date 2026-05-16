@@ -1831,7 +1831,32 @@ def _maybe_schedule_title_refresh(session, put_event, agent):
     ).start()
 
 
-def _sanitize_messages_for_api(messages):
+def _strip_native_image_parts_from_content(content):
+    """Return provider-safe content with native image parts removed.
+
+    Text-only provider endpoints (for example DeepSeek/OpenAI-compatible text
+    models) reject historical OpenAI-style ``image_url`` parts before the agent
+    can recover.  When WebUI is configured for text-mode image handling, preserve
+    textual content from mixed content arrays and drop only the native image
+    blocks from replayed history.
+    """
+    if not isinstance(content, list):
+        return content
+    clean_parts = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get('type') == 'image_url' or 'image_url' in part:
+            continue
+        clean_parts.append(copy.deepcopy(part))
+    if not clean_parts:
+        return ''
+    if len(clean_parts) == 1 and clean_parts[0].get('type') == 'text':
+        return str(clean_parts[0].get('text') or '')
+    return clean_parts
+
+
+def _sanitize_messages_for_api(messages, *, cfg: dict = None):
     """Return a deep copy of messages with only API-safe fields.
 
     The webui stores extra metadata on messages (attachments, timestamp, _ts)
@@ -1843,7 +1868,14 @@ def _sanitize_messages_for_api(messages):
     (Mercury-2/Inception, newer OpenAI models) reject histories containing dangling
     tool results with a 400 error: "Message has tool role, but there was no previous
     assistant message with a tool call."
+
+    If ``agent.image_input_mode`` resolves to ``text``, native historical
+    ``image_url`` content parts are stripped too.  Current-turn uploads already
+    respect text mode in ``_build_native_multimodal_message``; this closes the
+    remaining replay gap where an older native image in the saved transcript kept
+    causing 400s on every later text-only turn (#2297).
     """
+    strip_native_images = cfg is not None and _resolve_image_input_mode(cfg) == "text"
     # First pass: collect all tool_call_ids declared by assistant messages.
     # Handles both OpenAI ('id') and Anthropic ('call_id') field names.
     valid_tool_call_ids: set = set()
@@ -1872,6 +1904,8 @@ def _sanitize_messages_for_api(messages):
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if strip_native_images and 'content' in sanitized:
+            sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
             clean.append(sanitized)
     return clean
@@ -3515,7 +3549,7 @@ def _run_agent_streaming(
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
@@ -3726,7 +3760,7 @@ def _run_agent_streaming(
                                 _heal_result = agent.run_conversation(
                                     user_message=user_message,
                                     system_message=workspace_system_msg,
-                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages),
+                                    conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                                     task_id=session_id,
                                     persist_user_message=msg_text,
                                 )
@@ -4505,7 +4539,7 @@ def _run_agent_streaming(
                         _heal_result = _heal_agent.run_conversation(
                             user_message=user_message,
                             system_message=workspace_system_msg,
-                            conversation_history=_sanitize_messages_for_api(_previous_context_messages),
+                            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=_cfg),
                             task_id=session_id,
                             persist_user_message=msg_text,
                         )

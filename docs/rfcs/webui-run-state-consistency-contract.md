@@ -78,7 +78,10 @@ while WebUI still has multiple overlapping state stores.
    assistant just acted.
 5. **Replay is idempotent.** Replaying a run from a cursor must not duplicate
    transcript rows, thinking content, interim assistant text, tool cards, or
-   compression cards.
+   compression cards. Replayed long-task events should enter the same
+   browser-facing timeline renderer as live SSE events so recovery does not
+   downgrade a structured Thinking / progress / tool / compression turn into a
+   separate flattened presentation.
 6. **Compression is not current intent.** Automatic compression summaries and
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for
@@ -102,6 +105,8 @@ context reconstruction, or session metadata:
 - What happens after browser refresh, session switch, SSE reconnect, and WebUI
   restart?
 - Does replay rebuild the same scene without duplicates?
+- Does replay use the same timeline-rendering path as live SSE for thinking,
+  interim assistant text, tool cards, compression cards, and terminal states?
 - Can this change move a session in the sidebar without meaningful user or
   assistant activity?
 - Can automatic compression or recovery text become visible active-turn content?
@@ -147,4 +152,3 @@ The two documents should be read together:
 4. If #1925 introduces a new adapter-backed runtime layer, update this RFC or
    replace it with the accepted implementation contract so these invariants do
    not live only in historical discussion.
-

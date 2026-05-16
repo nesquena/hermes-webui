@@ -369,6 +369,44 @@ def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(mo
     assert [row["session_id"] for row in rows] == ["new_sid"]
 
 
+def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkeypatch):
+    """If the hidden snapshot has the fuller transcript, keep it reachable.
+
+    Auto-compression can leave a visible continuation segment in the sidebar
+    while the fuller transcript remains on disk marked as a pre-compression
+    snapshot. In that case the default session list should prefer the fuller
+    transcript so the conversation does not look like recent messages vanished.
+    """
+    snapshot = Session(
+        session_id="full_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "latest user"},
+            {"role": "assistant", "content": "latest answer"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+    )
+    continuation = Session(
+        session_id="short_child",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "first"}],
+        parent_session_id="full_parent",
+        updated_at=400.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["full_parent"]
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["pre_compression_snapshot"] is True
+
+
 def test_session_save_does_not_persist_metadata_message_count_hint():
     s = Session(
         session_id="sess_private_hint",

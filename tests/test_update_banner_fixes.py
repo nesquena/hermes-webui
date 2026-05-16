@@ -476,9 +476,12 @@ class TestUpdateSummaryRouteModelSelection:
         monkeypatch.setattr(cfg, 'get_effective_default_model', lambda: 'openai/test-main')
 
         def fake_resolve_model_provider(model):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
             captured['model_resolution_env'] = {
                 'HERMES_HOME': os.environ.get('HERMES_HOME'),
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
             }
             return model, 'openai', 'https://example.test/v1'
 
@@ -514,9 +517,12 @@ class TestUpdateSummaryRouteModelSelection:
                         )
 
         def fake_get_text_auxiliary_client(task, main_runtime=None):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
             captured['aux_env'] = {
                 'HERMES_HOME': os.environ.get('HERMES_HOME'),
                 'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
                 'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
                 'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
             }
@@ -564,10 +570,14 @@ class TestUpdateSummaryRouteModelSelection:
         assert captured['model_resolution_env'] == {
             'HERMES_HOME': str(profile_home),
             'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
         }
         assert captured['aux_env'] == {
             'HERMES_HOME': str(profile_home),
             'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
             'SKILL_MODULE_HOME': profile_home,
             'SKILL_MODULE_DIR': profile_home / 'skills',
         }
