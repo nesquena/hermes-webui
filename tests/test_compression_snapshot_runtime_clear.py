@@ -1,5 +1,6 @@
 import json
 
+from api import models
 from api import streaming
 
 
@@ -57,6 +58,38 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
     assert session.pending_started_at == 123.0
 
     saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
+    assert saved["pre_compression_snapshot"] is True
+    assert saved["active_stream_id"] is None
+    assert saved["pending_user_message"] is None
+    assert saved["pending_attachments"] == []
+    assert saved["pending_started_at"] is None
+
+
+def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(streaming, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    old_payload = {
+        "session_id": "old_session",
+        "title": "Archived parent",
+        "messages": [
+            {"role": "user", "content": "older prompt"},
+            {"role": "assistant", "content": "older answer"},
+            {"role": "user", "content": "newer prompt already on disk"},
+        ],
+        "pre_compression_snapshot": True,
+        "active_stream_id": "stale-stream",
+        "pending_user_message": "stale prompt",
+        "pending_attachments": [{"name": "stale.txt"}],
+        "pending_started_at": 12345,
+    }
+    (tmp_path / "old_session.json").write_text(json.dumps(old_payload), encoding="utf-8")
+    session = FakeSession()
+    session.messages = [{"role": "user", "content": "current prompt"}]
+
+    streaming._preserve_pre_compression_snapshot(session, "old_session")
+
+    saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
+    assert saved["messages"] == old_payload["messages"]
     assert saved["pre_compression_snapshot"] is True
     assert saved["active_stream_id"] is None
     assert saved["pending_user_message"] is None

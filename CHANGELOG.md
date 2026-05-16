@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- **PR #2337** by @Michaelyklam (closes #2336) — Pre-compression snapshot preservation now also clears stale runtime stream fields when the existing on-disk snapshot is already as complete as the in-memory session. This keeps the load-and-mark branch aligned with the full-save branch and adds regression coverage so archived parent snapshots cannot retain stale `active_stream_id` / `pending_*` state.
+
 - **PR #2322** by @Michaelyklam (refs #2271) — LAN Ollama models selected from endpoint-discovered `custom:<host>-<port>` / `custom:<host>:<port>` picker entries now route through the configured `ollama` provider and base URL instead of surfacing a missing `CUSTOM_*_API_KEY` error. The picker still surfaces endpoint-discovered entries; the fix is to recognize them as UI routing hints matching the configured local-server base URL and resolve them via the actual `ollama` provider.
 
 
