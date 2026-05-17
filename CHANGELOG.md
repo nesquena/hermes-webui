@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Clarify `Compact tool activity` semantics: the setting now describes compact inline activity that preserves the agent timeline, matching the current long-running turn behavior where thinking cards, visible progress notes, and tool Activity bursts stay in chronological order instead of being described as one top-of-turn collapsed block.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
