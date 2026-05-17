@@ -6,6 +6,7 @@ provider outside WebUI, the browser can keep seeing the previous provider's
 PRIMARY badge until the cache is manually cleared or expires.
 """
 
+import copy
 import json
 import sys
 import time
@@ -142,3 +143,43 @@ def test_disk_models_cache_still_loads_when_auth_and_config_sources_are_unchange
     result = config.get_available_models()
 
     assert result == fresh_opencode
+
+
+def test_disk_models_cache_invalidates_when_static_model_catalog_changes(
+    tmp_path, monkeypatch
+):
+    _configure_isolated_sources(tmp_path, monkeypatch, "opencode-go")
+    fresh_opencode = _valid_models_cache("opencode-go", "glm-5.1")
+    config._save_models_cache_to_disk(fresh_opencode)
+
+    assert config._load_models_cache_from_disk() == fresh_opencode
+
+    updated_catalog = copy.deepcopy(config._PROVIDER_MODELS)
+    updated_catalog.setdefault("opencode-go", []).append(
+        {"id": "glm-5.1-new", "label": "GLM-5.1 New"}
+    )
+    monkeypatch.setattr(config, "_PROVIDER_MODELS", updated_catalog)
+
+    assert config._load_models_cache_from_disk() is None
+
+
+def test_memory_models_cache_invalidates_when_static_model_catalog_changes(
+    tmp_path, monkeypatch
+):
+    _configure_isolated_sources(tmp_path, monkeypatch, "opencode-go")
+    fresh_opencode = _valid_models_cache("opencode-go", "glm-5.1")
+
+    with config._available_models_cache_lock:
+        config._available_models_cache = fresh_opencode
+        config._available_models_cache_ts = time.monotonic()
+        config._available_models_cache_source_fingerprint = (
+            config._models_cache_source_fingerprint()
+        )
+
+    updated_catalog = copy.deepcopy(config._PROVIDER_MODELS)
+    updated_catalog.setdefault("opencode-go", []).append(
+        {"id": "glm-5.1-new", "label": "GLM-5.1 New"}
+    )
+    monkeypatch.setattr(config, "_PROVIDER_MODELS", updated_catalog)
+
+    assert config._get_fresh_memory_models_cache(time.monotonic()) is None

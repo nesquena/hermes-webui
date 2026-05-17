@@ -2205,11 +2205,55 @@ def _models_cache_file_fingerprint(path: Path) -> dict:
     return fingerprint
 
 
+def _models_cache_static_catalog_fingerprint() -> dict:
+    """Return non-secret static catalog metadata that shapes /api/models.
+
+    The disk cache already follows external inputs such as config.yaml and
+    auth.json.  Same-version development builds and hotfix deployments can also
+    change the bundled provider catalog in this module; include only public
+    model ids, labels, provider display names, and aliases so those source
+    changes invalidate persisted picker data without exposing credentials.
+    """
+
+    def _model_entry_fingerprint(entry: object) -> dict:
+        if isinstance(entry, dict):
+            payload = {
+                "id": str(entry.get("id") or ""),
+                "label": str(entry.get("label") or ""),
+            }
+            provider = entry.get("provider")
+            if provider:
+                payload["provider"] = str(provider)
+            return payload
+        return {"id": str(entry), "label": str(entry)}
+
+    provider_models: dict[str, list[dict]] = {}
+    for provider_id, models in sorted(_PROVIDER_MODELS.items()):
+        entries = models if isinstance(models, list) else []
+        provider_models[str(provider_id)] = [
+            _model_entry_fingerprint(entry)
+            for entry in entries
+        ]
+
+    return {
+        "provider_aliases": {
+            str(key): str(value)
+            for key, value in sorted(_PROVIDER_ALIASES.items())
+        },
+        "provider_display": {
+            str(key): str(value)
+            for key, value in sorted(_PROVIDER_DISPLAY.items())
+        },
+        "provider_models": provider_models,
+    }
+
+
 def _models_cache_source_fingerprint() -> dict:
-    """Return the current config/auth-store fingerprint for /api/models cache."""
+    """Return current inputs that determine the persisted /api/models cache."""
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _models_cache_file_fingerprint(_get_auth_store_path()),
+        "static_catalog": _models_cache_static_catalog_fingerprint(),
     }
 
 

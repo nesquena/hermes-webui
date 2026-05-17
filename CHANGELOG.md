@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Invalidate the persisted `/api/models` cache when the bundled provider/model catalog changes, so same-version local builds or hotfix deployments do not keep serving stale model-picker options until the 24-hour cache TTL expires.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
