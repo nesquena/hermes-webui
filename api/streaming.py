@@ -4518,20 +4518,21 @@ def _run_agent_streaming(
                 if not ephemeral:
                     _memory_lifecycle_commit_sid = s.session_id
                     _memory_lifecycle_commit_agent = agent
-            # ── Memory-provider lifecycle commit ──
-            # Mark the turn as completed and attempt a memory commit for
-            # batch-extraction providers (OpenViking, Holographic). This
-            # must happen AFTER s.save() succeeds, AFTER cancellation checks,
-            # and AFTER the completed-turn journal event so only genuinely
-            # completed, non-ephemeral turns are marked. The provider commit
-            # itself runs outside _agent_lock because it can perform I/O.
+            # ── Memory-provider lifecycle: mark turn completed (CLI parity) ──
+            # Completed, non-ephemeral turns are marked dirty/uncommitted so
+            # boundary drains know there is work.  Per CLI semantics, the
+            # actual memory extraction/commit happens only at session boundaries
+            # (new session creation, LRU eviction, shutdown drain) — NOT after
+            # every completed turn.  This mirrors Hermes CLI where
+            # run_agent.py::_sync_external_memory_for_turn() records messages
+            # but only AIAgent.commit_memory_session()/shutdown_memory_provider()
+            # trigger extraction via provider on_session_end().
             if _memory_lifecycle_commit_sid:
                 try:
-                    from api.session_lifecycle import mark_turn_completed, commit_session_memory
+                    from api.session_lifecycle import mark_turn_completed
                     mark_turn_completed(_memory_lifecycle_commit_sid, agent=_memory_lifecycle_commit_agent)
-                    commit_session_memory(_memory_lifecycle_commit_sid, agent=_memory_lifecycle_commit_agent)
                 except Exception:
-                    logger.debug("Memory lifecycle commit failed for session %s", _memory_lifecycle_commit_sid, exc_info=True)
+                    logger.debug("Memory lifecycle mark failed for session %s", _memory_lifecycle_commit_sid, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings

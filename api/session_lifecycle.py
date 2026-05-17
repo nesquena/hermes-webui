@@ -11,6 +11,21 @@ sessions can be reopened and continued many times, so the lifecycle must guarant
 4. Replacement/reopened agents cannot steal older dirty generations.
 5. Overlapping commits are serialised via a per-session in-flight guard.
 
+CLI-parity semantics — post-turn marking, boundary extraction/commit:
+
+- Completed turn: Hermes core still mirrors the exchange through
+  run_agent.py::_sync_external_memory_for_turn(), MemoryManager sync_all(), and
+  provider sync_turn() WITHOUT triggering extraction.  WebUI then calls
+  mark_turn_completed() after the saved/completed-turn boundary so later drains
+  know the synced session has uncommitted work and which agent owns it.
+
+- Session boundary: commit_session_memory() triggers
+  AIAgent.commit_memory_session(), which calls provider on_session_end(),
+  posting /api/v1/sessions/<sid>/commit and triggering extraction. This is
+  called only at boundaries — /api/session/new with prev_session_id, explicit
+  agent eviction, LRU cache eviction, and shutdown drain — matching the CLI's
+  AIAgent.commit_memory_session()/shutdown_memory_provider() boundary.
+
 The design uses a monotonic generation counter per session plus per-generation
 agent ownership segments. mark_turn_completed() records which agent owns the new
 generation. commit_session_memory() commits the earliest uncommitted segment and

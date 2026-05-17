@@ -338,16 +338,17 @@ def test_lru_eviction_commits_outside_cache_lock():
     assert "outside the cache lock" in outside_section
 
 
-def test_post_turn_lifecycle_is_after_completed_journal_and_cancel_check():
-    """Source-adjacent test: verify post-turn lifecycle marking is ordered
-    after save/cancel/completed-journal and that provider commit runs outside
-    the per-session agent lock."""
+def test_post_turn_lifecycle_marks_completion_without_commit():
+    """Source-adjacent test: verify post-turn lifecycle only calls
+    mark_turn_completed and does NOT call commit_session_memory.  Per
+    CLI-parity semantics, completed turns are marked dirty/uncommitted;
+    actual extraction/commit happens only at session boundaries
+    (new session, LRU eviction, shutdown drain)."""
     import api.streaming as streaming_mod
     src = Path(streaming_mod.__file__).read_text(encoding="utf-8")
 
     save_pos = src.index("s.save()")
     lifecycle_marker = src.index("_memory_lifecycle_commit_sid = s.session_id", save_pos)
-    lifecycle_commit = src.index("commit_session_memory", lifecycle_marker)
     cancel_check = src.index("cancel_event.is_set()", save_pos)
     completed_journal = src.index('"completed"', save_pos)
     sync_to_state_db = src.index("# Sync to state.db", save_pos)
@@ -359,13 +360,44 @@ def test_post_turn_lifecycle_is_after_completed_journal_and_cancel_check():
         "mark_turn_completed must appear after the completed-turn journal event"
     )
     assert lifecycle_marker < sync_to_state_db
-    assert lifecycle_commit < sync_to_state_db
 
-    commit_line = next(
-        line for line in src.splitlines()
-        if "commit_session_memory(_memory_lifecycle_commit_sid" in line
-    )
-    assert len(commit_line) - len(commit_line.lstrip()) == 20
+    # The post-turn block must contain mark_turn_completed but NOT
+    # commit_session_memory — extraction is a boundary concern.
+    block_start = src.index("if _memory_lifecycle_commit_sid:", save_pos)
+    block_end_pos = src.index("# Sync to state.db", save_pos)
+    post_turn_block = src[block_start:block_end_pos]
+    assert "mark_turn_completed" in post_turn_block
+    assert "commit_session_memory" not in post_turn_block
+
+
+def test_multiple_completed_turns_coalesce_into_single_boundary_commit():
+    """Behavioral test: repeated completed turns accumulate without commit,
+    and a single boundary commit flushes the coalesced segment once."""
+    lifecycle = _fresh_lifecycle()
+    agent = RecordingAgent()
+    agent.release.set()
+    sid = "coalesce-boundary"
+
+    lifecycle.register_agent(sid, agent)
+
+    # Multiple turns complete — all are marked but NOT committed.
+    lifecycle.mark_turn_completed(sid, agent=agent)
+    assert lifecycle.has_uncommitted_work(sid) is True
+
+    lifecycle.mark_turn_completed(sid, agent=agent)
+    assert lifecycle.has_uncommitted_work(sid) is True
+
+    lifecycle.mark_turn_completed(sid, agent=agent)
+    assert lifecycle.has_uncommitted_work(sid) is True
+
+    # A single boundary commit flushes all accumulated work.
+    assert lifecycle.commit_session_memory(sid) is True
+    assert agent.calls == 1, "one boundary commit should coalesce all turns"
+    assert lifecycle.has_uncommitted_work(sid) is False
+
+    # A further boundary commit is a no-op when nothing new happened.
+    assert lifecycle.commit_session_memory(sid) is False
+    assert agent.calls == 1
 
 
 def test_empty_session_id_is_safe_noop():
