@@ -3039,6 +3039,30 @@ def handle_get(handler, parsed) -> bool:
             bad(handler, _sanitize_error(exc), status=500)
         return True
 
+    if parsed.path == "/api/capy-memory/status":
+        try:
+            from api.capy_memory import memory_status
+
+            return j(handler, memory_status())
+        except Exception as exc:
+            logger.exception("capy memory status failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
+    if parsed.path == "/api/capy-memory/search":
+        try:
+            from api.capy_memory import search_memory
+
+            qs = parse_qs(parsed.query)
+            query = (qs.get("q") or qs.get("query") or [""])[0]
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+            limit = int((qs.get("limit") or [10])[0] or 10)
+            return j(handler, search_memory(query, space_id=space_id or None, limit=limit))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("capy memory search failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 
@@ -3642,6 +3666,22 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, str(e))
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
+
+    if parsed.path == "/api/spaces/memory":
+        try:
+            from api.capy_memory import relevant_memory_for_space
+
+            qs = parse_qs(parsed.query)
+            space_id = _query_alias_value(qs, "space_id", "spaceId")
+            limit = int((qs.get("limit") or [5])[0] or 5)
+            if not space_id:
+                return bad(handler, "Missing space_id", 400)
+            return j(handler, relevant_memory_for_space(space_id, limit=limit))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except Exception as exc:
+            logger.exception("spaces memory failed")
+            return bad(handler, _sanitize_error(exc), 500)
 
     if parsed.path == "/api/spaces/widgets":
         from api import spaces as capy_spaces
