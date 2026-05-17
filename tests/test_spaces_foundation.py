@@ -11816,6 +11816,186 @@ def test_space_delete_route_accepts_camelcase_id_and_rejects_conflicts_metadata_
     assert "api_key" not in serialized
 
 
+def test_direct_space_mutation_routes_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    ambient_error = (
+        "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+    )
+
+    update_space = spaces.create_space({"space_id": "ambient-update-route", "name": "Ambient Update Route"})
+    handled, status, body = _route_post(
+        "/api/spaces/update",
+        {
+            "spaceId": update_space["space_id"],
+            "activeSpaceId": update_space["space_id"],
+            "updates": {"name": "Mutated Ambient Update"},
+            "renderer": "<script>ambientUpdateLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_space(update_space["space_id"])["name"] == "Ambient Update Route"
+
+    delete_space = spaces.create_space({"space_id": "ambient-delete-route", "name": "Ambient Delete Route"})
+    handled, status, body = _route_post(
+        "/api/spaces/delete",
+        {
+            "spaceId": delete_space["space_id"],
+            "currentSpaceId": delete_space["space_id"],
+            "renderer": "<script>ambientDeleteLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_space(delete_space["space_id"])["space_id"] == delete_space["space_id"]
+
+    widget_space = spaces.create_space({"space_id": "ambient-widget-route", "name": "Ambient Widget Route"})
+    spaces.upsert_widget(widget_space["space_id"], {"id": "safe-widget", "title": "Safe Widget"})
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {
+            "spaceId": widget_space["space_id"],
+            "activeSpaceId": widget_space["space_id"],
+            "widget": {"id": "new-widget", "title": "New Widget"},
+            "source": "raw prompt renderer body",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    with pytest.raises(FileNotFoundError):
+        spaces.read_widget_detail(widget_space["space_id"], "new-widget")
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/patch",
+        {
+            "spaceId": widget_space["space_id"],
+            "currentSpaceId": widget_space["space_id"],
+            "widgetId": "safe-widget",
+            "patch": {"title": "Mutated Widget"},
+            "source": "raw prompt renderer body",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_widget_detail(widget_space["space_id"], "safe-widget")["title"] == "Safe Widget"
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/delete",
+        {
+            "spaceId": widget_space["space_id"],
+            "activeSpaceId": widget_space["space_id"],
+            "widgetId": "safe-widget",
+            "source": "raw prompt renderer body",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_widget_detail(widget_space["space_id"], "safe-widget")["id"] == "safe-widget"
+
+    spaces.set_shared_data_slot(
+        widget_space["space_id"],
+        "safe-slot",
+        {"summary": "safe metadata", "renderer": "<script>stored evidence</script>"},
+    )
+    handled, status, body = _route_post(
+        "/api/spaces/data/delete",
+        {
+            "spaceId": widget_space["space_id"],
+            "currentSpaceId": widget_space["space_id"],
+            "key": "safe-slot",
+            "source": "raw prompt renderer body",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_shared_data_slot(widget_space["space_id"], "safe-slot")["key"] == "safe-slot"
+
+    template_space = spaces.create_space({"space_id": "ambient-template-route", "name": "Ambient Template Route"})
+    handled, status, body = _route_post(
+        "/api/spaces/templates/install",
+        {
+            "spaceId": template_space["space_id"],
+            "activeSpaceId": template_space["space_id"],
+            "template": "weather",
+            "renderer": "<script>ambientTemplateLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_space_detail(template_space["space_id"])["widgets"] == []
+
+    reset_space = spaces.install_template("big-bang", space_id="ambient-reset-route")["space"]
+    reset_before_revision = reset_space["revision_event_id"]
+    handled, status, body = _route_post(
+        "/api/spaces/templates/reset",
+        {
+            "spaceId": reset_space["space_id"],
+            "currentSpaceId": reset_space["space_id"],
+            "template": "weather",
+            "renderer": "<script>ambientResetLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_space_detail(reset_space["space_id"])["revision_event_id"] == reset_before_revision
+
+    system_space = spaces.create_space({"space_id": "ambient-system-route", "name": "Ambient System Route"})
+    handled, status, body = _route_post(
+        "/api/spaces/system-widget/upsert",
+        {
+            "spaceId": system_space["space_id"],
+            "activeSpaceId": system_space["space_id"],
+            "panel": "chat",
+            "renderer": "<script>ambientSystemLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+    assert spaces.read_space_detail(system_space["space_id"])["widgets"] == []
+
+    handled, status, body = _route_post(
+        "/api/spaces/export",
+        {
+            "spaceId": system_space["space_id"],
+            "currentSpaceId": system_space["space_id"],
+            "format": "yaml",
+            "renderer": "<script>ambientExportLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 400
+    assert body["error"] == ambient_error
+
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert "ambient" not in serialized
+    assert "<script" not in serialized
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+
 def test_revision_restore_routes_accept_camelcase_ids_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "camel-route-restore", "name": "Camel Route Restore"})

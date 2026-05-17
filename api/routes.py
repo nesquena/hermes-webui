@@ -4983,6 +4983,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/update":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -4997,6 +4998,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/delete":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -5011,6 +5013,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/templates/install":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             return j(
                 handler,
                 capy_spaces.install_template(
@@ -5028,6 +5031,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/templates/reset":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             return j(
                 handler,
                 capy_spaces.reset_template(
@@ -5061,6 +5065,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/export":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
@@ -5154,6 +5159,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/widget/upsert":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             widget = body.get("widget")
             route_widget_id = _route_alias_value("widget_id", "widgetId", "id")
@@ -5176,6 +5182,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/system-widget/upsert":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             panel = body.get("panel")
             if not space_id or not panel:
@@ -5191,6 +5198,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/widget/patch":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             widget_id = _route_alias_value("widget_id", "widgetId", "id")
             patch = body.get("patch") or body.get("fields") or {}
@@ -5207,6 +5215,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/widget/delete":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
@@ -5222,6 +5231,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/data/delete":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             key = body.get("key")
             if not space_id or not key:
