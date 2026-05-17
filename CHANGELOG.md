@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **PR #2475** — Refresh the default Hermes WebUI brand mark with a modern geometric caduceus. The favicon/PWA raster assets, titlebar icon, and in-app empty-state logo now share the same simplified wing-and-staff shape so browser tabs, install icons, and first-run chat surfaces present one consistent mark.
+
 ## [v0.51.90] — 2026-05-18 — Release BN (stage-383 — 10-PR full sweep batch — empty-gateway messaging history fix + previous-messaging-sessions setting + Kanban board switcher layout + UI/UX demo theme controls + Slice 3c queue/goal RFC gate + keyless custom endpoints + custom-provider remote model catalog parity + auto-compression elapsed timer + new-conversation cold-start guard + Kanban drag-drop detail open fix)
 
 ### Fixed
@@ -41,7 +45,6 @@
 ### Documentation
 
 - **PR #2503** by @franksong2702 (refs #2502) — Add `docs/CONTRACTS.md` as a public contributor-facing routing index that points UI/UX, runtime/state, and onboarding/setup changes to the relevant public docs (DESIGN.md, AGENTS.md, RFCs, troubleshooting) before contributors edit code or open PRs. Also adds `docs/UIUX-GUIDE.md` synthesizing the calm-developer-console UI/UX principles from DESIGN.md / README.md / THEMES.md / `docs/ui-ux/` into one contributor guide, refreshes the README and THEMES.md skin lists to cover all ten built-in skins (`catppuccin` + `nous`), and tightens the AGENTS.md / CONTRIBUTING.md contribution-style notes for state-layer and evidence requirements. Docs-only — no runtime or maintainer-policy changes.
-
 ## [v0.51.88] — 2026-05-18 — Release BL (stage-381 — 3-PR security + UX + lineage batch — session-bound CSRF tokens for unsafe browser requests + quoted-reply selected-text composer append + compression-continuation sidebar collapse)
 
 ### Security
@@ -78,7 +81,6 @@
 ### Infrastructure
 
 - **PR #2490** by @nesquena-hermes — Add a Docker runtime smoke gate (`.github/workflows/docker-smoke.yml`) triggered on PRs and pushes to `master` that modify `Dockerfile`, `docker_init.bash`, `docker-compose*.yml`, `.dockerignore`, or `.env.docker.example`. Validates every compose file parses (`docker compose config`), then matrix-runs the single, two-container, and three-container variants end-to-end: rebuilds the local `Dockerfile` and re-tags it as `ghcr.io/nesquena/hermes-webui:latest` so the multi-container variants exercise PR-level changes rather than the previously-released registry image, `docker compose up -d --wait`s with a 120s health window, probes `/health`, and greps startup logs for known-bad signatures (`EROFS`, `Traceback`, `PermissionError`, `error_exit`, `!! ERROR`, `!! Exiting script`, `groupmod: cannot`, `usermod: cannot`, `Failed to set`). Closes the source-only-test gap that let v0.51.84's `:ro`-mount × `chown -h ... {} +` startup regression reach review with 5800+ green pytests. Workflow runs with `permissions: contents: read`, uses per-run project names and a pre-flight orphan reaper for safe concurrency, and unconditionally tears down all volumes/networks in an `EXIT` trap. Two new source-level invariants in `tests/test_docker_docs_and_readonly.py` pin the staging path so the underlying `:ro`-incompatible call doesn't regress.
-
 
 ## [v0.51.86] — 2026-05-17 — Release BJ (stage-379 — 4-PR review-bypass batch — memory-provider session lifecycle + cross-provider /model alias + RuntimeAdapter cancel seam + Fork-from-here messaging coord)
 
