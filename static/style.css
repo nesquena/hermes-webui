@@ -4477,24 +4477,24 @@ html[lang^="ar"] .hljs {
 .chat-content-rtl .session-item-meta {
   text-align: right;
 }
-/* Stream/hover padding stays on the right (button is on the right in RTL) */
+/* Stream/hover padding flips sides */
 .chat-content-rtl .session-item.streaming,
 .chat-content-rtl .session-item.unread,
 .chat-content-rtl .session-item:focus-within,
 .chat-content-rtl .session-item.menu-open {
-  padding-right: 40px;
-  padding-left: 8px;
+  padding-right: 8px;
+  padding-left: 40px;
 }
 @media (hover:hover){
   .chat-content-rtl .session-item:hover {
-    padding-right: 40px;
-    padding-left: 8px;
+    padding-right: 8px;
+    padding-left: 40px;
   }
 }
-/* Session attention indicator stays on the right (matches button position) */
+/* Session attention indicator flips to left */
 .chat-content-rtl .session-attention-indicator {
-  right: 6px;
-  left: auto;
+  right: auto;
+  left: 6px;
 }
 /* Session time pushes to left in RTL */
 .chat-content-rtl .session-time {
@@ -4523,13 +4523,20 @@ html[lang^="ar"] .hljs {
 .chat-content-rtl .settings-pane-heading {
   text-align: right;
 }
-/* Session action trigger stays on the right in RTL (matches Arabic UI conventions:
-   WhatsApp, Telegram keep the three-dot on the right, menu opens left from it) */
-/* Session action menu fallback — JS handles actual positioning */
-/* Mobile session items: keep padding-right for the action button on the right */
+/* Session action trigger flips to left */
+.chat-content-rtl .session-actions {
+  right: auto;
+  left: 6px;
+}
+/* Session action menu opens from right */
+.chat-content-rtl .session-action-menu {
+  left: auto;
+  right: 0;
+}
+/* Mobile session items: padding flips (right→left) */
 @media(max-width:640px){
   .chat-content-rtl .session-item {
-    padding: 10px 40px 10px 12px;
+    padding: 10px 12px 10px 40px;
   }
 }
 /* Session pin indicator moves to right */
