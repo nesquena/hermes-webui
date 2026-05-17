@@ -707,9 +707,9 @@ async function loadSession(sid){
       input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
       output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
       estimated_cost:    _pick(u.estimated_cost,    _s.estimated_cost),
-      context_length:    _pick(u.context_length,    _s.context_length),
+      context_length:    _pick(_s.context_length,    u.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
-      threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
+      threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
@@ -1102,8 +1102,23 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
+      S.session.context_length=data.session.context_length||0;
+      S.session.threshold_tokens=data.session.threshold_tokens||0;
+      S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session._modelResolutionDeferred=false;
       syncTopbar();
+      if(typeof _syncCtxIndicator==='function'){
+        const u=S.lastUsage||{};
+        const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+        _syncCtxIndicator({
+          input_tokens:_pick(u.input_tokens,S.session.input_tokens),
+          output_tokens:_pick(u.output_tokens,S.session.output_tokens),
+          estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
+          context_length:data.session.context_length||0,
+          last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+          threshold_tokens:data.session.threshold_tokens||0,
+        });
+      }
     }catch(_){
       // Keep session switching non-blocking; the next load can try again.
     }

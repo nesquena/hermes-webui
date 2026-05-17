@@ -1630,6 +1630,57 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
     return provider
 
 
+def _resolve_context_length_for_session_model(
+    model: str | None,
+    provider: str | None = None,
+) -> int:
+    """Best-effort current context window for a session model.
+
+    Persisted session context metadata is a snapshot from a prior model call.
+    During session hydration/model switching, the current model metadata should
+    be allowed to replace that stale snapshot.
+    """
+    model_for_lookup = str(model or "").strip()
+    if not model_for_lookup:
+        return 0
+    try:
+        from agent.model_metadata import get_model_context_length as _get_cl
+        from api.config import get_config as _get_config_for_cl
+
+        _cfg_for_cl = _get_config_for_cl()
+        _cfg_ctx_len_load = None
+        _cfg_custom_providers_load = None
+        try:
+            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
+            if isinstance(_model_cfg_load, dict):
+                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
+                if _raw_cfg_ctx_load is not None:
+                    try:
+                        _parsed_load = int(_raw_cfg_ctx_load)
+                        if _parsed_load > 0:
+                            _cfg_ctx_len_load = _parsed_load
+                    except (TypeError, ValueError):
+                        pass
+            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
+            if isinstance(_raw_cp_load, list):
+                _cfg_custom_providers_load = _raw_cp_load
+        except Exception:
+            pass
+        try:
+            return _get_cl(
+                model_for_lookup,
+                "",
+                config_context_length=_cfg_ctx_len_load,
+                provider=provider or "",
+                custom_providers=_cfg_custom_providers_load,
+            ) or 0
+        except TypeError:
+            # Older hermes-agent builds: legacy 2-arg form.
+            return _get_cl(model_for_lookup, "") or 0
+    except Exception:
+        return 0
+
+
 def _session_model_state_from_request(
     model: str | None,
     requested_provider: str | None,
@@ -3553,48 +3604,22 @@ def handle_get(handler, parsed) -> bool:
             # /api/session/get response — the same wrong-window display this
             # fix addresses on the streaming side.
             _persisted_cl = getattr(s, "context_length", 0) or 0
-            if not _persisted_cl:
+            _threshold_tokens = getattr(s, "threshold_tokens", 0) or 0
+            if (not _persisted_cl) or resolve_model:
                 _model_for_lookup = (
-                    getattr(s, "model", "") or effective_model or ""
+                    effective_model or getattr(s, "model", "") or ""
                 ).strip()
-                if _model_for_lookup:
-                    try:
-                        from agent.model_metadata import get_model_context_length as _get_cl
-                        from api.config import get_config as _get_config_for_cl
-                        _cfg_for_cl = _get_config_for_cl()
-                        _cfg_ctx_len_load = None
-                        _cfg_custom_providers_load = None
-                        try:
-                            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
-                            if isinstance(_model_cfg_load, dict):
-                                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                                if _raw_cfg_ctx_load is not None:
-                                    try:
-                                        _parsed_load = int(_raw_cfg_ctx_load)
-                                        if _parsed_load > 0:
-                                            _cfg_ctx_len_load = _parsed_load
-                                    except (TypeError, ValueError):
-                                        pass
-                            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-                            if isinstance(_raw_cp_load, list):
-                                _cfg_custom_providers_load = _raw_cp_load
-                        except Exception:
-                            pass
-                        try:
-                            _fb_cl = _get_cl(
-                                _model_for_lookup,
-                                "",
-                                config_context_length=_cfg_ctx_len_load,
-                                provider=effective_provider or "",
-                                custom_providers=_cfg_custom_providers_load,
-                            ) or 0
-                        except TypeError:
-                            # Older hermes-agent builds: legacy 2-arg form.
-                            _fb_cl = _get_cl(_model_for_lookup, "") or 0
-                        if _fb_cl:
-                            _persisted_cl = _fb_cl
-                    except Exception:
-                        pass
+                _fb_cl = _resolve_context_length_for_session_model(
+                    _model_for_lookup,
+                    effective_provider or getattr(s, "model_provider", None) or "",
+                )
+                if _fb_cl:
+                    if _persisted_cl and _fb_cl != _persisted_cl:
+                        # The old threshold belongs to the old window. Hiding it
+                        # is less misleading than rendering a stale compression
+                        # threshold against a freshly resolved context length.
+                        _threshold_tokens = 0
+                    _persisted_cl = _fb_cl
             _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
             if (
                 load_messages
@@ -3613,7 +3638,7 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
                 "context_length": _persisted_cl,
-                "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
+                "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
             if original_stream_id:
@@ -4638,6 +4663,8 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
+        old_model = getattr(s, "model", None)
+        old_provider = getattr(s, "model_provider", None)
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -4653,6 +4680,16 @@ def handle_post(handler, parsed) -> bool:
                 if model is not None:
                     s.model = model
                 s.model_provider = provider
+                if (
+                    str(old_model or "") != str(getattr(s, "model", "") or "")
+                    or str(old_provider or "") != str(getattr(s, "model_provider", "") or "")
+                ):
+                    s.context_length = _resolve_context_length_for_session_model(
+                        getattr(s, "model", None),
+                        getattr(s, "model_provider", None),
+                    )
+                    s.threshold_tokens = 0
+                    s.last_prompt_tokens = 0
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:

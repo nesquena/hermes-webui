@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Refresh context-window metadata when a session's resolved model changes during load or when the user switches models, so high-context models do not stay stuck on a stale prior window and trigger premature compression. Fixes #2442.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
