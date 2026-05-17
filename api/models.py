@@ -365,6 +365,7 @@ class Session:
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
+                 cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
                  active_stream_id: str=None,
                  pending_user_message: str=None,
@@ -403,6 +404,8 @@ class Session:
         self.input_tokens = input_tokens or 0
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
+        self.cache_read_tokens = cache_read_tokens or 0
+        self.cache_write_tokens = cache_write_tokens or 0
         self.personality = personality
         self.active_stream_id = active_stream_id
         self.pending_user_message = pending_user_message
@@ -465,6 +468,7 @@ class Session:
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
+            'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
@@ -628,6 +632,8 @@ class Session:
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
+            'cache_read_tokens': self.cache_read_tokens,
+            'cache_write_tokens': self.cache_write_tokens,
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,

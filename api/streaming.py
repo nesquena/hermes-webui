@@ -2827,6 +2827,8 @@ def _run_agent_streaming(
             'input_tokens': 0,
             'output_tokens': 0,
             'estimated_cost': 0,
+            'cache_read_tokens': 0,
+            'cache_write_tokens': 0,
             'context_length': 0,
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
@@ -2842,6 +2844,8 @@ def _run_agent_streaming(
                 _usage['input_tokens'] = getattr(_agent, 'session_prompt_tokens', 0) or 0
                 _usage['output_tokens'] = getattr(_agent, 'session_completion_tokens', 0) or 0
                 _usage['estimated_cost'] = getattr(_agent, 'session_estimated_cost_usd', 0) or 0
+                _usage['cache_read_tokens'] = getattr(_agent, 'session_cache_read_tokens', 0) or 0
+                _usage['cache_write_tokens'] = getattr(_agent, 'session_cache_write_tokens', 0) or 0
             except Exception:
                 pass
             try:
@@ -2854,7 +2858,7 @@ def _run_agent_streaming(
                 pass
 
         if _session_obj is not None:
-            for _field in ('input_tokens', 'output_tokens', 'estimated_cost', 'context_length', 'threshold_tokens', 'last_prompt_tokens'):
+            for _field in ('input_tokens', 'output_tokens', 'estimated_cost', 'cache_read_tokens', 'cache_write_tokens', 'context_length', 'threshold_tokens', 'last_prompt_tokens'):
                 if not _usage.get(_field):
                     try:
                         _usage[_field] = getattr(_session_obj, _field, 0) or 0
@@ -4260,12 +4264,18 @@ def _run_agent_streaming(
                 input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
                 output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0
                 estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
+                cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
+                cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
                 if input_tokens > 0:
                     s.input_tokens = input_tokens
                 if output_tokens > 0:
                     s.output_tokens = output_tokens
                 if estimated_cost is not None:
                     s.estimated_cost = estimated_cost
+                if cache_read_tokens > 0:
+                    s.cache_read_tokens = cache_read_tokens
+                if cache_write_tokens > 0:
+                    s.cache_write_tokens = cache_write_tokens
                 # Persist tool-call summaries even when the final message history only
                 # kept bare tool rows and omitted explicit assistant tool_call IDs.
                 tool_calls = _extract_tool_calls_from_messages(
@@ -4493,6 +4503,8 @@ def _run_agent_streaming(
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
                 'estimated_cost': estimated_cost,
+                'cache_read_tokens': cache_read_tokens,
+                'cache_write_tokens': cache_write_tokens,
                 'duration_seconds': round(_turn_duration_seconds, 3),
             }
             if _turn_tps is not None:
