@@ -4534,6 +4534,14 @@ html[lang^="ar"] .hljs {
   right: 0;
   direction: rtl;
 }
+/* Override left-align to prevent text drifting away from icon */
+.chat-content-rtl .session-action-menu .session-action-opt {
+  text-align: right;
+}
+/* Prevent text container from stretching and creating empty gap between icon and text */
+.chat-content-rtl .session-action-menu .session-action-copy {
+  flex: 0 1 auto;
+}
 /* Mobile session items: padding flips (right→left) */
 @media(max-width:640px){
   .chat-content-rtl .session-item {
