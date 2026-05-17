@@ -185,8 +185,17 @@ chown_home_hermeswebui() {
   # macOS Docker bind mounts can expose hermes-agent git object packs as
   # read-only host files. The runtime only needs to read those existing objects;
   # requiring chown on them makes startup fail before WebUI can run (#2237).
+  #
+  # Multi-container compose (#2470) additionally mounts the entire
+  # hermes-agent-src volume read-only on the WebUI side because the WebUI only
+  # reads it for `uv pip install`. On a :ro mount, chown returns EROFS for any
+  # file inside the subtree, which would propagate to `set -e` and kill startup
+  # before the WebUI can run. Either way, the WebUI never writes to the agent
+  # source — prune the entire hermes-agent path from the chown walk so a
+  # read-only or partially-read-only mount doesn't break the rest of the home
+  # ownership alignment.
   find /home/hermeswebui \
-    -path "/home/hermeswebui/.hermes/hermes-agent/.git/objects" -prune \
+    -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
 }
 
