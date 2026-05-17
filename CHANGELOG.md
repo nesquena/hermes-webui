@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.51.81] — 2026-05-17 — Release BE (stage-374 — 6-PR batch — cost-history POSIX lock + prompt-cache tokens + Plugins panel i18n + pending-placeholder chat + journal-replay partial recovery + default-off RuntimeAdapter Slice 2 seam)
+
 ### Added
 
 - **PR #2424** by @Michaelyklam (refs #1925) — Add the default-off `RuntimeAdapter` Slice 2 seam. `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` now routes chat start through a `LegacyJournalRuntimeAdapter` facade over the existing legacy streaming path, while the default remains `legacy-direct`. The new adapter interface/payload classes expose start/observe/status/cancel/approval/clarify methods and delegate controls to existing handlers without introducing a runner, sidecar, new process-local queues, cached agents, cancellation registries, or callback registries.
