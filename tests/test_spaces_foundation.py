@@ -8202,6 +8202,51 @@ def test_space_tool_adapter_safe_mode_widget_aliases_return_safe_metadata(monkey
     assert "<script" not in serialized
 
 
+@pytest.mark.parametrize("ambient_key", ["activeSpaceId", "active_space_id", "currentSpaceId", "current_space_id"])
+@pytest.mark.parametrize(
+    ("action", "pre_disable", "expected_disabled"),
+    [
+        ("space.recovery.disable_widget", False, False),
+        ("space.safe_mode.disable_widget", False, False),
+        ("space.admin.disable_widget", False, False),
+        ("space.recovery.enable_widget", True, True),
+        ("space.safe_mode.enable_widget", True, True),
+        ("space.admin.enable_widget", True, True),
+    ],
+)
+def test_space_tool_adapter_rejects_ambient_current_selectors_for_non_current_recovery_widget_aliases_before_side_effects(
+    monkeypatch, tmp_path, ambient_key, action, pre_disable, expected_disabled
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "ambient-widget-recovery", "name": "Ambient Widget Recovery"})
+    ambient = spaces.create_space({"space_id": "ambient-widget-current", "name": "Ambient Widget Current"})
+    spaces.upsert_widget(created["space_id"], {"id": "bad-widget", "kind": "html", "title": "Bad Widget"})
+    if pre_disable:
+        spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="trusted current quarantine")
+    baseline_events = {path.name for path in spaces.events_dir().glob("*.json")}
+
+    request = {
+        "spaceId": created["space_id"],
+        "widgetId": "bad-widget",
+        ambient_key: created["space_id"],
+        "reason": "renderer source api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+    }
+    with pytest.raises(ValueError, match="Non-current actions require explicit space_id/spaceId") as exc:
+        spaces.run_space_tool(action, request)
+
+    widget = spaces.read_widget(created["space_id"], "bad-widget")
+    snapshot = spaces.recovery_snapshot()
+    serialized = json.dumps({"error": str(exc.value), "widget": widget, "snapshot": snapshot}).lower()
+    assert widget.get("recovery", {}).get("disabled", False) is expected_disabled
+    assert spaces.read_space(ambient["space_id"]).get("recovery", {}).get("disabled", False) is False
+    assert {path.name for path in spaces.events_dir().glob("*.json")} == baseline_events
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_recovery_disable_widget_rejects_conflicting_positional_space_alias_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     primary = spaces.create_space({"space_id": "recovery-primary", "name": "Recovery Primary"})

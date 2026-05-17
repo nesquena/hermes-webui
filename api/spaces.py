@@ -3166,10 +3166,28 @@ def _space_tool_current_id(payload: dict[str, Any], *, positional_space_index: i
 
 def _space_tool_non_current_space_id(payload: dict[str, Any]) -> str:
     """Return an explicit non-current Space target, rejecting ambient current selectors."""
+    return _space_tool_non_current_space_id_from_aliases(payload)
+
+
+def _space_tool_non_current_space_id_from_aliases(
+    payload: dict[str, Any], *, positional_space_index: int | None = None
+) -> str:
+    """Return an explicit non-current Space target from snake/camel aliases plus optional positional selector."""
     _space_tool_reject_ambient_current_selectors(payload)
-    if str(_space_tool_arg(payload, 0) or "").strip():
+    positional_space = _space_tool_arg(payload, positional_space_index) if positional_space_index is not None else None
+    if positional_space_index is None and str(_space_tool_arg(payload, 0) or "").strip():
         raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
-    return _space_tool_space_id_alias(payload)
+    _space_tool_assert_matching_aliases(
+        payload,
+        ("space_id", "spaceId"),
+        "Conflicting space selector aliases",
+        positional_space,
+    )
+    for key in ("space_id", "spaceId"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return str(positional_space or "").strip()
 
 
 def _space_tool_reject_ambient_current_selectors(payload: dict[str, Any]) -> None:
@@ -4253,7 +4271,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         positional_space_index, positional_widget_index = _space_tool_space_widget_positional_indexes(data)
-        space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        if is_current:
+            space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        else:
+            space_id = validate_space_id(
+                _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
+            )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
         result = disable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
@@ -4279,7 +4302,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         positional_space_index, positional_widget_index = _space_tool_space_widget_positional_indexes(data)
-        space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        if is_current:
+            space_id = validate_space_id(_space_tool_current_id(data, positional_space_index=positional_space_index))
+        else:
+            space_id = validate_space_id(
+                _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
+            )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
         result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
         response = {"ok": True, "action": name, **result}
