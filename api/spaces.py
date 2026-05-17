@@ -333,10 +333,40 @@ def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max
     return found
 
 
+def _assert_widget_event_payload_has_no_ambient_current_selectors(
+    payload: dict[str, Any], *, max_depth: int = 6, max_items: int = 120
+) -> None:
+    ambient_names = {"active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"}
+    inspected = 0
+
+    def reject() -> None:
+        raise ValueError("Widget event payloads must not include current-space selectors")
+
+    def visit(current: Any, depth: int = 0) -> None:
+        nonlocal inspected
+        inspected += 1
+        if inspected > max_items:
+            reject()
+        if depth > max_depth:
+            reject()
+        if isinstance(current, dict):
+            for key, nested in current.items():
+                if key in ambient_names:
+                    reject()
+                visit(nested, depth + 1)
+        elif isinstance(current, (list, tuple)):
+            for nested in current:
+                visit(nested, depth + 1)
+
+    visit(payload)
+
+
 def _assert_widget_event_runtime_contract_allowed(event_name: str, payload: dict[str, Any]) -> None:
     event_type = _runtime_message_type_value(event_name)
     payload_type = _payload_runtime_message_type(payload)
-    for message_type in (event_type, payload_type, *_nested_payload_runtime_message_types(payload)):
+    nested_message_types = _nested_payload_runtime_message_types(payload)
+    _assert_widget_event_payload_has_no_ambient_current_selectors(payload)
+    for message_type in (event_type, payload_type, *nested_message_types):
         if message_type and (
             _is_blocked_runtime_message_type(message_type) or not _is_allowed_runtime_message_type(message_type)
         ):

@@ -1425,9 +1425,48 @@
 
   function runtimeMessageHasAmbientCurrentSelector(data){
     if (!data || typeof data !== 'object') return false;
-    return ['active_space_id', 'activeSpaceId', 'current_space_id', 'currentSpaceId'].some(function(key){
-      return Object.prototype.hasOwnProperty.call(data, key) && String(data[key] || '').trim();
-    });
+    const ambientKeys = ['active_space_id', 'activeSpaceId', 'current_space_id', 'currentSpaceId'];
+    const hasOwn = Object.prototype.hasOwnProperty;
+    const seen = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+    const maxDepth = 6;
+    const maxInspectedNodes = 120;
+    let inspected = 0;
+    let blocked = false;
+    function charge(){
+      inspected += 1;
+      if (inspected > maxInspectedNodes) blocked = true;
+      return !blocked;
+    }
+    function visit(current, depth){
+      if (blocked || !current || typeof current !== 'object') return false;
+      if (depth > maxDepth) {
+        blocked = true;
+        return true;
+      }
+      if (!charge()) return true;
+      if (seen) {
+        if (seen.has(current)) return false;
+        seen.add(current);
+      }
+      if (Array.isArray(current)) {
+        for (let i = 0; i < current.length; i += 1) {
+          if (!charge()) return true;
+          if (visit(current[i], depth + 1)) return true;
+        }
+        return blocked;
+      }
+      for (let i = 0; i < ambientKeys.length; i += 1) {
+        const key = ambientKeys[i];
+        if (hasOwn.call(current, key)) return true;
+      }
+      for (const key in current) {
+        if (!hasOwn.call(current, key)) continue;
+        if (!charge()) return true;
+        if (visit(current[key], depth + 1)) return true;
+      }
+      return blocked;
+    }
+    return visit(data, 0) || blocked;
   }
 
   function runtimeMessageTokenValue(value){
@@ -1464,11 +1503,11 @@
     if (!runtimeMessageSourceAllowed(event, token)) return;
     if (!runtimeMessageSelectorMatches(data, 'space_id', 'spaceId', session.spaceId)) return;
     if (!runtimeMessageSelectorMatches(data, 'widget_id', 'widgetId', session.widgetId)) return;
-    if (runtimeMessageHasAmbientCurrentSelector(data)) return;
     if (typeInfo.blocked) {
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked', 'Blocked by Capy runtime contract; no widget event was queued.'));
       return;
     }
+    if (runtimeMessageHasAmbientCurrentSelector(data)) return;
     const type = typeInfo.type;
     if (type === 'capy:ready') {
       if (session.readyAcknowledged) return;

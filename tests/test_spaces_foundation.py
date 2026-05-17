@@ -4565,6 +4565,70 @@ def test_space_tool_adapter_rejects_conflicting_widget_event_selector_aliases_me
     assert "source" not in serialized
 
 
+def test_queue_widget_event_rejects_nested_ambient_current_selectors_before_persistence(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "direct-nested-ambient-event-lab", "name": "Direct Nested Ambient Event Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="Widget event payloads must not include current-space selectors"):
+        spaces.queue_widget_event(
+            created["space_id"],
+            "research-card",
+            "agent.prompt",
+            {
+                "query": "Claude Mythos",
+                "nested": [
+                    {
+                        "activeSpaceId": created["space_id"],
+                        "currentSpaceId": created["space_id"],
+                        "renderer": "<script>bad()</script>",
+                        "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+                    }
+                ],
+            },
+            prompt="Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        )
+
+    events = spaces.list_widget_events(created["space_id"], "research-card")
+    serialized = json.dumps(events).lower()
+    assert events == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+
+
+def test_queue_widget_event_rejects_blank_nested_ambient_current_selector_keys_before_persistence(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "direct-blank-nested-ambient-event-lab", "name": "Blank Nested Ambient Event Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="Widget event payloads must not include current-space selectors"):
+        spaces.queue_widget_event(
+            created["space_id"],
+            "research-card",
+            "agent.prompt",
+            {
+                "query": "Claude Mythos",
+                "metadata": {
+                    "activeSpaceId": "",
+                    "current_space_id": None,
+                    "renderer": "<script>bad()</script>",
+                    "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+            },
+            prompt="Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        )
+
+    events = spaces.list_widget_events(created["space_id"], "research-card")
+    serialized = json.dumps(events).lower()
+    assert events == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+
+
 def test_space_tool_adapter_rejects_ambient_current_selectors_for_non_current_widget_event_metadata_only(
     monkeypatch, tmp_path
 ):

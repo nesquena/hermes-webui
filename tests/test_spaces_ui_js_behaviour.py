@@ -1698,6 +1698,46 @@ async function dispatchWindowMessage(data, opts) {
       prompt: 'Queue this ambient selector prompt with SECRET_VALUE_DO_NOT_LEAK',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeNestedAmbientCurrentSelectors') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      spaceId: 'lab',
+      widgetId: 'weather',
+      prompt: 'Queue this nested ambient selector prompt with SECRET_VALUE_DO_NOT_LEAK',
+      payload: {
+        activeSpaceId: 'lab',
+        nested: [{ currentSpaceId: 'lab', renderer: '<script>bad()</script>' }],
+      },
+    });
+  } else if (scenario === 'runtimeNestedBlankAmbientCurrentSelectorKeys') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      spaceId: 'lab',
+      widgetId: 'weather',
+      prompt: 'Queue this blank ambient selector prompt with SECRET_VALUE_DO_NOT_LEAK',
+      payload: {
+        activeSpaceId: '',
+        nested: [{ current_space_id: null, renderer: '<script>bad()</script>' }],
+      },
+    });
   } else if (scenario === 'runtimePathLikeSelectorsDoNotNormalize') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -3622,6 +3662,36 @@ def test_spaces_ui_sandbox_postmessage_rejects_ambient_current_selectors_without
     assert "Queue this ambient selector prompt" not in out["rootHtml"]
     assert "activeSpaceId" not in out["rootHtml"]
     assert "currentSpaceId" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_nested_ambient_current_selectors_without_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedAmbientCurrentSelectors")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this nested ambient selector prompt" not in out["rootHtml"]
+    assert "activeSpaceId" not in out["rootHtml"]
+    assert "currentSpaceId" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_blank_nested_ambient_current_selector_keys_without_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedBlankAmbientCurrentSelectorKeys")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this blank ambient selector prompt" not in out["rootHtml"]
+    assert "activeSpaceId" not in out["rootHtml"]
+    assert "current_space_id" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
