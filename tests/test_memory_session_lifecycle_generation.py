@@ -257,8 +257,6 @@ def test_evict_session_agent_commits_before_dropping():
     lifecycle.mark_turn_completed(sid, agent=agent)
 
     import api.config as cfg
-    import importlib as _il
-    _il.reload(cfg)
 
     with cfg.SESSION_AGENT_CACHE_LOCK:
         cfg.SESSION_AGENT_CACHE.clear()
@@ -296,8 +294,6 @@ def test_evict_session_agent_waits_for_inflight_commit_before_closing_db():
     lifecycle.mark_turn_completed(sid, agent=agent)
 
     import api.config as cfg
-    import importlib as _il
-    _il.reload(cfg)
     with cfg.SESSION_AGENT_CACHE_LOCK:
         cfg.SESSION_AGENT_CACHE.clear()
         cfg.SESSION_AGENT_CACHE[sid] = (agent, "sig")
