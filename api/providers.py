@@ -19,10 +19,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+try:  # POSIX-only; Windows-style environments fall back to process-local locking.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only where fcntl is unavailable
+    fcntl = None  # type: ignore[assignment]
 
 from api.config import (
     _PROVIDER_DISPLAY,
@@ -1457,6 +1463,22 @@ def _cost_snapshots_dir() -> Path:
     return _get_hermes_home() / _COST_SNAPSHOTS_DIR_NAME
 
 
+@contextmanager
+def _cost_snapshot_file_lock(provider: str):
+    """Serialize cost snapshot read-modify-write across worker processes."""
+    if fcntl is None:
+        with nullcontext():
+            yield
+        return
+
+    snap_dir = _cost_snapshots_dir()
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = snap_dir / f"{provider}.lock"
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        yield
+
+
 def _fetch_openrouter_key_usage(api_key: str) -> dict[str, Any] | None:
     """Fetch current usage/limit from the OpenRouter ``/auth/key`` endpoint.
 
@@ -1560,27 +1582,30 @@ def _append_cost_snapshot(provider: str, usage: int | float | None, limit: int |
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     # Serialize the read-modify-write cycle.  The atomic os.replace in
-    # _write_cost_snapshots protects the file write itself, but without this
-    # lock two concurrent requests can both read the same old snapshot list and
-    # race to replace it with stale data.
+    # _write_cost_snapshots protects the file write itself, but without these
+    # locks two concurrent requests can both read the same old snapshot list and
+    # race to replace it with stale data.  The threading lock covers current
+    # single-process deployments; the file lock covers future multi-worker
+    # deployments that share one Hermes home/state directory.
     with _COST_SNAPSHOT_LOCK:
-        snapshots = _read_cost_snapshots(provider)
-        # Update or append today's entry
-        updated = False
-        for entry in snapshots:
-            if entry["date"] == today:
-                entry["used"] = usage
-                entry["limit"] = limit
-                updated = True
-                break
-        if not updated:
-            snapshots.append({"date": today, "used": usage, "limit": limit})
-        snapshots.sort(key=lambda e: e["date"])
-        # Cap to _COST_SNAPSHOT_MAX_DAYS entries (keep most recent)
-        if len(snapshots) > _COST_SNAPSHOT_MAX_DAYS:
-            snapshots = snapshots[-_COST_SNAPSHOT_MAX_DAYS:]
-        _write_cost_snapshots(provider, snapshots)
-        return snapshots
+        with _cost_snapshot_file_lock(provider):
+            snapshots = _read_cost_snapshots(provider)
+            # Update or append today's entry
+            updated = False
+            for entry in snapshots:
+                if entry["date"] == today:
+                    entry["used"] = usage
+                    entry["limit"] = limit
+                    updated = True
+                    break
+            if not updated:
+                snapshots.append({"date": today, "used": usage, "limit": limit})
+            snapshots.sort(key=lambda e: e["date"])
+            # Cap to _COST_SNAPSHOT_MAX_DAYS entries (keep most recent)
+            if len(snapshots) > _COST_SNAPSHOT_MAX_DAYS:
+                snapshots = snapshots[-_COST_SNAPSHOT_MAX_DAYS:]
+            _write_cost_snapshots(provider, snapshots)
+            return snapshots
 
 
 def _compute_deltas(snapshots: list[dict[str, Any]], window_days: int) -> list[dict[str, Any]]:

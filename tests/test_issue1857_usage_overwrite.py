@@ -30,6 +30,8 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
             self.input_tokens = 9000
             self.output_tokens = 800
             self.estimated_cost = 12.34
+            self.cache_read_tokens = 1000
+            self.cache_write_tokens = 200
             self.tool_calls = []
             self.gateway_routing = None
             self.gateway_routing_history = []
@@ -48,6 +50,8 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
                     "input_tokens": self.input_tokens,
                     "output_tokens": self.output_tokens,
                     "estimated_cost": self.estimated_cost,
+                    "cache_read_tokens": self.cache_read_tokens,
+                    "cache_write_tokens": self.cache_write_tokens,
                     "kwargs": kwargs,
                 }
             )
@@ -67,6 +71,8 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
                 "estimated_cost": self.estimated_cost,
+                "cache_read_tokens": self.cache_read_tokens,
+                "cache_write_tokens": self.cache_write_tokens,
                 "personality": self.personality,
             }
 
@@ -93,6 +99,8 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
             self.session_prompt_tokens = 123
             self.session_completion_tokens = 45
             self.session_estimated_cost_usd = 0.067
+            self.session_cache_read_tokens = 9000
+            self.session_cache_write_tokens = 1000
             self.reasoning_config = None
             self.ephemeral_system_prompt = None
             self._last_error = None
@@ -169,13 +177,19 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
     assert fake_session.input_tokens == 123
     assert fake_session.output_tokens == 45
     assert fake_session.estimated_cost == 0.067
+    assert fake_session.cache_read_tokens == 9000
+    assert fake_session.cache_write_tokens == 1000
     assert any(
         event == "done"
         and payload["usage"]["input_tokens"] == 123
         and payload["usage"]["output_tokens"] == 45
         and payload["usage"]["estimated_cost"] == 0.067
+        and payload["usage"]["cache_read_tokens"] == 9000
+        and payload["usage"]["cache_write_tokens"] == 1000
         for event, payload in list(fake_queue.queue)
     )
     assert saved_snapshots[-1]["input_tokens"] == 123
     assert saved_snapshots[-1]["output_tokens"] == 45
     assert saved_snapshots[-1]["estimated_cost"] == 0.067
+    assert saved_snapshots[-1]["cache_read_tokens"] == 9000
+    assert saved_snapshots[-1]["cache_write_tokens"] == 1000

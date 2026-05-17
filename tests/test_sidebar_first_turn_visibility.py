@@ -16,7 +16,7 @@ class TestSidebarFirstTurnVisibility:
             "send() must optimistically upsert the active session into the sidebar "
             "as soon as the local user message is pushed."
         )
-        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);")
+        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
         helper_idx = src.index("upsertActiveSessionForLocalTurn", push_idx)
         start_idx = src.index("api('/api/chat/start'", push_idx)
         assert helper_idx < start_idx, (
@@ -28,6 +28,26 @@ class TestSidebarFirstTurnVisibility:
             "Do not re-fetch /api/sessions before /api/chat/start saves pending state; "
             "that race can overwrite the optimistic first-turn row with an empty list."
         )
+
+    def test_messages_send_renders_pending_assistant_placeholder_before_chat_start(self):
+        messages = read("static/messages.js")
+        ui = read("static/ui.js")
+        send_start = messages.index("async function send()")
+        push_idx = messages.index("appendThinking('',{pending:true})", send_start)
+        start_idx = messages.index("api('/api/chat/start'", send_start)
+        assert push_idx < start_idx, (
+            "send() should render an assistant-side pending placeholder before "
+            "/api/chat/start or the first SSE event returns."
+        )
+        append_start = ui.index("function appendThinking(text='', options)")
+        append_end = ui.index("function updateThinking", append_start)
+        append_body = ui[append_start:append_end]
+        assert "allowPendingPlaceholder" in append_body
+        assert "options.pending===true" in append_body.replace(" ", ""), (
+            "appendThinking() must allow the explicit pre-stream placeholder path "
+            "without weakening the stale-stream guard for ordinary SSE updates."
+        )
+        assert "(!S.activeStreamId&&!allowPendingPlaceholder)" in append_body.replace(" ", "")
 
     def test_sessions_js_has_local_turn_upsert_helper(self):
         src = read("static/sessions.js")

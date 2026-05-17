@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [v0.51.81] — 2026-05-17 — Release BE (stage-374 — 6-PR batch — cost-history POSIX lock + prompt-cache tokens + Plugins panel i18n + pending-placeholder chat + journal-replay partial recovery + default-off RuntimeAdapter Slice 2 seam)
+
+### Added
+
+- **PR #2424** by @Michaelyklam (refs #1925) — Add the default-off `RuntimeAdapter` Slice 2 seam. `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` now routes chat start through a `LegacyJournalRuntimeAdapter` facade over the existing legacy streaming path, while the default remains `legacy-direct`. The new adapter interface/payload classes expose start/observe/status/cancel/approval/clarify methods and delegate controls to existing handlers without introducing a runner, sidecar, new process-local queues, cached agents, cancellation registries, or callback registries.
+- **PR #2421** by @Michaelyklam (fixes #2419) — Surface provider prompt-cache read/write tokens in WebUI usage displays. Cache-miss cost issues are now visible in the context tooltip and per-turn usage footer; counters carry through session persistence, SSE usage payloads, and live snapshots so deltas remain accurate across the active turn.
+- **PR #2425** by @mccxj — Wire Settings → Plugins panel into the existing i18n system. Panel title, description, empty state, and per-plugin labels (hooks, enabled/disabled, load failures) now respect the user's language preference; 10 new keys ship in English with `TODO: translate` placeholders in 9 additional locales.
+
+### Fixed
+
+- **PR #2418** by @Michaelyklam (fixes #2402) — OpenRouter cost-history snapshot updates now take a provider-specific POSIX file lock around the read-modify-write cycle, preserving the existing process-local lock while preventing lost snapshot updates if WebUI is deployed with multiple worker processes sharing one Hermes home/state directory.
+- **PR #2431** by @Michaelyklam (fixes #2429) — Chat sends now render the assistant-side pending `Thinking…` placeholder immediately after the user turn is echoed, before `/api/chat/start` returns a stream id or the first SSE event arrives. The existing stale-stream guard remains in place for ordinary reasoning updates — only the explicit pre-stream placeholder path is allowed through.
+- **PR #2427** by @franksong2702 (fixes #2423) — Recover already-journaled visible assistant text and tool cards when a WebUI process restart interrupts an in-flight browser-originated turn. The stale-stream repair path now materializes run-journal output before the explicit interrupted marker instead of collapsing the turn to "no agent output was recovered."
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.
