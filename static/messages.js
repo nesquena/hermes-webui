@@ -273,7 +273,7 @@ async function send(){
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
+  S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
   // First optimistic pass: make the local user turn visible before /api/chat/start
   // can save pending state on the server.
   if(typeof upsertActiveSessionForLocalTurn==='function'){

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2431** by @Michaelyklam (fixes #2429) — Chat sends now render the assistant-side pending `Thinking…` placeholder immediately after the user turn is echoed, before `/api/chat/start` returns a stream id or the first SSE event arrives. The existing stale-stream guard remains in place for ordinary reasoning updates.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.

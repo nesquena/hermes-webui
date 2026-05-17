@@ -7018,11 +7018,12 @@ function finalizeThinkingCard(){
     _syncToolCallGroupSummary(group);
   }
 }
-function appendThinking(text=''){
+function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
-  if(!S.session||!S.activeStreamId) return;
+  const allowPendingPlaceholder=!!(options&&options.pending===true);
+  if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
