@@ -4398,9 +4398,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         args = data.get("args")
         positional_space_id = _space_tool_arg(data, 0) if isinstance(args, (list, tuple)) else ""
         positional_widget_id = _space_tool_arg(data, 1) if isinstance(args, (list, tuple)) and len(args) > 1 else ""
+        is_current_widget_event = name == "space.current.widget.event"
+        if not is_current_widget_event:
+            _space_tool_reject_ambient_current_selectors(data)
+        space_aliases = (
+            ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId")
+            if is_current_widget_event
+            else ("space_id", "spaceId")
+        )
         _space_tool_assert_matching_aliases(
             data,
-            ("space_id", "spaceId", "active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"),
+            space_aliases,
             "Conflicting widget event selector aliases",
             positional_space_id,
         )
@@ -4412,7 +4420,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         )
         space_id = validate_space_id(
             _space_tool_current_id(data)
-            if name == "space.current.widget.event"
+            if is_current_widget_event
             else (data.get("space_id") or data.get("spaceId") or _space_tool_arg(data, 0))
         )
         widget_id_raw = ""

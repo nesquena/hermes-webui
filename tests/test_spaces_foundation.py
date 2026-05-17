@@ -4473,6 +4473,45 @@ def test_space_tool_adapter_rejects_conflicting_widget_event_selector_aliases_me
     assert "source" not in serialized
 
 
+def test_space_tool_adapter_rejects_ambient_current_selectors_for_non_current_widget_event_metadata_only(
+    monkeypatch, tmp_path
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-ambient-event-lab", "name": "Tool Ambient Event Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    with pytest.raises(ValueError, match="Non-current actions require explicit space_id/spaceId"):
+        spaces.run_space_tool(
+            "space.widget.event",
+            {
+                "spaceId": created["space_id"],
+                "activeSpaceId": created["space_id"],
+                "widgetId": "research-card",
+                "eventName": "agent.prompt",
+                "messageType": "capy:agent:prompt",
+                "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                "payload": {
+                    "query": "Claude Mythos",
+                    "renderer": "<script>bad()</script>",
+                    "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+                    "source": "SECRET_SOURCE",
+                },
+            },
+        )
+
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"spaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps(events).lower()
+    assert events["events"] == []
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "source" not in serialized
+
+
 def test_space_tool_adapter_rejects_shadowed_top_level_type_runtime_alias_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-runtime-type-shadow-lab", "name": "Tool Runtime Type Shadow Lab"})
@@ -14622,6 +14661,41 @@ def test_widget_event_route_rejects_conflicting_selector_aliases(monkeypatch, tm
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
+
+
+def test_widget_event_route_rejects_ambient_current_selectors_before_queue_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "ambient-route-runtime", "name": "Ambient Route Runtime"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "spaceId": created["space_id"],
+            "activeSpaceId": created["space_id"],
+            "widgetId": "sandbox",
+            "messageType": "capy:agent:prompt",
+            "prompt": "Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+            "payload": {
+                "query": "safe ambient route prompt",
+                "renderer": "<script>bad()</script>",
+                "apiKey": "SECRET_VALUE_DO_NOT_LEAK",
+                "source": "SECRET_SOURCE",
+            },
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps({"route": body, "events": events}).lower()
+
+    assert handled is None
+    assert status == 400
+    assert "Non-current Capy Spaces routes require explicit space_id/spaceId" in body["error"]
+    assert not events
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "apikey" not in serialized
+    assert "source" not in serialized
 
 
 def test_widget_event_route_rejects_conflicting_runtime_message_aliases(monkeypatch, tmp_path):

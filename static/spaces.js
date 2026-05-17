@@ -1423,6 +1423,13 @@
     return values.length > 0 && values.every(function(value){ return value && value === expected; });
   }
 
+  function runtimeMessageHasAmbientCurrentSelector(data){
+    if (!data || typeof data !== 'object') return false;
+    return ['active_space_id', 'activeSpaceId', 'current_space_id', 'currentSpaceId'].some(function(key){
+      return Object.prototype.hasOwnProperty.call(data, key) && String(data[key] || '').trim();
+    });
+  }
+
   function runtimeMessageTokenValue(value){
     const token = String(value || '').trim().slice(0, 120);
     return /^[a-z0-9._-]+$/i.test(token) ? token : '';
@@ -1457,6 +1464,7 @@
     if (!runtimeMessageSourceAllowed(event, token)) return;
     if (!runtimeMessageSelectorMatches(data, 'space_id', 'spaceId', session.spaceId)) return;
     if (!runtimeMessageSelectorMatches(data, 'widget_id', 'widgetId', session.widgetId)) return;
+    if (runtimeMessageHasAmbientCurrentSelector(data)) return;
     if (typeInfo.blocked) {
       prependRuntimeStatus(renderSandboxRuntimeStatus('Sandbox message blocked', 'Blocked by Capy runtime contract; no widget event was queued.'));
       return;
