@@ -4533,6 +4533,14 @@ html[lang^="ar"] .hljs {
   left: auto;
   right: 0;
 }
+/* RTL menu content: text right-aligned, icon on the right */
+.chat-content-rtl .session-action-opt {
+  text-align: right;
+}
+.chat-content-rtl .session-action-opt .ws-opt-action {
+  flex-direction: row-reverse;
+  text-align: right;
+}
 /* Mobile session items: padding flips (right→left) */
 @media(max-width:640px){
   .chat-content-rtl .session-item {
