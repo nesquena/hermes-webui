@@ -3810,7 +3810,14 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-board-switcher-item:hover,
 .kanban-board-switcher-item:focus{background:var(--accent-bg);outline:none;}
 .kanban-board-switcher-item.is-current{font-weight:650;}
-.kanban-board-switcher-item-icon{font-size:14px;line-height:1;flex-shrink:0;width:18px;text-align:center;}
+.kanban-board-switcher-item-icon{
+  display:block;
+  font-size:14px;line-height:1.15;
+  flex:0 1 auto;
+  min-width:18px;max-width:7.5rem;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-align:center;
+}
 .kanban-board-switcher-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .kanban-board-switcher-item-count{
   flex-shrink:0;font-size:10px;color:var(--muted);

@@ -874,6 +874,28 @@ def test_kanban_board_switcher_handlers_in_panels():
         assert fn in PANELS, f"Missing handler: {fn}"
 
 
+def test_kanban_board_switcher_icon_column_clamps_long_labels():
+    """Regression for #2458: board metadata may use a short text label in the
+    icon/color slot. The menu must keep that label inside its own column instead
+    of letting it overlap the board title and count badge.
+    """
+    rule = re.search(
+        r"\.kanban-board-switcher-item-icon\{(?P<body>.*?)\}",
+        STYLE,
+        flags=re.S,
+    )
+    assert rule, "missing .kanban-board-switcher-item-icon CSS rule"
+    compact = re.sub(r"\s+", "", rule.group("body"))
+    for required in (
+        "overflow:hidden",
+        "text-overflow:ellipsis",
+        "white-space:nowrap",
+        "max-width:7.5rem",
+        "min-width:18px",
+    ):
+        assert required in compact
+
+
 def test_kanban_board_switcher_calls_correct_endpoints():
     """The switcher must hit the right REST verbs to round-trip with the
     bridge's multi-board contract."""
