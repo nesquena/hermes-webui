@@ -4092,7 +4092,7 @@ _SETTINGS_DEFAULTS = {
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
-    "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
+    "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
