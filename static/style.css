@@ -327,7 +327,6 @@
   :root:not(.dark) *{scrollbar-color:rgba(0,0,0,.15) transparent;}
   /* ── Light mode: sidebar, roles, chips, active states ── */
   :root:not(.dark) .session-item{color:var(--muted);}
-  :root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}
   :root:not(.dark) .session-item.active{background:var(--accent-bg);color:var(--accent-text);}
   :root:not(.dark) .session-item.active .session-title{color:var(--accent-text);}
   :root:not(.dark) .session-pin-indicator{color:var(--accent-text);}
@@ -475,17 +474,65 @@
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
      menu-open / focus-within rule below. */
-  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}
+  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.2,.8,.2,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translateX(var(--session-swipe-offset,0));}
   .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
-  .session-item:hover{background:var(--hover-bg);color:var(--text);}
+  @media (hover:hover){.session-item:hover{background:var(--hover-bg);color:var(--text);}}
+  .session-item.loading{background:var(--hover-bg);color:var(--text);}
+  .session-item.long-pressing{
+    background:var(--hover-bg);
+    color:var(--text);
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 38%,transparent);
+    animation:session-long-press .4s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .session-item.swiping-right{background:color-mix(in srgb,var(--warning) 18%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--warning) 60%,transparent);}
+  .session-item.swiping-left{background:color-mix(in srgb,var(--error) 16%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 60%,transparent);}
+  .session-item.swiping-right::after,.session-item.swiping-left::after{
+    position:absolute;
+    top:0;
+    bottom:0;
+    display:flex;
+    align-items:center;
+    width:72px;
+    padding:0 10px;
+    box-sizing:border-box;
+    opacity:var(--session-swipe-progress,0);
+    font-size:10px;
+    font-weight:700;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+    pointer-events:none;
+  }
+  .session-item.swiping-right::after{
+    content:"Archive";
+    left:0;
+    justify-content:flex-start;
+    transform:translateX(calc(-1 * var(--session-swipe-offset,0px)));
+    color:var(--warning);
+    background:transparent;
+  }
+  .session-item.swiping-left::after{
+    content:"Delete";
+    right:0;
+    justify-content:flex-end;
+    transform:translateX(calc(-1 * var(--session-swipe-offset,0px)));
+    color:var(--error);
+    background:transparent;
+  }
+  .session-item.dragging{transition:background .15s,color .15s,box-shadow .15s ease;}
+  .session-item.swipe-committed{transition:background .15s,color .15s,transform .42s cubic-bezier(.2,.8,.2,1),box-shadow .15s ease;}
+  .session-item.swipe-committed::after{transition:opacity .18s ease;}
   /* Suppress hover highlight during drag to avoid visual noise mid-scroll */
   .session-item.dragging:hover{background:transparent;color:var(--muted);}
+  .session-item.dragging.swiping-right{background:color-mix(in srgb,var(--warning) 18%,var(--surface));}
+  .session-item.dragging.swiping-left{background:color-mix(in srgb,var(--error) 16%,var(--surface));}
   /* Restore hover padding-right only for mouse (hover:hover) devices.
      Touch/iPad (hover:none) must NOT expand padding-right on :hover —
      the expansion causes a layout-reflow mid-tap that moves session-actions
      under the finger, triggering stopPropagation and swallowing navigation. */
-  @media (hover:hover){.session-item:hover{padding-right:40px;}}
+  @media (hover:hover){:root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}.session-item:hover{padding-right:40px;}}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
+  .session-item.active.swiping-right{background:color-mix(in srgb,var(--warning) 22%,var(--accent-bg));}
+  .session-item.active.swiping-left{background:color-mix(in srgb,var(--error) 20%,var(--accent-bg));}
   .session-item.streaming .session-title{color:var(--accent);}
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
@@ -544,8 +591,8 @@
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .session-actions-trigger svg{display:block;}
-  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:320px;overflow-y:auto;}
-  .session-action-menu.open{display:block;}
+  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
+  .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
   .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:10px 14px;}
   .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;flex-shrink:0;display:flex;align-items:center;width:16px;}
@@ -555,8 +602,13 @@
   .session-action-opt.is-active{background:var(--accent-bg);}
   .session-action-opt.danger:hover{background:rgba(239,83,80,.08);}
   .session-action-opt.danger .ws-opt-icon,.session-action-opt.danger .ws-opt-name{color:var(--error);}
+  @media (prefers-reduced-motion:reduce){
+    .session-action-menu{animation:none;will-change:auto;}
+  }
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
+  @keyframes session-menu-in{from{opacity:0;transform:translate3d(0,-4px,0) scale(.985);}to{opacity:1;transform:translate3d(0,0,0) scale(1);}}
+  @keyframes session-long-press{from{filter:brightness(1);}to{filter:brightness(1.08);}}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
   @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
@@ -1690,6 +1742,13 @@
     .empty-state p{font-size:13px;}
     .suggestion-grid{max-width:100%!important;}
     .suggestion{font-size:12px;padding:10px 12px;}
+  }
+
+  @media (hover:none) and (pointer:coarse){
+    .session-actions{display:none;}
+    .session-item{padding-right:6px;}
+    .session-item.streaming,.session-item.unread{padding-right:40px;}
+    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
   }
 
   @media (max-width: 340px){

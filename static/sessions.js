@@ -1582,9 +1582,11 @@ function closeSessionActionMenu(){
     _sessionActionMenu = null;
   }
   if(_sessionActionAnchor){
-    _sessionActionAnchor.classList.remove('active');
+    if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
+      _sessionActionAnchor.classList.remove('active');
+    }
     const row=_sessionActionAnchor.closest('.session-item');
-    if(row) row.classList.remove('menu-open');
+    if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
   _sessionActionSessionId = null;
@@ -1647,6 +1649,38 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _playSessionActionMenuEntrance(menu){
+  if(!menu) return;
+  const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if(reduce) return;
+  if(typeof menu.animate==='function'){
+    try{
+      const anim=menu.animate(
+        [
+          {opacity:0, transform:'translate3d(0,-4px,0) scale(.985)'},
+          {opacity:1, transform:'translate3d(0,0,0) scale(1)'}
+        ],
+        {duration:450, easing:'cubic-bezier(.2,.8,.2,1)'}
+      );
+      if(anim&&anim.finished) anim.finished.catch(()=>{});
+      return;
+    }catch(_){}
+  }
+  menu.classList.add('open-animated');
+}
+
+async function _archiveSession(session, archived=true){
+  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
+  try{
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    session.archived=archived;
+    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    await renderSessionList();
+    showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
+    return true;
+  }catch(err){showToast(t('session_archive_failed')+err.message);return false;}
+}
+
 function _openSessionActionMenu(session, anchorEl){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -1658,7 +1692,7 @@ function _openSessionActionMenu(session, anchorEl){
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
-  menu.className='session-action-menu open';
+  menu.className='session-action-menu';
   // Rename — first menu item by request (#1764). Double-click rename is
   // timing-sensitive: the first click frequently registers as "open the
   // chat" before the second click arrives, so users open the conversation
@@ -1717,13 +1751,7 @@ function _openSessionActionMenu(session, anchorEl){
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
-      try{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
-        session.archived=!session.archived;
-        if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
-        await renderSessionList();
-        showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
-      }catch(err){showToast(t('session_archive_failed')+err.message);}
+      await _archiveSession(session,!session.archived);
     }
   ));
   if(!isExternalSession){
@@ -1769,10 +1797,11 @@ function _openSessionActionMenu(session, anchorEl){
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
-  anchorEl.classList.add('active');
+  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
   const row=anchorEl.closest('.session-item');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  _playSessionActionMenuEntrance(menu);
 }
 
 document.addEventListener('click',e=>{
@@ -3214,63 +3243,191 @@ function renderSessionListFromCache(){
     // single-tap navigation. pointerup fires immediately on both mouse & touch.
     // Mouse clicks are instant; touch presses need a 300ms delay to distinguish
     // a tap from a scroll-drag gesture on mobile.
-    // Drag detection (pointermove > 5px) cancels the pending tap on release.
+    // Movement promotes pressing into dragging; drag release cancels a pending tap.
     let _lastTapTime=0;
     let _tapTimer=null;
     let _pointerDownX=0;
     let _pointerDownY=0;
-    let _pointerActive=false;
-    let _isDragging=false;
+    let _gestureState='idle'; // idle | pressing | dragging | committed
     let _clearDragTimer=null;
+    let _longPressTimer=null;
+    let _longPressMenuOpened=false;
+    let _swipeTracking=false;
+    let _pointerX=0;
+    let _pointerY=0;
+    let _gesturePointerType='';
+    const _longPressDelay=400;
+    const _swipeActionThreshold=144;
+    const _swipeCancelRatio=0.75;
+    const _committedSwipeDuration=420;
+    const _clearLongPressTimer=()=>{
+      if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
+      if(!_longPressMenuOpened) el.classList.remove('long-pressing');
+    };
+    const _beginSessionGesture=(clientX,clientY)=>{
+      _gesturePointerType='';
+      _pointerDownX=clientX;
+      _pointerDownY=clientY;
+      _pointerX=clientX;
+      _pointerY=clientY;
+      _gestureState='pressing';
+      _swipeTracking=false;
+      _longPressMenuOpened=false;
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+      el.classList.remove('dragging','swipe-committed');
+    };
+    const _scheduleSessionLongPressMenu=()=>{
+      _clearLongPressTimer();
+      el.classList.add('long-pressing');
+      _longPressTimer=setTimeout(()=>{
+        if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode||readOnly) return;
+        _longPressMenuOpened=true;
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        _openSessionActionMenu(s, el);
+      },_longPressDelay);
+    };
+    const _isSessionSwipeTarget=()=>{
+      return _gesturePointerType!=='mouse'&&!readOnly&&!_renamingSid&&!_sessionSelectMode;
+    };
+    const _trackHorizontalSwipe=(dx,dy)=>{
+      if(dx>16&&dx>dy*1.2) _swipeTracking=true;
+    };
+    const _promoteSessionDrag=(dx,dy)=>{
+      if(_gestureState!=='pressing'||(dx<=5&&dy<=5)) return;
+      if(dy>8||dx>10) _clearLongPressTimer();
+      _gestureState='dragging';
+      el.classList.add('dragging');
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+    };
+    const _canSwipeDeleteSession=()=>{
+      return _isSessionSwipeTarget()&&!_isMessagingSession(s)&&!_isCliSession(s);
+    };
+    const _paintSessionSwipe=(signedDx)=>{
+      const offset=Math.max(-72,Math.min(72,signedDx*.55));
+      const progress=Math.min(1,Math.abs(offset)/72);
+      el.style.setProperty('--session-swipe-offset',offset+'px');
+      el.style.setProperty('--session-swipe-progress',Math.pow(progress,1.5));
+      el.classList.toggle('swiping-right',offset>0);
+      el.classList.toggle('swiping-left',offset<0);
+    };
+    const _clearSessionSwipePaint=()=>{
+      el.style.removeProperty('--session-swipe-offset');
+      el.style.removeProperty('--session-swipe-progress');
+      el.classList.remove('swiping-right','swiping-left','swipe-committed');
+    };
+    const _settleSessionSwipePaint=()=>{
+      el.classList.remove('dragging');
+      requestAnimationFrame(()=>requestAnimationFrame(_clearSessionSwipePaint));
+    };
+    const _completeSessionSwipePaint=(signedDx)=>{
+      el.classList.remove('dragging');
+      el.classList.add('swipe-committed');
+      el.style.setProperty('--session-swipe-progress','0');
+      el.style.setProperty('--session-swipe-offset',(signedDx>0?1:-1)*window.innerWidth+'px');
+    };
+    const _handleSessionSwipe=(signedDx,signedDy)=>{
+      if(_gestureState==='committed'||!_isSessionSwipeTarget()) return false;
+      if(Math.abs(signedDx)<_swipeActionThreshold) return false;
+      if(Math.abs(signedDy)>Math.abs(signedDx)*_swipeCancelRatio) return false;
+      _gestureState='committed';
+      _clearLongPressTimer();
+      clearTimeout(_tapTimer);
+      _tapTimer=null;
+      _lastTapTime=0;
+      if(signedDx>0){
+        _completeSessionSwipePaint(signedDx);
+        setTimeout(async()=>{
+          const archived=await _archiveSession(s,!s.archived);
+          if(!archived) _settleSessionSwipePaint();
+        },_committedSwipeDuration);
+      }else if(_canSwipeDeleteSession()){
+        el.classList.remove('dragging');
+        deleteSession(s.session_id,async()=>{
+          _completeSessionSwipePaint(signedDx);
+          await new Promise(resolve=>setTimeout(resolve,_committedSwipeDuration));
+        }).then((deleted)=>{
+          if(!deleted) _settleSessionSwipePaint();
+        });
+      }else if(typeof showToast==='function'){
+        showToast('Imported sessions cannot be deleted here.',3000);
+        _gestureState='dragging';
+        _settleSessionSwipePaint();
+      }
+      return true;
+    };
+    const _commitSessionSwipe=()=>{
+      return _handleSessionSwipe(_pointerX-_pointerDownX,_pointerY-_pointerDownY);
+    };
     const _clearPointerDragState=()=>{
-      _pointerActive=false;
-      if(_isDragging){
-        _isDragging=false;
+      const wasDragging=_gestureState==='dragging';
+      _gestureState='idle';
+      _clearLongPressTimer();
+      if(wasDragging){
         if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-        _clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);
+        _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
       }
     };
     el.onpointerdown=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
-      _pointerActive=true;
-      _pointerDownX=e.clientX;
-      _pointerDownY=e.clientY;
-      _isDragging=false;
-      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      el.classList.remove('dragging');
+      _beginSessionGesture(e.clientX,e.clientY);
+      _gesturePointerType=e.pointerType||'';
+      if(e.pointerType==='touch'||e.pointerType==='pen'){
+        _scheduleSessionLongPressMenu();
+      }
     };
     el.onpointermove=(e)=>{
       // Plain hover also dispatches pointermove. Only mark a row as dragging
       // after an actual press starts on this row; otherwise hovered rows stay
       // faded until the next sidebar rerender clears their DOM nodes.
-      if(!_pointerActive) return;
-      if(_isDragging) return;
+      if(_gestureState==='idle') return;
+      _pointerX=e.clientX;
+      _pointerY=e.clientY;
       const dx=Math.abs(e.clientX-_pointerDownX);
       const dy=Math.abs(e.clientY-_pointerDownY);
-      if(dx>5||dy>5){
-        _isDragging=true;
-        el.classList.add('dragging');
-        // Cancel any pending drag-clear so we don't flash hover mid-drag
-        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      }
+      _promoteSessionDrag(dx,dy);
+      const signedDx=e.clientX-_pointerDownX;
+      const signedDy=e.clientY-_pointerDownY;
+      _trackHorizontalSwipe(Math.abs(signedDx),Math.abs(signedDy));
+      if(_isSessionSwipeTarget()&&(_swipeTracking||Math.abs(signedDx)>Math.abs(signedDy))) _paintSessionSwipe(signedDx);
     };
     el.onpointercancel=_clearPointerDragState;
-    el.onpointerleave=()=>{ if(_pointerActive) _clearPointerDragState(); };
+    el.onpointerleave=()=>{
+      if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+    };
     el.onpointerup=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      _pointerActive=false;
+      const wasDragging=_gestureState==='dragging';
+      _clearLongPressTimer();
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
+      _pointerX=e.clientX;
+      _pointerY=e.clientY;
+      _commitSessionSwipe();
+      if(_longPressMenuOpened||_gestureState==='committed'){e.stopPropagation();return;}
+      if(_sessionActionMenu&&!_sessionActionMenu.contains(e.target)){
+        closeSessionActionMenu();
+        e.stopPropagation();
+        return;
+      }
       if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
-      if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);return;}
+      if(wasDragging){
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _gestureState='idle';
+        _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+        return;
+      }
+      _gestureState='idle';
       const now=Date.now();
       if(now-_lastTapTime<350){
         // Double-tap: rename
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        el.classList.remove('loading');
         startRename();
         return;
       }
@@ -3280,6 +3437,7 @@ function renderSessionListFromCache(){
       // accidental navigation during scroll-drag lifts.
       clearTimeout(_tapTimer);
       const delay=e.pointerType==='mouse'?0:300;
+      if(e.pointerType!=='mouse') el.classList.add('loading');
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;
@@ -3290,8 +3448,12 @@ function renderSessionListFromCache(){
             await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
           }catch(e){ /* import failed -- fall through to read-only view */ }
         }
-        await loadSession(s.session_id);renderSessionListFromCache();
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        try{
+          await loadSession(s.session_id);renderSessionListFromCache();
+          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        }finally{
+          el.classList.remove('loading');
+        }
       }, delay);
     };
     // Add ondblclick for more reliable double-click detection
@@ -3304,6 +3466,47 @@ function renderSessionListFromCache(){
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
     };
+    el.oncontextmenu=(e)=>{
+      if(e.pointerType==='touch'||e.pointerType==='pen'){
+        e.preventDefault();
+      }
+    };
+    el.addEventListener('touchstart',(e)=>{
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      _beginSessionGesture(touch.clientX,touch.clientY);
+      _gesturePointerType='touch';
+      _scheduleSessionLongPressMenu();
+    },{passive:true});
+    el.addEventListener('touchmove',(e)=>{
+      if(_gestureState==='idle') return;
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      _pointerX=touch.clientX;
+      _pointerY=touch.clientY;
+      const signedDx=touch.clientX-_pointerDownX;
+      const signedDy=touch.clientY-_pointerDownY;
+      const dx=Math.abs(signedDx);
+      const dy=Math.abs(signedDy);
+      _promoteSessionDrag(dx,dy);
+      _trackHorizontalSwipe(dx,dy);
+      if(_isSessionSwipeTarget()&&(_swipeTracking||dx>dy)) _paintSessionSwipe(signedDx);
+      if(_swipeTracking) e.preventDefault();
+    },{passive:false});
+    el.addEventListener('touchend',(e)=>{
+      const wasDragging=_gestureState==='dragging';
+      _clearLongPressTimer();
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(touch){
+        _pointerX=touch.clientX;
+        _pointerY=touch.clientY;
+      }
+      _commitSessionSwipe();
+      if(wasDragging){
+        if(_gestureState!=='committed') _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+      }
+      if(_gestureState!=='committed') _gestureState='idle';
+    },{passive:true});
     return el;
   }
 }
@@ -3407,19 +3610,20 @@ async function removeWorktree(session){
   }
 }
 
-async function deleteSession(sid){
+async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
     message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
     confirmLabel:t('delete_title'),
     danger:true
   });
-  if(!ok)return;
+  if(!ok)return false;
+  if(beforeDelete) await beforeDelete();
   let response=null;
   try{
     response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
     _clearHandoffStorageForSession(sid);
-  }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
+  }catch(e){setStatus(`Delete failed: ${e.message}`);return false;}
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
     localStorage.removeItem('hermes-webui-session');
@@ -3439,6 +3643,7 @@ async function deleteSession(sid){
   }
   showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
   await renderSessionList();
+  return true;
 }
 
 // ── Project helpers ─────────────────────────────────────────────────────
