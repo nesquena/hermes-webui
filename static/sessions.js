@@ -3181,17 +3181,15 @@ function renderSessionListFromCache(){
     // single-tap navigation. pointerup fires immediately on both mouse & touch.
     // Mouse clicks are instant; touch presses need a 300ms delay to distinguish
     // a tap from a scroll-drag gesture on mobile.
-    // Drag detection (pointermove > 5px) cancels the pending tap on release.
+    // Movement promotes pressing into dragging; drag release cancels a pending tap.
     let _lastTapTime=0;
     let _tapTimer=null;
     let _pointerDownX=0;
     let _pointerDownY=0;
-    let _pointerActive=false;
-    let _isDragging=false;
+    let _gestureState='idle'; // idle | pressing | dragging | committed
     let _clearDragTimer=null;
     let _longPressTimer=null;
     let _longPressMenuOpened=false;
-    let _swipeHandled=false;
     let _swipeTracking=false;
     let _pointerX=0;
     let _pointerY=0;
@@ -3205,16 +3203,14 @@ function renderSessionListFromCache(){
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
     };
     const _beginSessionGesture=(clientX,clientY)=>{
-      _pointerActive=true;
       _gesturePointerType='';
       _pointerDownX=clientX;
       _pointerDownY=clientY;
       _pointerX=clientX;
       _pointerY=clientY;
-      _isDragging=false;
+      _gestureState='pressing';
       _swipeTracking=false;
       _longPressMenuOpened=false;
-      _swipeHandled=false;
       if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
       el.classList.remove('dragging','swipe-committed');
     };
@@ -3222,7 +3218,7 @@ function renderSessionListFromCache(){
       _clearLongPressTimer();
       el.classList.add('long-pressing');
       _longPressTimer=setTimeout(()=>{
-        if(!_pointerActive||_isDragging||_renamingSid||_sessionSelectMode||readOnly) return;
+        if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode||readOnly) return;
         _longPressMenuOpened=true;
         clearTimeout(_tapTimer);
         _tapTimer=null;
@@ -3235,6 +3231,13 @@ function renderSessionListFromCache(){
     };
     const _trackHorizontalSwipe=(dx,dy)=>{
       if(dx>16&&dx>dy*1.2) _swipeTracking=true;
+    };
+    const _promoteSessionDrag=(dx,dy)=>{
+      if(_gestureState!=='pressing'||(dx<=5&&dy<=5)) return;
+      if(dy>8||dx>10) _clearLongPressTimer();
+      _gestureState='dragging';
+      el.classList.add('dragging');
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
     };
     const _canSwipeDeleteSession=()=>{
       return _isSessionSwipeTarget()&&!_isMessagingSession(s)&&!_isCliSession(s);
@@ -3263,10 +3266,10 @@ function renderSessionListFromCache(){
       el.style.setProperty('--session-swipe-offset',(signedDx>0?1:-1)*window.innerWidth+'px');
     };
     const _handleSessionSwipe=(signedDx,signedDy)=>{
-      if(_swipeHandled||!_isSessionSwipeTarget()) return false;
+      if(_gestureState==='committed'||!_isSessionSwipeTarget()) return false;
       if(Math.abs(signedDx)<_swipeActionThreshold) return false;
       if(Math.abs(signedDy)>Math.abs(signedDx)*_swipeCancelRatio) return false;
-      _swipeHandled=true;
+      _gestureState='committed';
       _clearLongPressTimer();
       clearTimeout(_tapTimer);
       _tapTimer=null;
@@ -3287,7 +3290,7 @@ function renderSessionListFromCache(){
         });
       }else if(typeof showToast==='function'){
         showToast('Imported sessions cannot be deleted here.',3000);
-        _swipeHandled=false;
+        _gestureState='dragging';
         _settleSessionSwipePaint();
       }
       return true;
@@ -3296,10 +3299,10 @@ function renderSessionListFromCache(){
       return _handleSessionSwipe(_pointerX-_pointerDownX,_pointerY-_pointerDownY);
     };
     const _clearPointerDragState=()=>{
-      _pointerActive=false;
+      const wasDragging=_gestureState==='dragging';
+      _gestureState='idle';
       _clearLongPressTimer();
-      if(_isDragging){
-        _isDragging=false;
+      if(wasDragging){
         if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
         _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
       }
@@ -3316,35 +3319,31 @@ function renderSessionListFromCache(){
       // Plain hover also dispatches pointermove. Only mark a row as dragging
       // after an actual press starts on this row; otherwise hovered rows stay
       // faded until the next sidebar rerender clears their DOM nodes.
-      if(!_pointerActive) return;
+      if(_gestureState==='idle') return;
       _pointerX=e.clientX;
       _pointerY=e.clientY;
       const dx=Math.abs(e.clientX-_pointerDownX);
       const dy=Math.abs(e.clientY-_pointerDownY);
-      if(!_isDragging&&(dx>5||dy>5)){
-        if(dy>8||dx>10) _clearLongPressTimer();
-        _isDragging=true;
-        el.classList.add('dragging');
-        // Cancel any pending drag-clear so we don't flash hover mid-drag
-        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      }
+      _promoteSessionDrag(dx,dy);
       const signedDx=e.clientX-_pointerDownX;
       const signedDy=e.clientY-_pointerDownY;
       _trackHorizontalSwipe(Math.abs(signedDx),Math.abs(signedDy));
       if(_isSessionSwipeTarget()&&(_swipeTracking||Math.abs(signedDx)>Math.abs(signedDy))) _paintSessionSwipe(signedDx);
     };
     el.onpointercancel=_clearPointerDragState;
-    el.onpointerleave=()=>{ if(_pointerActive) _clearPointerDragState(); };
+    el.onpointerleave=()=>{
+      if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+    };
     el.onpointerup=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      _pointerActive=false;
+      const wasDragging=_gestureState==='dragging';
       _clearLongPressTimer();
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       _pointerX=e.clientX;
       _pointerY=e.clientY;
       _commitSessionSwipe();
-      if(_longPressMenuOpened||_swipeHandled){e.stopPropagation();return;}
+      if(_longPressMenuOpened||_gestureState==='committed'){e.stopPropagation();return;}
       if(_sessionActionMenu&&!_sessionActionMenu.contains(e.target)){
         closeSessionActionMenu();
         e.stopPropagation();
@@ -3353,7 +3352,13 @@ function renderSessionListFromCache(){
       if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
       // If the pointer moved enough to be a drag, cancel any pending tap
-      if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);return;}
+      if(wasDragging){
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _gestureState='idle';
+        _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+        return;
+      }
+      _gestureState='idle';
       const now=Date.now();
       if(now-_lastTapTime<350){
         // Double-tap: rename
@@ -3412,7 +3417,7 @@ function renderSessionListFromCache(){
       _scheduleSessionLongPressMenu();
     },{passive:true});
     el.addEventListener('touchmove',(e)=>{
-      if(!_pointerActive) return;
+      if(_gestureState==='idle') return;
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
       _pointerX=touch.clientX;
@@ -3421,18 +3426,13 @@ function renderSessionListFromCache(){
       const signedDy=touch.clientY-_pointerDownY;
       const dx=Math.abs(signedDx);
       const dy=Math.abs(signedDy);
-      if(dx>10||dy>8) _clearLongPressTimer();
-      if(!_isDragging&&(dx>5||dy>5)){
-        _isDragging=true;
-        el.classList.add('dragging');
-        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      }
+      _promoteSessionDrag(dx,dy);
       _trackHorizontalSwipe(dx,dy);
       if(_isSessionSwipeTarget()&&(_swipeTracking||dx>dy)) _paintSessionSwipe(signedDx);
       if(_swipeTracking) e.preventDefault();
     },{passive:false});
     el.addEventListener('touchend',(e)=>{
-      _pointerActive=false;
+      const wasDragging=_gestureState==='dragging';
       _clearLongPressTimer();
       const touch=e.changedTouches&&e.changedTouches[0];
       if(touch){
@@ -3440,10 +3440,10 @@ function renderSessionListFromCache(){
         _pointerY=touch.clientY;
       }
       _commitSessionSwipe();
-      if(_isDragging){
-        _isDragging=false;
-        if(!_swipeHandled) _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+      if(wasDragging){
+        if(_gestureState!=='committed') _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
       }
+      if(_gestureState!=='committed') _gestureState='idle';
     },{passive:true});
     return el;
   }

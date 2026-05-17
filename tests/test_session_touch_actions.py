@@ -67,8 +67,10 @@ def test_session_swipes_archive_right_and_delete_left():
     assert "_archiveSession(s,!s.archived)" in SESSIONS_JS
     assert "deleteSession(s.session_id,async()=>{" in SESSIONS_JS
     assert "showToast('Imported sessions cannot be deleted here.',3000);" in SESSIONS_JS
-    assert "_swipeHandled=false;" in SESSIONS_JS
-    assert "if(!_isDragging&&(dx>5||dy>5))" in SESSIONS_JS
+    assert "let _gestureState='idle';" in SESSIONS_JS
+    assert "_gestureState='dragging';" in SESSIONS_JS
+    assert "const _promoteSessionDrag=(dx,dy)=>{" in SESSIONS_JS
+    assert "if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();" in SESSIONS_JS
     assert "const _commitSessionSwipe=()=>{" in SESSIONS_JS
     assert "_commitSessionSwipe();" in SESSIONS_JS
 
