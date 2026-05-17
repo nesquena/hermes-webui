@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2450** by @Michaelyklam (fixes #2447) — Cap the optional streaming word-fade drain after the final `done` SSE event so very large or bursty completed responses are rendered from the canonical session promptly instead of keeping the chat in a live/working state until Stop is pressed.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
