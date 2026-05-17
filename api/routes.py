@@ -4115,12 +4115,34 @@ def handle_post(handler, parsed) -> bool:
         return values[0] if values else ""
 
     def _route_reject_ambient_current_selectors():
-        for name in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
-            value = body.get(name) if name in body else None
-            if value is not None and str(value).strip():
+        inspected = 0
+        ambient_names = {"active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"}
+
+        def visit(value, depth=0):
+            nonlocal inspected
+            if depth > 6:
                 raise ValueError(
                     "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
                 )
+            if not isinstance(value, (dict, list, tuple)):
+                return
+            inspected += 1
+            if inspected > 120:
+                raise ValueError(
+                    "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+                )
+            if isinstance(value, dict):
+                for name, nested in value.items():
+                    if name in ambient_names and nested is not None and str(nested).strip():
+                        raise ValueError(
+                            "Non-current Capy Spaces routes require explicit space_id/spaceId; use current-space routes for current selectors"
+                        )
+                    visit(nested, depth + 1)
+            else:
+                for nested in value:
+                    visit(nested, depth + 1)
+
+        visit(body)
 
     def _capy_spaces_session_receipt(session):
         receipt = session.compact()
