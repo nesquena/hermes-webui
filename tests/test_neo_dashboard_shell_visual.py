@@ -69,7 +69,6 @@ def test_neo_sidebar_matches_required_navigation_order_and_targets():
         ("chat", "chat", "tab_conversations"),
         ("projects", "projects", "tab_projects"),
         ("profiles", "profiles", "tab_profiles"),
-        ("finance", "finance", "tab_finance"),
         ("agents", "agents", "tab_agents"),
         ("skills", "skills", "tab_skills"),
         ("tasks", "tasks", "tab_automation"),
@@ -97,11 +96,9 @@ def test_neo_placeholder_panels_are_routable_from_sidebar():
     for marker in [
         'id="mainProjects"',
         'id="mainTodos"',
-        'id="mainFinance"',
         'id="mainAgents"',
         "projects: 'showing-projects'",
         "todos: 'showing-todos'",
-        "finance: 'showing-finance'",
         "agents: 'showing-agents'",
         "NEO_SHELL_PANELS",
         "panelDashboard",
@@ -110,7 +107,6 @@ def test_neo_placeholder_panels_are_routable_from_sidebar():
     for selector in [
         "main.main.showing-projects > #mainProjects",
         "main.main.showing-todos > #mainTodos",
-        "main.main.showing-finance > #mainFinance",
         "main.main.showing-agents > #mainAgents",
         ".neo-placeholder-panel",
     ]:

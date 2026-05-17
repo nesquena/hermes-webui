@@ -2024,11 +2024,10 @@ main.main > #mainMemory,
 main.main > #mainTasks,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles{display:none;}
-main.main:not(.showing-dashboard):not(.showing-projects):not(.showing-todos):not(.showing-finance):not(.showing-agents):not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles) > #mainChat{display:flex;}
+main.main:not(.showing-dashboard):not(.showing-projects):not(.showing-todos):not(.showing-agents):not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles) > #mainChat{display:flex;}
 main.main.showing-dashboard > #mainDashboard{display:flex;}
 main.main.showing-projects > #mainProjects{display:flex;}
 main.main.showing-todos > #mainTodos{display:flex;}
-main.main.showing-finance > #mainFinance{display:flex;}
 main.main.showing-agents > #mainAgents{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}

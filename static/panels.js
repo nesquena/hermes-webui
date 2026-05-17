@@ -18,17 +18,16 @@ const APP_TITLEBAR_KEYS = {
   chat: 'tab_conversations', dashboard: 'tab_dashboard', tasks: 'tab_automation', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
-  projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
+  projects: 'tab_projects', agents: 'tab_agents',
 };
 
-const NEO_SHELL_PANELS = new Set(['dashboard', 'chat', 'projects', 'profiles', 'finance', 'agents', 'settings', 'skills', 'tasks']);
+const NEO_SHELL_PANELS = new Set(['dashboard', 'chat', 'projects', 'profiles', 'agents', 'settings', 'skills', 'tasks']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',
   chat: 'showing-chat',
   projects: 'showing-projects',
   todos: 'showing-todos',
-  finance: 'showing-finance',
   agents: 'showing-agents',
   settings: 'showing-settings',
   skills: 'showing-skills',
