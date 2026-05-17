@@ -9879,6 +9879,38 @@ def test_import_export_routes_reject_conflicting_space_id_aliases_before_side_ef
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_import_space_agent_package_route_rejects_ambient_current_selector_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    current = spaces.create_space(
+        {"space_id": "ambient-current-import-route", "name": "Ambient Current Import Route"}
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/import",
+        {
+            "spaceId": "ambient-import-created",
+            "activeSpaceId": current["space_id"],
+            "space_yaml": "id: ambient-import-yaml\nname: Ambient Import YAML\n",
+            "renderer": "<script>ambientImportLeak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+    space_ids = [space["space_id"] for space in spaces.list_spaces()]
+
+    assert handled is None
+    assert status == 400
+    assert "current selectors" in body["error"]
+    assert "ambient-import-created" not in space_ids
+    assert "ambient-import-yaml" not in space_ids
+    assert spaces.read_space(current["space_id"])["name"] == "Ambient Current Import Route"
+    assert "ambientimportleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_export_space_agent_yaml_package_omits_generated_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

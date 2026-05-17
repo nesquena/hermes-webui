@@ -5049,6 +5049,7 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/import":
         from api import spaces as capy_spaces
         try:
+            _route_reject_ambient_current_selectors()
             space_id = _route_alias_value("space_id", "spaceId")
             return j(
                 handler,
