@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compact live Thinking cards now reuse the same timeline card across sequential tool calls, preventing repeated Thinking cards from stacking during one multi-tool turn.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
