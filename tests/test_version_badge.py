@@ -87,8 +87,8 @@ class TestDetectWebUIVersion:
         )
         assert result == 'unknown'
 
-    def test_git_uses_correct_describe_flags(self, tmp_path):
-        """git describe is called with --tags --always --dirty."""
+    def test_git_uses_fast_describe_flags(self, tmp_path):
+        """git describe avoids --dirty so WSL /mnt checkouts do not stall."""
         called_args = []
 
         def capture(args, cwd, timeout=10):
@@ -99,7 +99,35 @@ class TestDetectWebUIVersion:
         assert called_args, 'git was never called'
         assert '--tags' in called_args[0]
         assert '--always' in called_args[0]
-        assert '--dirty' in called_args[0]
+        assert '--dirty' not in called_args[0]
+
+    def test_dirty_check_appends_suffix_when_fast(self, tmp_path):
+        """A dirty worktree still gets a suffix when the cheap probe returns quickly."""
+        calls = []
+
+        def fake_run_git(args, cwd, timeout=10):
+            calls.append((args, timeout))
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('', False)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'v0.50.123-dirty'
+        assert calls[1][0][:2] == ['diff-index', '--quiet']
+
+    def test_dirty_check_timeout_does_not_hide_base_version(self, tmp_path):
+        """If dirty detection times out, keep the base version instead of unknown."""
+        def fake_run_git(args, cwd, timeout=10):
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('git diff-index --quiet HEAD -- timed out after 1s', False)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'v0.50.123'
 
 
 # ---------------------------------------------------------------------------
