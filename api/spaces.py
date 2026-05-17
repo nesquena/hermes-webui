@@ -4321,8 +4321,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         return {"ok": True, "action": name, "widget": read_widget_detail(space_id, widget_id)}
     if name in {"widget.patch", "space.widget.patch", "space.current.widget.patch"}:
+        is_current_widget_patch = name == "space.current.widget.patch"
+        if not is_current_widget_patch:
+            _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(
-            _space_tool_current_id(data) if name == "space.current.widget.patch" else _space_tool_space_id_alias(data)
+            _space_tool_current_id(data) if is_current_widget_patch else _space_tool_space_id_alias(data)
         )
         widget_id = validate_widget_id(_space_tool_widget_id_alias(data))
         result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})

@@ -12408,6 +12408,48 @@ def test_space_tool_route_rejects_widget_patch_alias_conflicts_before_side_effec
     assert "widgetconflictleak" not in json.dumps(body).lower()
 
 
+def test_space_tool_route_widget_patch_rejects_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for index, action in enumerate(("widget.patch", "space.widget.patch")):
+        created = spaces.create_space(
+            {"space_id": f"tool-patch-ambient-{index}", "name": f"Tool Patch Ambient {index}"}
+        )
+        spaces.upsert_widget(
+            created["space_id"],
+            {"id": "safe-widget", "kind": "markdown", "title": "Safe Widget"},
+        )
+        before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+        handled, status, body = _route_post(
+            "/api/spaces/tool",
+            {
+                "action": action,
+                "spaceId": created["space_id"],
+                "currentSpaceId": created["space_id"],
+                "widgetId": "safe-widget",
+                "patch": {
+                    "title": "AmbientPatchLeak SECRET_VALUE_DO_NOT_LEAK",
+                    "renderer": "<script>ambientPatchLeak()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+            },
+        )
+
+        assert handled is None
+        assert status == 400
+        assert "current-space selectors" in body["error"]
+        widget = spaces.read_widget_detail(created["space_id"], "safe-widget")
+        serialized = json.dumps({"body": body, "widget": widget}).lower()
+        assert widget["title"] == "Safe Widget"
+        assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+        assert "ambientpatchleak" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert "api_key" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_route_widget_patch_requires_explicit_widget_selector(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-patch-args", "name": "Tool Patch Args"})
