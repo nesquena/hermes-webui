@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover already-journaled visible assistant text and tool cards when a WebUI process restart interrupts an in-flight browser-originated turn. The stale-stream repair path now materializes run-journal output before the explicit interrupted marker instead of collapsing the turn to "no agent output was recovered." Fixes #2423.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.

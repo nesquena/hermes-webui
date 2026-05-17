@@ -1004,6 +1004,39 @@ def _clear_stale_stream_state(session) -> bool:
     with _get_session_agent_lock(session.session_id):
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
+        if getattr(session, "pending_user_message", None):
+            try:
+                from api.models import _apply_core_sync_or_error_marker, _get_profile_home
+                profile_home = _get_profile_home(getattr(session, "profile", None))
+                core_path = profile_home / "sessions" / f"session_{session.session_id}.json"
+                repaired = _apply_core_sync_or_error_marker(
+                    session,
+                    core_path,
+                    stream_id_for_recheck=stream_id,
+                    touch_updated_at=False,
+                )
+            except Exception:
+                logger.exception(
+                    "_clear_stale_stream_state: failed to repair stale pending stream %s "
+                    "for session %s",
+                    stream_id, getattr(session, "session_id", "?"),
+                )
+                repaired = False
+            if repaired:
+                if original_stub is not session:
+                    try:
+                        original_stub.active_stream_id = None
+                        if hasattr(original_stub, "pending_user_message"):
+                            original_stub.pending_user_message = None
+                        if hasattr(original_stub, "pending_attachments"):
+                            original_stub.pending_attachments = []
+                        if hasattr(original_stub, "pending_started_at"):
+                            original_stub.pending_started_at = None
+                    except Exception:
+                        pass
+                return True
+            if getattr(session, "active_stream_id", None) != stream_id:
+                return False
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):

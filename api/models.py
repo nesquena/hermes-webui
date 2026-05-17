@@ -679,18 +679,179 @@ def _get_profile_home(profile) -> Path:
         return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
 
 
-def _interrupted_recovery_marker() -> dict:
-    return {
-        'role': 'assistant',
-        'content': (
+def _interrupted_recovery_marker(*, recovered_output: bool = False) -> dict:
+    if recovered_output:
+        content = (
+            '**Response interrupted.**\n\n'
+            'The WebUI process restarted before this turn finished. '
+            'The partial output above was recovered from the run journal, '
+            'but the interrupted agent process could not continue.'
+        )
+    else:
+        content = (
             '**Response interrupted.**\n\n'
             'The WebUI process restarted before this turn finished. '
             'The user message above was preserved, but no agent output was recovered.'
-        ),
+        )
+    return {
+        'role': 'assistant',
+        'content': content,
         'timestamp': int(time.time()),
         '_error': True,
         'type': 'interrupted',
     }
+
+
+def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    out = {}
+    for key, value in list(args.items())[:limit]:
+        text = str(value)
+        out[str(key)] = text[:120] + ('...' if len(text) > 120 else '')
+    return out
+
+
+def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
+    """Recover already-emitted visible output from a dead stream journal.
+
+    This repair path is intentionally conservative: it restores user-visible
+    assistant text and tool-card metadata that had already been emitted over
+    SSE before the WebUI process died. It does not restore hidden reasoning and
+    it does not try to continue execution.
+    """
+    if not stream_id:
+        return False
+
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        logger.debug(
+            "Session %s: failed to read run journal for stream %s",
+            getattr(session, 'session_id', '?'),
+            stream_id,
+            exc_info=True,
+        )
+        return False
+
+    events = [event for event in journal.get('events') or [] if isinstance(event, dict)]
+    if not events:
+        return False
+
+    appended_any = False
+    assistant_parts: list[str] = []
+    assistant_started_at: float | None = None
+    current_assistant_idx: int | None = None
+    recovered_tool_calls: list[dict] = []
+
+    def flush_assistant() -> int | None:
+        nonlocal appended_any, assistant_parts, assistant_started_at, current_assistant_idx
+        content = ''.join(assistant_parts).strip()
+        assistant_parts = []
+        if not content:
+            return current_assistant_idx
+        timestamp = int(assistant_started_at or time.time())
+        session.messages.append({
+            'role': 'assistant',
+            'content': content,
+            'timestamp': timestamp,
+            '_recovered_from_run_journal': True,
+            '_recovered_stream_id': stream_id,
+        })
+        current_assistant_idx = len(session.messages) - 1
+        assistant_started_at = None
+        appended_any = True
+        return current_assistant_idx
+
+    def ensure_assistant_anchor(created_at: float | None = None) -> int:
+        nonlocal appended_any, current_assistant_idx
+        idx = flush_assistant()
+        if idx is not None:
+            return idx
+        # A stream can start with tools before any text. Keep those tools
+        # visible after restart with an empty recovered assistant anchor instead
+        # of inventing synthetic progress prose.
+        session.messages.append({
+            'role': 'assistant',
+            'content': '',
+            'timestamp': int(created_at or time.time()),
+            '_recovered_from_run_journal': True,
+            '_recovered_stream_id': stream_id,
+        })
+        current_assistant_idx = len(session.messages) - 1
+        appended_any = True
+        return current_assistant_idx
+
+    for event in events:
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        created_at = event.get('created_at') if isinstance(event.get('created_at'), (int, float)) else None
+        if event_name == 'token':
+            text = str(payload.get('text') or '')
+            if not text:
+                continue
+            if not assistant_parts and assistant_started_at is None:
+                assistant_started_at = created_at or time.time()
+            assistant_parts.append(text)
+            continue
+        if event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                flush_assistant()
+                continue
+            text = str(payload.get('text') or '').strip()
+            if not text:
+                continue
+            if not assistant_parts and assistant_started_at is None:
+                assistant_started_at = created_at or time.time()
+            if assistant_parts and not ''.join(assistant_parts).endswith(('\n', ' ')):
+                assistant_parts.append('\n\n')
+            assistant_parts.append(text)
+            flush_assistant()
+            continue
+        if event_name == 'tool':
+            anchor_idx = flush_assistant()
+            if anchor_idx is None:
+                anchor_idx = ensure_assistant_anchor(created_at)
+            name = str(payload.get('name') or 'tool')
+            preview = str(payload.get('preview') or '')
+            recovered_tool_calls.append({
+                'name': name,
+                'preview': preview,
+                'snippet': preview,
+                'tid': f"journal-{event.get('seq') or len(recovered_tool_calls) + 1}",
+                'assistant_msg_idx': anchor_idx,
+                'args': _truncate_journal_tool_args(payload.get('args') or {}),
+                'done': False,
+                '_recovered_from_run_journal': True,
+                '_recovered_stream_id': stream_id,
+            })
+            appended_any = True
+            current_assistant_idx = anchor_idx
+            continue
+        if event_name == 'tool_complete':
+            name = str(payload.get('name') or '')
+            for tool_call in reversed(recovered_tool_calls):
+                if tool_call.get('done'):
+                    continue
+                if not name or tool_call.get('name') == name:
+                    tool_call['done'] = True
+                    if payload.get('preview'):
+                        tool_call['preview'] = str(payload.get('preview') or '')
+                        tool_call['snippet'] = str(payload.get('preview') or '')
+                    if payload.get('duration') is not None:
+                        tool_call['duration'] = payload.get('duration')
+                    tool_call['is_error'] = bool(payload.get('is_error', False))
+                    break
+            continue
+        if event_name in {'done', 'stream_end', 'cancel', 'apperror', 'error'}:
+            flush_assistant()
+
+    flush_assistant()
+    if recovered_tool_calls:
+        session.tool_calls = list(session.tool_calls or []) + recovered_tool_calls
+        appended_any = True
+    return appended_any
 
 
 def _apply_core_sync_or_error_marker(
@@ -699,6 +860,7 @@ def _apply_core_sync_or_error_marker(
     stream_id_for_recheck=None,
     *,
     require_stream_dead=True,
+    touch_updated_at=True,
 ) -> bool:
     """Inner repair logic. Must be called with the per-session lock already held.
 
@@ -755,12 +917,16 @@ def _apply_core_sync_or_error_marker(
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
+        recovered_output = _append_journaled_partial_output(
+            session,
+            stream_id_for_recheck or session.active_stream_id,
+        )
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
-        session.messages.append(_interrupted_recovery_marker())
-        session.save()
+        session.messages.append(_interrupted_recovery_marker(recovered_output=recovered_output))
+        session.save(touch_updated_at=touch_updated_at)
         logger.info(
             "Session %s: recovered pending user turn (messages non-empty), added error marker",
             sid,
@@ -783,7 +949,7 @@ def _apply_core_sync_or_error_marker(
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
-            session.save()
+            session.save(touch_updated_at=touch_updated_at)
             logger.info(
                 "Session %s: synced %d messages from core transcript",
                 sid, len(core_messages),
@@ -799,12 +965,16 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+    recovered_output = _append_journaled_partial_output(
+        session,
+        stream_id_for_recheck or session.active_stream_id,
+    )
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
-    session.messages.append(_interrupted_recovery_marker())
-    session.save()
+    session.messages.append(_interrupted_recovery_marker(recovered_output=recovered_output))
+    session.save(touch_updated_at=touch_updated_at)
     logger.info("Session %s: no core transcript found, added error marker", sid)
     return True
 
