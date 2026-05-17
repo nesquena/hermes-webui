@@ -697,6 +697,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
+  const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
   const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
@@ -1086,6 +1087,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
   }
   function _drainStreamFadeBeforeDone(onDone){
+    const drainStartedAt=performance.now();
+    let forcedDone=false;
     const step=()=>{
       if(!assistantBody){onDone();return;}
       const target=_streamFadeCurrentDisplayText();
@@ -1099,6 +1102,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // the final renderMessages() DOM replacement removes the live spans.
         const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
         setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
+        return;
+      }
+      // Final SSE `done` means the canonical completed session is available.
+      // The optional word-fade playout must not keep that completed answer
+      // hidden behind the live Thinking state for large/bursty responses.
+      if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
+        forcedDone=true;
+        if(_smdParser) _smdEndParser();
+        onDone();
         return;
       }
       setTimeout(()=>requestAnimationFrame(step), 33);
