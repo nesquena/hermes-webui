@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 17:41 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-16 20:32 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces static safe-recovery module actions now reject unsafe/path-like or secret-looking `data-module-id` values before opening shared dialogs or posting recovery module disable/enable/repair requests, while preserving safe module controls and metadata-only recovery rendering. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces widget-event runtime contract now rejects nested postMessage-shaped payload dictionaries whose capy runtime discriminator aliases (`type`, `message_type`, `messageType`) disagree, before event persistence, while preserving benign non-capy nested labels and metadata-only public event surfaces. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject nested runtime alias conflicts`
+  - Added RED/GREEN backend coverage proving nested payload envelopes with conflicting capy runtime aliases such as `type: capy:ready` plus `messageType: capy:agent:prompt` fail closed before queueing widget events.
+  - Hardened `_nested_payload_runtime_message_types(...)` to validate capy-shaped aliases within each nested payload object as a consistency set, mirroring the top-level runtime alias guard while continuing to ignore benign non-capy widget-local `type` labels.
+  - Validation at completion: focused RED failed before implementation (`1 failed` with `DID NOT RAISE`); focused GREEN passed (`2 passed`); widget-event runtime regressions passed (`9 passed, 352 deselected`); full Spaces foundation suite passed (`361 passed`); Spaces UI behavior + demo parity suites passed (`188 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static backend/UI QA harness leak checks passed. Screenshot artifact: `/tmp/capy-spaces-progress/nested-runtime-alias-qa.png`.
 
 - `fix(spaces): guard recovery module actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving forged recovery module disable/enable/repair clicks with an unsafe path/API-auth-looking module id fail closed before dialogs or POSTs.

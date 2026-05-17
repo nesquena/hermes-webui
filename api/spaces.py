@@ -291,6 +291,7 @@ def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max
         if depth > max_depth or len(found) >= max_items:
             return
         if isinstance(current, dict):
+            aliases: list[str] = []
             for key in ("type", "message_type", "messageType"):
                 if key not in current:
                     continue
@@ -300,6 +301,10 @@ def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max
                 message_type = _runtime_message_type_value(raw)
                 if not message_type:
                     raise ValueError("Blocked by widget runtime contract")
+                aliases.append(message_type)
+            if aliases and any(message_type.lower() != aliases[0].lower() for message_type in aliases):
+                raise ValueError("Blocked by widget runtime contract")
+            for message_type in aliases:
                 found.append(message_type)
                 if len(found) >= max_items:
                     return
