@@ -215,3 +215,31 @@ class TestKatexDollarInTableCell:
             f"`$5 | $10` must remain two cells, not collapse to one math span. "
             f"Got {len(cells)} cells: {cells!r}"
         )
+
+
+class TestComparisonOperatorsAcrossColumns:
+    """The first cut of #2428 included `<` and `>` in the protected-bracket
+    set. That caused tables containing comparison operators across adjacent
+    columns to mis-collapse: ``| x < 5 | y > 10 |`` matched `< … >` as a
+    bracket pair and stashed the inner pipe, producing one cell instead of
+    two. Stage-fix removed `<` / `>` from the bracket set because real LLM
+    output uses angle brackets as comparison operators far more often than
+    as a content-grouping pair."""
+
+    def test_less_than_greater_than_across_columns_stays_two_cells(self, driver_path):
+        md = "| x < 5 | y > 10 |\n|---|---|\n| less | more |"
+        cells = _table_cells(_render(driver_path, md))
+        assert len(cells) == 4, (
+            f"`| x < 5 | y > 10 |` must produce 4 cells (2 cols × 2 rows). "
+            f"Got {len(cells)} cells: {cells!r}"
+        )
+
+    def test_less_than_alone_in_cell(self, driver_path):
+        md = "| a < b | c |\n|---|---|\n| ok | y |"
+        cells = _table_cells(_render(driver_path, md))
+        assert len(cells) == 4, f"got cells: {cells!r}"
+
+    def test_greater_than_alone_in_cell(self, driver_path):
+        md = "| a > b | c |\n|---|---|\n| ok | y |"
+        cells = _table_cells(_render(driver_path, md))
+        assert len(cells) == 4, f"got cells: {cells!r}"
