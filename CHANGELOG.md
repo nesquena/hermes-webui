@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2445** by @Michaelyklam (fixes #2443) — `/api/models` now fingerprints model-catalog inputs as part of its persisted cache metadata, so server-side catalog additions and Codex local catalog changes invalidate `models_cache.json` immediately instead of waiting for the 24-hour TTL or manual cache deletion.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
