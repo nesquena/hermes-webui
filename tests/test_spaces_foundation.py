@@ -6243,6 +6243,96 @@ def test_revision_and_widget_event_summaries_redact_secret_looking_values(monkey
     assert "token" not in serialized.lower()
 
 
+def test_widget_event_public_summaries_redact_unsafe_event_name_and_status_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {"space_id": "widget-event-label-redaction", "name": "Widget Event Label Redaction"}
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "panel", "kind": "status", "title": "Panel"})
+
+    prompt = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "agent.prompt",
+        {"note": "safe prompt label"},
+    )
+    refresh = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "widget.refresh",
+        {"note": "safe refresh label"},
+    )
+    queued_compact = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "dataHTML",
+        {"note": "safe direct compact fixture label"},
+    )
+    queued_handler = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "onClick",
+        {"note": "safe handler fixture label"},
+    )
+    unsafe = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "agent.prompt",
+        {"note": "safe fixture label"},
+    )
+    compact_unsafe = spaces.queue_widget_event(
+        created["space_id"],
+        "panel",
+        "agent.prompt",
+        {"note": "safe compact fixture label"},
+    )
+
+    event_path = spaces.events_dir() / f"{unsafe['event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    event["details"]["event_name"] = "renderer.source"
+    event["details"]["status"] = "data.html"
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+    compact_event_path = spaces.events_dir() / f"{compact_unsafe['event_id']}.json"
+    compact_event = json.loads(compact_event_path.read_text(encoding="utf-8"))
+    compact_event["details"]["event_name"] = "renderersource"
+    compact_event["details"]["status"] = "DATAHTML"
+    compact_event_path.write_text(json.dumps(compact_event), encoding="utf-8")
+
+    events = spaces.list_widget_events(created["space_id"], "panel", limit=10)
+    by_id = {event["event_id"]: event for event in events}
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert by_id[prompt["event_id"]]["event_name"] == "agent.prompt"
+    assert by_id[prompt["event_id"]]["status"] == "queued"
+    assert by_id[refresh["event_id"]]["event_name"] == "widget.refresh"
+    assert by_id[refresh["event_id"]]["status"] == "queued"
+    assert queued_compact["event_name"] == "[REDACTED]"
+    assert by_id[queued_compact["event_id"]]["event_name"] == "[REDACTED]"
+    assert by_id[queued_compact["event_id"]]["status"] == "queued"
+    assert queued_handler["event_name"] == "[REDACTED]"
+    assert by_id[queued_handler["event_id"]]["event_name"] == "[REDACTED]"
+    assert by_id[queued_handler["event_id"]]["status"] == "queued"
+    assert by_id[unsafe["event_id"]]["event_name"] == "[REDACTED]"
+    assert by_id[unsafe["event_id"]]["status"] == "[REDACTED]"
+    assert by_id[compact_unsafe["event_id"]]["event_name"] == "[REDACTED]"
+    assert by_id[compact_unsafe["event_id"]]["status"] == "[REDACTED]"
+    assert f"{prompt['event_id']}|panel|agent.prompt|queued" in context
+    assert f"{refresh['event_id']}|panel|widget.refresh|queued" in context
+    assert f"{queued_compact['event_id']}|panel|[REDACTED]|queued" in context
+    assert f"{queued_handler['event_id']}|panel|[REDACTED]|queued" in context
+    assert f"{unsafe['event_id']}|panel|[REDACTED]|[REDACTED]" in context
+    assert f"{compact_unsafe['event_id']}|panel|[REDACTED]|[REDACTED]" in context
+
+    serialized = json.dumps({"events": events, "context": context}, sort_keys=True).lower()
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "data.html" not in serialized
+    assert "datahtml" not in serialized
+    assert "renderersource" not in serialized
+    assert "onclick" not in serialized
+    assert '"html"' not in serialized
+
+
 def test_revision_events_include_safe_restore_preview_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Rollback Preview"})

@@ -1052,6 +1052,37 @@ def _active_context_value(value: Any, limit: int = 500) -> str:
     return _recovery_reason_summary(value, limit)
 
 
+def _widget_event_label_summary(value: Any, limit: int = 120) -> str:
+    """Return public widget-event label text with unsafe marker labels redacted."""
+    text = _active_context_value(value, limit)
+    if not text or text == "[REDACTED]":
+        return text
+    marker_text = _space_repair_marker_text(text, limit)
+    compact_marker = marker_text.replace(" ", "")
+    if _SPACE_REPAIR_UNSAFE_TEXT_RE.search(marker_text):
+        return "[REDACTED]"
+    compact_unsafe_markers = (
+        "apikey",
+        "apiauth",
+        "authorization",
+        "bearer",
+        "credential",
+        "credentials",
+        "generatedcode",
+        "generatedwidgetbody",
+        "password",
+        "rawprompt",
+    )
+    if any(marker in compact_marker for marker in compact_unsafe_markers):
+        return "[REDACTED]"
+    if re.search(r"on(?:click|error|load|mouse|pointer|key|input|change|submit|focus|blur|drag|drop|touch)[a-z]*", compact_marker):
+        return "[REDACTED]"
+    unsafe_parts = ("api", "auth", "body", "code", "data", "html", "key", "renderer", "script", "secret", "source", "token")
+    if any(f"{left}{right}" in compact_marker for left in unsafe_parts for right in unsafe_parts if left != right):
+        return "[REDACTED]"
+    return text
+
+
 def _payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
     if not lowered:
@@ -6781,8 +6812,8 @@ def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None
         "event_id": event_id,
         "space_id": sid,
         "widget_id": wid,
-        "event_name": _context_value(details.get("event_name"), 120),
-        "status": _context_value(details.get("status") or "queued", 80),
+        "event_name": _widget_event_label_summary(details.get("event_name"), 120),
+        "status": _widget_event_label_summary(details.get("status") or "queued", 80),
         "prompt_preview": _payload_text_summary(details.get("prompt_preview"), 1000),
         "payload_summary": payload_summary,
         "created_at": event.get("created_at"),
@@ -6934,7 +6965,7 @@ def queue_widget_event(
         "status": "queued",
         "space_id": sid,
         "widget_id": wid,
-        "event_name": name,
+        "event_name": _widget_event_label_summary(name),
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
