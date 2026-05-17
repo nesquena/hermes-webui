@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2463** by @Michaelyklam (closes #2462) — Align `/theme` command help strings in Russian, German, Simplified Chinese, Traditional Chinese, and French with the current Theme × Skin contract. The localized command descriptions now mention `system/dark/light` plus the full skin list through `nous`, and French invalid-usage text now uses the actual `/theme ` slash command prefix.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
