@@ -66,23 +66,16 @@ class TestStartShReadonlyEnvFilter:
                 f"'{var}: readonly variable'"
             )
 
-    def test_filter_pattern_uses_grep_or_equivalent(self):
+    def test_filter_pattern_uses_grep_before_source(self):
         """Filter must use a pattern that strips readonly-var lines before
-        the bash `source` consumes them.  `grep -vE` is the canonical form;
-        the assertion accepts any process-substitution-into-source shape."""
-        # Look for `source <(...UID...)` pattern. Note that the inner shell
-        # expression can contain its own parens (e.g. `(export[[:space:]]+)`),
-        # so we use a non-greedy `.*?` rather than `[^)]*`.
-        assert re.search(
-            r"source\s+<\(.*?UID.*?\)",
-            START_SH,
-            re.DOTALL,
-        ), (
-            "start.sh's .env loader must filter readonly bash vars "
-            "(UID/GID/EUID/EGID/PPID) via `source <(grep -vE ...)` or "
-            "equivalent process-substitution form before `source`-ing "
-            "the .env file"
-        )
+        the bash `source` consumes them.  The loader may use a temporary file
+        rather than process substitution because some bash/macOS combinations
+        can source an empty `/dev/fd/*` stream from `source <(grep ...)`."""
+        grep_idx = START_SH.find("grep -vE")
+        source_idx = START_SH.find("source", grep_idx)
+        assert grep_idx != -1, "start.sh must filter readonly vars with grep -vE or equivalent"
+        assert source_idx != -1, "start.sh must source the filtered .env stream"
+        assert grep_idx < source_idx, "readonly-var filtering must happen before source"
 
     def test_filter_handles_optional_export_prefix(self):
         """The ``export`` prefix on env vars is optional but common.  The

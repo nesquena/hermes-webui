@@ -179,6 +179,25 @@ def test_session_delete():
         assert e.code in (404, 500), f"Expected 404 or 500, got {e.code}"
 
 
+def test_session_delete_removes_attachment_inbox(cleanup_test_sessions):
+    """Deleting a session also removes its chat attachment inbox directory."""
+    sid, _ = make_session_tracked(cleanup_test_sessions)
+
+    result, status = post_multipart("/api/upload", {"session_id": sid}, {
+        "file": ("delete-me.txt", b"temporary attachment")
+    })
+    assert status == 200, f"Upload failed {status}: {result}"
+    attachment_dir = pathlib.Path(result["path"]).parent
+    assert attachment_dir.name == sid
+    assert attachment_dir.exists()
+
+    delete_result, delete_status = post("/api/session/delete", {"session_id": sid})
+
+    assert delete_status == 200
+    assert delete_result.get("ok") is True
+    assert not attachment_dir.exists()
+
+
 def test_session_delete_nonexistent():
     """Deleting a nonexistent session should return ok:True (idempotent)."""
     result, status = post("/api/session/delete", {"session_id": "doesnotexist"})
@@ -296,7 +315,7 @@ def test_parse_multipart_binary_file():
 # ──────────────────────────────────────────────
 
 def test_upload_text_file(cleanup_test_sessions):
-    """Upload a text file to a session workspace, verify it appears in /api/list."""
+    """Upload a text file to the attachment inbox, not the workspace root."""
     sid, ws = make_session_tracked(cleanup_test_sessions)
 
     result, status = post_multipart("/api/upload", {"session_id": sid}, {
@@ -306,12 +325,31 @@ def test_upload_text_file(cleanup_test_sessions):
     assert "filename" in result
     assert result["size"] == len(b"sprint1 test content")
 
-    # Verify file appears in listing
+    uploaded_path = pathlib.Path(result["path"])
+    assert uploaded_path.exists()
+    assert uploaded_path.read_bytes() == b"sprint1 test content"
+    assert uploaded_path.parent.name == sid
+
+    # Verify ordinary chat uploads no longer clutter the workspace listing.
     listing = get(f"/api/list?session_id={sid}&path=.")
     names = [e["name"] for e in listing["entries"]]
-    assert result["filename"] in names, f"{result['filename']} not in {names}"
-    # Cleanup the uploaded file
-    post("/api/file/delete", {"session_id": sid, "path": result["filename"]})
+    assert result["filename"] not in names, f"{result['filename']} unexpectedly in {names}"
+    # Cleanup the uploaded file from the attachment inbox.
+    uploaded_path.unlink(missing_ok=True)
+
+
+def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
+    """HERMES_WEBUI_ATTACHMENT_DIR routes chat uploads to a per-session inbox."""
+    from api.upload import _session_attachment_dir, _upload_destination
+
+    inbox = tmp_path / "attachment-inbox"
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(inbox))
+
+    dest = _upload_destination("session-123", "notes.md")
+
+    assert dest == inbox.resolve() / "session-123" / "notes.md"
+    assert dest.parent.exists()
+    assert _session_attachment_dir("session-123") == inbox.resolve() / "session-123"
 
 
 def test_upload_too_large(cleanup_test_sessions):

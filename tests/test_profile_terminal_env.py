@@ -78,6 +78,8 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
             "TERMINAL_CWD": "/profile/config/cwd",
             "HERMES_EXEC_ASK": "0",
             "HERMES_SESSION_KEY": "old-session",
+            "HERMES_SESSION_ID": "old-session",
+            "HERMES_SESSION_PLATFORM": "cli",
             "HERMES_HOME": "/old/profile/home",
             "TERMINAL_ENV": "ssh",
         },
@@ -89,5 +91,7 @@ def test_streaming_thread_env_allows_profile_terminal_cwd_override():
     assert env["TERMINAL_CWD"] == "/active/workspace"
     assert env["HERMES_EXEC_ASK"] == "1"
     assert env["HERMES_SESSION_KEY"] == "active-session"
+    assert env["HERMES_SESSION_ID"] == "active-session"
+    assert env["HERMES_SESSION_PLATFORM"] == "webui"
     assert env["HERMES_HOME"] == "/active/profile/home"
     assert env["TERMINAL_ENV"] == "ssh"

@@ -11,6 +11,7 @@ REPO = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 def _function_body(src: str, name: str) -> str:
@@ -214,35 +215,129 @@ class TestToolCallGroupingStatic:
             "A previously-open Activity group should still restore open from persisted state."
         )
 
-    def test_tools_and_thinking_share_one_collapsed_activity_dropdown(self):
+    def test_live_activity_summary_shows_readable_progress_without_persisted_content(self):
+        sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
+        progress_fn = _function_body(UI_JS, "_activityProgressLabelForToolName")
+        live_progress_fn = _function_body(UI_JS, "_activityLiveProgressLabel")
+        assert "_activityLiveProgressLabel" in sync_fn, (
+            "Live compact Activity rows should expose a readable transient progress label."
+        )
+        assert "durationEl.textContent" in sync_fn and "filter(Boolean).join(' · ')" in sync_fn, (
+            "Progress should share the existing non-persistent summary/duration slot, not become transcript text."
+        )
+        for label in ("Searching workspace", "Reading files", "Updating files", "Running command"):
+            assert label in progress_fn
+        assert "tool-card-running" in live_progress_fn, (
+            "The live progress label should prefer the currently running tool over older completed tools."
+        )
+        assert "tool-call-group-list" not in sync_fn, (
+            "Readable progress must not reintroduce the noisy secondary tool-name list."
+        )
+
+    def test_live_thinking_suppresses_visible_interim_echoes(self):
+        interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
+        assert interim_match, "interim_assistant listener not found"
+        interim_fn = interim_match.group(1)
+        live_thinking_fn = _function_body(MESSAGES_JS, "_liveThinkingText")
+
+        assert "visibleInterimSnippets.push(visible)" in interim_fn, (
+            "Visible interim commentary should be remembered so the live Thinking card does not echo it."
+        )
+        assert "_stripLiveVisibleAssistantEchoFromThinking" in live_thinking_fn, (
+            "Live Thinking text should suppress exact visible interim commentary echoes."
+        )
+
+    def test_settled_thinking_suppresses_visible_assistant_echoes(self):
+        render_fn = _function_body(UI_JS, "renderMessages")
+        helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
+        assert "_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent)" in render_fn, (
+            "Settled Thinking cards should not repeat text already rendered as visible assistant content."
+        )
+        assert "s.length>=20" in helper, (
+            "Thinking echo suppression should ignore tiny snippets to avoid over-stripping reasoning."
+        )
+        assert "out.split(snippet).join('')" in helper, (
+            "Thinking echo suppression should remove exact visible assistant snippets from reasoning display."
+        )
+
+    def test_compact_activity_keeps_thinking_cards_after_session_switch(self):
         ui_min = re.sub(r"\s+", "", UI_JS)
         assert "functionensureActivityGroup(" in ui_min, (
-            "Tool calls and thinking should share one agent-activity disclosure helper."
+            "Tool calls should still use the shared Activity disclosure helper."
         )
         assert "data-agent-activity-group" in UI_JS, (
-            "The shared tools/thinking disclosure needs a stable data-agent-activity-group hook."
-        )
-        assert "agent-activity-thinking" in UI_JS, (
-            "Thinking content should be nested inside the shared activity dropdown, not rendered separately."
+            "The Activity disclosure needs a stable data-agent-activity-group hook."
         )
         render_fn = _function_body(UI_JS, "renderMessages")
         assert "isSimplifiedToolCalling()" in render_fn and "assistantThinking.set(rawIdx, thinkingText)" in render_fn, (
-            "Settled thinking should move into the shared activity dropdown only when Compact tool activity is enabled."
+            "Compact settled transcript rendering should preserve Thinking cards after switching sessions."
+        )
+        assert "_thinkingActivityNode(thinkingText, false)" in render_fn, (
+            "Settled Thinking cards should render as collapsed timeline entries before related tools."
+        )
+        assert "anchorParent.insertBefore(thinkingNode, anchorRow)" in render_fn, (
+            "Settled Thinking cards should appear before their visible assistant process text."
         )
         assert "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))" in render_fn, (
             "The non-simplified path should preserve standalone settled thinking cards."
         )
 
-    def test_live_thinking_uses_shared_activity_dropdown_only_when_simplified(self):
+    def test_live_visible_interim_text_splits_tool_bursts_not_thinking(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
+        live_tool_fn = _function_body(UI_JS, "appendLiveToolCard")
+        helper = _function_body(UI_JS, "ensureActivityGroup")
         assert "isSimplifiedToolCalling()" in live_thinking_fn, (
             "Live thinking should branch on the Compact tool activity toggle."
         )
-        assert "ensureActivityGroup" in live_thinking_fn, (
-            "Compact live thinking should be inserted into the shared activity dropdown."
+        assert "body.insertBefore(row, body.firstChild)" not in live_thinking_fn, (
+            "Live thinking should not be moved into the top Activity dropdown."
         )
-        assert "thinkingRow" in live_thinking_fn, (
-            "The non-simplified live thinking path should preserve the upstream #thinkingRow card."
+        assert "_thinkingActivityNode(thinkingText, false)" in live_thinking_fn, (
+            "Compact live thinking should render a collapsed Thinking card in the timeline."
+        )
+        assert "removeAttribute('data-live-activity-current')" not in live_thinking_fn, (
+            "Reasoning/Thinking updates alone should not split consecutive tools into one-tool Activity rows."
+        )
+        assert '.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]' in helper, (
+            "Live tool cards should only reuse the current Activity burst, not the first group in the turn."
+        )
+        assert "group.setAttribute('data-live-activity-current','1')" in helper, (
+            "New live Activity bursts must be marked current so later tools append to the right group."
+        )
+        assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
+            "tool_complete must still update its current live Activity burst by tool id."
+        )
+        close_activity_fn = _function_body(MESSAGES_JS, "_closeCurrentLiveActivityGroup")
+        assert "data-live-activity-current" in close_activity_fn, (
+            "Visible interim assistant boundaries should close the previous live Activity burst."
+        )
+        reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
+        assert "closeActivity" in reset_fn and "_closeCurrentLiveActivityGroup()" in reset_fn, (
+            "Assistant text reset and Activity burst closing should stay separate."
+        )
+        interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
+        assert interim_match and "_resetAssistantSegment({closeActivity:true});" in interim_match.group(1), (
+            "Visible interim assistant text should split the previous tool burst before the next tool starts."
+        )
+        tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
+        assert "_resetAssistantSegment();" in tool_start_segment, (
+            "Tool starts should reset the next assistant text segment without closing the current Activity burst."
+        )
+        assert "_resetAssistantSegment({closeActivity:true});" not in tool_start_segment, (
+            "Tool starts must not split consecutive tools into one-tool Activity rows."
+        )
+
+    def test_live_compression_card_splits_current_tool_activity_burst(self):
+        compression_fn = _function_body(UI_JS, "appendLiveCompressionCard")
+        close_fn = _function_body(UI_JS, "closeCurrentLiveActivityGroup")
+        assert "closeCurrentLiveActivityGroup();" in compression_fn, (
+            "Auto-compression cards should close the current live Activity burst so later tools start a fresh group."
+        )
+        assert "data-live-activity-current" in close_fn, (
+            "The live compression boundary helper must clear the current Activity marker."
+        )
+        assert "removeAttribute('data-live-activity-current')" in close_fn, (
+            "Closing a live Activity burst should leave the row rendered but stop later tools from reusing it."
         )
 
 

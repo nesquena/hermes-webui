@@ -50,6 +50,7 @@ PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
     '/manifest.json', '/manifest.webmanifest',
+    '/session/manifest.json', '/session/manifest.webmanifest',
 })
 
 COOKIE_NAME = 'hermes_session'

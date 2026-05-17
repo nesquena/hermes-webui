@@ -177,6 +177,40 @@ class TestIssue1499OnboardingProbe:
         assert r["ok"] is False
         assert r["error"] == "dns", f"Expected dns error, got {r}"
 
+    def test_dns_failure_wrapped_by_urlerror(self, monkeypatch):
+        """Proxy/network stacks can wrap DNS failures as generic URLError."""
+        from api import onboarding
+
+        class FakeOpener:
+            def open(self, *_args, **_kwargs):
+                raise urllib.error.URLError(OSError("getaddrinfo failed"))
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        r = onboarding.probe_provider_endpoint(
+            "lmstudio",
+            "http://model-server.example:1234/v1",
+            timeout=2.0,
+        )
+        assert r["ok"] is False
+        assert r["error"] == "dns", f"Expected dns error, got {r}"
+
+    def test_reserved_dns_tld_network_failure_classifies_as_dns(self, monkeypatch):
+        """Reserved non-resolvable TLDs stay dns even if the stack says generic."""
+        from api import onboarding
+
+        class FakeOpener:
+            def open(self, *_args, **_kwargs):
+                raise urllib.error.URLError(OSError("network is unreachable"))
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        r = onboarding.probe_provider_endpoint(
+            "lmstudio",
+            "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
+            timeout=2.0,
+        )
+        assert r["ok"] is False
+        assert r["error"] == "dns", f"Expected dns error, got {r}"
+
     def test_connect_refused(self):
         """Connecting to a port nobody's listening on → error='connect_refused'."""
         from api.onboarding import probe_provider_endpoint

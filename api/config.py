@@ -55,6 +55,36 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 logger = logging.getLogger(__name__)
 
 
+def _env_mb_bytes(name: str, default_mb: int) -> int:
+    """Parse an optional megabyte environment variable into bytes.
+
+    Accepts values like ``200``, ``200MB``, or ``200MiB``. Invalid or
+    non-positive values fall back to the provided default.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default_mb * 1024 * 1024
+    m = re.match(r"^(\d+)\s*(?:m|mb|mib)?$", raw, re.IGNORECASE)
+    if not m:
+        logger.warning(
+            "Invalid %s=%r; expected a positive integer in MB. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    value_mb = int(m.group(1))
+    if value_mb <= 0:
+        logger.warning(
+            "Invalid %s=%r; expected a value greater than zero. Falling back to %sMB.",
+            name,
+            raw,
+            default_mb,
+        )
+        return default_mb * 1024 * 1024
+    return value_mb * 1024 * 1024
+
+
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discover_agent_dir() -> Path:
     """
@@ -485,7 +515,7 @@ def verify_hermes_imports() -> tuple:
 
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = 200_000
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
@@ -566,6 +596,28 @@ _DEFAULT_TOOLSETS = [
     "web",
     "webhook",
 ]
+
+_LEGACY_CLI_TOOLSET_ALIASES = {
+    # Older Hermes configs used "hermes" as the CLI composite toolset. Modern
+    # Hermes Agent exposes that split as these two registered composites; keep
+    # WebUI sessions usable when pointed at an older shared config.yaml.
+    "hermes": ("hermes-cli", "hermes-api-server"),
+}
+
+
+def _normalize_cli_toolsets(toolsets):
+    """Expand legacy CLI toolset aliases while preserving order and de-duping."""
+    normalized = []
+    seen = set()
+    for name in toolsets or []:
+        replacements = _LEGACY_CLI_TOOLSET_ALIASES.get(name, (name,))
+        for replacement in replacements:
+            if replacement and replacement not in seen:
+                seen.add(replacement)
+                normalized.append(replacement)
+    return normalized
+
+
 def _resolve_cli_toolsets(cfg=None):
     """Resolve CLI toolsets using the agent's _get_platform_tools() so that
     MCP server toolsets are automatically included, matching CLI behaviour."""
@@ -573,10 +625,10 @@ def _resolve_cli_toolsets(cfg=None):
         cfg = get_config()
     try:
         from hermes_cli.tools_config import _get_platform_tools
-        return list(_get_platform_tools(cfg, "cli"))
+        return _normalize_cli_toolsets(_get_platform_tools(cfg, "cli"))
     except Exception:
         # Fallback: read raw list from config (MCP toolsets will be missing)
-        return cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+        return _normalize_cli_toolsets(cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS))
 
 CLI_TOOLSETS = _resolve_cli_toolsets()
 
@@ -893,6 +945,30 @@ def _normalize_base_url_for_match(value: object) -> str:
     if not parsed_url.netloc:
         path = ""
     return f"{scheme}://{netloc}{path}"
+
+
+def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
+    """Return custom provider slugs that WebUI may derive from a base URL.
+
+    Model picker values for endpoint-discovered models have historically used
+    both ``custom:<host>:<port>`` and ``custom:<host>-<port>`` forms. When the
+    active config already names a local-server provider such as Ollama for that
+    same base URL, those endpoint slugs are just UI routing hints and should
+    resolve back to the configured provider rather than requiring a CUSTOM_* API
+    key.
+    """
+    url = str(value or "").strip().rstrip("/")
+    if not url:
+        return set()
+    parsed_url = urlparse(url if "://" in url else f"http://{url}")
+    host = (parsed_url.hostname or "").strip().lower()
+    if not host:
+        return set()
+    port = parsed_url.port
+    if port is None:
+        scheme = (parsed_url.scheme or "http").lower()
+        port = 443 if scheme == "https" else 80
+    return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
 def _named_custom_provider_slug_for_base_url(
@@ -1651,6 +1727,13 @@ def resolve_model_provider(model_id: str) -> tuple:
                 and provider_hint not in _PROVIDER_DISPLAY
                 and not provider_hint.startswith("custom:")):
             provider_hint, bare_model = inner.split(":", 1)
+        if (
+            provider_hint.startswith("custom:")
+            and config_base_url
+            and _is_local_server_provider(config_provider)
+            and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
+        ):
+            return bare_model, config_provider, config_base_url
         return bare_model, provider_hint, _get_provider_base_url(provider_hint)
 
     if "/" in model_id:
@@ -2348,6 +2431,15 @@ def invalidate_credential_pool_cache(provider_id: str):
     with _available_models_cache_lock:
         _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
         _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+    try:
+        # api.providers imports from api.config; keep this lazy to avoid
+        # import-cycle/module-initialization issues.
+        from api.providers import invalidate_account_usage_status_cache
+
+        invalidate_account_usage_status_cache(provider_id)
+        invalidate_account_usage_status_cache(_resolve_provider_alias(provider_id))
+    except Exception:
+        logger.debug("Failed to invalidate account usage status cache", exc_info=True)
 
 
 def invalidate_provider_models_cache(provider_id: str):
@@ -2865,6 +2957,13 @@ def get_available_models() -> dict:
         # A user may configure a provider key via config.yaml providers.<name>.api_key
         # without setting the corresponding env var. (#604)
         #
+        # Gating: only seed picker groups for keys whose canonical id is known
+        # to ``_PROVIDER_MODELS`` / ``_PROVIDER_DISPLAY``, or whose value is a
+        # dict-shaped provider config (custom/local). Scalar siblings under
+        # ``providers:`` (e.g. ``providers.only_configured: true``) are config
+        # flags, not providers, and must not render as phantom picker groups
+        # like ``Only-Configured`` (#2399).
+        #
         # Canonicalise the id slug here so a user with ``providers.opencode_go``
         # (underscore variant) doesn't see TWO provider groups in the picker —
         # one for the canonical ``opencode-go`` from active_provider detection
@@ -2872,13 +2971,29 @@ def get_available_models() -> dict:
         # The same applies to mixed-case ids like ``OpenCode-Go`` and to
         # legitimate aliases like ``z-ai`` → ``zai``.
         _cfg_providers = cfg.get("providers", {})
+        # Map canonical provider IDs back to raw config keys so the
+        # generic-provider branch can preserve mixed-case/underscore
+        # provider_cfg values (#2245).
+        _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
-            for _pid_key in _cfg_providers:
+            for _pid_key, _provider_cfg in _cfg_providers.items():
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
-                if _canonical in _PROVIDER_MODELS or _canonical in _cfg_providers or _pid_key in _cfg_providers:
-                    detected_providers.add(_canonical)
+
+                # See the gating comment on the block above. ``_PROVIDER_MODELS``
+                # / ``_PROVIDER_DISPLAY`` membership accepts known providers and
+                # aliases; ``isinstance(_provider_cfg, dict)`` accepts custom
+                # entries that supply their own models/api_key/base_url. (#2399)
+                _is_known_provider = (
+                    _canonical in _PROVIDER_MODELS or _canonical in _PROVIDER_DISPLAY
+                )
+                _is_provider_config = isinstance(_provider_cfg, dict)
+                if not (_is_known_provider or _is_provider_config):
+                    continue
+
+                _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
+                detected_providers.add(_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
             target = _normalize_base_url_for_match(base_url)
@@ -3097,6 +3212,16 @@ def get_available_models() -> dict:
                     for _m_id in _cp_models_dict:
                         if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
                             _cp_model_ids.append(_m_id.strip())
+                elif isinstance(_cp_models_dict, list):
+                    for _item in _cp_models_dict:
+                        if isinstance(_item, str):
+                            _mid = _item.strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
+                        elif isinstance(_item, dict):
+                            _mid = str(_item.get("id") or _item.get("model") or _item.get("name") or "").strip()
+                            if _mid and _mid not in _cp_model_ids:
+                                _cp_model_ids.append(_mid)
 
                 for _cp_model in _cp_model_ids:
                     _dedup_key = f"{_slug}:{_cp_model}" if _slug else _cp_model
@@ -3502,8 +3627,14 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    provider_cfg = cfg.get("providers", {}).get(pid, {})
+                elif pid in _PROVIDER_MODELS or pid in _canonical_to_raw_provider_key:
+                    # Look up provider_cfg using the original raw key from
+                    # config.yaml so that mixed-case / underscore keys like
+                    # ``CLIPpoxy`` or ``snake_case_provider`` still resolve
+                    # (#2245).  Fall back to the canonical pid for providers
+                    # that appear in _PROVIDER_MODELS but not in cfg.
+                    _raw_key = _canonical_to_raw_provider_key.get(pid, pid)
+                    provider_cfg = cfg.get("providers", {}).get(_raw_key, {})
                     raw_models = []
 
                     # User-configured model allowlists are explicit local
@@ -3795,6 +3926,7 @@ STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulate
 STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated during streaming (#1361 §A)
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
+STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
@@ -3905,13 +4037,15 @@ _SETTINGS_DEFAULTS = {
     "onboarding_completed": False,
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
+    "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
+    "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
-    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
+    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -3920,6 +4054,7 @@ _SETTINGS_DEFAULTS = {
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
+    "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
@@ -3939,6 +4074,9 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    "sienna",
+    "catppuccin",
+    "nous",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -4034,12 +4172,15 @@ _SETTINGS_ENUM_VALUES = {
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
     "show_token_usage",
+    "show_quota_chip",
     "show_tps",
+    "fade_text_effect",
     "show_cli_sessions",
     "sync_to_insights",
     "check_for_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
+    "rtl",
     "notifications_enabled",
     "show_thinking",
     "simplified_tool_calling",

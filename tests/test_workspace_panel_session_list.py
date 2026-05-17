@@ -74,20 +74,20 @@ class TestWorkspacePanelCollapsePriority:
         # in #1775 so its tooltip pseudo-elements can escape the header bar
         # (otherwise the workspace-panel header tooltips like "New file" get
         # clipped). The title-text ellipsis is preserved by the inner span
-        # `.panel-header > span:first-child` which has its own
+        # `.workspace-panel-title-group > span:first-child` which has its own
         # overflow:hidden + text-overflow:ellipsis. So we check that EITHER
         # the parent uses overflow:hidden (legacy) or that the inner span
         # handles its own ellipsis (current).
         if "overflow:hidden" not in rule:
-            inner_span_idx = STYLE_CSS.find(".panel-header > span:first-child{")
+            inner_span_idx = STYLE_CSS.find(".workspace-panel-title-group > span:first-child{")
             assert inner_span_idx != -1, (
                 ".panel-header lost overflow:hidden but no inner span "
-                "rule (.panel-header > span:first-child) handles the "
+                "rule (.workspace-panel-title-group > span:first-child) handles the "
                 "title-text ellipsis as a fallback."
             )
             inner_rule = STYLE_CSS[inner_span_idx: STYLE_CSS.find("}", inner_span_idx) + 1]
             assert "overflow:hidden" in inner_rule and "text-overflow:ellipsis" in inner_rule, (
-                ".panel-header > span:first-child must own the ellipsis "
+                ".workspace-panel-title-group > span:first-child must own the ellipsis "
                 "behaviour now that the parent is overflow:visible."
             )
 
@@ -106,26 +106,21 @@ class TestWorkspacePanelCollapsePriority:
         )
 
     def test_workspace_label_shrinks_with_ellipsis(self):
-        """The "Workspace" label (`panel-header > span:first-child`) must
-        shrink with ellipsis truncation rather than overflow uncontrollably."""
+        """The "Workspace" label must shrink with ellipsis truncation."""
         # Find the rule
-        sel = ".panel-header > span:first-child"
+        sel = ".workspace-panel-title-group > span:first-child"
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, f"Selector {sel!r} not found in style.css"
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "text-overflow:ellipsis" in rule
         assert "min-width:0" in rule
-        assert "flex-shrink:2" in rule  # shrinks before icons (icons are 0)
 
-    def test_git_badge_shrinks_first(self):
-        """`.git-badge` must shrink faster than the label so it disappears
-        first as the panel narrows."""
+    def test_git_badge_uses_second_row(self):
+        """`.git-badge` should sit beneath the title/action row."""
         idx = STYLE_CSS.find(".git-badge{")
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
-        assert "flex-shrink:3" in rule, (
-            ".git-badge must have flex-shrink:3 so it shrinks before the "
-            "label (flex-shrink:2) and the icons (flex-shrink:0)."
-        )
+        assert "grid-column:1 / -1" in rule
+        assert "grid-row:2" in rule
 
     def test_container_query_hides_git_badge_first(self):
         """At narrow widths the git badge gets `display:none` BEFORE the
@@ -145,7 +140,7 @@ class TestWorkspacePanelCollapsePriority:
         assert "@container rightpanel (max-width: 160px)" in STYLE_CSS
         idx = STYLE_CSS.find("@container rightpanel (max-width: 160px)")
         block = STYLE_CSS[idx: idx + 200]
-        assert ".panel-header > span:first-child{display:none" in block
+        assert ".workspace-panel-title-group{display:none" in block
 
     def test_breakpoints_in_correct_order(self):
         """Sanity: the git-badge breakpoint (220px) must be wider than the

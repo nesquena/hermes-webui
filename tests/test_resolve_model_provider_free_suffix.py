@@ -208,3 +208,44 @@ def test_model_with_provider_context_custom_ipv4_port_roundtrip():
         assert model == "Qwen3-235B"
     finally:
         cfg_mod.cfg["model"] = old
+
+
+def test_endpoint_custom_slug_matching_ollama_base_url_uses_ollama_provider():
+    """Issue #2271: endpoint-derived custom slugs must not force CUSTOM_* keys."""
+    import api.config as cfg_mod
+
+    old = dict(cfg_mod.cfg.get("model", {}))
+    cfg_mod.cfg["model"] = {
+        "provider": "ollama",
+        "default": "ministral-3:latest",
+        "base_url": "http://lan-box.local:11434/v1",
+    }
+    try:
+        model, provider, base_url = resolve_model_provider(
+            "@custom:lan-box.local-11434:ministral-3:latest"
+        )
+        assert model == "ministral-3:latest"
+        assert provider == "ollama"
+        assert base_url == "http://lan-box.local:11434/v1"
+    finally:
+        cfg_mod.cfg["model"] = old
+
+
+def test_endpoint_custom_colon_slug_matching_ollama_base_url_uses_ollama_provider():
+    import api.config as cfg_mod
+
+    old = dict(cfg_mod.cfg.get("model", {}))
+    cfg_mod.cfg["model"] = {
+        "provider": "ollama",
+        "default": "llama3.2",
+        "base_url": "http://ollama.internal:11434/v1",
+    }
+    try:
+        model, provider, base_url = resolve_model_provider(
+            "@custom:ollama.internal:11434:llama3.2"
+        )
+        assert model == "llama3.2"
+        assert provider == "ollama"
+        assert base_url == "http://ollama.internal:11434/v1"
+    finally:
+        cfg_mod.cfg["model"] = old

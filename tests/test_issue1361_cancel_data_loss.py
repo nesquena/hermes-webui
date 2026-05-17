@@ -25,6 +25,7 @@ import api.config as config
 import api.models as models
 import api.streaming as streaming
 from api.models import Session
+from api.run_journal import append_run_event
 from api.streaming import cancel_stream
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
@@ -391,14 +392,60 @@ def test_stale_stream_cleanup_materializes_pending_turn_before_clearing_state():
     assert cleared is True
     assert s.active_stream_id is None
     assert s.pending_user_message is None
-    assert s.messages[-1]["role"] == "user"
-    assert s.messages[-1]["content"] == "please make the GUI fully usable"
-    assert s.messages[-1]["timestamp"] == 1778187755
-    assert s.messages[-1]["attachments"] == [{"name": "visible-state.png"}]
+    assert s.messages[-2]["role"] == "user"
+    assert s.messages[-2]["content"] == "please make the GUI fully usable"
+    assert s.messages[-2]["timestamp"] == 1778187755
+    assert s.messages[-2]["attachments"] == [{"name": "visible-state.png"}]
+    assert s.messages[-1]["role"] == "assistant"
+    assert s.messages[-1].get("_error") is True
+    assert s.messages[-1].get("type") == "interrupted"
 
     reloaded = models.get_session(sid, metadata_only=False)
-    assert reloaded.messages[-1]["role"] == "user"
-    assert reloaded.messages[-1]["content"] == "please make the GUI fully usable"
+    assert reloaded.messages[-2]["role"] == "user"
+    assert reloaded.messages[-2]["content"] == "please make the GUI fully usable"
+    assert reloaded.messages[-1]["role"] == "assistant"
+    assert reloaded.messages[-1].get("type") == "interrupted"
+
+
+def test_stale_stream_cleanup_recovers_journaled_visible_output():
+    """The /api/session stale cleanup path can run before a full chat reload;
+    it must preserve journaled partial output instead of only clearing runtime
+    flags."""
+    from api.routes import _clear_stale_stream_state
+
+    sid = "test_pending_error_d4_journal"
+    s = _make_session(
+        session_id=sid,
+        pending_msg="please check maintainer activity",
+        messages=[{"role": "assistant", "content": "previous answer"}],
+    )
+    append_run_event(
+        sid,
+        "stream_1361",
+        "token",
+        {"text": "I will check GitHub first."},
+    )
+    append_run_event(
+        sid,
+        "stream_1361",
+        "tool",
+        {"name": "terminal", "preview": "gh issue view 2423", "args": {"command": "gh issue view 2423"}},
+    )
+    append_run_event(
+        sid,
+        "stream_1361",
+        "tool_complete",
+        {"name": "terminal", "duration": 0.4, "is_error": False},
+    )
+
+    cleared = _clear_stale_stream_state(s)
+
+    assert cleared is True
+    assert any("I will check GitHub first." in (m.get("content") or "") for m in s.messages)
+    assert s.tool_calls
+    assert s.tool_calls[0]["name"] == "terminal"
+    assert s.messages[-1].get("type") == "interrupted"
+    assert "partial output above was recovered" in s.messages[-1]["content"]
 
 
 # ── Structural guard: pin call sites of the materialize helper at error branches ──
@@ -445,6 +492,35 @@ def test_materialize_helper_called_immediately_before_error_path_clears():
 
 
 
+def test_cancel_copy_uses_configured_bot_name(monkeypatch):
+    """Cancellation copy should use the configured assistant display name."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': 'Obryn'})
+
+    assert streaming._cancelled_turn_hint() == (
+        'The run was cancelled by the user before Obryn finished. '
+        'No provider failure occurred.'
+    )
+    assert 'before Obryn finished' in streaming._cancelled_turn_content()
+    assert streaming._classify_provider_error('Task cancelled by user')['hint'] == (
+        'The run was cancelled by the user before Obryn finished. '
+        'No provider failure occurred.'
+    )
+
+
+def test_cancel_copy_falls_back_to_hermes_for_blank_bot_name(monkeypatch):
+    """Blank or missing bot_name should not leak old persona copy."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': '   '})
+
+    assert streaming._cancelled_turn_hint() == (
+        'The run was cancelled by the user before Hermes finished. '
+        'No provider failure occurred.'
+    )
+
+
 class TestCancelStreamIdempotentWithWorkerFinalizer:
     """The worker and explicit cancel endpoint can both finalize the same turn."""
 
@@ -455,7 +531,7 @@ class TestCancelStreamIdempotentWithWorkerFinalizer:
             session_id=sid,
             messages=[
                 {'role': 'user', 'content': 'Help me debug this', 'timestamp': 100},
-                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
+                {'role': 'assistant', 'content': '**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Hermes finished. No provider failure occurred.*', '_error': True, 'timestamp': 101},
             ],
         )
         _setup_cancel_state(sid, stream_id)

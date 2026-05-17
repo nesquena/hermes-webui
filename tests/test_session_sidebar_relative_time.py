@@ -169,3 +169,12 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_bucket_older",
     ):
         assert key in I18N_JS
+
+
+def test_german_relative_time_translations_interpolate_numbers():
+    assert "session_time_minutes_ago: (n) => `Vor ${n} Minuten`" in I18N_JS
+    assert "session_time_hours_ago: (n) => `Vor ${n} Stunden`" in I18N_JS
+    assert "session_time_days_ago: (n) => `Vor ${n} Tagen`" in I18N_JS
+    assert "session_time_minutes_ago: 'Vor {n} Minuten'" not in I18N_JS
+    assert "session_time_hours_ago: 'Vor {n} Stunden'" not in I18N_JS
+    assert "session_time_days_ago: 'Vor {n} Tagen'" not in I18N_JS

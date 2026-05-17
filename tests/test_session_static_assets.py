@@ -116,7 +116,9 @@ def test_session_static_auth_exemption(monkeypatch):
     """
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
 
-    from api.auth import check_auth
+    from api.auth import check_auth, _invalidate_password_hash_cache
+
+    _invalidate_password_hash_cache()
 
     # /session/static/* is public (matches /static/* policy)
     handler = _FakeHandler()
@@ -129,3 +131,25 @@ def test_session_static_auth_exemption(monkeypatch):
     # And confirm a non-static /session/* path still requires auth
     handler = _FakeHandler()
     assert check_auth(handler, SimpleNamespace(path="/session/abc123", query="")) is False
+
+
+def test_session_static_favicon_512_returns_png():
+    """/session/static/favicon-512.png must return image/png with a PNG signature.
+
+    Firefox Android fetches PWA icons from the manifest's icon URLs. When the
+    page is /session/<id>, the manifest's relative icon paths resolve to
+    /session/static/favicon-512.png. This test ensures the existing
+    /session/static/* alias serves the real PNG icon, not the HTML index.
+    See #2226.
+    """
+    from api.routes import handle_get
+
+    handler = _FakeHandler()
+    parsed = urlparse("http://example.com/session/static/favicon-512.png")
+    assert handle_get(handler, parsed) is True
+    assert handler.status == 200
+    ct = handler.header("Content-Type") or ""
+    assert ct.startswith("image/png"), f"expected image/png, got {ct!r}"
+    # PNG signature: first 8 bytes are \x89PNG\r\n\x1a\n
+    body = bytes(handler.body)
+    assert body[:4] == b"\x89PNG", "favicon-512.png must start with PNG signature"

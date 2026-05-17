@@ -141,11 +141,19 @@ class TestPWARoutes:
         idx = src.find('"/manifest.json"')
         assert idx != -1, "routes.py must handle /manifest.json"
         block = src[idx:idx + 800]
-        assert "application/manifest+json" in block, (
-            "manifest.json route must serve Content-Type: application/manifest+json"
+        # After the #2226 refactor, the root route delegates to _serve_manifest().
+        # Verify the helper exists and sets the correct Content-Type.
+        assert "_serve_manifest" in block, (
+            "manifest.json route must delegate to _serve_manifest()"
         )
-        assert "no-store" in block or "Cache-Control" in block, (
-            "manifest.json should have Cache-Control: no-store so updates are picked up"
+        helper_idx = src.find("def _serve_manifest")
+        assert helper_idx != -1, "routes.py must define _serve_manifest helper"
+        helper_block = src[helper_idx:helper_idx + 800]
+        assert "application/manifest+json" in helper_block, (
+            "_serve_manifest must serve Content-Type: application/manifest+json"
+        )
+        assert "no-store" in helper_block or "Cache-Control" in helper_block, (
+            "_serve_manifest should set Cache-Control: no-store so updates are picked up"
         )
 
     def test_sw_route_injects_cache_version(self):
@@ -318,3 +326,198 @@ class TestIndexHtmlIntegration:
         assert "apple-mobile-web-app-capable" in src, (
             "index.html should include Apple PWA meta tags for iOS home-screen support"
         )
+
+
+# ── Regression tests for #2226 ──────────────────────────────────────────────
+# Firefox Android resolves <link rel="manifest"> against the page URL before
+# the dynamic <base href> script executes when installing from /session/<id>,
+# producing requests like /session/manifest.json.  Without the route guard
+# the catch-all returns index.html and Firefox falls back to a generated
+# letter icon.  Two fixes: (1) move <base href> script above manifest/favicon
+# links so browsers resolve them correctly, and (2) add /session/manifest.*
+# route handlers that serve the real manifest JSON.
+
+
+class TestBaseHrefOrdering:
+    """Assert the dynamic <base href> script appears before manifest and
+    favicon links so browsers resolve relative URLs deterministically
+    even when the page is served from /session/<id> routes."""
+
+    def test_base_href_script_before_manifest_link(self):
+        src = INDEX.read_text(encoding="utf-8")
+        base_pos = src.find("document.write('<base href=")
+        manifest_pos = src.find('rel="manifest"')
+        assert base_pos != -1, "index.html must contain the dynamic base-href script"
+        assert manifest_pos != -1, "index.html must contain a manifest link"
+        assert base_pos < manifest_pos, (
+            "dynamic <base href> script must appear before <link rel=\"manifest\"> "
+            "so browsers resolve the manifest URL against the correct base when "
+            "served from /session/<id> — see #2226"
+        )
+
+    def test_base_href_script_before_favicon_links(self):
+        src = INDEX.read_text(encoding="utf-8")
+        base_pos = src.find("document.write('<base href=")
+        favicon_pos = src.find('rel="icon"')
+        assert base_pos != -1, "index.html must contain the dynamic base-href script"
+        assert favicon_pos != -1, "index.html must contain a favicon link"
+        assert base_pos < favicon_pos, (
+            "dynamic <base href> script must appear before <link rel=\"icon\"> "
+            "so browsers resolve favicon URLs against the correct base when "
+            "served from /session/<id> — see #2226"
+        )
+
+
+class _FakeHandler:
+    """Minimal request handler stub for exercising handle_get() in tests."""
+    def __init__(self):
+        self.status = None
+        self.sent_headers = []
+        self.body = bytearray()
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def header(self, name):
+        for key, value in self.sent_headers:
+            if key.lower() == name.lower():
+                return value
+        return None
+
+
+class TestSessionManifestRoute:
+    """Assert /session/manifest.json and /session/manifest.webmanifest
+    return the real manifest JSON (not index.html) so Firefox Android can
+    find the Hermes icons when installing from a /session/<id> page."""
+
+    def _get(self, path):
+        from urllib.parse import urlparse
+        from api.routes import handle_get
+        handler = _FakeHandler()
+        parsed = urlparse(f"http://example.com{path}")
+        handle_get(handler, parsed)
+        return handler
+
+    def test_session_manifest_json_returns_200(self):
+        handler = self._get("/session/manifest.json")
+        assert handler.status == 200
+
+    def test_session_manifest_json_has_manifest_content_type(self):
+        handler = self._get("/session/manifest.json")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_session_manifest_json_is_parseable_json(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert isinstance(data, dict)
+
+    def test_session_manifest_json_has_hermes_name(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+
+    def test_session_manifest_json_has_512_icon(self):
+        handler = self._get("/session/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        icons = data.get("icons", [])
+        sizes = [icon.get("sizes", "") for icon in icons]
+        assert any("512" in s for s in sizes), (
+            f"manifest must include a 512x512 icon for PWA install, got sizes: {sizes}"
+        )
+
+    def test_session_manifest_json_is_not_html(self):
+        handler = self._get("/session/manifest.json")
+        body_start = bytes(handler.body[:200]).lower()
+        assert b"<!doctype html>" not in body_start, (
+            "/session/manifest.json must return manifest JSON, not the HTML index"
+        )
+
+    def test_session_manifest_webmanifest_returns_200(self):
+        handler = self._get("/session/manifest.webmanifest")
+        assert handler.status == 200
+
+    def test_session_manifest_webmanifest_has_manifest_content_type(self):
+        handler = self._get("/session/manifest.webmanifest")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_session_manifest_webmanifest_is_parseable_json(self):
+        handler = self._get("/session/manifest.webmanifest")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+
+    def test_session_manifest_webmanifest_is_not_html(self):
+        handler = self._get("/session/manifest.webmanifest")
+        body_start = bytes(handler.body[:200]).lower()
+        assert b"<!doctype html>" not in body_start
+
+
+class TestRootManifestRoute:
+    """Assert root /manifest.json still works after the _serve_manifest refactor."""
+
+    def _get(self, path):
+        from urllib.parse import urlparse
+        from api.routes import handle_get
+        handler = _FakeHandler()
+        parsed = urlparse(f"http://example.com{path}")
+        handle_get(handler, parsed)
+        return handler
+
+    def test_root_manifest_json_returns_200(self):
+        handler = self._get("/manifest.json")
+        assert handler.status == 200
+
+    def test_root_manifest_json_has_manifest_content_type(self):
+        handler = self._get("/manifest.json")
+        ct = handler.header("Content-Type") or ""
+        assert ct.startswith("application/manifest+json"), (
+            f"expected application/manifest+json, got {ct!r}"
+        )
+
+    def test_root_manifest_json_has_hermes_name_and_512_icon(self):
+        handler = self._get("/manifest.json")
+        data = json.loads(bytes(handler.body).decode("utf-8"))
+        assert data.get("name") == "Hermes"
+        icons = data.get("icons", [])
+        sizes = [icon.get("sizes", "") for icon in icons]
+        assert any("512" in s for s in sizes)
+
+    def test_root_manifest_webmanifest_returns_200(self):
+        handler = self._get("/manifest.webmanifest")
+        assert handler.status == 200
+
+
+class TestSessionManifestAuthExemption:
+    """Assert /session/manifest.* paths are auth-exempt so the browser
+    can fetch the manifest during PWA install without being redirected."""
+
+    def test_session_manifest_json_is_public(self, monkeypatch):
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+        from api.auth import check_auth, _invalidate_password_hash_cache
+        from types import SimpleNamespace
+        _invalidate_password_hash_cache()
+        handler = _FakeHandler()
+        assert check_auth(handler, SimpleNamespace(path="/session/manifest.json", query="")) is True
+
+    def test_session_manifest_webmanifest_is_public(self, monkeypatch):
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+        from api.auth import check_auth, _invalidate_password_hash_cache
+        from types import SimpleNamespace
+        _invalidate_password_hash_cache()
+        handler = _FakeHandler()
+        assert check_auth(handler, SimpleNamespace(path="/session/manifest.webmanifest", query="")) is True

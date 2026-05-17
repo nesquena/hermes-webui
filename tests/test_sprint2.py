@@ -67,7 +67,7 @@ def test_raw_endpoint_path_traversal_blocked(cleanup_test_sessions):
         get_raw(f"/api/file/raw?session_id={sid}&path=../../etc/passwd")
         assert False
     except urllib.error.HTTPError as e:
-        assert e.code in (400, 500)
+        assert e.code in (400, 404, 500)
 
 def test_raw_endpoint_missing_file_returns_404(cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)

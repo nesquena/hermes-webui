@@ -355,7 +355,7 @@ def test_lineage_segment_expansion_static_contract():
     assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js
     assert "className='session-lineage-segment'" in js
-    assert "const segTitle=seg.title||t('session_lineage_segment_untitled');" in js
+    assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
     assert "await loadSession(seg.session_id);" in js
     assert ".session-lineage-count.expandable{" in css
@@ -564,3 +564,89 @@ def test_session_meta_segments_softened_label_no_literal_segment_in_english():
         f"session_meta_segments English value still contains the technical word 'segment': {rendered}. "
         "Expected softened copy like 'prior turn(s)' instead. See #2155."
     )
+
+
+def test_sidebar_search_and_rows_use_read_only_display_title():
+    """Stale persisted titles should not drive sidebar search/render when display_title exists."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "function _sessionDisplayTitle" in js
+    assert "function _sessionTitleTags" in js
+    assert "_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q))" in js
+    assert "_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase()))" in js
+    assert "const rawTitle=_sessionDisplayTitle(s);" in js
+    assert "const tags=_sessionTitleTags(rawTitle);" in js
+    assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
+    assert "const childTitle=_sessionDisplayTitle(child)||'Untitled child session';" in js
+
+
+def test_child_session_parent_segment_note_uses_display_title():
+    """A child attached through a hidden parent segment should show the reconciled segment title."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parentRow={{
+  session_id:'tip',
+  title:'Hermes WebUI #8',
+  _lineage_root_id:'root',
+  _lineage_segments:[
+    {{session_id:'tip', title:'Hermes WebUI #8', display_title:'Hermes WebUI #177'}},
+    {{session_id:'old-parent', title:'Hermes WebUI #8', display_title:'Hermes WebUI #176'}},
+  ],
+}};
+const child={{
+  session_id:'child',
+  title:'Child Session',
+  relationship_type:'child_session',
+  parent_session_id:'old-parent',
+}};
+const rows = _attachChildSessionsToSidebarRows([parentRow], [parentRow, child]);
+console.log(JSON.stringify(rows[0]._child_sessions[0]));
+"""
+    child = json.loads(_run_node(source))
+    assert child["_parent_segment_id"] == "old-parent"
+    assert child["_parent_segment_title"] == "Hermes WebUI #176"
+
+
+def test_default_webui_numbered_titles_are_not_treated_as_hash_tags():
+    """The reconciled title 'Hermes WebUI #177' must render with its number intact."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTitleIsDefaultWebUI'));
+eval(extractFunc('_sessionTitleTags'));
+console.log(JSON.stringify({{
+  webui:_sessionTitleTags('Hermes WebUI #177'),
+  custom:_sessionTitleTags('Deploy #prod'),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {"webui": [], "custom": ["#prod"]}

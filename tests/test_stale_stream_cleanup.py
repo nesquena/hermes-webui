@@ -37,10 +37,13 @@ class _FakeSession:
         self.pending_user_message = "old prompt"
         self.pending_attachments = ["old.txt"]
         self.pending_started_at = 123
+        self.messages = []
         self.saved_stream_ids = []
+        self.saved_touch_updated_at = []
 
-    def save(self):
+    def save(self, *, touch_updated_at=True):
         self.saved_stream_ids.append(self.active_stream_id)
+        self.saved_touch_updated_at.append(touch_updated_at)
 
 
 def test_stale_stream_cleanup_helper_exists():
@@ -50,7 +53,18 @@ def test_stale_stream_cleanup_helper_exists():
     assert "session.pending_user_message = None" in ROUTES_SRC
     assert "session.pending_attachments = []" in ROUTES_SRC
     assert "session.pending_started_at = None" in ROUTES_SRC
-    assert "session.save()" in ROUTES_SRC
+    assert "session.save(touch_updated_at=False)" in ROUTES_SRC
+
+
+def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp():
+    config.STREAMS.clear()
+    config.SESSION_AGENT_LOCKS.clear()
+    session = _FakeSession()
+
+    assert routes._clear_stale_stream_state(session) is True
+
+    assert session.active_stream_id is None
+    assert session.saved_touch_updated_at == [False]
 
 
 def test_session_load_clears_stale_stream_before_response():
