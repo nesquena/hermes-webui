@@ -100,7 +100,7 @@ class TestToolCallGroupingStatic:
         fn = _function_body(UI_JS, "renderMessages")
         helper = _function_body(UI_JS, "ensureActivityGroup")
         assert "isSimplifiedToolCalling()" in fn, (
-            "Settled tool/thinking grouping should be gated by the Compact tool activity toggle."
+            "Settled compact inline activity rendering should be gated by the Compact tool activity toggle."
         )
         assert "tool-cards-toggle" in fn, (
             "The non-simplified path should preserve the upstream loose tool-card controls."
@@ -157,7 +157,7 @@ class TestToolCallGroupingStatic:
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
         settled_fn = _function_body(UI_JS, "renderMessages")
         assert "isSimplifiedToolCalling()" in live_fn, (
-            "Live streaming tool cards should branch on the Compact tool activity toggle."
+            "Live streaming tool cards should branch on the Compact tool activity timeline mode."
         )
         assert "ensureActivityGroup" in live_fn, (
             "Compact live tool rendering should use the grouped activity container."
@@ -263,7 +263,7 @@ class TestToolCallGroupingStatic:
     def test_compact_activity_keeps_thinking_cards_after_session_switch(self):
         ui_min = re.sub(r"\s+", "", UI_JS)
         assert "functionensureActivityGroup(" in ui_min, (
-            "Tool calls should still use the shared Activity disclosure helper."
+            "Tool calls should still use the shared compact Activity disclosure helper."
         )
         assert "data-agent-activity-group" in UI_JS, (
             "The Activity disclosure needs a stable data-agent-activity-group hook."
@@ -306,6 +306,13 @@ class TestToolCallGroupingStatic:
         )
         assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
             "tool_complete must still update its current live Activity burst by tool id."
+        )
+        finalize_fn = _function_body(UI_JS, "finalizeThinkingCard")
+        assert "turn.querySelector('.agent-activity-thinking[data-thinking-active=\"1\"]')" in finalize_fn, (
+            "Compact Thinking cards live directly in assistant-turn blocks, so finalization must clear the active marker from the whole turn, not only the tool group."
+        )
+        assert "thinkingCards.filter" in live_thinking_fn and "setAttribute('data-thinking-active','1')" in live_thinking_fn, (
+            "Compact live thinking should reactivate the latest existing Thinking card instead of stacking a new card after every tool boundary."
         )
         close_activity_fn = _function_body(MESSAGES_JS, "_closeCurrentLiveActivityGroup")
         assert "data-live-activity-current" in close_activity_fn, (

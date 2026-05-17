@@ -82,6 +82,7 @@ const _STREAM_FADE_MS=200;
 const _STREAM_FADE_MAX_MS=350;
 const _STREAM_FADE_STAGGER_MS=16;
 const _STREAM_FADE_DONE_MAX_MS=320;
+const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
 const performance={performance_stub};
 {helpers}
 """
@@ -176,6 +177,20 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
         ["animationend", "span.replaceWith(document.createTextNode"],
     )
     assert "_wrapStreamingFadeWords" not in MESSAGES_JS
+
+
+def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
+    drain_block = function_block(MESSAGES_JS, "_drainStreamFadeBeforeDone")
+    assert "const _STREAM_FADE_DONE_DRAIN_MAX_MS=900" in MESSAGES_JS
+    assert_contains_all(
+        drain_block,
+        [
+            "const drainStartedAt=performance.now();",
+            "performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS",
+            "if(_smdParser) _smdEndParser();",
+            "onDone();",
+        ],
+    )
 
 
 def test_stream_fade_css_is_opacity_only_and_hides_live_cursor():

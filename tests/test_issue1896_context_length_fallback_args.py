@@ -202,25 +202,32 @@ def test_routes_session_load_fallback_passes_config_overrides():
     anchor = "older sessions (pre-#1318) that have context_length=0 persisted"
     idx = ROUTES_PY.find(anchor)
     assert idx != -1, "session-load fallback comment moved/removed"
-    # Find the resolver callsite that follows.
+    # The route block may delegate the resolver details to a helper, but the
+    # session-load path must still call the helper and that helper must preserve
+    # the same kwargs as the streaming.py fix.
     block_end = ROUTES_PY.find("if _fb_cl:", idx)
     assert block_end != -1, "_fb_cl assignment not found after fallback comment"
     block = ROUTES_PY[idx:block_end]
+    helper_start = ROUTES_PY.find("def _resolve_context_length_for_session_model")
+    assert helper_start != -1, "context-length resolver helper not found"
+    helper_end = ROUTES_PY.find("\ndef ", helper_start + 1)
+    helper = ROUTES_PY[helper_start:helper_end if helper_end != -1 else len(ROUTES_PY)]
+    assert "_resolve_context_length_for_session_model" in block
     # Same kwargs as the streaming.py fix.
-    assert "config_context_length=" in block, (
+    assert "config_context_length=" in helper, (
         "session-load fallback in api/routes.py must pass config_context_length= "
         "so user-set model.context_length wins over the 256K default. See #1896."
     )
-    assert "provider=effective_provider" in block, (
-        "session-load fallback in api/routes.py must pass provider=effective_provider "
+    assert "provider=provider or" in helper, (
+        "session-load fallback in api/routes.py must pass provider= "
         "so the registry lookup is provider-aware. See #1896."
     )
-    assert "custom_providers=" in block, (
+    assert "custom_providers=" in helper, (
         "session-load fallback in api/routes.py must pass custom_providers= "
         "so the per-model override path applies. See #1896."
     )
     # Legacy fallback for older hermes-agent builds that pre-date the kwargs.
-    assert "except TypeError:" in block, (
+    assert "except TypeError:" in helper, (
         "session-load fallback must catch TypeError to support older "
         "hermes-agent builds without the new kwargs."
     )

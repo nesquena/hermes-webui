@@ -11,6 +11,7 @@ Discovery order for all paths:
 
 import collections
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -2205,11 +2206,45 @@ def _models_cache_file_fingerprint(path: Path) -> dict:
     return fingerprint
 
 
+def _models_cache_catalog_fingerprint() -> dict:
+    """Return non-secret model-catalog identity metadata for cache invalidation.
+
+    The /api/models payload is not only a function of user config/auth files.
+    It also depends on the provider/model catalog baked into this module and on
+    small local catalogs such as Codex's models_cache.json. Keep this cheap and
+    deterministic so a server restart after catalog changes does not keep
+    serving an otherwise-valid persisted models_cache.json until the 24h TTL
+    expires (#2443).
+    """
+    catalog_payload = {
+        "provider_models": _PROVIDER_MODELS,
+        "provider_display": _PROVIDER_DISPLAY,
+    }
+    try:
+        encoded = json.dumps(
+            catalog_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        provider_catalog_sha = hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        provider_catalog_sha = "unavailable"
+
+    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    return {
+        "provider_catalog_sha256": provider_catalog_sha,
+        "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
+    }
+
+
 def _models_cache_source_fingerprint() -> dict:
-    """Return the current config/auth-store fingerprint for /api/models cache."""
+    """Return the current config/auth/catalog fingerprint for /api/models cache."""
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _models_cache_file_fingerprint(_get_auth_store_path()),
+        "catalog": _models_cache_catalog_fingerprint(),
     }
 
 
@@ -4057,7 +4092,7 @@ _SETTINGS_DEFAULTS = {
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
-    "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
+    "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges

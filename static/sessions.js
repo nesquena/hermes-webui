@@ -256,6 +256,31 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
 }
 
+function _reconcileActiveSessionIdleStateFromList(serverRows) {
+  if (!S || !S.session || !S.session.session_id) return false;
+  if (typeof _sendInProgress !== 'undefined' && _sendInProgress) return false;
+  if (!Array.isArray(serverRows)) return false;
+  const sid=S.session.session_id;
+  const serverRow=serverRows.find(s=>s&&s.session_id===sid);
+  if (!serverRow) return false;
+  const serverRowIsIdle=!serverRow.is_streaming&&!serverRow.active_stream_id&&!serverRow.pending_user_message;
+  if (!serverRowIsIdle) return false;
+  let changed=false;
+  if (S.busy) { S.busy=false; changed=true; }
+  if (S.activeStreamId) { S.activeStreamId=null; changed=true; }
+  if (INFLIGHT&&INFLIGHT[sid]) {
+    delete INFLIGHT[sid];
+    if (typeof clearInflightState==='function') clearInflightState(sid);
+    changed=true;
+  }
+  if (S.session) {
+    S.session.active_stream_id=null;
+    S.session.pending_user_message=null;
+  }
+  if (changed&&typeof updateSendBtn==='function') updateSendBtn();
+  return changed;
+}
+
 function _purgeStaleInflightEntries() {
   // Clean up INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This prevents the in-memory cache from growing unbounded
@@ -707,9 +732,9 @@ async function loadSession(sid){
       input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
       output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
       estimated_cost:    _pick(u.estimated_cost,    _s.estimated_cost),
-      context_length:    _pick(u.context_length,    _s.context_length),
+      context_length:    _pick(_s.context_length,    u.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
-      threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
+      threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
@@ -742,12 +767,13 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
   discord: 'Discord',
   slack: 'Slack',
+  email: 'Email',
 };
 
 function _isMessagingSession(session) {
@@ -1102,8 +1128,23 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
+      S.session.context_length=data.session.context_length||0;
+      S.session.threshold_tokens=data.session.threshold_tokens||0;
+      S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session._modelResolutionDeferred=false;
       syncTopbar();
+      if(typeof _syncCtxIndicator==='function'){
+        const u=S.lastUsage||{};
+        const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+        _syncCtxIndicator({
+          input_tokens:_pick(u.input_tokens,S.session.input_tokens),
+          output_tokens:_pick(u.output_tokens,S.session.output_tokens),
+          estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
+          context_length:data.session.context_length||0,
+          last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
+          threshold_tokens:data.session.threshold_tokens||0,
+        });
+      }
     }catch(_){
       // Keep session switching non-blocking; the next load can try again.
     }
@@ -1878,9 +1919,6 @@ function _applySessionListPayload(sessData, projData){
   // active profile so the "Show N from other profiles" toggle can render
   // without a second round-trip. Stashed on the module for renderSessionListFromCache.
   _otherProfileCount = sessData.other_profile_count || 0;
-  _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
-  _clearLineageReportCache();
-  _allProjects = projData.projects||[];
   // Capture server clock for clock-skew compensation (issue #1144).
   // server_time is epoch seconds from the server's time.time().
   // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
@@ -1891,6 +1929,10 @@ function _applySessionListPayload(sessData, projData){
   if (typeof sessData.server_tz === 'string') {
     _serverTz = sessData.server_tz;
   }
+  _reconcileActiveSessionIdleStateFromList(sessData.sessions||[]);
+  _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
+  _clearLineageReportCache();
+  _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
   if (isStreaming) {

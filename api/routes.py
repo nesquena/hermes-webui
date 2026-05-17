@@ -754,7 +754,14 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     agent config/.env while running. When no job profile is selected, both homes
     are the same and legacy server-default behavior is preserved.
     """
+    import importlib
+
     from cron.jobs import mark_job_run, save_job_output
+
+    _cron_scheduler = importlib.import_module("cron.scheduler")
+
+    _silent_marker = getattr(_cron_scheduler, "SILENT_MARKER", "[SILENT]")
+    _deliver_result = getattr(_cron_scheduler, "_deliver_result", None)
 
     job_id = job.get("id", "")
     execution_profile_home = execution_profile_home or profile_home
@@ -772,10 +779,28 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
             job, execution_profile_home
         )
 
-        # Persist output and run metadata back to the job's owning cron store,
-        # even when the selected execution profile is different.
+        # Persist output, deliver the same content the scheduled cron path would
+        # send, and write run metadata back to the job's owning cron store even
+        # when the selected execution profile is different.
         def _persist_success():
             save_job_output(job_id, output)
+
+            deliver_content = (
+                final_response
+                if success
+                else f"⚠️ Cron job '{job.get('name', job_id)}' failed:\n{error}"
+            )
+            should_deliver = bool(deliver_content)
+            if should_deliver and success and _silent_marker in deliver_content.strip().upper():
+                should_deliver = False
+
+            delivery_error = None
+            if should_deliver and _deliver_result is not None:
+                try:
+                    delivery_error = _deliver_result(job, deliver_content)
+                except Exception as de:
+                    delivery_error = str(de)
+                    logger.error("Delivery failed for manual cron job %s: %s", job_id, de)
 
             # Match the scheduled cron path: an apparently successful run with no
             # final response should not leave the job looking healthy.
@@ -784,7 +809,14 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
                 _success = False
                 _error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-            mark_job_run(job_id, _success, _error)
+            try:
+                mark_job_run(job_id, _success, _error, delivery_error=delivery_error)
+            except TypeError:
+                # Older/fake cron.jobs modules used by focused WebUI tests may
+                # not expose the newer delivery_error parameter. Real Hermes
+                # scheduler builds do, so this is only a compatibility shim for
+                # legacy test doubles and deployments.
+                mark_job_run(job_id, _success, _error)
 
         _with_cron_home(profile_home, _persist_success)
     except Exception as e:
@@ -1628,6 +1660,57 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         getattr(session, "model_provider", None),
     )
     return provider
+
+
+def _resolve_context_length_for_session_model(
+    model: str | None,
+    provider: str | None = None,
+) -> int:
+    """Best-effort current context window for a session model.
+
+    Persisted session context metadata is a snapshot from a prior model call.
+    During session hydration/model switching, the current model metadata should
+    be allowed to replace that stale snapshot.
+    """
+    model_for_lookup = str(model or "").strip()
+    if not model_for_lookup:
+        return 0
+    try:
+        from agent.model_metadata import get_model_context_length as _get_cl
+        from api.config import get_config as _get_config_for_cl
+
+        _cfg_for_cl = _get_config_for_cl()
+        _cfg_ctx_len_load = None
+        _cfg_custom_providers_load = None
+        try:
+            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
+            if isinstance(_model_cfg_load, dict):
+                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
+                if _raw_cfg_ctx_load is not None:
+                    try:
+                        _parsed_load = int(_raw_cfg_ctx_load)
+                        if _parsed_load > 0:
+                            _cfg_ctx_len_load = _parsed_load
+                    except (TypeError, ValueError):
+                        pass
+            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
+            if isinstance(_raw_cp_load, list):
+                _cfg_custom_providers_load = _raw_cp_load
+        except Exception:
+            pass
+        try:
+            return _get_cl(
+                model_for_lookup,
+                "",
+                config_context_length=_cfg_ctx_len_load,
+                provider=provider or "",
+                custom_providers=_cfg_custom_providers_load,
+            ) or 0
+        except TypeError:
+            # Older hermes-agent builds: legacy 2-arg form.
+            return _get_cl(model_for_lookup, "") or 0
+    except Exception:
+        return 0
 
 
 def _session_model_state_from_request(
@@ -3553,48 +3636,22 @@ def handle_get(handler, parsed) -> bool:
             # /api/session/get response — the same wrong-window display this
             # fix addresses on the streaming side.
             _persisted_cl = getattr(s, "context_length", 0) or 0
-            if not _persisted_cl:
+            _threshold_tokens = getattr(s, "threshold_tokens", 0) or 0
+            if (not _persisted_cl) or resolve_model:
                 _model_for_lookup = (
-                    getattr(s, "model", "") or effective_model or ""
+                    effective_model or getattr(s, "model", "") or ""
                 ).strip()
-                if _model_for_lookup:
-                    try:
-                        from agent.model_metadata import get_model_context_length as _get_cl
-                        from api.config import get_config as _get_config_for_cl
-                        _cfg_for_cl = _get_config_for_cl()
-                        _cfg_ctx_len_load = None
-                        _cfg_custom_providers_load = None
-                        try:
-                            _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
-                            if isinstance(_model_cfg_load, dict):
-                                _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                                if _raw_cfg_ctx_load is not None:
-                                    try:
-                                        _parsed_load = int(_raw_cfg_ctx_load)
-                                        if _parsed_load > 0:
-                                            _cfg_ctx_len_load = _parsed_load
-                                    except (TypeError, ValueError):
-                                        pass
-                            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-                            if isinstance(_raw_cp_load, list):
-                                _cfg_custom_providers_load = _raw_cp_load
-                        except Exception:
-                            pass
-                        try:
-                            _fb_cl = _get_cl(
-                                _model_for_lookup,
-                                "",
-                                config_context_length=_cfg_ctx_len_load,
-                                provider=effective_provider or "",
-                                custom_providers=_cfg_custom_providers_load,
-                            ) or 0
-                        except TypeError:
-                            # Older hermes-agent builds: legacy 2-arg form.
-                            _fb_cl = _get_cl(_model_for_lookup, "") or 0
-                        if _fb_cl:
-                            _persisted_cl = _fb_cl
-                    except Exception:
-                        pass
+                _fb_cl = _resolve_context_length_for_session_model(
+                    _model_for_lookup,
+                    effective_provider or getattr(s, "model_provider", None) or "",
+                )
+                if _fb_cl:
+                    if _persisted_cl and _fb_cl != _persisted_cl:
+                        # The old threshold belongs to the old window. Hiding it
+                        # is less misleading than rendering a stale compression
+                        # threshold against a freshly resolved context length.
+                        _threshold_tokens = 0
+                    _persisted_cl = _fb_cl
             _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
             if (
                 load_messages
@@ -3613,7 +3670,7 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
                 "context_length": _persisted_cl,
-                "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
+                "threshold_tokens": _threshold_tokens,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
             if original_stream_id:
@@ -4183,6 +4240,7 @@ def handle_get(handler, parsed) -> bool:
             "telegram": "Telegram",
             "discord": "Discord",
             "slack": "Slack",
+            "email": "Email",
             "web": "Web",
             "api": "API",
         }
@@ -4638,6 +4696,8 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         old_ws = getattr(s, "workspace", "")
+        old_model = getattr(s, "model", None)
+        old_provider = getattr(s, "model_provider", None)
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -4653,6 +4713,16 @@ def handle_post(handler, parsed) -> bool:
                 if model is not None:
                     s.model = model
                 s.model_provider = provider
+                if (
+                    str(old_model or "") != str(getattr(s, "model", "") or "")
+                    or str(old_provider or "") != str(getattr(s, "model_provider", "") or "")
+                ):
+                    s.context_length = _resolve_context_length_for_session_model(
+                        getattr(s, "model", None),
+                        getattr(s, "model_provider", None),
+                    )
+                    s.threshold_tokens = 0
+                    s.last_prompt_tokens = 0
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:
@@ -7800,9 +7870,6 @@ def _handle_chat_start(handler, body, diag=None):
             response = dict(result.payload)
             response.setdefault("stream_id", result.stream_id)
             response.setdefault("session_id", result.session_id)
-            response.setdefault("run_id", result.run_id)
-            response.setdefault("status", result.status)
-            response.setdefault("active_controls", result.active_controls)
         else:
             response = _start_chat_stream_for_session(
                 s,
