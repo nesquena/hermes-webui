@@ -2957,6 +2957,13 @@ def get_available_models() -> dict:
         # A user may configure a provider key via config.yaml providers.<name>.api_key
         # without setting the corresponding env var. (#604)
         #
+        # Gating: only seed picker groups for keys whose canonical id is known
+        # to ``_PROVIDER_MODELS`` / ``_PROVIDER_DISPLAY``, or whose value is a
+        # dict-shaped provider config (custom/local). Scalar siblings under
+        # ``providers:`` (e.g. ``providers.only_configured: true``) are config
+        # flags, not providers, and must not render as phantom picker groups
+        # like ``Only-Configured`` (#2399).
+        #
         # Canonicalise the id slug here so a user with ``providers.opencode_go``
         # (underscore variant) doesn't see TWO provider groups in the picker —
         # one for the canonical ``opencode-go`` from active_provider detection
@@ -2969,13 +2976,24 @@ def get_available_models() -> dict:
         # provider_cfg values (#2245).
         _canonical_to_raw_provider_key: dict[str, str] = {}
         if isinstance(_cfg_providers, dict):
-            for _pid_key in _cfg_providers:
+            for _pid_key, _provider_cfg in _cfg_providers.items():
                 _canonical = _canonicalise_provider_id(_pid_key)
                 if not _canonical:
                     continue
+
+                # See the gating comment on the block above. ``_PROVIDER_MODELS``
+                # / ``_PROVIDER_DISPLAY`` membership accepts known providers and
+                # aliases; ``isinstance(_provider_cfg, dict)`` accepts custom
+                # entries that supply their own models/api_key/base_url. (#2399)
+                _is_known_provider = (
+                    _canonical in _PROVIDER_MODELS or _canonical in _PROVIDER_DISPLAY
+                )
+                _is_provider_config = isinstance(_provider_cfg, dict)
+                if not (_is_known_provider or _is_provider_config):
+                    continue
+
                 _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
-                if _canonical in _PROVIDER_MODELS or _canonical in _cfg_providers or _pid_key in _cfg_providers:
-                    detected_providers.add(_canonical)
+                detected_providers.add(_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
             target = _normalize_base_url_for_match(base_url)
