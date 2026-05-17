@@ -4280,11 +4280,13 @@ html[lang^="ar"] .hljs {
   padding-right:30px;
 }
 /* User messages float right, assistant messages float left */
-.chat-content-rtl .msg-row[data-role="user"] .msg-body {
+.chat-content-rtl .msg-row[data-role="user"] {
+  align-self: auto;
   margin-left: auto;
   margin-right: 0;
 }
-.chat-content-rtl .msg-row[data-role="assistant"] .msg-body {
+.chat-content-rtl .msg-row[data-role="assistant"] {
+  align-self: auto;
   margin-left: 0;
   margin-right: auto;
 }
