@@ -13,6 +13,9 @@
 - **PR #2452** by @Michaelyklam (fixes #2451) — Manual WebUI cron triggers now deliver the same final response or failure notice as scheduled cron runs, while still saving output files and recording delivery errors separately from job execution failures.
 - Keep the sidebar spinner in sync with server session metadata when the currently open session has finished but the browser still has stale local busy state (#2454).
 - **PR #2457** by @Michaelyklam (closes #2456) — Email gateway sessions imported from Hermes Agent `state.db` now normalize as messaging sessions and show an `Email` source label in the WebUI sidebar instead of falling through as unlabelled generic agent sessions. Keeps the Python source-normalization contract, gateway status platform labels, and frontend handoff/sidebar whitelist in sync.
+### Added
+
+- **PR #2460** by @Michaelyklam (closes #2449) — Add a copy button to Thinking card headers so users can copy the card's reasoning text without selecting the `<pre>` manually. The button stops header-toggle propagation and shows the same short checkmark feedback pattern used by existing copy actions.
 
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 

@@ -3057,7 +3057,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
    Only sub-element selectors that the consolidated block doesn't cover
    (label, toggle, rotate animation) are kept here. ── */
 .thinking-card-label{font-weight:600;letter-spacing:.02em;}
-.thinking-card-toggle{margin-left:auto;font-size:10px;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
+.thinking-card-btn-row{margin-left:auto;display:inline-flex;align-items:center;gap:6px;}
+.thinking-copy-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--accent-text);opacity:.72;cursor:pointer;transition:background .15s,color .15s,opacity .15s;}
+.thinking-copy-btn:hover,.thinking-copy-btn:focus-visible{background:var(--accent-bg-strong);opacity:1;outline:none;}
+.thinking-card-toggle{font-size:10px;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);}
 
 .bg-error-banner{background:rgba(229,62,62,.15);border:1px solid rgba(229,62,62,.3);color:#fca5a5;padding:8px 16px;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:0;}

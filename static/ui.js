@@ -3682,6 +3682,19 @@ function copyMsg(btn){
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
+function _copyThinkingText(btn){
+  const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
+  if(!card)return;
+  const pre=card.querySelector('.thinking-card-body pre');
+  const text=pre?pre.textContent:'';
+  if(!text)return;
+  _copyText(text).then(()=>{
+    const orig=btn.innerHTML;
+    btn.innerHTML=li('check',12);
+    btn.style.color='var(--accent)';
+    setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
+  }).catch(()=>showToast(t('copy_failed')));
+}
 
 // ── TTS: Text-to-Speech via Web Speech API (#499) ──
 // Strips markdown, code blocks, and MEDIA: paths for clean speech output.
@@ -4732,9 +4745,9 @@ function _assistantTurnBlocks(turn){
 }
 function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
-  return open
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`
-    : `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
+  const classes=`thinking-card${open?' open':''}`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
