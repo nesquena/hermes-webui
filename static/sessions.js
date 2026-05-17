@@ -418,6 +418,7 @@ async function newSession(flash, options={}){
     workspace:inheritWs,
     profile:S.activeProfile||'default',
   };
+  if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
   if(options&&options.worktree) reqBody.worktree=true;
   if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
