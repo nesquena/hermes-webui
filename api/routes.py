@@ -786,29 +786,44 @@ def _resolve_login_locale_key(raw_lang: str | None) -> str:
     return "en"
 
 # ── Login page (self-contained, no external deps) ────────────────────────────
+# Uses Neo design tokens inline: warm parchment light / neutral dark,
+# gold accent, restrained radius, no gradients or heavy shadows.
 _LOGIN_PAGE_HTML = """<!doctype html>
 <html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+:root{
+  --bg:#FEFCF7;--surface:#F3EEE3;--border:rgba(0,0,0,.1);
+  --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--accent-hover:#996F08;
+  --input-bg:rgba(0,0,0,.03);--focus-ring:rgba(184,134,11,.35);
+  --error:#C62828;
+  --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#0D0D1A;--surface:#1A1A2E;--border:rgba(255,255,255,.1);
+  --text:#FFF8DC;--muted:#C0C0C0;--accent:#FFD700;--accent-hover:#FFBF00;
+  --input-bg:rgba(255,255,255,.04);--focus-ring:rgba(255,215,0,.35);
+  --error:#EF5350;
+}}
+body{background:var(--bg);color:var(--text);font-family:var(--font-ui);
   height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:36px 32px;
-  width:320px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)}
-.logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(145deg,#e8a030,#e94560);
-  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;
-  margin:0 auto 12px;box-shadow:0 2px 12px rgba(233,69,96,.3)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:36px 32px;width:320px;text-align:center}
+.logo{width:48px;height:48px;border-radius:8px;background:var(--accent);
+  display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:20px;color:var(--bg);margin:0 auto 12px}
 h1{font-size:18px;font-weight:600;margin-bottom:4px}
-.sub{font-size:12px;color:#8888aa;margin-bottom:24px}
-input{width:100%;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
-  background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;outline:none;margin-bottom:14px;
-  transition:border-color .15s}
-input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
-button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(124,185,255,.15);
-  border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
-  transition:all .15s}
-button:hover{background:rgba(124,185,255,.25)}
-.err{color:#e94560;font-size:12px;margin-top:10px;display:none}
+.sub{font-size:12px;color:var(--muted);margin-bottom:24px}
+input{width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);
+  background:var(--input-bg);color:var(--text);font-size:14px;outline:none;
+  margin-bottom:14px;transition:border-color .15s}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring)}
+button{width:100%;padding:10px;border-radius:8px;border:1px solid var(--accent);
+  background:transparent;color:var(--accent);font-size:14px;font-weight:600;
+  cursor:pointer;transition:background .15s,color .15s}
+button:hover{background:var(--accent);color:var(--bg)}
+.err{color:var(--error);font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
