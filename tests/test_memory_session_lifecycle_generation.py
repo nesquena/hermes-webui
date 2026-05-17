@@ -338,6 +338,27 @@ def test_lru_eviction_commits_outside_cache_lock():
     assert "outside the cache lock" in outside_section
 
 
+def test_clear_session_evicts_outside_session_lock():
+    """Clearing a session must not hold the per-session mutation lock while
+    evicting its cached agent, because eviction can run provider commit I/O."""
+    import api.routes as routes_mod
+    src = Path(routes_mod.__file__).read_text(encoding="utf-8")
+
+    route_start = src.index('if parsed.path == "/api/session/clear"')
+    route_end = src.index('if parsed.path == "/api/session/truncate"', route_start)
+    route_block = src[route_start:route_end]
+
+    lock_start = route_block.index("with _get_session_agent_lock(sid):")
+    lock_end = route_block.index("# Evict cached agent outside the per-session lock", lock_start)
+    locked_section = route_block[lock_start:lock_end]
+    outside_section = route_block[lock_end:]
+
+    assert "_evict_session_agent" not in locked_section
+    assert "s.save()" in locked_section
+    assert "_evict_session_agent(sid)" in outside_section
+    assert "provider" in outside_section and "I/O" in outside_section
+
+
 def test_post_turn_lifecycle_marks_completion_without_commit():
     """Source-adjacent test: verify post-turn lifecycle only calls
     mark_turn_completed and does NOT call commit_session_memory.  Per

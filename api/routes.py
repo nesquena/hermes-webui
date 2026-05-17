@@ -4765,14 +4765,17 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        with _get_session_agent_lock(body["session_id"]):
+        sid = body["session_id"]
+        with _get_session_agent_lock(sid):
             s.messages = []
             s.tool_calls = []
             s.title = "Untitled"
             s.save()
-            # Evict cached agent — cleared session is a fresh conversation
-            from api.config import _evict_session_agent
-            _evict_session_agent(body["session_id"])
+        # Evict cached agent outside the per-session lock.  Eviction may run a
+        # boundary memory commit for batch-extraction providers, and provider
+        # I/O must not hold the session mutation lock.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/session/truncate":
