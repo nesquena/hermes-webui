@@ -7,7 +7,10 @@ injection checks, approval gates, or rollback/recovery controls.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 _MAX_SCAN_DEPTH = 24
@@ -29,6 +32,174 @@ _UNSAFE_VALUE_RE = re.compile(
 )
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._:-]+")
+
+_SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS sources (
+    source_id TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    origin_uri TEXT NOT NULL,
+    origin_kind TEXT NOT NULL DEFAULT 'local',
+    space_id TEXT,
+    artifact_ref TEXT,
+    content_sha256 TEXT,
+    freshness_status TEXT NOT NULL DEFAULT 'unknown',
+    last_ingested_at TEXT,
+    last_checked_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sources_type_status ON sources(source_type, freshness_status);
+CREATE INDEX IF NOT EXISTS idx_sources_space ON sources(space_id);
+CREATE INDEX IF NOT EXISTS idx_sources_updated ON sources(updated_at);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+    source_ref TEXT NOT NULL,
+    content_path TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    approx_tokens INTEGER NOT NULL DEFAULT 0,
+    lifecycle_status TEXT NOT NULL DEFAULT 'admitted',
+    redaction_status TEXT NOT NULL DEFAULT 'none',
+    start_line INTEGER,
+    end_line INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_lifecycle ON chunks(lifecycle_status);
+CREATE INDEX IF NOT EXISTS idx_chunks_source_ref ON chunks(source_ref);
+
+CREATE TABLE IF NOT EXISTS entities (
+    entity_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    hotness_score REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entities_kind_hotness ON entities(kind, hotness_score);
+
+CREATE TABLE IF NOT EXISTS chunk_entities (
+    chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+    score REAL NOT NULL DEFAULT 1,
+    PRIMARY KEY(chunk_id, entity_id)
+);
+
+CREATE TABLE IF NOT EXISTS summary_nodes (
+    node_id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    summary_path TEXT NOT NULL,
+    child_refs_json TEXT NOT NULL DEFAULT '[]',
+    redaction_status TEXT NOT NULL DEFAULT 'none',
+    sealed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_summary_scope ON summary_nodes(scope, scope_id, level);
+CREATE INDEX IF NOT EXISTS idx_summary_sealed ON summary_nodes(sealed_at);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    leased_until TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, leased_until);
+CREATE INDEX IF NOT EXISTS idx_jobs_dedupe ON jobs(kind, dedupe_key);
+"""
+
+_TABLES = ("sources", "chunks", "entities", "chunk_entities", "summary_nodes", "jobs")
+
+
+def memory_tree_root() -> Path:
+    return Path(os.getenv("CAPY_MEMORY_TREE_ROOT") or "~/.hermes/capy-memory-tree").expanduser().resolve()
+
+
+def memory_tree_db_path() -> Path:
+    configured = os.getenv("CAPY_MEMORY_TREE_DB")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return memory_tree_root() / "capy-memory-tree.sqlite3"
+
+
+def memory_tree_vault_path() -> Path:
+    configured = os.getenv("CAPY_MEMORY_TREE_VAULT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return memory_tree_root() / "vault"
+
+
+def _connect(db_path: Path | None = None) -> sqlite3.Connection:
+    path = (db_path or memory_tree_db_path()).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_memory_tree(db_path: Path | None = None) -> dict[str, Any]:
+    """Create local Memory Tree storage and return safe metadata."""
+    db = (db_path or memory_tree_db_path()).expanduser().resolve()
+    vault = memory_tree_vault_path()
+    vault.mkdir(parents=True, exist_ok=True)
+    with _connect(db) as conn:
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    tables = [row[0] for row in rows]
+    return {
+        "available": True,
+        "local_only": True,
+        "db_exists": db.exists(),
+        "db_path": str(db),
+        "vault_path": str(vault),
+        "tables": tables,
+    }
+
+
+def _count(conn: sqlite3.Connection, sql: str) -> int:
+    row = conn.execute(sql).fetchone()
+    return int(row[0] if row else 0)
+
+
+def memory_status() -> dict[str, Any]:
+    """Return bounded local Memory Tree status without reading source bodies."""
+    db = memory_tree_db_path()
+    if not db.exists():
+        return {
+            "available": True,
+            "local_only": True,
+            "db_exists": False,
+            "source_count": 0,
+            "chunk_count": 0,
+            "stale_source_count": 0,
+            "last_error_count": 0,
+        }
+    with _connect(db) as conn:
+        conn.executescript(_SCHEMA_SQL)
+        return {
+            "available": True,
+            "local_only": True,
+            "db_exists": True,
+            "source_count": _count(conn, "SELECT COUNT(*) FROM sources"),
+            "chunk_count": _count(conn, "SELECT COUNT(*) FROM chunks"),
+            "stale_source_count": _count(conn, "SELECT COUNT(*) FROM sources WHERE freshness_status = 'stale'"),
+            "last_error_count": _count(conn, "SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error != ''"),
+        }
 
 
 def _safe_text(value: Any, *, limit: int = _MAX_TEXT_LEN) -> str:
@@ -159,4 +330,11 @@ def canonicalize_space_manifest(space: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-__all__ = ["canonicalize_space_manifest"]
+__all__ = [
+    "canonicalize_space_manifest",
+    "init_memory_tree",
+    "memory_status",
+    "memory_tree_db_path",
+    "memory_tree_root",
+    "memory_tree_vault_path",
+]

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from api.capy_memory import canonicalize_space_manifest
+from api.capy_memory import canonicalize_space_manifest, init_memory_tree, memory_status
 
 
 def _hostile_space_manifest():
@@ -87,3 +87,42 @@ def test_canonicalizer_fails_closed_on_over_deep_metadata():
 
     with pytest.raises(ValueError, match="too deep|too complex"):
         canonicalize_space_manifest(manifest)
+
+
+def test_init_memory_tree_creates_expected_tables(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+
+    result = init_memory_tree()
+
+    assert result["local_only"] is True
+    assert result["db_exists"] is True
+    assert result["db_path"].endswith("capy-memory-tree.sqlite3")
+    assert (root / "capy-memory-tree.sqlite3").exists()
+    assert (root / "vault").is_dir()
+    assert set(result["tables"]) >= {
+        "sources",
+        "chunks",
+        "entities",
+        "chunk_entities",
+        "summary_nodes",
+        "jobs",
+    }
+
+
+def test_memory_status_returns_local_only_counts(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    status = memory_status()
+
+    assert status == {
+        "available": True,
+        "local_only": True,
+        "db_exists": True,
+        "source_count": 0,
+        "chunk_count": 0,
+        "stale_source_count": 0,
+        "last_error_count": 0,
+    }
