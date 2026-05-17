@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
+
+### Added
+
+- **PR #2432** by @Michaelyklam (closes #2426) — Add a Catppuccin skin to Appearance settings. The single opt-in skin maps light mode to Catppuccin Latte and dark mode to Catppuccin Mocha, using Mauve as the accent while preserving the existing theme/skin persistence and no-build-step architecture.
+
+### Fixed
+
+- **PR #2428** by @bengdan — Protect pipes inside parens / brackets / braces from naive `split('|')` in the Markdown table renderer. Cells like `` `(a|b)` ``, `` `Union[int|float]` ``, `` `(a|b|c)` ``, and `` `Union[int|float|str]` `` now stay in a single column instead of mis-splitting. The fix uses an iterative `_protectPipes` loop so all pipes inside one bracket pair are caught, not just the first. Also adds a `$...$` guard so a KaTeX inline-math span straddling ` | ` column separators is left alone instead of being stashed as math. Stage-fix on the contributor branch (a) swapped the literal `}` glyphs in the regex character classes for `\x7d` hex escapes (semantically identical, but the JS source no longer carries bare close-brace glyphs that confused the brace-counting `extractFunc` in `tests/test_renderer_js_behaviour.py`); (b) dropped a stray apostrophe stop that would have mis-split `('a'|'b')`-style string-literal unions; (c) dropped angle brackets `<` / `>` from the protected-bracket set, after Opus advisor flagged that `| x < 5 | y > 10 |` would otherwise collapse into a single cell (comparison-operator usage dominates content-grouping usage in real LLM table output); and (d) added `tests/test_issue2428_table_pipe_protection.py` with 12 regression cases covering single-pipe, multi-pipe-in-brackets, apostrophes-with-pipes, the KaTeX-in-table guard, and the angle-bracket comparison-operator case.
+
 ## [v0.51.81] — 2026-05-17 — Release BE (stage-374 — 6-PR batch — cost-history POSIX lock + prompt-cache tokens + Plugins panel i18n + pending-placeholder chat + journal-replay partial recovery + default-off RuntimeAdapter Slice 2 seam)
 
 ### Added

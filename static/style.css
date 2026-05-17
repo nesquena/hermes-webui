@@ -175,6 +175,51 @@
   :root[data-skin="sienna"] .session-item.active{border-left:2px solid var(--accent);}
   :root[data-skin="sienna"] .composer-box{border-radius:18px;}
 
+  /* ── Skin: Catppuccin (Latte light / Mocha dark) ──
+     Full palette rewrite using the Catppuccin mauve accent. Light mode maps
+     to Latte, dark mode maps to Mocha, matching the Sienna-style single-skin
+     pattern without adding a separate theme axis. Opt-in via Settings → Skin. */
+  :root[data-skin="catppuccin"]{
+    --bg:#EFF1F5;--sidebar:#E6E9EF;--surface:#FFFFFF;
+    --border:#CCD0DA;--border2:#BCC0CC;
+    --text:#4C4F69;--muted:#7C7F93;--strong:#1E1E2E;--em:#5C5F77;
+    --accent:#8839EF;--accent-hover:#6C26D6;--accent-text:#8839EF;
+    --accent-bg:rgba(136,57,239,0.09);--accent-bg-strong:rgba(136,57,239,0.18);
+    --code-bg:#E6E9EF;--code-inline-bg:rgba(30,30,46,0.06);--code-text:#8839EF;--pre-text:#4C4F69;
+    --topbar-bg:rgba(239,241,245,0.96);--main-bg:rgba(239,241,245,0.55);
+    --input-bg:rgba(30,30,46,0.035);--hover-bg:rgba(30,30,46,0.05);
+    --focus-ring:rgba(136,57,239,0.3);--focus-glow:rgba(136,57,239,0.1);
+    --blue:#1E66F5;--gold:#DF8E1D;
+    --user-bubble-bg:#E6E9EF;--user-bubble-border:#CCD0DA;
+    --user-bubble-text:#4C4F69;--user-bubble-placeholder:#7C7F93;
+    --user-selection-bg:rgba(136,57,239,0.24);--user-selection-text:#1E1E2E;
+  }
+  :root.dark[data-skin="catppuccin"]{
+    --bg:#1E1E2E;--sidebar:#181825;--surface:#313244;
+    --border:#45475A;--border2:#585B70;
+    --text:#CDD6F4;--muted:#A6ADC8;--strong:#F5F5F5;--em:#BAC2DE;
+    --accent:#CBA6F7;--accent-hover:#B4BEFE;--accent-text:#CBA6F7;
+    --accent-bg:rgba(203,166,247,0.12);--accent-bg-strong:rgba(203,166,247,0.22);
+    --code-bg:#181825;--code-inline-bg:rgba(255,255,255,0.07);--code-text:#CBA6F7;--pre-text:#CDD6F4;
+    --topbar-bg:rgba(30,30,46,0.96);--main-bg:rgba(30,30,46,0.55);
+    --input-bg:rgba(255,255,255,0.045);--hover-bg:rgba(255,255,255,0.07);
+    --focus-ring:rgba(203,166,247,0.35);--focus-glow:rgba(203,166,247,0.1);
+    --blue:#89B4FA;--gold:#F9E2AF;
+    --user-bubble-bg:#313244;--user-bubble-border:#45475A;
+    --user-bubble-text:#CDD6F4;--user-bubble-placeholder:#A6ADC8;
+    --user-selection-bg:rgba(203,166,247,0.3);--user-selection-text:#1E1E2E;
+  }
+  :root[data-skin="catppuccin"]:not(.dark) .new-chat-btn,
+  :root.dark[data-skin="catppuccin"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 3px rgba(136,57,239,0.24);}
+  :root[data-skin="catppuccin"]:not(.dark) .new-chat-btn:hover,
+  :root.dark[data-skin="catppuccin"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+  :root[data-skin="catppuccin"] .tool-card{background:rgba(30,30,46,0.025);border-color:var(--border);}
+  :root.dark[data-skin="catppuccin"] .tool-card{background:rgba(255,255,255,0.03);}
+  :root[data-skin="catppuccin"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root[data-skin="catppuccin"] .tool-arg-key,
+  :root[data-skin="catppuccin"] .tool-card-more{color:var(--accent-text);}
+  :root[data-skin="catppuccin"] .tool-card-running-dot{background:var(--accent);}
+
   /* ── Skin: Nous Research (steel blue, monospace, sharp corners, deep navy dark) ──
      Full palette rewrite inspired by the Nous Research visual identity.
      Monochromatic steel blue accent, monospace typography, near-sharp corners,

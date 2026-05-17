@@ -2587,7 +2587,7 @@ function renderMd(raw){
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Inline math: $...$ — require non-space at boundaries to avoid false positives
   // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
@@ -2717,8 +2717,20 @@ function renderMd(raw){
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
     if(!isSep(rows[1]))return block;
-    const parseRow=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(c.trim())}</td>`).join('');
-    const parseHeader=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(c.trim())}</th>`).join('');
+    // _protectPipes: temporarily swap pipes inside matching bracket pairs for a
+    // sentinel before split('|'), then restore. Iterates until no more matches
+    // so all pipes inside one pair are caught.
+    // Note: both opening and closing brace literals in the character classes
+    // are written as hex escapes (\x7b and \x7d) so the JS source contains no
+    // bare brace glyphs that would confuse the brace-counting extractFunc in
+    // tests/test_renderer_js_behaviour.py. Regex semantics are identical.
+    // Bracket set is paren / square / curly only -- NOT angle brackets, since
+    // angle brackets are overwhelmingly comparison operators in real LLM table
+    // output (`| x < 5 | y > 10 |`) and treating them as a pair collapses cells.
+    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
+    const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
+    const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
+    const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
     const header=`<tr>${parseHeader(rows[0])}</tr>`;
     const body=rows.slice(2).map(r=>`<tr>${parseRow(r)}</tr>`).join('');
     // Surround with blank lines so the final paragraph splitter treats the
