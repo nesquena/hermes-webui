@@ -595,6 +595,54 @@
   height: 1px;
 }
 
+.capy-spaces-memory-freshness {
+  align-items: center;
+  background: rgba(11, 22, 42, 0.72);
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 24px;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.24);
+  color: #f8fbff;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(220px, 1.25fr) minmax(240px, 1fr) auto;
+  margin: 18px auto 0;
+  max-width: 900px;
+  padding: 18px;
+}
+
+.capy-spaces-memory-freshness h3 {
+  margin: 4px 0 6px;
+}
+
+.capy-spaces-memory-freshness p {
+  color: rgba(226,232,240,0.76);
+  margin: 0;
+}
+
+.capy-spaces-memory-freshness-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capy-spaces-memory-freshness-stats span,
+.capy-spaces-memory-freshness-state {
+  background: rgba(15, 23, 42, 0.68);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  color: rgba(226,232,240,0.88);
+  padding: 8px 11px;
+}
+
+.capy-spaces-memory-freshness-stats strong {
+  color: #bfdbfe;
+}
+
+.capy-spaces-memory-freshness-state {
+  justify-self: end;
+  white-space: nowrap;
+}
+
 .capy-spaces-product-card-grid {
   display: grid;
   gap: 16px;
@@ -752,6 +800,8 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   .capy-spaces-product-home { border-radius: 22px; min-height: 980px; padding-inline: 14px; }
   .capy-spaces-agent-float { align-items: stretch; border-radius: 24px; flex-wrap: wrap; }
   .capy-spaces-product-topbar { border-radius: 0 0 18px 18px; }
+  .capy-spaces-memory-freshness { grid-template-columns: 1fr; }
+  .capy-spaces-memory-freshness-state { justify-self: start; }
 }
 
 

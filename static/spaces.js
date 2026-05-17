@@ -31,6 +31,12 @@
       } catch (demoErr) {
         demoData = {demos: []};
       }
+      let memoryStatus = {unavailable: true, local_only: true};
+      try {
+        memoryStatus = await fetchSpacesJson('api/capy-memory/status');
+      } catch (memoryErr) {
+        memoryStatus = {unavailable: true, local_only: true};
+      }
       const data = await fetchSpacesJson('api/spaces');
       if (!data.enabled) {
         root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces disabled</h3><div class="capy-spaces-muted">Set HERMES_WEBUI_SPACES_ENABLED=1 to enable the foundation shell.</div></div>';
@@ -38,7 +44,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData.demos || []);
+      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -108,14 +114,14 @@
       '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div></div>';
   }
 
-  function renderSpacesList(spaces, demos){
+  function renderSpacesList(spaces, demos, memoryStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
-    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId) +
+    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}) +
       renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
   }
 
-  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId){
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus){
     return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
       '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
       '<div class="capy-spaces-product-topbar">' +
@@ -151,6 +157,7 @@
       '</div>' +
       '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
       '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
+      renderMemoryFreshnessCard(memoryStatus || {}) +
       '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
       '<div class="capy-spaces-product-panels">' + renderSpaceAgentPanelPills(activeSpaceId) + '</div>' +
       '</section>';
@@ -158,6 +165,38 @@
 
   function renderSpaceAgentResourceLink(label, href){
     return '<a class="capy-spaces-resource-pill" href="'+escapeHtml(href)+'" target="_blank" rel="noopener noreferrer" aria-label="'+escapeHtml(label)+' opens in a new tab"><span>'+escapeHtml(label)+'</span><span class="capy-spaces-resource-external" aria-hidden="true">↗</span></a>';
+  }
+
+  function renderMemoryFreshnessCard(status){
+    const unavailable = status && status.unavailable === true;
+    const localOnly = !status || status.local_only !== false;
+    const sourceCount = safeNonNegativeCount(status && status.source_count);
+    const chunkCount = safeNonNegativeCount(status && status.chunk_count);
+    const staleCount = safeNonNegativeCount(status && status.stale_source_count);
+    const errorCount = safeNonNegativeCount(status && status.last_error_count);
+    const state = unavailable ? 'Memory status unavailable' : (errorCount ? 'Needs attention' : (staleCount ? 'Refresh recommended' : 'Fresh'));
+    const subtitle = unavailable ? 'Memory freshness will appear when the local Memory Tree route is available.' : (localOnly ? 'Local-only context layer' : 'Context layer');
+    return '<section class="capy-spaces-memory-freshness" aria-label="Memory freshness">' +
+      '<div><div class="capy-spaces-product-eyebrow">MEMORY</div><h3>Memory freshness</h3><p>'+escapeHtml(subtitle)+' · metadata-only source status.</p></div>' +
+      '<div class="capy-spaces-memory-freshness-stats">' +
+      renderMemoryFreshnessStat(sourceCount, 'sources') +
+      renderMemoryFreshnessStat(chunkCount, 'chunks') +
+      renderMemoryFreshnessStat(staleCount, 'stale') +
+      renderMemoryFreshnessStat(errorCount, 'error') +
+      '</div>' +
+      '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
+      '</section>';
+  }
+
+  function renderMemoryFreshnessStat(value, label){
+    const count = safeNonNegativeCount(value);
+    return '<span>'+escapeHtml(String(count))+' '+escapeHtml(label)+'</span>';
+  }
+
+  function safeNonNegativeCount(value){
+    const num = Number(value || 0);
+    if (!Number.isFinite(num) || num < 0) return 0;
+    return Math.floor(num);
   }
 
   function renderSpaceAgentDemoCards(){

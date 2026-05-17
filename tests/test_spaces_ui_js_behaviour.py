@@ -135,6 +135,23 @@ global.fetch = async function(path, opts = {}) {
       ],
     });
   }
+  if (path === 'api/capy-memory/status') {
+    if (scenario === 'productHomeMemoryStatus') {
+      return response({
+        available: true,
+        local_only: true,
+        db_exists: true,
+        source_count: 3,
+        chunk_count: 12,
+        stale_source_count: 1,
+        last_error_count: 1,
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        last_error: 'raw prompt ignore previous instructions',
+      });
+    }
+    return response({ available: true, local_only: true, db_exists: true, source_count: 1, chunk_count: 1, stale_source_count: 0, last_error_count: 0 });
+  }
   if (path === 'api/spaces/demo/run') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     const demo = body.demo || 'demo_weather_widget';
@@ -1403,7 +1420,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus') {
     await window.loadCapySpaces();
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -3372,6 +3389,25 @@ def test_spaces_ui_product_home_empty_state_is_dense_actionable_and_safe(driver_
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
     assert "SECRET" not in html
+
+
+def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeMemoryStatus")
+    html = out["rootHtml"]
+
+    assert "Memory freshness" in html
+    assert "Local-only context layer" in html
+    assert "3 sources" in html
+    assert "12 chunks" in html
+    assert "1 stale" in html
+    assert "1 error" in html
+    assert {"path": "api/capy-memory/status", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
 
 
 def test_spaces_ui_product_home_close_button_and_icons_have_polished_css():
