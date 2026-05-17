@@ -119,3 +119,22 @@ def test_chat_start_route_selects_adapter_only_when_flag_enabled():
     assert "LegacyJournalRuntimeAdapter" in start_body
     assert "_start_chat_stream_for_session(" in start_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in start_body, "route should use runtime_adapter_enabled(), not inline env checks"
+
+
+def test_chat_start_adapter_path_preserves_legacy_response_shape():
+    """The RuntimeAdapter seam must be invisible to /api/chat/start callers.
+
+    The adapter can use run_id/status/controls internally, but the flagged
+    route must not add fields that the legacy-direct response does not expose.
+    """
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    branch_start = src.index("if runtime_adapter_enabled():")
+    branch_end = src.index("else:", branch_start)
+    adapter_branch = src[branch_start:branch_end]
+
+    assert 'response.setdefault("stream_id", result.stream_id)' in adapter_branch
+    assert 'response.setdefault("session_id", result.session_id)' in adapter_branch
+    assert 'response.setdefault("run_id", result.run_id)' not in adapter_branch
+    assert 'response.setdefault("status", result.status)' not in adapter_branch
+    assert 'response.setdefault("active_controls", result.active_controls)' not in adapter_branch

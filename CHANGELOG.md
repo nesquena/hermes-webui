@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep the default-off `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` chat-start path response-compatible with the legacy-direct path by not adding adapter-internal `run_id`, `status`, or `active_controls` fields to `/api/chat/start` responses. Fixes #2435.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
