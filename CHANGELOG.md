@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Board selector menu labels no longer overlap board titles when board metadata uses a longer text label in the icon/color slot.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
