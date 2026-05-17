@@ -292,9 +292,11 @@ Success criterion:
 
 ### Slice 2: Adapter interface over the journaled legacy path
 
-Status as of 2026-05-16: ready for a planning/adapter-seam PR after the active
-Slice 1 validation pass and the #2313 selected-session stream cap. Slice 2 should
-still be a reversible boundary change, not a sidecar or execution-ownership move.
+Status as of 2026-05-17: shipped. PR #2416 defined the adapter-seam contract,
+PR #2424 added the default-off `LegacyJournalRuntimeAdapter` seam, and PR #2438
+kept `/api/chat/start` response shape identical between `legacy-direct` and the
+flagged `legacy-journal` path. Slice 2 remains a reversible boundary change, not
+a sidecar or execution-ownership move.
 
 Scope:
 
@@ -405,6 +407,13 @@ execution-survives-WebUI-restart gate remains deferred to Slice 4.
 
 ### Slice 3: Control migration
 
+Status as of 2026-05-17: not started. Slice 3 should begin with cancel only.
+Cancel is the smallest control-plane migration because it already has one clear
+browser affordance, one active-run target, and an existing legacy handler to
+delegate to. Approval, clarify, queue/continue, and goal are intentionally held
+behind a successful cancel-control slice because they carry more callback and
+state-lifetime risk.
+
 Scope:
 
 - move cancel first,
@@ -415,6 +424,55 @@ Scope:
 
 Revert path: per-control feature flags or route-level fallback to legacy control
 handlers.
+
+#### Slice 3a: Cancel control gate
+
+The first control migration should route Stop Generation through the
+`RuntimeAdapter.cancel_run(...)` seam while preserving the current legacy cancel
+semantics. It should not introduce a new cancellation registry, worker-owned
+signal table, or sidecar boundary. During this slice, `cancel_run` is still a
+protocol translator over the existing cancellation path.
+
+Acceptance properties:
+
+1. **Same visible result as legacy Stop Generation.** A cancelled turn still
+   emits one terminal cancelled/interrupted state and preserves any already
+   streamed partial assistant content according to the existing cancellation
+   contract.
+2. **Adapter flag is behavior-preserving.** With
+   `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal`, Stop Generation uses
+   `RuntimeAdapter.cancel_run(...)`; with the default `legacy-direct` path, the
+   current route remains available as fallback.
+3. **No new runtime-surrogate state.** The implementation must not add a second
+   `CANCEL_FLAGS`-like map, cached `AIAgent` table, long-lived queue, or local
+   callback registry inside the main WebUI process.
+4. **Journal/status coherence.** After cancellation, replay and session reload
+   classify the turn as cancelled/interrupted rather than stale/unknown, and the
+   terminal state is visible through the same journal/session diagnostic surface
+   used by Slice 1.
+5. **Idempotent duplicate cancel.** Repeating cancel for the same run should be
+   safe: one terminal result is recorded, later attempts return a bounded
+   `ControlResult` such as `not-active` rather than creating extra terminal
+   events or resurrecting stale stream state.
+
+Suggested regression coverage:
+
+- a route/source test proving the flagged cancel path calls the adapter seam and
+  the default path remains the legacy route;
+- an adapter unit test proving `cancel_run` delegates exactly once and returns a
+  bounded `ControlResult` for unsupported/not-active runs;
+- an existing cancellation preservation suite run (for example the partial-output
+  and cancelled-turn status tests) under the adapter flag or an equivalent
+  synthetic harness;
+- a replay/session-load assertion that a cancelled run's terminal state remains
+  classifiable from the journal/session surface after reload.
+
+Non-goals for Slice 3a:
+
+- no approval or clarify migration;
+- no queue/continue or goal migration;
+- no runner process, sidecar, or execution-survives-WebUI-restart claim;
+- no public `/api/chat/start` response-shape expansion for adapter-only fields.
 
 ### Slice 4: Runner process / sidecar boundary
 
