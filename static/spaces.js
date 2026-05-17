@@ -407,6 +407,25 @@
       '</div>';
   }
 
+  function renderCompactionEvidence(receipt){
+    const data = receipt && typeof receipt === 'object' && !Array.isArray(receipt) ? receipt : null;
+    if (!data) return '';
+    const originalChars = safeNonNegativeCount(data.original_chars);
+    const compactedChars = safeNonNegativeCount(data.compacted_chars);
+    const redaction = safeDisplayMetadataText(data.redaction_status || 'none', 'none') || 'none';
+    const rules = Array.isArray(data.rules_applied) ? data.rules_applied : [];
+    const safeRules = rules.slice(0, 8).map(function(rule){
+      const text = safeDisplayMetadataText(rule || '', '');
+      return text && text !== '[REDACTED]' && /^[a-z0-9_.:-]{1,80}$/i.test(text) ? text : '';
+    }).filter(Boolean);
+    if (!originalChars && !compactedChars && !safeRules.length && redaction === 'none') return '';
+    return '<div class="capy-spaces-card capy-spaces-compaction-evidence"><h4>Compaction evidence</h4>' +
+      '<div class="capy-spaces-muted">Original output: '+originalChars+' chars · Compacted output: '+compactedChars+' chars · Redaction: '+escapeHtml(redaction)+'</div>' +
+      '<div class="capy-spaces-muted">Rules: '+escapeHtml(safeRules.length ? safeRules.join(', ') : 'none')+'</div>' +
+      '<div class="capy-spaces-muted">Raw output, prompt bodies, widget bodies, and credentials remain omitted from this receipt.</div>' +
+      '</div>';
+  }
+
   function renderDemoSmokeResult(data){
     const space = data && data.space && typeof data.space === 'object' ? data.space : {};
     const demo = data && data.demo ? String(data.demo) : 'demo';
@@ -455,6 +474,7 @@
       : {};
     const musicPreview = renderMusicSmokePreview(musicFlow);
     const researchPreview = demo === 'demo_research_harness_pdf_export' ? renderResearchHarnessSmokePreview(data) : '';
+    const compactionPreview = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const hasNotesPreview = !!notesPreview;
     const hasKanbanPreview = !!kanbanPreview;
@@ -472,7 +492,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+compactionPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -480,6 +500,7 @@
     const passed = Number(data && data.passed || 0);
     const failed = Number(data && data.failed || 0);
     const results = Array.isArray(data && data.results) ? data.results : [];
+    const suiteCompaction = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const rows = results.slice(0, 20).map(function(item){
       const demo = item && item.demo ? String(item.demo) : 'demo';
       const template = item && item.template ? String(item.template) : 'template';
@@ -554,6 +575,7 @@
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
+      suiteCompaction +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
