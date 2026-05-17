@@ -10,6 +10,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,197 @@ def memory_status() -> dict[str, Any]:
         }
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _safe_vault_file(source_id: str) -> Path:
+    safe_source_id = _safe_id(source_id, fallback="source")
+    vault = memory_tree_vault_path().resolve()
+    vault.mkdir(parents=True, exist_ok=True)
+    path = (vault / f"{safe_source_id}.md").resolve()
+    try:
+        path.relative_to(vault)
+    except ValueError as exc:
+        raise ValueError("memory content path escaped vault") from exc
+    return path
+
+
+def _snippet(markdown: str, query: str = "", *, limit: int = 700) -> str:
+    lines = [line.strip() for line in markdown.splitlines() if line.strip() and line.strip() != "---"]
+    if query:
+        query_lower = query.lower()
+        for line in lines:
+            if query_lower in line.lower():
+                return _safe_text(line, limit=limit)
+    text = " ".join(lines)
+    return _safe_text(text, limit=limit)
+
+
+def _public_hit(row: sqlite3.Row | tuple[Any, ...], *, query: str = "") -> dict[str, Any]:
+    if isinstance(row, sqlite3.Row):
+        data = dict(row)
+    else:
+        keys = ["source_id", "chunk_id", "source_type", "display_name", "origin_uri", "space_id", "summary", "redaction_status"]
+        data = dict(zip(keys, row))
+    return {
+        "source_id": _safe_text(data.get("source_id"), limit=160),
+        "chunk_id": _safe_text(data.get("chunk_id"), limit=160),
+        "source_type": _safe_text(data.get("source_type"), limit=80),
+        "title": _safe_text(data.get("display_name"), limit=200),
+        "origin_uri": _safe_text(data.get("origin_uri"), limit=300),
+        "space_id": _safe_text(data.get("space_id"), limit=160),
+        "snippet": _snippet(str(data.get("summary") or ""), query=query),
+        "redaction_status": _safe_text(data.get("redaction_status"), limit=80),
+    }
+
+
+def ingest_source(record: dict[str, Any]) -> dict[str, Any]:
+    """Persist one sanitized canonical source record idempotently."""
+    init_memory_tree()
+    source_id = _safe_id(record.get("source_id"), fallback="source")
+    chunk_id = _safe_id(record.get("chunk_id"), fallback=f"{source_id}-chunk")
+    source_type = _safe_text(record.get("source_type"), limit=80) or "unknown"
+    space_id = _safe_text(record.get("space_id"), limit=160)
+    origin_uri = _safe_text(record.get("origin_uri"), limit=500) or f"capy-memory://{source_id}"
+    markdown = str(record.get("markdown") or "")
+    if not markdown.strip():
+        raise ValueError("canonical record markdown is required")
+    if _UNSAFE_VALUE_RE.search(markdown):
+        raise ValueError("canonical record markdown contains unsafe source content")
+    content_sha256 = _safe_text(record.get("content_sha256"), limit=80) or _sha256(markdown)
+    display_name = _snippet(markdown, limit=160) or source_id
+    redaction_status = _safe_text(record.get("redaction_status"), limit=80) or "none"
+    content_path = _safe_vault_file(source_id)
+    existed = content_path.exists()
+    content_path.write_text(markdown, encoding="utf-8")
+    now = _now_iso()
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        source_exists = conn.execute("SELECT 1 FROM sources WHERE source_id = ?", (source_id,)).fetchone() is not None
+        conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, source_type, display_name, origin_uri, origin_kind, space_id,
+                artifact_ref, content_sha256, freshness_status, last_ingested_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'local', ?, ?, ?, 'ok', ?, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                source_type=excluded.source_type,
+                display_name=excluded.display_name,
+                origin_uri=excluded.origin_uri,
+                space_id=excluded.space_id,
+                artifact_ref=excluded.artifact_ref,
+                content_sha256=excluded.content_sha256,
+                freshness_status='ok',
+                last_ingested_at=excluded.last_ingested_at,
+                last_error=NULL,
+                updated_at=excluded.updated_at
+            """,
+            (source_id, source_type, display_name, origin_uri, space_id, str(content_path), content_sha256, now, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO chunks (
+                chunk_id, source_id, source_ref, content_path, summary, approx_tokens,
+                lifecycle_status, redaction_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'admitted', ?, ?, ?)
+            ON CONFLICT(chunk_id) DO UPDATE SET
+                source_id=excluded.source_id,
+                source_ref=excluded.source_ref,
+                content_path=excluded.content_path,
+                summary=excluded.summary,
+                approx_tokens=excluded.approx_tokens,
+                lifecycle_status='admitted',
+                redaction_status=excluded.redaction_status,
+                updated_at=excluded.updated_at
+            """,
+            (
+                chunk_id,
+                source_id,
+                origin_uri,
+                str(content_path),
+                markdown,
+                max(1, len(markdown.split())),
+                redaction_status,
+                now,
+                now,
+            ),
+        )
+    return {
+        "ok": True,
+        "local_only": True,
+        "source_id": source_id,
+        "chunk_id": chunk_id,
+        "content_path": str(content_path),
+        "created": not (source_exists or existed),
+    }
+
+
+def search_memory(query: str, *, space_id: str | None = None, limit: int = 10) -> dict[str, Any]:
+    """Search sanitized Memory Tree snippets with bounded metadata results."""
+    query_text = _safe_text(query, limit=200)
+    if not query_text:
+        raise ValueError("query is required")
+    limit = max(1, min(int(limit or 10), 25))
+    init_memory_tree()
+    pattern = f"%{query_text.lower()}%"
+    params: list[Any] = [pattern]
+    sql = """
+        SELECT s.source_id, c.chunk_id, s.source_type, s.display_name, s.origin_uri,
+               s.space_id, c.summary, c.redaction_status
+        FROM chunks c
+        JOIN sources s ON s.source_id = c.source_id
+        WHERE lower(c.summary) LIKE ?
+    """
+    if space_id:
+        sql += " AND s.space_id = ?"
+        params.append(_safe_text(space_id, limit=160))
+    sql += " ORDER BY s.updated_at DESC, c.updated_at DESC LIMIT ?"
+    params.append(limit)
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(sql, params).fetchall()
+    return {
+        "query": query_text,
+        "limit": limit,
+        "space_id": _safe_text(space_id, limit=160) if space_id else None,
+        "local_only": True,
+        "results": [_public_hit(row, query=query_text) for row in rows],
+    }
+
+
+def relevant_memory_for_space(space_id: str, *, limit: int = 5) -> dict[str, Any]:
+    """Return recent sanitized snippets for one Space."""
+    safe_space_id = _safe_text(space_id, limit=160)
+    if not safe_space_id:
+        raise ValueError("space_id is required")
+    limit = max(1, min(int(limit or 5), 25))
+    init_memory_tree()
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            """
+            SELECT s.source_id, c.chunk_id, s.source_type, s.display_name, s.origin_uri,
+                   s.space_id, c.summary, c.redaction_status
+            FROM chunks c
+            JOIN sources s ON s.source_id = c.source_id
+            WHERE s.space_id = ?
+            ORDER BY s.updated_at DESC, c.updated_at DESC
+            LIMIT ?
+            """,
+            (safe_space_id, limit),
+        ).fetchall()
+    return {
+        "space_id": safe_space_id,
+        "limit": limit,
+        "local_only": True,
+        "results": [_public_hit(row) for row in rows],
+    }
+
+
 def _safe_text(value: Any, *, limit: int = _MAX_TEXT_LEN) -> str:
     text = "" if value is None else str(value)
     text = re.sub(r"\s+", " ", text).strip()
@@ -332,9 +524,12 @@ def canonicalize_space_manifest(space: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "canonicalize_space_manifest",
+    "ingest_source",
     "init_memory_tree",
     "memory_status",
     "memory_tree_db_path",
     "memory_tree_root",
     "memory_tree_vault_path",
+    "relevant_memory_for_space",
+    "search_memory",
 ]
