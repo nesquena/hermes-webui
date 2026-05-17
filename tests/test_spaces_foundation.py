@@ -6140,6 +6140,70 @@ name: Should Not Import
     assert "secret_source_value_do_not_leak" not in str(export_exc.value).lower()
 
 
+def test_space_tool_package_import_rejects_ambient_current_selector_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    current = spaces.create_space(
+        {"space_id": "package-tool-current-import", "name": "Package Tool Current Import"}
+    )
+    events_before = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="current-space selectors") as exc:
+        spaces.run_space_tool(
+            "space.import",
+            {
+                "spaceId": "package-tool-ambient-import",
+                "activeSpaceId": current["space_id"],
+                "space_yaml": "id: package-tool-ambient-yaml\nname: Package Tool Ambient YAML\n",
+                "renderer": "<script>ambientImportToolLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+    serialized = str(exc.value).lower()
+    space_ids = [space["space_id"] for space in spaces.list_spaces()]
+
+    assert "package-tool-ambient-import" not in space_ids
+    assert "package-tool-ambient-yaml" not in space_ids
+    assert spaces.read_space(current["space_id"])["name"] == "Package Tool Current Import"
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == events_before
+    assert "ambientimporttoolleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_space_tool_package_export_rejects_ambient_current_selector_before_reading_target(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    current = spaces.create_space(
+        {"space_id": "package-tool-current-export", "name": "Package Tool Current Export"}
+    )
+    target = spaces.create_space(
+        {"space_id": "package-tool-explicit-export", "name": "Package Tool Explicit Export"}
+    )
+    events_before = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="current-space selectors") as exc:
+        spaces.run_space_tool(
+            "space.export",
+            {
+                "spaceId": target["space_id"],
+                "currentSpaceId": current["space_id"],
+                "format": "yaml",
+                "source": "SECRET_SOURCE_VALUE_DO_NOT_LEAK",
+                "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+    serialized = str(exc.value).lower()
+
+    assert spaces.read_space(current["space_id"])["name"] == "Package Tool Current Export"
+    assert spaces.read_space(target["space_id"])["name"] == "Package Tool Explicit Export"
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == events_before
+    assert "secret_source_value_do_not_leak" not in serialized
+    assert "api_auth" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-rollback", "name": "Tool Rollback"})

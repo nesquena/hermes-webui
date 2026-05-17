@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-16 20:32 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-17 05:16 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces widget-event runtime contract now rejects nested postMessage-shaped payload dictionaries whose capy runtime discriminator aliases (`type`, `message_type`, `messageType`) disagree, before event persistence, while preserving benign non-capy nested labels and metadata-only public event surfaces. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Spaces package import/export Space-tool aliases now reject ambient current-space selectors on non-current package actions before package import/export side effects, while preserving `space.current.*` export behavior and metadata-only package receipts. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `fix(spaces): reject ambient package tool selectors`
+  - Added RED/GREEN backend coverage proving non-current `space.import` and `space.export` reject same-valued ambient current selectors (`activeSpaceId` / `currentSpaceId`) before package creation/export handling, preserve candidate Spaces and event history, and avoid reflecting hostile renderer/source/API-auth/secret-looking fixture markers.
+  - Hardened package Space-tool import/export branches to use the shared explicit non-current selector guard while preserving `space.current.export*` aliases through the current-space selector resolver.
+  - Validation at completion: focused RED failed before implementation (`2 failed` with `DID NOT RAISE`); focused GREEN passed (`2 passed`); package Space-tool regressions passed (`4 passed, 366 deselected`); full Spaces foundation suite passed (`370 passed`); Spaces UI behavior + demo parity suites passed (`193 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and `/tmp` backend package-tool browser QA passed. Screenshot artifact: `/tmp/capy-spaces-progress/package-tool-ambient-qa.png`.
 
 - `fix(spaces): reject nested runtime alias conflicts`
   - Added RED/GREEN backend coverage proving nested payload envelopes with conflicting capy runtime aliases such as `type: capy:ready` plus `messageType: capy:agent:prompt` fail closed before queueing widget events.

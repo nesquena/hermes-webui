@@ -3613,7 +3613,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = reset_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.import", "space.package.import", "space.agent.import"}:
-        result = import_space_agent_package(data, space_id=_space_tool_space_id_alias(data) or None)
+        result = import_space_agent_package(data, space_id=_space_tool_non_current_space_id(data) or None)
         return {"ok": True, "action": name, **result}
     if name in {
         "space.export",
@@ -3627,7 +3627,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.current.export.yaml",
         "space.current.export.zip",
     }:
-        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else _space_tool_space_id_alias(data))
+        space_id = validate_space_id(
+            _space_tool_current_id(data) if name.startswith("space.current.") else _space_tool_non_current_space_id(data)
+        )
         export_format = "zip" if name.endswith(".zip") else "yaml" if name.endswith(".yaml") else data.get("format") or "yaml"
         result = export_space_agent_package(space_id, format=export_format)
         return {"ok": True, "action": name, **result}
