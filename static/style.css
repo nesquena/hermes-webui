@@ -4528,18 +4528,11 @@ html[lang^="ar"] .hljs {
   right: auto;
   left: 6px;
 }
-/* Session action menu opens from right */
+/* Session action menu: right-aligned with RTL direction */
 .chat-content-rtl .session-action-menu {
   left: auto;
   right: 0;
-}
-/* RTL menu content: text right-aligned, icon on the right */
-.chat-content-rtl .session-action-opt {
-  text-align: right;
-}
-.chat-content-rtl .session-action-opt .ws-opt-action {
-  flex-direction: row-reverse;
-  text-align: right;
+  direction: rtl;
 }
 /* Mobile session items: padding flips (right→left) */
 @media(max-width:640px){
