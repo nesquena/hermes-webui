@@ -26,11 +26,11 @@
 <script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,neo:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},nd=(window.__neoDefaults||{}),t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),fb=skins[(nd.skin||'').toLowerCase()]?nd.skin.toLowerCase():'default',skin=skins[s]?s:(m?m[1]:fb);localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
+<link rel="preload" href="static/style.css?v=__WEBUI_VERSION__" as="style">
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
   <!-- xterm.js CSS (self-hosted, see static/vendor/xterm@5.3.0/) -->
   <link rel="stylesheet" href="static/vendor/xterm@5.3.0/css/xterm.css">
-  <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift; self-hosted) -->
-  <link rel="stylesheet" href="static/vendor/katex@0.16.22/dist/katex.min.css">
+  <!-- KaTeX CSS: loaded dynamically by renderKatexBlocks() in ui.js when math is needed -->
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
   <!-- Self-hosted from npm:streaming-markdown@0.2.15 — no CDN dependency.           -->
   <!-- sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa -->
@@ -75,7 +75,7 @@
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
   </button>
   <div class="app-titlebar-inner">
-    <img class="app-titlebar-icon" src="static/brand/neo-ico.png" width="24" height="24" alt="" aria-hidden="true">
+    <img class="app-titlebar-icon" src="static/brand/neo-ico-128.webp" width="24" height="24" alt="" aria-hidden="true">
     <span class="app-titlebar-title" id="appTitlebarTitle">Neo</span>
   </div>
   <div class="app-titlebar-actions">
@@ -117,7 +117,7 @@
     <!-- Dashboard panel -->
     <div class="panel-view active" id="panelDashboard">
       <div class="neo-dashboard-brand">
-        <img src="static/brand/neo-ico.png" alt="Neo" width="32" height="32" style="border-radius:50%;object-fit:cover;">
+        <img src="static/brand/neo-ico-128.webp" alt="Neo" width="32" height="32" style="border-radius:50%;object-fit:cover;">
         <div>
           <strong>NEO</strong>
           <span>AGENTE 24/7</span>
@@ -138,7 +138,7 @@
       <div class="neo-dashboard-bottom">
         <div class="neo-sidebar-status">
           <div class="neo-sidebar-status-head">
-            <img src="static/brand/neo-ico.png" alt="Neo" width="28" height="28" style="border-radius:50%;object-fit:cover;">
+            <img src="static/brand/neo-ico-128.webp" alt="Neo" width="28" height="28" style="border-radius:50%;object-fit:cover;">
             <div><strong>NEO</strong><span><i></i> ONLINE</span></div>
           </div>
           <p>Ativo 24/7<br>Respondendo e executando tarefas.</p>
@@ -312,7 +312,10 @@
             <aside class="dashboard-right">
               <!-- NEO HU-03.3: Hero card — avatar + status pill -->
               <div class="hero-card" aria-label="Neo agent status">
-                <img src="static/brand/neo-hero.png" alt="Neo humanoid avatar" class="hero-portrait" width="1402" height="1122">
+                <picture>
+                  <source srcset="static/brand/neo-hero.webp" type="image/webp">
+                  <img src="static/brand/neo-hero.png" alt="Neo humanoid avatar" class="hero-portrait" width="1402" height="1122" fetchpriority="high">
+                </picture>
                 <div class="hero-card-code" aria-hidden="true">input.stream: active · model: neo-core · cpu: optimize_code() · dashboard.render() · security: active</div>
                 <div class="hero-card-vignette" aria-hidden="true"></div>
                 <div class="hero-status-pill"><span class="hero-status-dot" aria-hidden="true"></span><span data-i18n="hero_status_online">STATUS: OPERACIONAL</span></div>
@@ -783,7 +786,7 @@
       </div>
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" aria-label="Scroll to bottom" onclick="scrollToBottom()" style="display:none">↓</button>
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo"><img src="static/brand/neo-ico.png" width="64" height="64" alt="Avatar do agente Neo" style="border-radius:50%;object-fit:cover;"></div>
+        <div class="empty-logo"><img src="static/brand/neo-ico-128.webp" width="64" height="64" alt="Avatar do agente Neo" style="border-radius:50%;object-fit:cover;" loading="lazy"></div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
         <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">

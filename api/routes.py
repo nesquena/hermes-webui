@@ -2397,8 +2397,27 @@ def _serve_static(handler, parsed):
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
     handler.send_response(200)
     handler.send_header("Content-Type", ct_header)
-    handler.send_header("Cache-Control", "no-store")
+
+    # Cache strategy: versioned assets get immutable long-cache;
+    # vendor libs get 7-day cache; everything else no-cache.
+    qs = parsed.query or ""
+    if "v=" in qs:
+        handler.send_header("Cache-Control", "public, max-age=31536000, immutable")
+    elif "/vendor/" in parsed.path:
+        handler.send_header("Cache-Control", "public, max-age=604800")
+    else:
+        handler.send_header("Cache-Control", "no-cache")
+
     raw = static_file.read_bytes()
+
+    # Gzip compress text-based assets when client supports it.
+    if ct in _TEXT_MIME_TYPES and len(raw) > 1024:
+        ae = handler.headers.get("Accept-Encoding", "")
+        if "gzip" in ae.lower():
+            import gzip
+            raw = gzip.compress(raw, compresslevel=4)
+            handler.send_header("Content-Encoding", "gzip")
+
     handler.send_header("Content-Length", str(len(raw)))
     handler.end_headers()
     handler.wfile.write(raw)

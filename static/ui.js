@@ -4240,6 +4240,7 @@ function renderMermaidBlocks(){
 
 let _katexLoading=false;
 let _katexReady=false;
+let _katexCssLoaded=false;
 
 function renderKatexBlocks(){
   const blocks=document.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
@@ -4247,6 +4248,14 @@ function renderKatexBlocks(){
   if(!_katexReady){
     if(!_katexLoading){
       _katexLoading=true;
+      // Load KaTeX CSS on demand (removed from <head> to avoid blocking initial render)
+      if(!_katexCssLoaded){
+        _katexCssLoaded=true;
+        const link=document.createElement('link');
+        link.rel='stylesheet';
+        link.href='static/vendor/katex@0.16.22/dist/katex.min.css';
+        document.head.appendChild(link);
+      }
       const script=document.createElement('script');
       script.src='https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js';
       script.integrity='sha384-cMkvdD8LoxVzGF/RPUKAcvmm49FQ0oxwDF3BGKtDXcEc+T1b2N+teh/OJfpU0jr6';
