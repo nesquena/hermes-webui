@@ -1594,11 +1594,20 @@ function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
   const rect=anchorEl.getBoundingClientRect();
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
-  let left=rect.right-menuW;
-  if(left<8) left=8;
-  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  const isRtl=document.documentElement.classList.contains('chat-content-rtl');
+  let left;
+  if(isRtl){
+    // In RTL, menu opens from the anchor's left edge going rightward
+    left=rect.left;
+    if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+    if(left<8) left=8;
+  }else{
+    left=rect.right-menuW;
+    if(left<8) left=8;
+    if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  }
   _sessionActionMenu.style.left=left+'px';
-  _sessionActionMenu.style.top='8px';
+  _sessionActionMenu.style.right='auto';
   const menuH=_sessionActionMenu.offsetHeight || 0;
   let top=rect.bottom+6;
   if(top+menuH>window.innerHeight-8 && rect.top>menuH+12){

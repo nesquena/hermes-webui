@@ -4177,9 +4177,40 @@ main.main.showing-logs > #mainLogs{display:flex;}
  */
 /* ── Arabic font (Thmanyah Sans) — applied when RTL is active ─────────── */
 .chat-content-rtl body,
+html[lang^="ar"] body,
+.chat-content-rtl .sidebar,
+html[lang^="ar"] .sidebar,
+.chat-content-rtl .panel-view,
+html[lang^="ar"] .panel-view,
+.chat-content-rtl .settings-main,
+html[lang^="ar"] .settings-main,
+.chat-content-rtl .side-menu,
+html[lang^="ar"] .side-menu,
+.chat-content-rtl body,
 html[lang^="ar"] body {
   --font-ui-ar: 'Thmanyah Sans', var(--font-ui);
   font-family: var(--font-ui-ar);
+}
+/* Force Arabic font on inputs, buttons, and sidebar elements */
+.chat-content-rtl input,
+.chat-content-rtl textarea,
+.chat-content-rtl select,
+.chat-content-rtl button,
+.chat-content-rtl .side-menu-item,
+.chat-content-rtl .nav-tab,
+.chat-content-rtl .panel-head,
+.chat-content-rtl .session-item,
+.chat-content-rtl .cron-item,
+html[lang^="ar"] input,
+html[lang^="ar"] textarea,
+html[lang^="ar"] select,
+html[lang^="ar"] button,
+html[lang^="ar"] .side-menu-item,
+html[lang^="ar"] .nav-tab,
+html[lang^="ar"] .panel-head,
+html[lang^="ar"] .session-item,
+html[lang^="ar"] .cron-item {
+  font-family: 'Thmanyah Sans', var(--font-ui);
 }
 /* Keep code/monospace in system monospace, not Arabic font */
 .chat-content-rtl code,
@@ -4285,10 +4316,22 @@ html[lang^="ar"] .hljs {
   text-align: right;
   padding-left: 32px;
   padding-right: 10px;
+  font-family: inherit;
 }
 .chat-content-rtl .sidebar-search-icon {
-  left: auto;
-  right: 22px;
+  left: 22px;
+  right: auto;
+}
+/* Mobile: icon stays on left, text on right */
+@media(max-width:640px){
+  .chat-content-rtl .sidebar-search input {
+    padding-left: 34px;
+    padding-right: 10px;
+  }
+  .chat-content-rtl .sidebar-search-icon {
+    left: 20px;
+    right: auto;
+  }
 }
 .chat-content-rtl .panel-head {
   text-align: right;
