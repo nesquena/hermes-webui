@@ -5,6 +5,7 @@
 ### Fixed
 
 - Keep the default-off `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` chat-start path response-compatible with the legacy-direct path by not adding adapter-internal `run_id`, `status`, or `active_controls` fields to `/api/chat/start` responses. Fixes #2435.
+- Recover already-journaled visible assistant text and tool cards even when restart repair first syncs a populated Hermes core transcript into an otherwise empty WebUI sidecar. The core-sync branch now merges non-duplicate run-journal output before clearing stale stream state, closing the rare #2427 carve-out where recoverable partial output could be silently skipped. Fixes #2434.
 
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 

@@ -718,7 +718,76 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
     return out
 
 
-def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
+def _normalize_journal_recovery_text(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:
+    candidate = _normalize_journal_recovery_text(content)
+    if not candidate:
+        return None
+    for idx, message in enumerate(session.messages or []):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        if message.get('_error'):
+            continue
+        existing = _normalize_journal_recovery_text(message.get('content'))
+        if not existing:
+            continue
+        if existing == candidate:
+            return idx
+        if len(candidate) >= 24 and candidate in existing:
+            return idx
+    return None
+
+
+def _journal_tool_already_present(session, name: str, preview: str) -> bool:
+    candidate_name = str(name or '')
+    candidate_preview = _normalize_journal_recovery_text(preview)
+    for tool_call in session.tool_calls or []:
+        if not isinstance(tool_call, dict):
+            continue
+        if str(tool_call.get('name') or '') != candidate_name:
+            continue
+        existing_preview = _normalize_journal_recovery_text(
+            tool_call.get('preview') or tool_call.get('snippet') or ''
+        )
+        if existing_preview == candidate_preview:
+            return True
+    return False
+
+
+def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
+    if not stream_id:
+        return False
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        return False
+    for event in journal.get('events') or []:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if event_name == 'token' and str(payload.get('text') or ''):
+            return True
+        if event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                continue
+            if str(payload.get('text') or '').strip():
+                return True
+        if event_name == 'tool':
+            return True
+    return False
+
+
+def _append_journaled_partial_output(
+    session,
+    stream_id: str | None,
+    *,
+    dedupe_existing: bool = False,
+) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
     This repair path is intentionally conservative: it restores user-visible
@@ -757,6 +826,12 @@ def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
         assistant_parts = []
         if not content:
             return current_assistant_idx
+        if dedupe_existing:
+            existing_idx = _find_existing_assistant_for_journal_content(session, content)
+            if existing_idx is not None:
+                current_assistant_idx = existing_idx
+                assistant_started_at = None
+                return existing_idx
         timestamp = int(assistant_started_at or time.time())
         session.messages.append({
             'role': 'assistant',
@@ -821,6 +896,9 @@ def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
                 anchor_idx = ensure_assistant_anchor(created_at)
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            if dedupe_existing and _journal_tool_already_present(session, name, preview):
+                current_assistant_idx = anchor_idx
+                continue
             recovered_tool_calls.append({
                 'name': name,
                 'preview': preview,
@@ -946,19 +1024,48 @@ def _apply_core_sync_or_error_marker(
             core = json.load(f)
         core_messages = core.get('messages', [])
         if core_messages:
+            _stream_id = stream_id_for_recheck or session.active_stream_id
             session.messages = core_messages
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
+            _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+            _already_checkpointed = False
+            if _pending_text and session.messages:
+                for _last_msg in reversed(session.messages):
+                    if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
+                        _last_text = _normalize_journal_recovery_text(_last_msg.get('content'))
+                        _already_checkpointed = _last_text == _pending_text
+                        break
+            if (
+                _pending_text
+                and not _already_checkpointed
+                and _run_journal_has_visible_output(session, _stream_id)
+            ):
+                _recovered_ts = int(time.time())
+                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+                    _recovered_ts = int(session.pending_started_at)
+                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            recovered_output = _append_journaled_partial_output(
+                session,
+                _stream_id,
+                dedupe_existing=True,
+            )
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
+            if recovered_output:
+                session.messages.append(
+                    _interrupted_recovery_marker(recovered_output=True)
+                )
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
-                "Session %s: synced %d messages from core transcript",
-                sid, len(core_messages),
+                "Session %s: synced %d messages from core transcript%s",
+                sid,
+                len(core_messages),
+                " and recovered journaled output" if recovered_output else "",
             )
             return True
 
