@@ -307,6 +307,13 @@ class TestToolCallGroupingStatic:
         assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
             "tool_complete must still update its current live Activity burst by tool id."
         )
+        finalize_fn = _function_body(UI_JS, "finalizeThinkingCard")
+        assert "turn.querySelector('.agent-activity-thinking[data-thinking-active=\"1\"]')" in finalize_fn, (
+            "Compact Thinking cards live directly in assistant-turn blocks, so finalization must clear the active marker from the whole turn, not only the tool group."
+        )
+        assert "thinkingCards.filter" in live_thinking_fn and "setAttribute('data-thinking-active','1')" in live_thinking_fn, (
+            "Compact live thinking should reactivate the latest existing Thinking card instead of stacking a new card after every tool boundary."
+        )
         close_activity_fn = _function_body(MESSAGES_JS, "_closeCurrentLiveActivityGroup")
         assert "data-live-activity-current" in close_activity_fn, (
             "Visible interim assistant boundaries should close the previous live Activity burst."

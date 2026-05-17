@@ -7040,7 +7040,7 @@ function finalizeThinkingCard(){
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');
     }
-    const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
     _syncToolCallGroupSummary(group);
   }
@@ -7095,6 +7095,11 @@ function appendThinking(text='', options){
   }
   const thinkingText=String(text||'').trim()||'Thinking…';
   let row=blocks.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+  if(!row){
+    const thinkingCards=Array.from(blocks.querySelectorAll('.agent-activity-thinking'));
+    row=thinkingCards.filter(el=>el.closest('.assistant-turn-blocks')===blocks).pop()||null;
+    if(row) row.setAttribute('data-thinking-active','1');
+  }
   if(!row){
     row=_thinkingActivityNode(thinkingText, false);
     row.setAttribute('data-thinking-active','1');
