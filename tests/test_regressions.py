@@ -335,6 +335,19 @@ def test_server_delete_invalidates_index(cleanup_test_sessions):
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
 
+
+def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
+    """session/delete must remove sidecar backups so deleted sessions stay deleted."""
+    routes_src = (REPO_ROOT / "api" / "routes.py").read_text()
+    delete_idx = max(
+        routes_src.find("if parsed.path == '/api/session/delete':"),
+        routes_src.find('if parsed.path == "/api/session/delete":'),
+    )
+    assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
+    delete_block = routes_src[delete_idx:delete_idx+1400]
+    assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
+        "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
+
 # ── R9: Token/tool SSE events write to wrong session after switch ─────────────
 
 def test_token_handler_guards_session_id(cleanup_test_sessions):

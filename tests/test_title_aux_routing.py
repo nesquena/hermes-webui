@@ -133,19 +133,48 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         self.assertEqual(_title_completion_budget(), 512)
         self.assertEqual(_title_retry_completion_budget(), 1024)
 
-    def test_aux_retries_empty_reasoning_length_response_with_larger_budget(self):
-        """If a reasoning model returns empty content at finish_reason=length, retry once."""
+    def test_aux_short_circuits_on_empty_reasoning_without_retrying(self):
+        """Regression for #2083: reasoning models that emit only hidden
+        reasoning tokens (no visible content) must NOT trigger a budget-doubling
+        retry — the second call invariably produces the same empty-reasoning
+        shape and just doubles the GPU/credit burn.  Short-circuit to the local
+        fallback path instead."""
         from api.streaming import generate_title_raw_via_aux
 
-        responses = [
-            {
+        call_count = [0]
+
+        def fake_call_llm(**kwargs):
+            call_count[0] += 1
+            return {
                 'choices': [
                     {
                         'message': {'content': '', 'reasoning': 'long hidden reasoning'},
                         'finish_reason': 'length',
                     }
                 ]
-            },
+            }
+
+        with _patch_tg_config({'provider': 'ollama', 'model': 'kimi-k2.6', 'base_url': 'https://ollama.com/v1'}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Hey nur ein kurzer Test',
+                    assistant_text='Alles klar, ich helfe dir dabei.',
+                )
+
+        self.assertIsNone(result)
+        self.assertEqual(status, 'llm_empty_reasoning_aux')
+        # One call per prompt at the base budget — no retry on prompt 0, no
+        # second-prompt attempt either (short-circuited).
+        self.assertEqual(call_count[0], 1)
+
+    def test_aux_still_retries_finish_length_without_reasoning(self):
+        """Length-truncated responses WITHOUT reasoning tokens still get the
+        budget-doubling retry — those are legitimately recoverable by giving
+        the model more headroom."""
+        from api.streaming import generate_title_raw_via_aux
+
+        responses = [
+            {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
             {'choices': [{'message': {'content': 'Useful Session Title'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []
@@ -187,21 +216,58 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
                 )
 
         self.assertIsNone(result)
-        self.assertEqual(status, 'llm_length_aux')
+        self.assertEqual(status, 'llm_empty_reasoning_aux')
 
-    def test_agent_route_retries_empty_reasoning_length_response(self):
-        """The active-agent route should get the same reasoning-model retry path as aux."""
+    def test_agent_route_short_circuits_on_empty_reasoning_without_retrying(self):
+        """Regression for #2083 on the active-agent route: empty-reasoning
+        responses must NOT trigger a budget-doubling retry."""
         from api.streaming import generate_title_raw_via_agent
 
-        responses = [
-            {
+        call_count = [0]
+
+        def fake_create(**kwargs):
+            call_count[0] += 1
+            return {
                 'choices': [
                     {
                         'message': {'content': '', 'reasoning': 'long hidden reasoning'},
                         'finish_reason': 'length',
                     }
                 ]
-            },
+            }
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=fake_create)
+            )
+        )
+        agent = MagicMock()
+        agent.api_mode = 'openai'
+        agent.provider = 'ollama'
+        agent.model = 'kimi-k2.6'
+        agent.base_url = 'https://ollama.com/v1'
+        agent.reasoning_config = None
+        agent._build_api_kwargs.return_value = {}
+        agent._ensure_primary_openai_client.return_value = client
+
+        result, status = generate_title_raw_via_agent(
+            agent,
+            user_text='Hey nur ein kurzer Test',
+            assistant_text='Alles klar, ich helfe dir dabei.',
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(status, 'llm_empty_reasoning')
+        # One call per prompt at base budget — no retry, no second-prompt attempt.
+        self.assertEqual(call_count[0], 1)
+        self.assertIsNone(agent.reasoning_config)
+
+    def test_agent_route_still_retries_finish_length_without_reasoning(self):
+        """The active-agent route should preserve retry-on-length-no-reasoning."""
+        from api.streaming import generate_title_raw_via_agent
+
+        responses = [
+            {'choices': [{'message': {'content': ''}, 'finish_reason': 'length'}]},
             {'choices': [{'message': {'content': 'Agent Session Title'}, 'finish_reason': 'stop'}]},
         ]
         captured_budgets = []

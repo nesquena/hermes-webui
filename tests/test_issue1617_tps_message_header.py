@@ -46,6 +46,32 @@ def test_live_metering_updates_only_real_tps_and_never_placeholders():
     )
 
 
+def test_live_metering_usage_is_provisional_until_done():
+    listener_start = MESSAGES_JS.find("source.addEventListener('metering'")
+    assert listener_start != -1, "messages.js should listen for metering SSE events"
+    listener_end = MESSAGES_JS.find("source.addEventListener('apperror'", listener_start)
+    assert listener_end != -1, "apperror listener should follow metering listener"
+    listener = MESSAGES_JS[listener_start:listener_end]
+
+    assert "S.lastUsage={...(S.lastUsage||{}),...d.usage}" in listener, (
+        "live usage should update the transient usage cache for the indicator"
+    )
+    assert "_syncCtxIndicator(S.lastUsage)" in listener, (
+        "live usage should refresh the context indicator"
+    )
+    assert "S.session.input_tokens=d.usage.input_tokens" not in listener
+    assert "S.session.last_prompt_tokens=d.usage.last_prompt_tokens" not in listener
+
+
+def test_live_prompt_estimate_reanchors_to_fresh_exact_prompt_tokens():
+    assert "_live_prompt_exact_tokens = [0]" in STREAMING_PY, (
+        "live prompt estimates need a separate exact-token anchor"
+    )
+    assert "_real_prompt_tokens = int(_usage.get('last_prompt_tokens') or 0)" in STREAMING_PY
+    assert "_real_prompt_tokens != _live_prompt_exact_tokens[0]" in STREAMING_PY
+    assert "_live_prompt_estimate_tokens[0] = _real_prompt_tokens" in STREAMING_PY
+
+
 def test_done_payload_persists_final_tps_when_exact_usage_available():
     assert "usage['tps']" in STREAMING_PY, "done usage payload should include final exact TPS when available"
     assert "output_tokens" in STREAMING_PY and "duration_seconds" in STREAMING_PY, (

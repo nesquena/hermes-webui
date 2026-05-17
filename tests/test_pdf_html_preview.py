@@ -104,37 +104,37 @@ class TestLoadPdfInlineFunction:
 
     def test_function_exists(self):
         ui = _read_js('ui.js')
-        assert 'function loadPdfInline()' in ui, 'loadPdfInline() function must exist'
+        assert 'function loadPdfInline' in ui, 'loadPdfInline() function must exist'
 
     def test_selects_pdf_preview_load_elements(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline()')
+        idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 500]
         assert 'pdf-preview-load' in body, 'Must query .pdf-preview-load elements'
         assert 'data-loaded' in body, 'Must use data-loaded attribute to prevent double-processing'
 
     def test_fetches_via_api_media(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline()')
+        idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 1500]
         assert 'api/media?path=' in body, 'Must fetch PDF via api/media endpoint'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline()')
+        idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 1500]
         assert 'MAX_SIZE' in body or 'byteLength' in body, 'Must enforce a size cap on PDF files'
 
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline()')
+        idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 3000]
         assert 'pdf_error' in body, 'Must show error fallback on failure'
         assert 'pdf_download' in body or 'download=' in body, 'Error fallback must include download link'
 
     def test_lazy_loads_pdfjs_from_cdn(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline()')
+        idx = ui.find('function loadPdfInline')
         body = ui[idx:idx + 3000]
         assert 'pdfjs' in body, 'Must lazy-load PDF.js from CDN'
 
@@ -149,44 +149,44 @@ class TestLoadHtmlInlineFunction:
 
     def test_function_exists(self):
         ui = _read_js('ui.js')
-        assert 'function loadHtmlInline()' in ui, 'loadHtmlInline() function must exist'
+        assert 'function loadHtmlInline' in ui, 'loadHtmlInline() function must exist'
 
     def test_selects_html_preview_load_elements(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 500]
         assert 'html-preview-load' in body, 'Must query .html-preview-load elements'
         assert 'data-loaded' in body, 'Must use data-loaded attribute'
 
     def test_fetches_via_api_media(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1000]
         assert 'api/media?path=' in body, 'Must fetch HTML via api/media endpoint'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1000]
         assert 'MAX_SIZE' in body or 'html.length' in body, 'Must enforce a size cap on HTML files'
 
     def test_fallback_on_error(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 2000]
         assert 'html_error' in body, 'Must show error fallback on failure'
 
     def test_uses_srcdoc_attribute(self):
         """Must use srcdoc (not src) for HTML content to keep it same-origin sandboxed."""
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1500]
         assert 'srcdoc=' in body, 'Must use srcdoc attribute for inline HTML rendering'
 
     def test_escapes_html_for_srcdoc(self):
         """HTML content must be escaped before embedding in srcdoc to prevent attribute injection."""
         ui = _read_js('ui.js')
-        idx = ui.find('function loadHtmlInline()')
+        idx = ui.find('function loadHtmlInline')
         body = ui[idx:idx + 1500]
         # Must escape &, <, >, " to prevent breaking out of srcdoc attribute
         assert '&amp;' in body or 'replace' in body, 'Must escape HTML entities for srcdoc'
@@ -195,31 +195,34 @@ class TestLoadHtmlInlineFunction:
 # ── requestAnimationFrame integration ──────────────────────────────────────
 
 class TestRAFIntegration:
-    """Both lazy-load functions must be called in the requestAnimationFrame blocks."""
+    """Lazy-load functions must be called by the consolidated post-render pass."""
 
     def test_loadPdfInline_called_after_render(self):
         ui = _read_js('ui.js')
-        raf_blocks = re.findall(r'requestAnimationFrame\(\(\)=>\{[^}]+\}\)', ui)
-        load_blocks = [b for b in raf_blocks if 'loadDiffInline' in b]
-        assert len(load_blocks) >= 2, 'Expected at least 2 rAF blocks with loadDiffInline'
-        for block in load_blocks:
-            assert 'loadPdfInline()' in block, 'loadPdfInline() must be called alongside loadDiffInline'
+        idx = ui.find('function postProcessRenderedMessages')
+        body = ui[idx:idx + 500]
+        assert 'loadDiffInline(container)' in body, 'post-process must call loadDiffInline'
+        assert 'loadPdfInline(container)' in body, 'post-process must call loadPdfInline alongside loadDiffInline'
 
     def test_loadHtmlInline_called_after_render(self):
         ui = _read_js('ui.js')
-        raf_blocks = re.findall(r'requestAnimationFrame\(\(\)=>\{[^}]+\}\)', ui)
-        load_blocks = [b for b in raf_blocks if 'loadDiffInline' in b]
-        for block in load_blocks:
-            assert 'loadHtmlInline()' in block, 'loadHtmlInline() must be called alongside loadDiffInline'
+        idx = ui.find('function postProcessRenderedMessages')
+        body = ui[idx:idx + 500]
+        assert 'loadDiffInline(container)' in body, 'post-process must call loadDiffInline'
+        assert 'loadHtmlInline(container)' in body, 'post-process must call loadHtmlInline alongside loadDiffInline'
 
     def test_initTreeViews_blocks_also_call_loaders(self):
-        """rAF blocks with initTreeViews (not loadDiffInline) must also call PDF/HTML loaders."""
+        """Tree views and inline loaders must share the same post-process pass."""
         ui = _read_js('ui.js')
-        raf_blocks = re.findall(r'requestAnimationFrame\(\(\)=>\{[^}]+\}\)', ui)
-        tree_blocks = [b for b in raf_blocks if 'initTreeViews' in b and 'loadDiffInline' not in b]
-        for block in tree_blocks:
-            assert 'loadPdfInline()' in block, 'initTreeViews rAF block must also call loadPdfInline'
-            assert 'loadHtmlInline()' in block, 'initTreeViews rAF block must also call loadHtmlInline'
+        idx = ui.find('function postProcessRenderedMessages')
+        body = ui[idx:idx + 500]
+        assert 'initTreeViews(container)' in body, 'post-process must initialize tree views'
+        assert 'loadPdfInline(container)' in body, 'post-process must also call loadPdfInline'
+        assert 'loadHtmlInline(container)' in body, 'post-process must also call loadHtmlInline'
+
+    def test_message_render_uses_single_post_process_raf(self):
+        ui = _read_js('ui.js')
+        assert ui.count('requestAnimationFrame(()=>postProcessRenderedMessages(inner))') == 2
 
 
 # ── CSS classes ────────────────────────────────────────────────────────────

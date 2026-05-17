@@ -52,7 +52,70 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+// Guard against concurrent send() calls.  Without this, two rapid sends
+// (e.g. queue drain + user click) can both pass the S.busy check because
+// setBusy(true) is only called after the first await inside send().
+let _sendInProgress = false;
+const _sessionTitleProvisionalBySid = new Map();
+
+function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
+  const title=String(titleText||'').replace(/\s+/g,' ').trim();
+  if(!title||title==='Untitled'||title==='New Chat')return true;
+  const provisional=String(provisionalText||'').replace(/\s+/g,' ').trim().slice(0,64);
+  return !!provisional&&title===provisional;
+}
+
+function _firstUserMessageTitleCandidate(){
+  const first=(S.messages||[]).find(m=>m&&m.role==='user'&&m.content);
+  return first?String(first.content||'').trim().slice(0,64):'';
+}
+
+function applySessionTitleUpdate(sid, titleText, options={}){
+  const newTitle=String(titleText||'').trim();
+  if(!sid||!newTitle)return false;
+  const row=(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions))
+    ? _allSessions.find(s=>s&&s.session_id===sid)
+    : null;
+  const currentTitle=S.session&&S.session.session_id===sid
+    ? S.session.title
+    : row&&row.title;
+  if(!options.force){
+    const expected=String(options.expectedCurrent||'').trim();
+    const remembered=_sessionTitleProvisionalBySid.get(sid)||'';
+    const provisionalCandidates=[options.provisionalText,remembered,_firstUserMessageTitleCandidate()];
+    const allowed=(expected&&String(currentTitle||'').trim()===expected)
+      || String(currentTitle||'').trim()===newTitle
+      || provisionalCandidates.some(p=>_sessionTitleLooksDefaultOrProvisional(currentTitle, p));
+    if(!allowed)return false;
+  }
+  if(S.session&&S.session.session_id===sid){
+    S.session.title=newTitle;
+    if(typeof syncTopbar==='function') syncTopbar();
+  }
+  if(row) row.title=newTitle;
+  if(options.rememberProvisional) _sessionTitleProvisionalBySid.set(sid,newTitle);
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  else if(typeof renderSessionList==='function') renderSessionList();
+  return true;
+}
+
 async function send(){
+  // Reject concurrent invocations early — before any await yields control.
+  // If a send is already in-flight (e.g. queue drain), re-queue the message
+  // instead of silently dropping it.
+  if (_sendInProgress) {
+    const _text=$('msg').value.trim();
+    if(_text && S.session && S.session.session_id){
+      queueSessionMessage(S.session.session_id,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      $('msg').value='';autoResize();
+      S.pendingFiles=[];renderTray();
+      updateQueueBadge(S.session.session_id);
+      showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
+    }
+    return;
+  }
+  _sendInProgress = true;
+  try{
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
   // Don't send while an inline message edit is active
@@ -166,6 +229,21 @@ async function send(){
         renderMessages();
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
+      if(_agentCmd&&_agentCmd.category==='Plugin'){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        let _pluginOutput='(no output)';
+        try{
+          _pluginOutput=typeof executeAgentPluginCommand==='function'
+            ? await executeAgentPluginCommand(text,_agentCmd)
+            : 'Plugin command runtime unavailable in WebUI.';
+        }catch(e){
+          _pluginOutput=`Plugin command error: ${e&&e.message||e}`;
+        }
+        S.messages.push({role:'assistant',content:String(_pluginOutput||'(no output)'),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}
@@ -210,23 +288,19 @@ async function send(){
   startClarifyPolling(activeSid);
   _fetchYoloState(activeSid);  // sync YOLO pill with backend state
   S.activeStreamId = null;  // will be set after stream starts
+  if(typeof updateSendBtn==='function') updateSendBtn();
 
   // Set provisional title from user message immediately so session appears
-  // in the sidebar right away with a meaningful name (server may refine later)
+  // in the sidebar right away with a meaningful name. /api/chat/start persists
+  // the server-side provisional title and may refine this optimistic text.
   if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
     const provisionalTitle=displayText.slice(0,64);
-    S.session.title=provisionalTitle;
-    syncTopbar();
-    // Persist it in the background; keep the optimistic sidebar cache as the
-    // immediate source of truth until /api/chat/start saves pending state.
-    api('/api/session/rename',{method:'POST',body:JSON.stringify({
-      session_id:activeSid, title:provisionalTitle
-    })}).catch(()=>{});  // fire-and-forget, server refines on done
+    applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
     if(typeof upsertActiveSessionForLocalTurn==='function'){
       // Second optimistic pass: carry the provisional title into the cached row
       // without re-fetching /api/sessions before pending state exists server-side.
       upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
-    }else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    }
   } else if(typeof upsertActiveSessionForLocalTurn==='function'){
     upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
   } else {
@@ -243,6 +317,9 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
+
+    if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
+
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
@@ -259,6 +336,9 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    // setBusy(true) already ran with activeStreamId=null; refresh now that we
+    // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
+    if(typeof updateSendBtn==='function') updateSendBtn();
     if(S.session&&typeof startData.pending_started_at==='number'){
       S.session.pending_started_at=startData.pending_started_at;
     }
@@ -317,6 +397,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
+  }finally{ _sendInProgress=false; }
 }
 
 const LIVE_STREAMS={};
@@ -867,18 +948,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
       if((d.session_id||activeSid)!==activeSid) return;
-      const newTitle=String(d.title||'').trim();
-      if(!newTitle) return;
-      if(S.session&&S.session.session_id===activeSid){
-        S.session.title=newTitle;
-        syncTopbar();
-      }
-      if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)){
-        const row=_allSessions.find(s=>s&&s.session_id===activeSid);
-        if(row) row.title=newTitle;
-      }
-      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-      else if(typeof renderSessionList==='function') renderSessionList();
+      applySessionTitleUpdate(activeSid, d.title);
     });
 
     source.addEventListener('title_status',e=>{
@@ -896,17 +966,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    function _resolveGoalMessage(d){
+      const key=String(d && d.message_key ? d.message_key : '').trim();
+      const args=Array.isArray(d && d.message_args) ? d.message_args : [];
+      const raw=String(d&&d.message||'').trim();
+      if(key && typeof t==='function'){
+        try{
+          const translated=String(t(key,...args));
+          if(translated && translated!==key)return translated;
+        }catch(_){}
+      }
+      return raw;
+    }
+
     source.addEventListener('goal',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
         const goalState=String(d.state||'').trim();
-        const goalEvaluatingMessage='Evaluating goal progress…';
+        const goalEvaluatingMessage=t('goal_evaluating_progress');
         if(goalState==='evaluating'){
           setComposerStatus(goalEvaluatingMessage);
           return;
         }
-        const msg=String(d.message||'').trim();
+        const msg=_resolveGoalMessage(d);
         if(!msg)return;
         _latestGoalStatus={message:msg,decision:d.decision||null,state:goalState||null};
         setComposerStatus(msg);
@@ -927,7 +1010,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           model_provider:S.session&&S.session.model_provider||null,
           profile:S.activeProfile||'default',
         };
-        showToast('Continuing toward goal…',2200);
+        const toast=t('goal_continuing_toast');
+        const cmsg=_resolveGoalMessage(d);
+        showToast((toast&&cmsg&&cmsg!==toast)?cmsg.split('\n')[0]:toast,2200);
       }catch(_){}
     });
 
@@ -1140,7 +1225,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      if(d.session_id&&d.session_id!==activeSid) return;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      if(d.usage&&typeof _syncCtxIndicator==='function'){
+        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        _syncCtxIndicator(S.lastUsage);
+      }
       if(typeof setCompressionUi==='function'){
         setCompressionUi({
           sessionId:activeSid,
@@ -1152,13 +1242,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
-      showToast(message||'Context compressed');
+      showToast(message||'Context compressed', 8000);
     });
 
     source.addEventListener('metering',e=>{
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
+        if(d.usage&&typeof _syncCtxIndicator==='function'){
+          if(S.session&&S.session.session_id===activeSid){
+            S.lastUsage={...(S.lastUsage||{}),...d.usage};
+            _syncCtxIndicator(S.lastUsage);
+          }
+        }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
           if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
           return;
@@ -1189,11 +1285,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
           const isModelNotFound=d.type==='model_not_found';
+          const isCancelled=d.type==='cancelled';
+          const isInterrupted=d.type==='interrupted';
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details});
+          const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
+          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
@@ -1284,7 +1383,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages({preserveScroll:true});
+            S.messages.push({role:'assistant',content:'**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*',provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
         }

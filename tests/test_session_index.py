@@ -123,6 +123,53 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     assert persisted[0].get("last_message_at") == 100.0
 
 
+def test_all_sessions_prune_reuses_in_memory_id_snapshot(monkeypatch):
+    """Index pruning should not reacquire the session lock for every row."""
+    index_file = models.SESSION_INDEX_FILE
+    entries = [
+        {
+            "session_id": "sess_a",
+            "title": "Alpha",
+            "updated_at": 200.0,
+            "last_message_at": 200.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 100.0,
+            "pinned": False,
+            "archived": False,
+        },
+        {
+            "session_id": "sess_b",
+            "title": "Bravo",
+            "updated_at": 150.0,
+            "last_message_at": 150.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 90.0,
+            "pinned": False,
+            "archived": False,
+        },
+    ]
+    _write_index_file(index_file, entries)
+
+    seen = []
+
+    def _assert_snapshot_used(session_id, in_memory_ids=None):
+        assert in_memory_ids is not None, "all_sessions should snapshot SESSIONS once before pruning"
+        seen.append(session_id)
+        return True
+
+    monkeypatch.setattr(models, "_index_entry_exists", _assert_snapshot_used)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["sess_a", "sess_b"]
+    assert seen == ["sess_a", "sess_b"]
+
+
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────
 
 def test_incremental_patch_correctness():

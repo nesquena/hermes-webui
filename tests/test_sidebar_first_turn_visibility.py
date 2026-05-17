@@ -106,11 +106,11 @@ class TestSidebarFirstTurnVisibility:
             "the server has saved pending state, and replacing _allSessions would hide the "
             "new in-flight chat until the stream finishes."
         )
-        render_start = src.index("async function renderSessionList")
-        render_end = src.index("// ── Gateway session SSE", render_start)
-        render_body = src[render_start:render_end]
-        assign_idx = render_body.index("_allSessions =")
-        assert "_mergeOptimisticFirstTurnSessions" in render_body[:assign_idx + 160], (
+        apply_start = src.index("function _applySessionListPayload")
+        apply_end = src.index("async function renderSessionList", apply_start)
+        apply_body = src[apply_start:apply_end]
+        assign_idx = apply_body.index("_allSessions =")
+        assert "_mergeOptimisticFirstTurnSessions" in apply_body[:assign_idx + 160], (
             "The fetched session list should be merged with optimistic rows at the assignment "
             "site, before completion transitions or renderSessionListFromCache() run."
         )

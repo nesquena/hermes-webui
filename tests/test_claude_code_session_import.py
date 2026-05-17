@@ -86,6 +86,89 @@ def test_claude_code_scan_skips_symlinks_and_oversized_files(tmp_path):
     assert models.get_claude_code_sessions(projects_dir=root_link) == []
 
 
+def test_get_cli_sessions_reuses_short_ttl_cache(monkeypatch, tmp_path):
+    import api.models as models
+    import api.profiles as profiles
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    models.clear_cli_sessions_cache()
+
+    calls = 0
+
+    def fake_claude_code_sessions():
+        nonlocal calls
+        calls += 1
+        return [
+            {
+                "session_id": "claude_code_cached",
+                "title": "Cached Claude Code",
+                "updated_at": calls,
+                "message_count": 1,
+                "source_tag": "claude_code",
+                "is_cli_session": True,
+            }
+        ]
+
+    monkeypatch.setattr(models, "get_claude_code_sessions", fake_claude_code_sessions)
+
+    first = models.get_cli_sessions()
+    first[0]["title"] = "mutated by caller"
+    second = models.get_cli_sessions()
+
+    assert calls == 1
+    assert second[0]["title"] == "Cached Claude Code"
+    assert second[0]["updated_at"] == 1
+
+
+def test_get_cli_sessions_cache_invalidates_when_sqlite_wal_changes(monkeypatch, tmp_path):
+    import api.models as models
+    import api.profiles as profiles
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "state.db"
+    db_path.write_text("initial", encoding="utf-8")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "get_claude_code_sessions", lambda: [])
+    models.clear_cli_sessions_cache()
+
+    calls = 0
+
+    def fake_rows(_db_path, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return [
+            {
+                "id": "cli_cached_state_db",
+                "title": "State DB Session",
+                "model": "test-model",
+                "source": "cli",
+                "raw_source": "cli",
+                "message_count": calls,
+                "actual_message_count": calls,
+                "actual_user_message_count": 1,
+                "last_activity": float(calls),
+                "started_at": 1.0,
+            }
+        ]
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", fake_rows)
+
+    first = models.get_cli_sessions()
+    Path(f"{db_path}-wal").write_text("new wal contents", encoding="utf-8")
+    second = models.get_cli_sessions()
+
+    assert calls == 2
+    assert first[0]["message_count"] == 1
+    assert second[0]["message_count"] == 2
+
+
 def test_session_import_cli_returns_read_only_claude_code_payload(monkeypatch, tmp_path):
     import api.routes as routes
 

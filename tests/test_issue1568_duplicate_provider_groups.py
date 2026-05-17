@@ -85,6 +85,7 @@ def _scrub_provider_env(monkeypatch):
         "OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY",
         "GLM_API_KEY", "KIMI_API_KEY", "MOONSHOT_API_KEY",
         "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
+        "XIAOMI_API_KEY",
         "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
         "NOUS_API_KEY", "NVIDIA_API_KEY", "LM_API_KEY", "LMSTUDIO_API_KEY",
     ):

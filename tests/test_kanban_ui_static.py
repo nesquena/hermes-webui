@@ -11,10 +11,25 @@ COMPACT_PANELS = re.sub(r"\s+", "", PANELS)
 COMPACT_STYLE = re.sub(r"\s+", "", STYLE)
 
 
+def _locale_blocks_with_body(i18n_text: str):
+    locale_blocks = re.findall(
+        r"\n\s*(?:'(?P<quoted>[a-z]{2}(?:-[A-Z][A-Za-z]+)?)'|(?P<plain>[a-z]{2}(?:-[A-Z]{2})?))\s*:\s*\{(.*?)\n\s*\},",
+        i18n_text,
+        flags=re.S,
+    )
+    return [(quoted or plain, body) for quoted, plain, body in locale_blocks]
+
+
 def test_kanban_has_native_sidebar_rail_and_mobile_tab():
     assert 'data-panel="kanban"' in INDEX
     assert 'data-i18n-title="tab_kanban"' in INDEX
-    assert 'onclick="switchPanel(\'kanban\')"' in INDEX
+    # Allow either the legacy `switchPanel('kanban')` form or the rail-click-aware
+    # `switchPanel('kanban',{fromRailClick:true})` form. The sidebar-collapse PR
+    # added the second-arg opts to all rail buttons so the same-active-icon click
+    # can toggle the sidebar; legacy callsites elsewhere may still use the bare form.
+    assert ('onclick="switchPanel(\'kanban\')"' in INDEX
+            or "onclick=\"switchPanel('kanban',{fromRailClick:true})\"" in INDEX), \
+        "kanban rail/mobile button must call switchPanel('kanban') (with or without fromRailClick opts)"
     assert 'data-label="Kanban"' in INDEX
     kanban_section = INDEX[INDEX.find('id="mainKanban"'):INDEX.find('id="mainWorkspaces"')]
     assert "<iframe" not in kanban_section.lower()
@@ -257,6 +272,10 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
         "Edit-mode status preservation requires tracking the initial displayed "
         "status so submit can detect whether the user actually changed it."
     )
+    assert 'id="kanbanTaskModalStatusOriginalHint"' in INDEX
+    assert "_kanbanSetTaskModalStatusHint" in PANELS
+    assert "kanban_status_original_hint" in I18N
+    assert ".kanban-status-original-hint" in STYLE
 
     # 2. openKanbanEdit captures the initial displayed status from the task.
     open_edit_match = re.search(
@@ -268,6 +287,8 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
         "openKanbanEdit must record the initial displayed status."
     )
     assert "_kanbanEditableStatusFor(task.status)" in open_edit_body
+    assert "_kanbanSetTaskModalStatusHint(originalStatus, initialDisplayedStatus)" in open_edit_body
+    assert "const originalStatus = task.status || initialDisplayedStatus" in open_edit_body
 
     # 3. Submit's edit branch only sends status when it differs from the
     #    initial displayed value.
@@ -292,6 +313,7 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
         "openKanbanCreate must reset the tracker to null so create-mode "
         "submits always include status in the POST payload."
     )
+    assert "_kanbanSetTaskModalStatusHint(null);" in create_body
 
     # 5. closeKanbanTaskModal clears the tracker so a stale value can't leak
     #    into the next open.
@@ -301,6 +323,60 @@ def test_kanban_edit_mode_preserves_status_when_dropdown_untouched():
     assert close_match
     close_body = close_match.group(1)
     assert "_kanbanTaskModalInitialDisplayedStatus = null" in close_body
+    assert "_kanbanSetTaskModalStatusHint(null, null);" in close_body
+
+
+def test_kanban_modal_focus_trap_helper_exists():
+    """Shared focus-trap helper should exist and attach/remove Tab key handling."""
+    assert "function _trapModalFocus" in PANELS
+    fn = re.search(r"function _trapModalFocus\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert fn, "_trapModalFocus() not found"
+    fn_body = fn.group(1)
+    assert "addEventListener('keydown'" in fn_body
+    assert "removeEventListener('keydown'" in fn_body
+    assert "ev.key !== 'Tab'" in fn_body or "ev.key === 'Tab'" in fn_body
+
+
+def test_kanban_task_modal_focus_trap_is_installed_and_removed():
+    """Task modal open calls should install focus trap and close should tear it down."""
+    create_match = re.search(r"function openKanbanCreate\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert create_match, "openKanbanCreate() not found"
+    create_body = create_match.group(1)
+    assert "_kanbanTaskModalFocusCleanup = _trapModalFocus(modal);" in create_body
+    assert "if (_kanbanTaskModalFocusCleanup) {" in create_body
+
+    edit_match = re.search(r"async function openKanbanEdit\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert edit_match, "openKanbanEdit() not found"
+    edit_body = edit_match.group(1)
+    assert "_kanbanTaskModalFocusCleanup = _trapModalFocus(modal);" in edit_body
+    assert "if (_kanbanTaskModalFocusCleanup) {" in edit_body
+
+    close_match = re.search(r"function closeKanbanTaskModal\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert close_match, "closeKanbanTaskModal() not found"
+    close_body = close_match.group(1)
+    assert "if (_kanbanTaskModalFocusCleanup) {" in close_body
+    assert "_kanbanTaskModalFocusCleanup = null;" in close_body
+
+
+def test_kanban_board_modal_focus_trap_is_installed_and_removed():
+    """Board modal open calls should install focus trap and close should tear it down."""
+    create_board_match = re.search(r"function openKanbanCreateBoard\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert create_board_match, "openKanbanCreateBoard() not found"
+    create_board_body = create_board_match.group(1)
+    assert "_kanbanBoardModalFocusCleanup = _trapModalFocus(modal);" in create_board_body
+    assert "if (_kanbanBoardModalFocusCleanup) {" in create_board_body
+
+    rename_board_match = re.search(r"function openKanbanRenameBoard\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert rename_board_match, "openKanbanRenameBoard() not found"
+    rename_board_body = rename_board_match.group(1)
+    assert "_kanbanBoardModalFocusCleanup = _trapModalFocus(modal);" in rename_board_body
+    assert "if (_kanbanBoardModalFocusCleanup) {" in rename_board_body
+
+    close_board_match = re.search(r"function closeKanbanBoardModal\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert close_board_match, "closeKanbanBoardModal() not found"
+    close_board_body = close_board_match.group(1)
+    assert "if (_kanbanBoardModalFocusCleanup) {" in close_board_body
+    assert "_kanbanBoardModalFocusCleanup = null;" in close_board_body
 
 
 def test_kanban_assignee_dropdown_uses_select_not_freetext():
@@ -413,6 +489,38 @@ def test_kanban_run_dispatcher_button_exists_and_is_distinct_from_preview():
         assert token in fmt_body, f"dispatch summary missing field: {token}"
 
 
+def test_kanban_dispatcher_inflight_guard_prevents_double_click_toast_confusion():
+    """Guard against concurrent dispatch invocations in both nudge and real run paths."""
+    assert "let _kanbanIsDispatching = false;" in PANELS
+    assert "function _setKanbanDispatcherButtonsDisabled" in PANELS
+
+    run_match = re.search(r"async function runKanbanDispatcher\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert run_match, "runKanbanDispatcher() not found"
+    run_body = run_match.group(1)
+    assert "_kanbanIsDispatching" in run_body, (
+        "runKanbanDispatcher() must check or set _kanbanIsDispatching to block concurrent execution."
+    )
+    assert "finally" in run_body, "runKanbanDispatcher() must always clear _kanbanIsDispatching in finally."
+    assert "_setKanbanDispatcherButtonsDisabled(true)" in run_body, (
+        "runKanbanDispatcher() should disable both dispatcher buttons while posting."
+    )
+    assert "_setKanbanDispatcherButtonsDisabled(false)" in run_body, (
+        "runKanbanDispatcher() should re-enable dispatcher buttons when done."
+    )
+
+    nudge_match = re.search(r"async function nudgeKanbanDispatcher\(\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert nudge_match, "nudgeKanbanDispatcher() not found"
+    nudge_body = nudge_match.group(1)
+    assert "_kanbanIsDispatching" in nudge_body, (
+        "nudgeKanbanDispatcher() should also respect the dispatch in-flight guard."
+    )
+    assert "finally" in nudge_body, "nudgeKanbanDispatcher() should always clear guard in finally."
+
+    assert 'kanban-run-dispatch-btn' in INDEX
+    assert 'kanban-nudge-dispatch-btn' in INDEX
+    assert 'btnKanbanRunDispatcher' in INDEX
+    assert 'btnKanbanPreviewDispatcher' in INDEX
+
 
 def test_kanban_board_has_native_css_classes():
     for selector in (
@@ -439,8 +547,8 @@ def test_kanban_main_view_scrolls_when_task_preview_is_tall():
 
 
 def test_kanban_i18n_keys_exist_in_every_locale_block():
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
-    assert len(locale_blocks) >= 8
+    locale_blocks = _locale_blocks_with_body(I18N)
+    assert len(locale_blocks) >= 9
     required_keys = [
         "tab_kanban",
         "kanban_board",
@@ -470,6 +578,39 @@ def test_kanban_i18n_keys_exist_in_every_locale_block():
         if re.search(rf"\b{re.escape(key)}\s*:", body) is None
     ]
     assert missing == []
+
+
+def test_kanban_modal_locale_parity():
+    """Parity check for modal-facing Kanban i18n keys.
+
+    Any locale that already contains modal-facing Kanban strings should include the
+    same set of modal vocabulary so new additions don't regress into locale gaps.
+    """
+    locale_blocks = _locale_blocks_with_body(I18N)
+    modal_keys = [
+        "kanban_title",
+        "kanban_description",
+        "kanban_description_placeholder",
+        "kanban_status",
+        "kanban_assignee",
+        "kanban_assignee_placeholder",
+        "kanban_tenant",
+        "kanban_tenant_placeholder",
+        "kanban_priority",
+        "kanban_priority_hint",
+        "kanban_title_required",
+        "kanban_status_original_hint",
+    ]
+    anchor_key = "kanban_status"
+    missing = [
+        f"{locale}:{key}"
+        for locale, body in locale_blocks
+        if re.search(rf"\b{re.escape(anchor_key)}\s*:", body) is not None
+        for key in modal_keys
+        if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+    ]
+    assert missing == []
+
 
 
 
@@ -504,7 +645,7 @@ def test_kanban_dashboard_parity_core_controls_are_native():
 
 
 def test_kanban_dashboard_parity_i18n_keys_exist():
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    locale_blocks = _locale_blocks_with_body(I18N)
     required_keys = [
         "kanban_only_mine",
         "kanban_bulk_action",
@@ -575,7 +716,7 @@ def test_kanban_ui_parity_polish_css_and_i18n_exist():
         ".hermes-kanban-md",
     ):
         assert selector in STYLE
-    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    locale_blocks = _locale_blocks_with_body(I18N)
     required_keys = ["kanban_lanes_by_profile", "kanban_card_complete", "kanban_card_archive", "kanban_unassigned", "kanban_work_queue_hint"]
     missing = [
         f"{locale}:{key}"
@@ -769,6 +910,52 @@ def test_kanban_active_board_persisted_to_localstorage():
     assert "_kanbanSetSavedBoard" in PANELS
 
 
+def test_kanban_profile_assignee_cache_has_invalidation_path():
+    """Kanban assignee suggestions should stay aligned with profile mutations.
+
+    The cache in _kanbanLoadProfileNames() can become stale when profiles are
+    created or deleted in the same session. This adds an explicit
+    invalidation path and a short TTL so modal opens recover from same-session
+    mutations and cross-tab/CLI changes.
+    """
+    assert "_KANBAN_PROFILE_NAMES_CACHE_TTL_MS" in PANELS
+    assert "_kanbanProfileNamesCacheAt" in PANELS
+    assert "_invalidateKanbanProfileCache" in PANELS
+
+    load_start = PANELS.find("async function _kanbanLoadProfileNames(){")
+    assert load_start != -1, "Missing _kanbanLoadProfileNames() declaration"
+    load_end = PANELS.find("\n}\n\nasync function _kanbanPopulateAssigneeSelect", load_start)
+    if load_end == -1:
+        load_end = PANELS.find("\n}\n\nfunction openKanbanCreate", load_start)
+    load_body = PANELS[load_start:load_end] if load_end != -1 else PANELS[load_start:load_start + 2200]
+    assert "Date.now() - _kanbanProfileNamesCacheAt" in load_body
+    assert "_kanbanProfileNamesCacheAt = Date.now()" in load_body
+
+    save_start = PANELS.find("async function saveProfileForm(){")
+    assert save_start != -1, "Missing saveProfileForm() declaration"
+    save_end = PANELS.find("\n}\n\n// Back-compat", save_start)
+    save_body = PANELS[save_start:save_end if save_end != -1 else save_start + 2000]
+    assert "_invalidateKanbanProfileCache();" in save_body, (
+        "Profile create flow should invalidate Kanban assignee cache after success."
+    )
+
+    delete_start = PANELS.find("async function deleteProfile(name) {")
+    assert delete_start != -1, "Missing deleteProfile() declaration"
+    delete_end = PANELS.find("\n\n// ── Memory panel", delete_start)
+    delete_body = PANELS[delete_start:delete_end if delete_end != -1 else delete_start + 1300]
+    assert "_invalidateKanbanProfileCache();" in delete_body, (
+        "Profile delete flow should invalidate Kanban assignee cache after success."
+    )
+
+    ui_delete_start = PANELS.find("async function deleteCurrentProfile(){")
+    assert ui_delete_start != -1, "Missing deleteCurrentProfile() declaration"
+    ui_delete_end = PANELS.find("\n\nfunction renderProfileDropdown", ui_delete_start)
+    ui_delete_body = PANELS[ui_delete_start:ui_delete_end if ui_delete_end != -1 else ui_delete_start + 1300]
+    assert "_invalidateKanbanProfileCache();" in ui_delete_body, (
+        "Profile detail delete flow (deleteCurrentProfile) should invalidate Kanban assignee cache after success."
+    )
+
+
 def test_kanban_archive_board_uses_showConfirmDialog():
     """Archive is destructive → must use the styled showConfirmDialog,
     not native confirm() (which can't be styled or i18n'd)."""
@@ -875,3 +1062,51 @@ console.log(JSON.stringify(results));
     # directly into the style attribute.
     assert "_kanbanSafeColor(b.color)" in PANELS
     assert "color:${esc(b.color)}" not in PANELS
+
+
+def test_kanban_locale_parity():
+    """Every kanban_* i18n key in the English locale must exist in all
+    non-English locale blocks.  The kanban panel has its own set of ~86
+    keys (kanban_board, kanban_task, …) that are rendered via t() — a
+    missing key silently falls back to English, which is acceptable for
+    content keys but confusing for UI labels the user expects to see
+    translated.
+
+    This test catches regressions where a new kanban key is added to the
+    English block but not to one or more locale blocks.  Pattern borrowed
+    from test_lineage_segment_locale_keys_are_defined_for_sidebar_locales
+    in test_session_lineage_collapse.py.
+
+    Refs: #1973
+    """
+    locale_blocks = _locale_blocks_with_body(I18N)
+    assert locale_blocks, "No locale blocks found in i18n.js"
+
+    # Collect the kanban_* keys from the English block.
+    en_name = "en"
+    en_body = None
+    for name, body in locale_blocks:
+        if name == en_name:
+            en_body = body
+            break
+    assert en_body is not None, "English locale block not found"
+
+    en_keys = set(re.findall(r"(kanban_\w+)\s*:", en_body))
+    assert en_keys, "No kanban_* keys found in English locale"
+
+    # Verify each non-English locale has the same set.
+    failures = []
+    for name, body in locale_blocks:
+        if name == en_name:
+            continue
+        loc_keys = set(re.findall(r"(kanban_\w+)\s*:", body))
+        missing = en_keys - loc_keys
+        extra = loc_keys - en_keys
+        if missing:
+            failures.append(f"{name}: missing {sorted(missing)}")
+        if extra:
+            failures.append(f"{name}: extra {sorted(extra)}")
+
+    assert not failures, (
+        "Kanban i18n key parity violations:\n" + "\n".join(failures)
+    )

@@ -383,6 +383,36 @@ class TestRemoveProviderKey:
         assert "api_key" not in active["providers"]["openai"]
         assert active["model"] == {"provider": "openai"}
 
+    def test_clean_custom_provider_key_matches_safe_name_slug(self, monkeypatch, tmp_path):
+        """Custom-provider key removal must match the canonical safe name slug."""
+        import yaml
+
+        import api.config as cfg_mod
+        import api.providers as providers
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump({
+                "custom_providers": [{
+                    "name": "Local (127.0.0.1:15721)",
+                    "base_url": "http://127.0.0.1:15721/v1",
+                    "api_key": "${LOCAL_PORT_API_KEY}",
+                    "model": "deepseek-v4-flash",
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(cfg_mod, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(providers, "reload_config", lambda: None)
+
+        providers._clean_provider_key_from_config("custom:local-127.0.0.1-15721")
+
+        reloaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        custom_provider = reloaded["custom_providers"][0]
+        assert custom_provider["name"] == "Local (127.0.0.1:15721)"
+        assert "api_key" not in custom_provider
+
     def test_remove_provider_key_calls_set_with_none(self, monkeypatch, tmp_path):
         """remove_provider_key should delegate to set_provider_key(id, None)."""
         _install_fake_hermes_cli(monkeypatch)

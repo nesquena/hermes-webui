@@ -119,9 +119,13 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
         "_isSessionEffectivelyStreaming",
         "_markPollingCompletionUnreadTransitions",
     )
-    render_idx = SESSIONS_JS.find("async function renderSessionList()")
+    render_idx = SESSIONS_JS.find("async function renderSessionList")
     assert render_idx != -1, "renderSessionList not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("// ── Gateway session SSE", render_idx)]
+
+    apply_idx = SESSIONS_JS.find("function _applySessionListPayload(")
+    assert apply_idx != -1, "_applySessionListPayload not found"
+    apply_block = SESSIONS_JS[apply_idx:render_idx]
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
     assert "const wasStreaming = _sessionStreamingById.get(sid);" in transition_block
@@ -132,7 +136,8 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
-    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in render_block
+    assert "_applySessionListPayload(sessData,projData);" in render_block
+    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
 
 
 def test_polling_transition_does_not_mark_historical_first_render():
@@ -186,8 +191,8 @@ def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar
     assert render_idx != -1, "_renderOneSession not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
 
-    assert "(isActive && S.busy)" in local_block
-    assert "INFLIGHT && INFLIGHT[s.session_id]" in local_block
+    assert "isActive && Boolean(S.busy)" in local_block
+    assert "INFLIGHT && INFLIGHT[s.session_id]" not in local_block
     assert "s.is_streaming || _isSessionLocallyStreaming(s)" in effective_block
     assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in render_block, (
         "the row spinner and polling completion transition must use the same "

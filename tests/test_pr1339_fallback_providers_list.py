@@ -70,3 +70,21 @@ def test_fallback_resolved_initialized_to_none():
     assert "_fallback_resolved = None" in block, (
         "_fallback_resolved must be initialized to None so callers can rely on its presence"
     )
+
+
+def test_fallback_resolved_preserves_credential_hints():
+    """Fallback entries must keep credential hints for AIAgent fallback activation."""
+    block = _extract_fallback_block()
+    resolved_start = block.find("_fallback_resolved = {")
+    assert resolved_start != -1, "_fallback_resolved dict not found"
+    resolved_end = block.find("}", resolved_start)
+    resolved_dict = block[resolved_start:resolved_end]
+
+    assert "'api_key': _fb_entry.get('api_key')" in resolved_dict, (
+        "WebUI must preserve fallback_model/fallback_providers api_key so "
+        "AIAgent._try_activate_fallback can authenticate the fallback."
+    )
+    assert "'key_env': _fb_entry.get('key_env')" in resolved_dict, (
+        "WebUI must preserve fallback_model/fallback_providers key_env so "
+        "AIAgent._try_activate_fallback can resolve env-backed fallback keys."
+    )

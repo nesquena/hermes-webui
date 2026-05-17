@@ -148,6 +148,29 @@ def test_mobile_breakpoint_640px_present():
         "Missing @media(max-width:640px) breakpoint in style.css"
 
 
+def test_settings_system_version_controls_wrap_on_phone_widths():
+    """Settings -> System version badges must wrap instead of overflowing phones."""
+    mobile_css = "\n".join(_max_width_media_blocks(768))
+    assert ".settings-section-head" in mobile_css, (
+        "Settings section header needs a mobile rule so title and update controls stack."
+    )
+    assert "flex-direction:column" in mobile_css.replace(" ", ""), (
+        "Settings section header should stack vertically on mobile."
+    )
+    assert "#checkUpdatesBlock" in mobile_css, (
+        "Settings update/version controls need a mobile rule."
+    )
+    assert "flex-wrap:wrap" in mobile_css.replace(" ", ""), (
+        "Version badges and Check now button must wrap instead of overflowing."
+    )
+    assert "width:100%" in mobile_css.replace(" ", ""), (
+        "The update controls row should take the available mobile width."
+    )
+    assert ".settings-version-badge" in mobile_css and "white-space:nowrap" in mobile_css.replace(" ", ""), (
+        "Individual version badges should stay intact while the group wraps."
+    )
+
+
 def test_rightpanel_mobile_slide_over_css():
     """Right panel must have position:fixed slide-over CSS for mobile."""
     # At max-width:900px the rightpanel should be position:fixed, off-screen right

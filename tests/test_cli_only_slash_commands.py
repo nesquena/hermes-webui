@@ -170,14 +170,16 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
 
 
 def test_unknown_slash_commands_still_fall_through_to_agent():
-    """Only known cli_only commands should be intercepted."""
+    """Only explicitly supported metadata-backed commands should be intercepted."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
     normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
+    assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
     assert "if(_parsedCmd&&!_cmd)" in intercept
     assert "if(!_agentCmd" not in intercept
+    assert "if(_agentCmd){" not in intercept
     assert "else" not in intercept[intercept.find("if(_agentCmd&&_agentCmd.cli_only)") :]
 
 

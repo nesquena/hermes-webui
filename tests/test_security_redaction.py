@@ -107,6 +107,138 @@ def test_redact_value_list():
     assert result[1]["content"] == "safe text"
 
 
+def test_redact_text_skips_full_redactor_for_safe_text(monkeypatch):
+    """Large ordinary transcript text should not pay the full redactor pass."""
+    import api.helpers as helpers
+
+    calls = []
+    monkeypatch.setattr(helpers, "_redact_fn_cached", lambda text: calls.append(text) or text)
+
+    safe_text = "ordinary session transcript without credential markers\n" * 500
+    assert helpers._redact_text(safe_text, _enabled=True) == safe_text
+    assert calls == []
+
+
+def test_redact_text_still_runs_full_redactor_for_sensitive_markers(monkeypatch):
+    """The cheap prefilter must preserve the hard redaction boundary."""
+    import api.helpers as helpers
+
+    calls = []
+
+    def fake_redactor(text):
+        calls.append(text)
+        return text.replace(_FAKE_SK_KEY, "sk-Tes...cdef")
+
+    monkeypatch.setattr(helpers, "_redact_fn_cached", fake_redactor)
+
+    result = helpers._redact_text(f"token={_FAKE_SK_KEY}", _enabled=True)
+
+    assert _FAKE_SK_KEY not in result
+    assert calls == [f"token={_FAKE_SK_KEY}"]
+
+
+@pytest.mark.parametrize("prefix,suffix", [
+    ("sk-", "TestCredential1234567890"),
+    ("ghp_", "TestCredential1234567890"),
+    ("github_pat_", "TestCredential_1234567890"),
+    ("gho_", "TestCredential1234567890"),
+    ("ghu_", "TestCredential1234567890"),
+    ("ghs_", "TestCredential1234567890"),
+    ("ghr_", "TestCredential1234567890"),
+    ("xoxb-", "TestCredential1234567890"),
+    ("xoxa-", "TestCredential1234567890"),
+    ("xoxp-", "TestCredential1234567890"),
+    ("xoxr-", "TestCredential1234567890"),
+    ("xoxs-", "TestCredential1234567890"),
+    ("AIza", "TestCredential1234567890abcdefghi"),
+    ("pplx-", "TestCredential1234567890"),
+    ("fal_", "TestCredential1234567890"),
+    ("fc-", "TestCredential1234567890"),
+    ("bb_live_", "TestCredential1234567890"),
+    ("gAAAA", "TestCredential1234567890abcd"),
+    ("AKIA", "TESTCREDENTIAL12"),
+    ("sk_" + "live_", "TestCredential1234567890"),
+    ("sk_" + "test_", "TestCredential1234567890"),
+    ("rk_" + "live_", "TestCredential1234567890"),
+    ("SG.", "TestCredential1234567890"),
+    ("hf_", "TestCredential1234567890"),
+    ("r8_", "TestCredential1234567890"),
+    ("npm_", "TestCredential1234567890"),
+    ("pypi-", "TestCredential1234567890"),
+    ("dop_v1_", "TestCredential1234567890"),
+    ("doo_v1_", "TestCredential1234567890"),
+    ("am_", "TestCredential1234567890"),
+    ("sk_", "TestCredential1234567890"),
+    ("tvly-", "TestCredential1234567890"),
+    ("exa_", "TestCredential1234567890"),
+    ("gsk_", "TestCredential1234567890"),
+    ("syt_", "TestCredential1234567890"),
+    ("retaindb_", "TestCredential1234567890"),
+    ("hsk-", "TestCredential1234567890"),
+    ("mem0_", "TestCredential1234567890"),
+    ("brv_", "TestCredential1234567890"),
+])
+def test_redact_text_prefilter_covers_known_prefixed_credentials(prefix, suffix):
+    """Every known prefix must still reach the hard redactor."""
+    import api.helpers as helpers
+
+    token = prefix + suffix
+    result = helpers._redact_text(f"credential={token}", _enabled=True)
+
+    assert token not in result
+
+
+@pytest.mark.parametrize("text", [
+    # OAuth callback URL with `code=` query param
+    "https://example.com/callback?code=AUTH_OPAQUE_VALUE",
+    # URL userinfo (user:password embedded in scheme://)
+    "https://admin:supersecretpassword@api.example.com/v1",
+    # Signed-URL sensitive query param
+    "https://cdn.example.com/file.zip?signature=ABCDEFGHIJKL",
+    # Session-token query param
+    "https://example.com/dashboard?session=xyzABC999DEF",
+    # WebSocket URL with token query param
+    "wss://example.com/ws?token=jwt_ABCDEFGHIJ",
+    # FTP userinfo
+    "ftp://user:pwd@files.example.com/path",
+])
+def test_redact_text_prefilter_routes_url_containing_strings_to_hard_redactor(text):
+    """Stage-348 Opus follow-up to PR #2171: the credential prefilter must
+    catch URL userinfo and sensitive query params so they still reach the
+    hard agent redactor instead of bypassing it.
+
+    Pre-fix, the prefilter only listed specific DB scheme prefixes
+    (postgres://, mysql://, etc.) and a closed set of form keys, so OAuth
+    callback URLs pasted into chat could pass through to the response
+    verbatim. The fix adds the generic "://" marker so http(s)/ws(s)/ftp
+    URLs always route to the hard redactor.
+
+    We test the *prefilter routing decision* here — `_might_contain_sensitive_text`
+    must return True for any URL-shaped string — rather than asserting on the
+    specific output of the agent redactor (which varies between hermes-agent
+    versions and CI vs local installs).
+    """
+    import api.helpers as helpers
+
+    assert helpers._might_contain_sensitive_text(text) is True, (
+        f"URL-shaped string {text!r} should route to hard redactor but the "
+        f"prefilter rejected it. Pre-fix this allowed OAuth callback URLs, "
+        f"URL userinfo, and signed-URL query params to bypass redaction."
+    )
+
+
+def test_redact_text_prefilter_admits_plain_text_without_url_or_credentials():
+    """Stage-348 follow-up companion: plain text with no URL or credential
+    marker still bypasses the hard redactor (the prefilter's whole purpose
+    is to skip the expensive pass when no markers are present)."""
+    import api.helpers as helpers
+
+    assert helpers._might_contain_sensitive_text("Hi how are you today?") is False
+    assert helpers._might_contain_sensitive_text("The user said 'hello'") is False
+    assert helpers._might_contain_sensitive_text("") is False
+    assert helpers._might_contain_sensitive_text(None) is False  # type: ignore[arg-type]
+
+
 def test_redact_value_works_with_legacy_agent_redact_signature(monkeypatch):
     """_redact_text must tolerate older redact_sensitive_text(text) signatures."""
     fake_agent = types.ModuleType("agent")

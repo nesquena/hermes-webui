@@ -68,7 +68,10 @@ def test_html_media_open_full_uses_inline_new_tab_not_download():
 
 def test_media_html_inline_keeps_csp_sandbox():
     """api/media may serve HTML inline only behind a CSP sandbox."""
-    body = _slice_after(ROUTES_PY, "def _handle_media", 4000)
+    # Slice widened to 5000 (was 4000) after PR #2044 added MEDIA_ALLOWED_ROOTS
+    # parsing earlier in _handle_media, which pushed the CSP block past the
+    # original window. The assertion is structural, not positional.
+    body = _slice_after(ROUTES_PY, "def _handle_media", 5000)
     assert 'html_inline_ok = inline_preview and mime == "text/html"' in body
     assert 'csp = "sandbox allow-scripts" if html_inline_ok else None' in body
     assert "csp=csp" in body

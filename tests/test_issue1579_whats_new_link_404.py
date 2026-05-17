@@ -187,39 +187,35 @@ def _read_ui_js():
     return (REPO_ROOT / 'static' / 'ui.js').read_text(encoding='utf-8')
 
 
-def test_whats_new_link_resets_display_and_href_on_every_render():
+def test_whats_new_link_resets_display_and_contents_on_every_render():
     """Without reset, a stale link from a prior banner can stay visible after
     a re-render where the new payload has current_sha=None.
     """
     src = _read_ui_js()
-    # Find the "What's new" wiring block (~50-line window)
-    idx = src.find("Wire up \"What's new?\" link")
-    assert idx != -1, "What's-new link wiring block not found"
-    block = src[idx:idx + 800]
+    idx = src.find("function _renderUpdateWhatsNewLinks(data)")
+    assert idx != -1, "What's-new link renderer not found"
+    block = src[idx:idx + 1200]
 
-    # Reset must happen BEFORE the conditional href set
-    reset_idx = block.find("style.display='none'")
-    set_idx = block.find("style.display='inline'")
-    href_clear_idx = block.find("removeAttribute('href')")
-    href_set_idx = block.find("link.href=repoUrl")
+    clear_idx = block.find("container.replaceChildren()")
+    hide_idx = block.find("container.style.display='none'")
+    show_idx = block.find("container.style.display='block'")
 
-    assert reset_idx != -1, "Missing display='none' reset on every render"
-    assert href_clear_idx != -1, "Missing removeAttribute('href') reset on every render"
-    assert reset_idx < set_idx, "display reset must precede inline set"
-    assert href_clear_idx < href_set_idx, "href clear must precede href assignment"
+    assert clear_idx != -1, "Missing container contents reset on every render"
+    assert hide_idx != -1, "Missing display='none' reset when no safe links exist"
+    assert clear_idx < show_idx, "contents reset must precede link rendering"
+    assert hide_idx < show_idx, "hidden state must be handled before visible rendering"
 
 
-def test_whats_new_link_suppressed_when_curSha_falsy():
-    """The conditional must guard on all three of repoUrl/curSha/newSha."""
+def test_whats_new_link_suppressed_when_current_sha_falsy():
+    """The legacy fallback must guard on all three of repo_url/current_sha/latest_sha."""
     src = _read_ui_js()
-    idx = src.find("Wire up \"What's new?\" link")
-    block = src[idx:idx + 800]
-    # Match "if(repoUrl && curSha && newSha)" with arbitrary whitespace
-    pattern = re.compile(r'if\s*\(\s*repoUrl\s*&&\s*curSha\s*&&\s*newSha\s*\)')
-    assert pattern.search(block), (
-        "Link must require all three of repoUrl, curSha, newSha to be truthy. "
-        "If any is null/empty, link stays display:none."
-    )
+    idx = src.find("function _updateCompareUrl(info)")
+    assert idx != -1, "Compare URL helper not found"
+    block = src[idx:idx + 500]
+    compact = re.sub(r"\s+", "", block)
+    assert "if(!(repo_url&&currentSha&&latestSha))returnnull;" in compact
+    assert "constfallbackUrl=repo_url+'/compare/'+currentSha+'...'+latestSha;" in compact
+    assert "return_isSafeUpdateCompareUrl(fallbackUrl)?fallbackUrl:null;" in compact
 
 
 # ── 3. End-to-end: simulate the exact reporter URL shape ──

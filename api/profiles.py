@@ -5,16 +5,18 @@ Wraps hermes_cli.profiles to provide profile switching for the web UI.
 The web UI maintains a process-level "active profile" that determines which
 HERMES_HOME directory is used for config, skills, memory, cron, and API keys.
 Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
-cached paths in hermes-agent modules (skills_tool, cron/jobs) that snapshot
-HERMES_HOME at import time.
+cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
+cron/jobs) that snapshot HERMES_HOME at import time.
 """
 import json
 import logging
 import os
 import re
 import shutil
+import sys
 import threading
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,22 @@ _loaded_profile_env_keys: set[str] = set()
 # reads its own profile from the hermes_profile cookie instead of the
 # process-global _active_profile.
 _tls = threading.local()
+
+_SKILL_HOME_MODULES = ("tools.skills_tool", "tools.skill_manager_tool")
+
+
+def patch_skill_home_modules(home: Path) -> None:
+    """Patch imported skill modules that cache HERMES_HOME at import time."""
+    for module_name in _SKILL_HOME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        try:
+            module.HERMES_HOME = home
+            module.SKILLS_DIR = home / "skills"
+        except AttributeError:
+            logger.debug("Failed to patch %s module", module_name)
+
 
 def _unwrap_profile_home_to_base(home: Path) -> Path:
     """Return the base Hermes home when *home* is already a named profile dir."""
@@ -611,13 +629,7 @@ def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)
 
-    # Patch skills_tool module-level cache (snapshots HERMES_HOME at import)
-    try:
-        import tools.skills_tool as _sk
-        _sk.HERMES_HOME = home
-        _sk.SKILLS_DIR = home / 'skills'
-    except (ImportError, AttributeError):
-        logger.debug("Failed to patch skills_tool module")
+    patch_skill_home_modules(home)
 
     # Patch cron/jobs module-level cache
     try:
@@ -949,16 +961,78 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
 
+def _clean_profile_config_value(value: Optional[str], field: str) -> Optional[str]:
+    """Return a safe single-line config value or raise ValueError."""
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if any(ch in cleaned for ch in ("\x00", "\r", "\n")):
+        raise ValueError(f"{field} must be a single-line value")
+    if len(cleaned) > 512:
+        raise ValueError(f"{field} is too long")
+    return cleaned
+
+
+def _split_webui_provider_model_value(default_model: Optional[str], model_provider: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Normalize WebUI-internal @provider:model picker values for config.yaml."""
+    model = _clean_profile_config_value(default_model, "default_model")
+    provider = _clean_profile_config_value(model_provider, "model_provider")
+    if model and model.startswith("@") and ":" in model:
+        provider_part, model_part = model[1:].rsplit(":", 1)
+        provider = provider or _clean_profile_config_value(provider_part, "model_provider")
+        model = _clean_profile_config_value(model_part, "default_model")
+    return model, provider
+
+
+def _write_model_defaults_to_config(
+    profile_dir: Path,
+    *,
+    default_model: Optional[str] = None,
+    model_provider: Optional[str] = None,
+) -> None:
+    """Write model default/provider fields into config.yaml for a profile."""
+    default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
+    if not default_model and not model_provider:
+        return
+    config_path = profile_dir / 'config.yaml'
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return
+    cfg = {}
+    if config_path.exists():
+        try:
+            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception:
+            logger.debug("Failed to load config from %s", config_path)
+    model_section = cfg.get('model', {})
+    if not isinstance(model_section, dict):
+        model_section = {}
+    if default_model:
+        model_section['default'] = default_model
+    if model_provider:
+        model_section['provider'] = model_provider
+    cfg['model'] = model_section
+    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+
+
 def create_profile_api(name: str, clone_from: str = None,
                        clone_config: bool = False,
                        base_url: str = None,
-                       api_key: str = None) -> dict:
+                       api_key: str = None,
+                       default_model: str = None,
+                       model_provider: str = None) -> dict:
     """Create a new profile. Returns the new profile info dict."""
     _validate_profile_name(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
     if clone_from is not None and not _is_root_profile(clone_from):
         _validate_profile_name(clone_from)
+    default_model, model_provider = _split_webui_provider_model_value(default_model, model_provider)
 
     try:
         from hermes_cli.profiles import create_profile
@@ -987,6 +1061,11 @@ def create_profile_api(name: str, clone_from: str = None,
 
     profile_path.mkdir(parents=True, exist_ok=True)
     _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
+    _write_model_defaults_to_config(
+        profile_path,
+        default_model=default_model,
+        model_provider=model_provider,
+    )
 
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).

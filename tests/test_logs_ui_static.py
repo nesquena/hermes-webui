@@ -93,7 +93,9 @@ def test_logs_panel_fetches_allowlisted_api_and_exposes_controls():
     assert "logsWrap" in INDEX
     assert "logsCopyAll" in INDEX
     assert "logsAutoRefresh" in INDEX
-    assert "navigator.clipboard.writeText" in PANELS
+    assert "logsSeverityFilter" in INDEX
+    copy_fn = _function_body(PANELS, "copyLogsAll")
+    assert "_copyText" in copy_fn
     assert "logs-copy" in INDEX
 
 

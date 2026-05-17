@@ -333,7 +333,7 @@ def test_panels_js_uses_locked_placeholder_i18n_key():
 # (en/es/de/zh/zh-Hant/ru/ja/fr/pt). The repo currently ships 9 locales but
 # substitutes 'ko' for 'fr' — we test what the repo actually has, not what the
 # issue body lists, so a future addition of fr won't fail the suite either.
-EXPECTED_LOCALES = ("en", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
+EXPECTED_LOCALES = ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko")
 
 
 def _locale_block(locale_key: str) -> str:

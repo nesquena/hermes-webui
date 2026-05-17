@@ -285,9 +285,8 @@ class TestIssue495TitleStreaming(unittest.TestCase):
         ]
 
         derived = title_from(messages, "")
-        current = derived[:63]  # Simulate the provisional title the UI writes immediately.
+        current = derived[:64]  # Simulate the provisional title the UI writes immediately.
 
-        self.assertNotEqual(current, derived[:64])
         self.assertTrue(
             _is_provisional_title(current, messages),
             "Whitespace-normalized provisional titles should still be recognized",

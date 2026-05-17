@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -279,6 +280,8 @@ def _payload(
     error: str | None = None,
     kickoff_prompt: str | None = None,
     decision: Dict[str, Any] | None = None,
+    message_key: str | None = None,
+    message_args: list[Any] | None = None,
 ) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "ok": bool(ok),
@@ -292,7 +295,96 @@ def _payload(
         body["kickoff_prompt"] = kickoff_prompt
     if decision is not None:
         body["decision"] = decision
+    if message_key:
+        body["message_key"] = message_key
+    if message_args is not None:
+        body["message_args"] = [a for a in message_args if a is not None]
     return body
+
+
+def _goal_status_payload(state: Any, *, default_message: str | None = None) -> Dict[str, Any]:
+    """Build localized-status style payload fields from a goal state."""
+    if default_message is None:
+        default_message = "No active goal. Set one with /goal <text>."
+    if state is None:
+        return {"message": default_message, "message_key": "goal_status_none"}
+    status = str(getattr(state, "status", "") or "").strip()
+    if status in ("cleared",):
+        return {"message": default_message, "message_key": "goal_status_none"}
+    turns_used = int(getattr(state, "turns_used", 0) or 0)
+    max_turns = int(getattr(state, "max_turns", 0) or 0)
+    goal = str(getattr(state, "goal", "") or "")
+    if status == "active":
+        return {
+            "message": f"⊙ Goal (active, {turns_used}/{max_turns} turns): {goal}",
+            "message_key": "goal_status_active",
+            "message_args": [turns_used, max_turns, goal],
+        }
+    if status == "paused":
+        reason = str(getattr(state, "paused_reason", "") or "")
+        return {
+            "message": f"⏸ Goal (paused, {turns_used}/{max_turns}{' — ' + reason if reason else ''}): {goal}",
+            "message_key": "goal_status_paused",
+            "message_args": [turns_used, max_turns, reason, goal],
+        }
+    if status == "done":
+        return {
+            "message": f"✓ Goal done ({turns_used}/{max_turns}): {goal}",
+            "message_key": "goal_status_done",
+            "message_args": [turns_used, max_turns, goal],
+        }
+    return {
+        "message": f"Goal ({status}, {turns_used}/{max_turns}): {goal}",
+        "message_args": [status, turns_used, max_turns, goal],
+    }
+
+
+def _extract_goal_turns_from_message(message: str) -> tuple[int, int]:
+    """Best-effort extraction for continuation messages like '(1/20)'."""
+    if not message:
+        return 0, 0
+    match = re.search(r"\((\d+)\s*/\s*(\d+)\)", message)
+    if not match:
+        return 0, 0
+    try:
+        return int(match.group(1)), int(match.group(2))
+    except Exception:
+        return 0, 0
+
+
+def _goal_decision_payload(
+    decision: Dict[str, Any],
+    state: Any,
+) -> Dict[str, Any]:
+    """Attach goal message i18n key/args to an evaluation decision."""
+    if not isinstance(decision, dict):
+        return decision
+    status = str(decision.get("status") or "").strip()
+    reason = str(decision.get("reason") or "").strip()
+    turns_used = int(getattr(state, "turns_used", 0) or 0)
+    max_turns = int(getattr(state, "max_turns", 0) or 0)
+    if (turns_used, max_turns) == (0, 0):
+        turns_used, max_turns = _extract_goal_turns_from_message(str(decision.get("message") or ""))
+
+    if status == "done":
+        return {
+            **decision,
+            "message_key": "goal_achieved",
+            "message_args": [reason],
+        }
+    if status == "paused":
+        return {
+            **decision,
+            "message_key": "goal_paused_budget_exhausted",
+            "message_args": [turns_used, max_turns],
+        }
+    if decision.get("should_continue"):
+        return {
+            **decision,
+            "message_key": "goal_continuing",
+            "message_args": [turns_used, max_turns, reason],
+        }
+    return decision
 
 
 def goal_state_snapshot(session_id: str, *, profile_home: str | Path | None = None) -> Any:
@@ -355,24 +447,46 @@ def goal_command_payload(
     lower = text.lower()
 
     if not text or lower == "status":
-        return _payload(action="status", message=mgr.status_line(), state=getattr(mgr, "state", None))
+        state = getattr(mgr, "state", None)
+        status_payload = _goal_status_payload(state)
+        return _payload(action="status", state=state, **status_payload)
 
     if lower == "pause":
         state = mgr.pause(reason="user-paused")
         if state is None:
-            return _payload(ok=False, action="pause", error="no_goal", message="No goal set.")
-        return _payload(action="pause", message=f"⏸ Goal paused: {state.goal}", state=state)
+            return _payload(
+                ok=False,
+                action="pause",
+                error="no_goal",
+                message="No goal set.",
+                message_key="goal_no_goal",
+            )
+        return _payload(
+            action="pause",
+            message=f"⏸ Goal paused: {state.goal}",
+            message_key="goal_paused",
+            message_args=[str(state.goal)],
+            state=state,
+        )
 
     if lower == "resume":
         state = mgr.resume()
         if state is None:
-            return _payload(ok=False, action="resume", error="no_goal", message="No goal to resume.")
+            return _payload(
+                ok=False,
+                action="resume",
+                error="no_goal",
+                message="No goal to resume.",
+                message_key="goal_no_goal",
+            )
         return _payload(
             action="resume",
             message=(
                 f"▶ Goal resumed: {state.goal}\n"
                 "Send a new message, or type continue, to kick it off."
             ),
+            message_key="goal_resumed",
+            message_args=[str(state.goal)],
             state=state,
         )
 
@@ -382,6 +496,7 @@ def goal_command_payload(
         return _payload(
             action="clear",
             message="Goal cleared." if had else "No active goal.",
+            message_key="goal_cleared" if had else "goal_no_goal",
             state=getattr(mgr, "state", None),
         )
 
@@ -408,6 +523,8 @@ def goal_command_payload(
             "I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\n"
             "Controls: /goal status · /goal pause · /goal resume · /goal clear"
         ),
+        message_key="goal_set",
+        message_args=[state.max_turns, state.goal],
         state=state,
         kickoff_prompt=state.goal,
     )
@@ -486,4 +603,6 @@ def evaluate_goal_after_turn(
     decision.setdefault("should_continue", False)
     decision.setdefault("continuation_prompt", None)
     decision.setdefault("message", "")
+    decision = dict(decision)
+    decision = _goal_decision_payload(decision, getattr(mgr, "state", None))
     return decision

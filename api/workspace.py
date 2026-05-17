@@ -64,7 +64,7 @@ def _profile_default_workspace() -> str:
       2. 'default_workspace' — alternate explicit key
       3. 'terminal.cwd'      — hermes-agent terminal working dir (most common)
 
-    Falls back to the boot-time DEFAULT_WORKSPACE constant.
+    Falls back to the live DEFAULT_WORKSPACE from api.config.
     """
     try:
         from api.config import get_config
@@ -86,7 +86,12 @@ def _profile_default_workspace() -> str:
                     return str(p)
     except (ImportError, Exception):
         logger.debug("Failed to load profile default workspace config")
-    return str(_BOOT_DEFAULT_WORKSPACE)
+    try:
+        from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
+
+        return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
+    except Exception:
+        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
 
 
 # ── Public API ──────────────────────────────────────────────────────────────

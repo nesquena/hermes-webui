@@ -179,6 +179,87 @@ def test_custom_provider_models_dict_routes_to_named_custom_provider():
     assert base_url == 'http://127.0.0.1:8080/v1'
 
 
+# ── Issue #2047: parenthesized local provider names with ports ────────────
+
+def test_custom_provider_name_with_parenthesized_port_uses_safe_slug():
+    """Setup-generated names like 'Local (host:port)' must not leak ':' into slugs."""
+    model, provider, base_url = _resolve_with_config(
+        'deepseek-v4-flash',
+        provider='custom',
+        custom_providers=[{
+            'name': 'Local (127.0.0.1:15721)',
+            'base_url': 'http://127.0.0.1:15721/v1',
+            'model': 'deepseek-v4-flash',
+        }],
+    )
+    assert model == 'deepseek-v4-flash'
+    assert provider == 'custom:local-127.0.0.1-15721'
+    assert base_url == 'http://127.0.0.1:15721/v1'
+
+
+def test_safe_custom_provider_hint_keeps_model_after_port_slug():
+    """The safe slug emitted by the picker must parse back without corrupting the model."""
+    model, provider, base_url = _resolve_with_config(
+        '@custom:local-127.0.0.1-15721:deepseek-v4-flash',
+        provider='custom',
+    )
+    assert model == 'deepseek-v4-flash'
+    assert provider == 'custom:local-127.0.0.1-15721'
+    assert base_url is None
+
+
+# ── Issue #1922: default model shadowed by overlapping custom_providers[] ──
+
+def test_default_model_not_shadowed_by_overlapping_custom_provider():
+    r'''Regression test for #1922.
+
+    When the active provider is an explicit non-custom provider (e.g. ai-gateway,
+    openrouter, xiaomi) AND the requested model_id matches the configured default
+    model, the active provider's base_url must take precedence over an overlapping
+    custom_providers[] entry. Otherwise the WebUI routes to 'custom:<name>' with
+    the wrong endpoint, causing 401 errors.
+
+    This test mirrors the reported scenario:
+      - provider: ai-gateway
+      - base_url: https://api.ai-gateway.example/v1
+      - default: gpt-5.4
+      - An overlapping custom_providers[] entry with the same default model
+
+    Expected: active provider (ai-gateway) wins over custom provider.
+    '''
+    model, provider, base_url = _resolve_with_config(
+        'gpt-5.4',
+        provider='ai-gateway',
+        base_url='https://api.ai-gateway.example/v1',
+        default='gpt-5.4',
+        custom_providers=[{
+            'name': 'My Custom Endpoint',
+            'base_url': 'http://localhost:8080/v1',
+            'model': 'gpt-5.4',
+        }],
+    )
+    assert model == 'gpt-5.4', f'Expected model=gpt-5.4, got {model!r}'
+    assert provider == 'ai-gateway', f'Expected provider=ai-gateway, got {provider!r}'
+    assert base_url == 'https://api.ai-gateway.example/v1', f'Expected base_url from active provider, got {base_url!r}'
+
+
+def test_default_model_shadowed_with_xiaomi_provider():
+    r'''Same regression test with provider=xiaomi instead of ai-gateway.'''
+    model, provider, base_url = _resolve_with_config(
+        'deepseek-v4-flash',
+        provider='xiaomi',
+        default='deepseek-v4-flash',
+        custom_providers=[{
+            'name': 'LiteLLM Proxy',
+            'base_url': 'http://127.0.0.1:8080/v1',
+            'model': 'deepseek-v4-flash',
+        }],
+    )
+    assert model == 'deepseek-v4-flash'
+    assert provider == 'xiaomi'
+    assert base_url is None  # xiaomi has no config base_url in this test
+
+
 # ── get_available_models() @provider: hint behaviour ──────────────────────
 
 

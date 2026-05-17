@@ -68,10 +68,18 @@ def test_goal_command_payload_matches_gateway_controls(monkeypatch):
     set_goal = webui_goals.goal_command_payload("sid-123", "ship the feature")
 
     assert status["message"] == "No active goal. Set one with /goal <text>."
+    assert status["message_key"] == "goal_status_none"
     assert pause["message"] == "⏸ Goal paused: ship the feature"
+    assert pause["message_key"] == "goal_paused"
+    assert pause["message_args"] == ["ship the feature"]
     assert resume["message"].startswith("▶ Goal resumed: ship the feature")
+    assert resume["message_key"] == "goal_resumed"
+    assert resume["message_args"] == ["ship the feature"]
     assert clear["message"] == "Goal cleared."
+    assert clear["message_key"] == "goal_cleared"
     assert set_goal["action"] == "set"
+    assert set_goal["message_key"] == "goal_set"
+    assert set_goal["message_args"] == [20, "ship the feature"]
     assert set_goal["kickoff_prompt"] == "ship the feature"
     assert "⊙ Goal set (20-turn budget): ship the feature" in set_goal["message"]
     assert ("set", "ship the feature") in calls
@@ -145,6 +153,8 @@ def test_goal_continuation_decision_emits_status_and_normal_user_prompt(monkeypa
 
     decision = webui_goals.evaluate_goal_after_turn("sid-123", "not done yet", user_initiated=False)
 
+    assert decision["message_key"] == "goal_continuing"
+    assert decision["message_args"] == [1, 20, "one step remains"]
     assert decision["message"].startswith("↻ Continuing toward goal")
     assert decision["should_continue"] is True
     assert decision["continuation_prompt"].startswith("[Continuing toward your standing goal]")
@@ -266,7 +276,7 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
 
 def test_frontend_goal_evaluating_state_uses_calm_composer_indicator():
     assert "const goalState=String(d.state||'').trim();" in MESSAGES_JS
-    assert "const goalEvaluatingMessage='Evaluating goal progress…';" in MESSAGES_JS
+    assert "t('goal_evaluating_progress')" in MESSAGES_JS
     assert "if(goalState==='evaluating')" in MESSAGES_JS
     assert "setComposerStatus(goalEvaluatingMessage);" in MESSAGES_JS
     assert "return;" in MESSAGES_JS
