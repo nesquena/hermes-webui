@@ -1480,6 +1480,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevIn=(S.session&&S.session.input_tokens)||0;
           const _prevOut=(S.session&&S.session.output_tokens)||0;
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
+          const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
+          const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -1509,12 +1511,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               const curIn=d.usage.input_tokens||0;
               const curOut=d.usage.output_tokens||0;
               const curCost=d.usage.estimated_cost||0;
+              const curCacheRead=d.usage.cache_read_tokens||0;
+              const curCacheWrite=d.usage.cache_write_tokens||0;
               // Only set delta if values actually increased (skip no-op turns)
-              if(curIn>prevIn||curOut>prevOut){
+              if(curIn>prevIn||curOut>prevOut||curCacheRead>_prevCacheRead||curCacheWrite>_prevCacheWrite){
                 lastAsst._turnUsage={
                   input_tokens:Math.max(0,curIn-prevIn),
                   output_tokens:Math.max(0,curOut-prevOut),
                   estimated_cost:Math.max(0,curCost-prevCost),
+                  cache_read_tokens:Math.max(0,curCacheRead-_prevCacheRead),
+                  cache_write_tokens:Math.max(0,curCacheWrite-_prevCacheWrite),
                 };
               }
               if(typeof d.usage.duration_seconds==='number'){

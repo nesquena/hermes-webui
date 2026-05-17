@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Surface provider prompt-cache read/write tokens in WebUI usage displays so cache-miss cost issues are visible from the context tooltip and per-turn usage footer.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.
