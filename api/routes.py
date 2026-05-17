@@ -4340,6 +4340,20 @@ def handle_post(handler, parsed) -> bool:
         )
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
+        # ── Memory lifecycle: commit the previous session before starting a new one ──
+        prev_session_id = body.get("prev_session_id")
+        if prev_session_id:
+            try:
+                from api.session_lifecycle import commit_session_memory
+                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                prev_agent = None
+                with SESSION_AGENT_CACHE_LOCK:
+                    _cached = SESSION_AGENT_CACHE.get(prev_session_id)
+                    if _cached:
+                        prev_agent = _cached[0]
+                commit_session_memory(prev_session_id, agent=prev_agent)
+            except Exception:
+                logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
         s = new_session(
             workspace=workspace,
             model=model,
@@ -4751,14 +4765,17 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        with _get_session_agent_lock(body["session_id"]):
+        sid = body["session_id"]
+        with _get_session_agent_lock(sid):
             s.messages = []
             s.tool_calls = []
             s.title = "Untitled"
             s.save()
-            # Evict cached agent — cleared session is a fresh conversation
-            from api.config import _evict_session_agent
-            _evict_session_agent(body["session_id"])
+        # Evict cached agent outside the per-session lock.  Eviction may run a
+        # boundary memory commit for batch-extraction providers, and provider
+        # I/O must not hold the session mutation lock.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/session/truncate":

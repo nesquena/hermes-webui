@@ -3627,6 +3627,13 @@ def _run_agent_streaming(
                         agent = _cached[0]
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         logger.debug('[webui] Reusing cached agent for session %s', session_id)
+                        # Reopened/cache-hit sessions must register the agent
+                        # so later lifecycle commits can find it.
+                        try:
+                            from api.session_lifecycle import register_agent
+                            register_agent(session_id, agent)
+                        except Exception:
+                            logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
 
                 if agent is not None:
                     # Refresh volatile runtime credentials selected from provider
@@ -3683,24 +3690,47 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    # Register the new agent with the memory lifecycle so
+                    # its commit_memory_session() can be found later.
+                    try:
+                        from api.session_lifecycle import register_agent
+                        register_agent(session_id, agent)
+                    except Exception:
+                        logger.debug("Lifecycle register_agent failed for new session %s", session_id, exc_info=True)
+                    _evicted_items = []
                     with SESSION_AGENT_CACHE_LOCK:
                         SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         from api.config import SESSION_AGENT_CACHE_MAX
                         while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
                             evicted_sid, evicted_entry = SESSION_AGENT_CACHE.popitem(last=False)
-                            # Same FD-leak shape as the cached-agent reuse path
-                            # in #1421: the evicted agent's _session_db won't be
-                            # released until GC finalizes the agent, which on a
-                            # long-running server may be never. Close it
-                            # explicitly so the WAL handles release immediately.
-                            try:
-                                _evicted_agent = evicted_entry[0] if isinstance(evicted_entry, tuple) else None
-                                if _evicted_agent is not None and getattr(_evicted_agent, '_session_db', None) is not None:
-                                    _evicted_agent._session_db.close()
-                            except Exception:
-                                pass
-                            logger.debug('[webui] Evicted LRU agent from cache: %s', evicted_sid)
+                            _evicted_items.append((evicted_sid, evicted_entry))
+                    # Commit and close evicted agents outside the cache lock so
+                    # concurrent cache users are not blocked by provider I/O.
+                    for _evicted_sid, _evicted_entry in _evicted_items:
+                        try:
+                            _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
+                            _should_close_evicted_agent = True
+                            if _evicted_agent is not None:
+                                try:
+                                    from api.session_lifecycle import (
+                                        commit_session_memory as _lifecycle_commit,
+                                        has_uncommitted_work as _lifecycle_has_uncommitted_work,
+                                        unregister_agent as _lifecycle_unregister_agent,
+                                    )
+                                    _lifecycle_commit(_evicted_sid, agent=_evicted_agent, wait=True)
+                                    if not _lifecycle_has_uncommitted_work(_evicted_sid):
+                                        _lifecycle_unregister_agent(_evicted_sid)
+                                    else:
+                                        _should_close_evicted_agent = False
+                                except Exception:
+                                    _should_close_evicted_agent = False
+                                    logger.debug("Lifecycle commit on eviction failed for %s", _evicted_sid, exc_info=True)
+                            if _should_close_evicted_agent and _evicted_agent is not None and getattr(_evicted_agent, '_session_db', None) is not None:
+                                _evicted_agent._session_db.close()
+                        except Exception:
+                            logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
+                        logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
                     logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Store agent instance for cancel/interrupt propagation
@@ -4483,6 +4513,23 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append completed turn journal event", exc_info=True)
+                if not ephemeral:
+                    # ── Memory-provider lifecycle: mark turn completed (CLI parity) ──
+                    # Completed, non-ephemeral turns are marked dirty/uncommitted so
+                    # boundary drains know there is work.  Per CLI semantics, the
+                    # actual memory extraction/commit happens only at session boundaries
+                    # (new session creation, LRU eviction, shutdown drain) — NOT after
+                    # every completed turn.  This mirrors Hermes CLI where
+                    # run_agent.py::_sync_external_memory_for_turn() records messages
+                    # but only AIAgent.commit_memory_session()/shutdown_memory_provider()
+                    # trigger extraction via provider on_session_end().  The mark is
+                    # in-memory bookkeeping, not provider I/O, so keep it inside the
+                    # per-session writeback lock to preserve completed-turn ordering.
+                    try:
+                        from api.session_lifecycle import mark_turn_completed
+                        mark_turn_completed(s.session_id, agent=agent)
+                    except Exception:
+                        logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings

@@ -441,6 +441,12 @@ def main() -> None:
             stop_watcher()
         except Exception:
             logger.debug("Failed to stop gateway watcher during shutdown")
+        # Drain pending memory-provider lifecycle commits before exit
+        try:
+            from api.session_lifecycle import drain_all_on_shutdown
+            drain_all_on_shutdown()
+        except Exception:
+            logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
 
 if __name__ == '__main__':
     main()

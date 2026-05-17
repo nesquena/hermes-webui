@@ -3983,9 +3983,38 @@ SESSION_AGENT_CACHE_LOCK = threading.Lock()
 
 
 def _evict_session_agent(session_id: str) -> None:
-    """Remove a cached agent for a session (on delete, clear, or model switch)."""
+    """Remove a cached agent for a session (on delete, clear, or model switch).
+
+    Attempts a lifecycle commit before dropping the agent handle so that
+    batch-extraction memory providers can extract any pending work.  If the
+    commit fails or there is uncommitted work with no successful commit, the
+    lifecycle entry is preserved (not unregistered) so a future commit can
+    retry.
+    """
+    agent = None
     with SESSION_AGENT_CACHE_LOCK:
-        SESSION_AGENT_CACHE.pop(session_id, None)
+        entry = SESSION_AGENT_CACHE.pop(session_id, None)
+        if entry is not None:
+            agent = entry[0] if isinstance(entry, tuple) else None
+    if agent is None:
+        return
+    should_close = True
+    try:
+        from api.session_lifecycle import commit_session_memory, has_uncommitted_work, unregister_agent
+        if has_uncommitted_work(session_id):
+            commit_session_memory(session_id, agent=agent, wait=True)
+        if not has_uncommitted_work(session_id):
+            unregister_agent(session_id)
+        else:
+            should_close = False
+    except Exception:
+        should_close = False
+        logger.debug("Lifecycle commit on eviction failed for %s", session_id, exc_info=True)
+    if should_close and getattr(agent, '_session_db', None) is not None:
+        try:
+            agent._session_db.close()
+        except Exception:
+            logger.debug("Failed to close _session_db on eviction for %s", session_id, exc_info=True)
 
 # ── Thread-local env context ─────────────────────────────────────────────────
 _thread_ctx = threading.local()
