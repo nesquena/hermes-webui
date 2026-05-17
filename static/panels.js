@@ -5493,7 +5493,16 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      langSel.addEventListener('change',()=>{
+        if(typeof setLocale==='function') setLocale(langSel.value);
+        if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+        // Sync RTL checkbox + dir attribute after locale change
+        const rtlCb=$('settingsRtl');
+        const rtlOn=document.documentElement.classList.contains('chat-content-rtl');
+        if(rtlCb) rtlCb.checked=rtlOn;
+        document.documentElement.dir=rtlOn?'rtl':'ltr';
+        _schedulePreferencesAutosave();
+      },{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -5537,7 +5546,9 @@ async function loadSettingsPanel(){
       rtlCb.addEventListener('change',()=>{
         const on=rtlCb.checked;
         try{localStorage.setItem('hermes-rtl',on?'true':'false');}catch(_){}
+        try{localStorage.setItem('hermes-rtl-touched','true');}catch(_){}
         document.documentElement.classList.toggle('chat-content-rtl',on);
+        document.documentElement.dir=on?'rtl':'ltr';
         _schedulePreferencesAutosave();
       },{once:false});
     }

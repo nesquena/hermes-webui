@@ -1,4 +1,30 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  /* ── Thmanyah Sans (ثمانية) Arabic font ─────────────────────────────── */
+  @font-face {
+    font-family: 'Thmanyah Sans';
+    src: url('fonts/thmanyahsans-Regular.woff2') format('woff2');
+    font-weight: 400; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: 'Thmanyah Sans';
+    src: url('fonts/thmanyahsans-Light.woff2') format('woff2');
+    font-weight: 300; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: 'Thmanyah Sans';
+    src: url('fonts/thmanyahsans-Medium.woff2') format('woff2');
+    font-weight: 500; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: 'Thmanyah Sans';
+    src: url('fonts/thmanyahsans-Bold.woff2') format('woff2');
+    font-weight: 700; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: 'Thmanyah Sans';
+    src: url('fonts/thmanyahsans-Black.woff2') format('woff2');
+    font-weight: 900; font-style: normal; font-display: swap;
+  }
   /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
   :root {
     --bg:#FEFCF7;--sidebar:#FAF7F0;--border:#E0D8C8;--border2:rgba(0,0,0,0.15);
@@ -844,6 +870,9 @@
   @media(min-width:641px){.rail{display:flex;}.sidebar > .sidebar-nav{display:none;}}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
+  .chat-content-rtl .sidebar-nav {
+    direction: rtl;
+  }
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;}
   .nav-tab:hover{color:var(--text);}
   /* Legacy hover-tooltip — kept for the mobile `.sidebar-nav` only, where it
@@ -853,8 +882,18 @@
      unobstructed; rail buttons carry no `data-label`, so an unscoped rule
      would render an empty styled box on hover. */
   .sidebar-nav .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:700;letter-spacing:.02em;padding:6px 12px;border-radius:8px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
+  .chat-content-rtl .sidebar-nav .nav-tab:hover::after {
+    left: auto;
+    right: 50%;
+    transform: translateX(50%);
+  }
   .nav-tab.active{color:var(--accent-text);}
   .nav-tab.active::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:20px;height:2px;background:var(--accent);border-radius:2px 2px 0 0;}
+  .chat-content-rtl .nav-tab.active::before {
+    left: auto;
+    right: 50%;
+    transform: translateX(50%);
+  }
   /* Panel content areas (swapped by tab) */
   .panel-view{display:none;flex:1;overflow:hidden;flex-direction:column;}
   .panel-view.active{display:flex;}
@@ -1496,11 +1535,22 @@
      rule applies. :not(.mobile-open) excludes the slide-in overlay below 641px. */
   @media(min-width:641px){
     .layout.sidebar-collapsed .sidebar:not(.mobile-open){width:0 !important;min-width:0;opacity:0;transform:translateX(-14px);border-right-color:transparent;pointer-events:none;overflow:hidden;}
+    .chat-content-rtl .layout.sidebar-collapsed .sidebar:not(.mobile-open){
+      transform:translateX(14px);
+      border-right-color:transparent;
+      border-left-color:transparent;
+    }
     .layout.sidebar-collapsed .sidebar .resize-handle{display:none;}
     /* Flash prevention: an inline <script> in index.html sets this dataset on
        <html> BEFORE the stylesheet loads, so the collapsed state paints from
        frame 0 with zero flicker on cold loads. boot.js clears it once JS owns the state. */
     html[data-sidebar-collapsed="1"] .sidebar:not(.mobile-open){width:0 !important;min-width:0;opacity:0;transform:translateX(-14px);border-right-color:transparent;pointer-events:none;overflow:hidden;transition:none;}
+    .chat-content-rtl html[data-sidebar-collapsed="1"] .sidebar:not(.mobile-open),
+    html[data-sidebar-collapsed="1"] .chat-content-rtl .sidebar:not(.mobile-open){
+      transform:translateX(14px);
+      border-right-color:transparent;
+      border-left-color:transparent;
+    }
   }
 
   @media(max-width:900px){
@@ -1581,7 +1631,16 @@
     /* ── Sidebar: slide-in overlay instead of hidden ── */
     .sidebar{position:fixed;left:-320px;top:0;bottom:0;width:min(320px, 100vw);z-index:200;
       transition:left .25s ease;}
+    .chat-content-rtl .sidebar{
+      left:auto;
+      right:-320px;
+      transition:right .25s ease;
+    }
     .sidebar.mobile-open{left:0;}
+    .chat-content-rtl .sidebar.mobile-open{
+      left:auto;
+      right:0;
+    }
     .sidebar .resize-handle{display:none;}
     /* Hamburger button (in app titlebar on mobile) */
     .app-titlebar{justify-content:space-between;}
@@ -1679,7 +1738,22 @@
     .sidebar-nav .nav-tab.active{background:var(--accent-bg);}
     .sidebar-nav .nav-tab.active::before{left:-4px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;border-radius:0 2px 2px 0;}
     .sidebar .panel-view{height:100%;margin-left:52px;}
-    .sidebar .panel-icon-btn{min-width:44px;min-height:44px;width:auto;height:auto;}
+    /* ── Mobile RTL sidebar-nav fixes ────────────────────────────────── */
+    .chat-content-rtl .sidebar-nav{
+      left:auto;
+      right:0;
+      border-right:none;
+      border-left:1px solid var(--border);
+    }
+    .chat-content-rtl .sidebar-nav .nav-tab.active::before{
+      left:auto;
+      right:-4px;
+      border-radius:2px 0 0 2px;
+    }
+    .chat-content-rtl .sidebar .panel-view{
+      margin-left:0;
+      margin-right:52px;
+    }
     /* Touch targets — minimum 44px */
     .icon-btn,.mic-btn,.voice-mode-btn{min-width:44px;min-height:44px;}
     .session-item{min-height:44px;padding:10px 40px 10px 12px;}
@@ -3173,13 +3247,20 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-role,
 .msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-files { display: none; }
 .msg-files { padding-left: var(--msg-rail); }
+.chat-content-rtl .msg-files { padding-left: 0; padding-right: var(--msg-rail); }
 .msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
+.chat-content-rtl .msg-usage { padding-left: 0; padding-right: var(--msg-rail); }
 .tool-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.chat-content-rtl .tool-card { margin-left: 0; margin-right: var(--msg-rail); }
 .thinking-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.chat-content-rtl .thinking-card { margin-left: 0; margin-right: var(--msg-rail); }
 .agent-activity-group .tool-card,
 .agent-activity-group .thinking-card { margin-left: 0; max-width: none; }
+.chat-content-rtl .agent-activity-group .tool-card,
+.chat-content-rtl .agent-activity-group .thinking-card { margin-left: 0; margin-right: 0; }
 .agent-activity-thinking { margin: 2px 0; }
 .tool-cards-toggle { margin-left: var(--msg-rail); }
+.chat-content-rtl .tool-cards-toggle { margin-left: 0; margin-right: var(--msg-rail); }
 .msg-row[data-editing="1"] { width: 100%; }
 .msg-row[data-editing="1"] .msg-edit-area,
 .msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
@@ -4086,19 +4167,77 @@ main.main.showing-logs > #mainLogs{display:flex;}
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active > :last-child::after,
 [data-live-assistant="1"]:last-child .msg-body.stream-fade-active:not(:has(> *))::after{display:none;content:none;}
 
-/* ── RTL chat layout (salvaged from PR #1721 by @malulian) ────────────────────
- * Triggered by .chat-content-rtl on <html>. Affects ONLY the chat messages
- * area and composer input, not the sidebar, workspace panel, settings panel,
- * or any other UI element. Direction objection from design review (PR #1721
- * comment by @aronprins, May 13 2026) honored: no composer button — the
- * toggle lives in Settings → Preferences only.
+/* ── RTL layout (salvaged from PR #1721 by @malulian, extended for Arabic) ───
+ * Triggered by .chat-content-rtl on <html>. Affects chat, sidebar panels,
+ * settings, and modals. The sidebar rail/nav stays LTR (icons are direction-neutral).
  *
  * Code blocks, inline code, and pre-formatted blocks stay LTR even when RTL
- * is active — Arabic/Hebrew users still write English code, command lines,
- * URLs, and JSON the same way English users do. Flipping those would render
- * code mirrored (e.g. `()fn()` instead of `fn()`) which is the salvage's
- * critical bug fix vs the original PR #1721 implementation.
+ * is active — Arabic users still write English code, command lines,
+ * URLs, and JSON the same way English users do.
  */
+/* ── Arabic font (Thmanyah Sans) — applied when RTL is active ─────────── */
+.chat-content-rtl body,
+html[lang^="ar"] body {
+  --font-ui-ar: 'Thmanyah Sans', var(--font-ui);
+  font-family: var(--font-ui-ar);
+}
+/* Keep code/monospace in system monospace, not Arabic font */
+.chat-content-rtl code,
+.chat-content-rtl pre,
+.chat-content-rtl kbd,
+.chat-content-rtl samp,
+.chat-content-rtl tt,
+.chat-content-rtl .hljs,
+html[lang^="ar"] code,
+html[lang^="ar"] pre,
+html[lang^="ar"] kbd,
+html[lang^="ar"] samp,
+html[lang^="ar"] tt,
+html[lang^="ar"] .hljs {
+  font-family: var(--font-mono, 'SF Mono','Fira Code','Fira Mono','Roboto Mono',monospace);
+}
+/* ── Global page-level RTL ────────────────────────────────────────────── */
+.chat-content-rtl body {
+  direction: rtl;
+}
+/* Sidebar rail stays LTR (icon nav) */
+.chat-content-rtl .rail {
+  direction: ltr;
+}
+/* ── Layout mirroring: sidebar goes right, workspace panel goes left ─── */
+.chat-content-rtl .layout {
+  flex-direction: row-reverse;
+}
+.chat-content-rtl .sidebar {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+.chat-content-rtl .rail {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+.chat-content-rtl .rightpanel {
+  border-left: none;
+  border-right: 1px solid var(--border);
+  transform-origin: left center;
+}
+/* Rail active indicator moves to right side */
+.chat-content-rtl .rail-btn.active::before {
+  left: auto;
+  right: -6px;
+  border-radius: 2px 0 0 2px;
+}
+/* Resize handle mirroring */
+.chat-content-rtl #sidebarResize {
+  right: auto;
+  left: -4px;
+}
+/* Skin-specific border overrides in RTL */
+:root[data-skin="nous"] .chat-content-rtl .sidebar {
+  border-left-style: dashed;
+  border-right-style: none;
+}
+/* ── Chat messages ───────────────────────────────────────────────────── */
 .chat-content-rtl .msg-row{
   direction:rtl;
   text-align:right;
@@ -4106,6 +4245,22 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 .chat-content-rtl .msg-body{
   text-align:start;
+  padding-left:0;
+  padding-right:30px;
+}
+/* User messages float right, assistant messages float left */
+.chat-content-rtl .msg-row[data-role="user"] .msg-body {
+  margin-left: 0;
+  margin-right: auto;
+}
+.chat-content-rtl .msg-row[data-role="assistant"] .msg-body {
+  margin-left: auto;
+  margin-right: 0;
+}
+/* Session active indicator on right side */
+.chat-content-rtl .session-item.active {
+  border-left: none;
+  border-right: 2px solid var(--accent);
 }
 .chat-content-rtl .msg-body th,
 .chat-content-rtl .csv-table th,
@@ -4120,6 +4275,64 @@ main.main.showing-logs > #mainLogs{display:flex;}
   direction:rtl;
   text-align:right;
   unicode-bidi:plaintext;
+}
+/* ── Sidebar panels ──────────────────────────────────────────────────── */
+.chat-content-rtl .sidebar {
+  direction: rtl;
+}
+.chat-content-rtl .sidebar-search input {
+  direction: rtl;
+  text-align: right;
+  padding-left: 32px;
+  padding-right: 10px;
+}
+.chat-content-rtl .sidebar-search-icon {
+  left: auto;
+  right: 22px;
+}
+.chat-content-rtl .panel-head {
+  text-align: right;
+}
+.chat-content-rtl .panel-head-actions {
+  margin-left: 0;
+  margin-right: auto;
+}
+/* ── Settings panels ──────────────────────────────────────────────────── */
+.chat-content-rtl .settings-main {
+  direction: rtl;
+}
+.chat-content-rtl .side-menu {
+  direction: rtl;
+  text-align: right;
+}
+/* ── Modals / dialogs ─────────────────────────────────────────────────── */
+.chat-content-rtl .modal-content,
+.chat-content-rtl .dialog-overlay {
+  direction: rtl;
+  text-align: right;
+}
+.chat-content-rtl .approval-card,
+.chat-content-rtl .clarify-card {
+  direction: rtl;
+}
+/* ── Toast notifications ─────────────────────────────────────────────── */
+.chat-content-rtl .toast {
+  direction: rtl;
+}
+/* ── Composer area ────────────────────────────────────────────────────── */
+.chat-content-rtl .composer-box {
+  direction: rtl;
+}
+.chat-content-rtl .composer-flyout {
+  direction: rtl;
+}
+/* ── Workspace panel ──────────────────────────────────────────────────── */
+.chat-content-rtl .rightpanel {
+  direction: rtl;
+}
+/* ── Titlebar ─────────────────────────────────────────────────────────── */
+.chat-content-rtl .app-titlebar {
+  direction: rtl;
 }
 /* Force code/pre/tt back to LTR — Arabic users still write English code. */
 .chat-content-rtl .msg-body pre,
@@ -4162,4 +4375,169 @@ main.main.showing-logs > #mainLogs{display:flex;}
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
+}
+/* ── RTL enhancements for mixed Arabic/English text ─────────────────────── */
+/* Lists: bullets/numbers on the right side */
+.chat-content-rtl .msg-body ul,
+.chat-content-rtl .msg-body ol{
+  padding-left:0;
+  padding-right:1.5em;
+}
+/* Blockquotes: border on the right */
+.chat-content-rtl .msg-body blockquote{
+  border-left:none;
+  border-right:3px solid var(--accent);
+  padding-left:0;
+  padding-right:1em;
+  margin-left:0;
+  margin-right:0;
+}
+/* Composer placeholder aligns right in RTL mode */
+.chat-content-rtl textarea#msg::placeholder,
+.chat-content-rtl #msg::placeholder{
+  text-align:right;
+}
+/* Ensure mixed Arabic/English inline text flows naturally */
+.chat-content-rtl .msg-body p,
+.chat-content-rtl .msg-body li,
+.chat-content-rtl .msg-body h1,
+.chat-content-rtl .msg-body h2,
+.chat-content-rtl .msg-body h3,
+.chat-content-rtl .msg-body h4,
+.chat-content-rtl .msg-body h5,
+.chat-content-rtl .msg-body h6{
+  unicode-bidi:plaintext;
+}
+/* Tool call headers (e.g. "Tool call: read_file") readable in RTL */
+.chat-content-rtl .tool-call-group-header{
+  text-align:right;
+}
+.chat-content-rtl .msg-role {
+  flex-direction: row;
+}
+.chat-content-rtl .role-icon {
+  order: inherit;
+}
+/* Inline citations/links mixed with Arabic */
+.chat-content-rtl .msg-body a[href]{
+  unicode-bidi:isolate;
+}
+/* Horizontal rules */
+.chat-content-rtl .msg-body hr{
+  margin-left:0;
+  margin-right:0;
+}
+/* ── Sidebar session list ─────────────────────────────────────────────── */
+.chat-content-rtl .session-item {
+  text-align: right;
+}
+.chat-content-rtl .session-item-meta {
+  text-align: right;
+}
+/* Stream/hover padding flips sides */
+.chat-content-rtl .session-item.streaming,
+.chat-content-rtl .session-item.unread,
+.chat-content-rtl .session-item:focus-within,
+.chat-content-rtl .session-item.menu-open {
+  padding-right: 8px;
+  padding-left: 40px;
+}
+@media (hover:hover){
+  .chat-content-rtl .session-item:hover {
+    padding-right: 8px;
+    padding-left: 40px;
+  }
+}
+/* Session attention indicator flips to left */
+.chat-content-rtl .session-attention-indicator {
+  right: auto;
+  left: 6px;
+}
+/* Session time pushes to left in RTL */
+.chat-content-rtl .session-time {
+  margin-left: 0;
+  margin-right: auto;
+}
+/* Session active border on right side */
+.chat-content-rtl .session-item.active {
+  border-left: none;
+  border-right: 2px solid var(--accent);
+}
+/* Sienna skin active session border */
+:root[data-skin="sienna"] .chat-content-rtl .session-item.active {
+  border-left: none;
+  border-right: 2px solid var(--accent);
+}
+/* Side menu items: icon on right, text aligns right */
+.chat-content-rtl .side-menu-item {
+  text-align: right;
+}
+/* Panel view headings align right */
+.chat-content-rtl .panel-view .panel-head {
+  text-align: right;
+}
+/* Settings pane headings */
+.chat-content-rtl .settings-pane-heading {
+  text-align: right;
+}
+/* Session action trigger flips to left */
+.chat-content-rtl .session-actions {
+  right: auto;
+  left: 6px;
+}
+/* Session action menu opens from right */
+.chat-content-rtl .session-action-menu {
+  left: auto;
+  right: 0;
+}
+/* Mobile session items: padding flips (right→left) */
+@media(max-width:640px){
+  .chat-content-rtl .session-item {
+    padding: 10px 12px 10px 40px;
+  }
+}
+/* Session pin indicator moves to right */
+.chat-content-rtl .session-pin-indicator {
+  margin-left: 0;
+  margin-right: auto;
+}
+.chat-content-rtl .empty-state {
+  text-align: right;
+}
+/* ── Slash command dropdown ───────────────────────────────────────────── */
+.chat-content-rtl .cmd-dropdown {
+  direction: rtl;
+  text-align: right;
+}
+/* ── Tool cards (inside chat) ──────────────────────────────────────────── */
+.chat-content-rtl .tool-card-header {
+  direction: rtl;
+}
+/* ── Thinking/chain-of-thought — always LTR (AI reasons in English) ──── */
+.chat-content-rtl .thinking-block,
+.chat-content-rtl .thinking-block *,
+.chat-content-rtl .chain-of-thought,
+.chat-content-rtl .chain-of-thought *,
+.chat-content-rtl [data-thinking],
+.chat-content-rtl [data-thinking] *,
+.chat-content-rtl .thinking-card,
+.chat-content-rtl .thinking-card *,
+.chat-content-rtl .agent-activity-thinking,
+.chat-content-rtl .agent-activity-group,
+.chat-content-rtl .composer-status {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: isolate;
+}
+/* ── Suggestion cards ────────────────────────────────────────────────── */
+.chat-content-rtl .suggestion {
+  text-align: right;
+}
+.chat-content-rtl .suggestion:hover {
+  transform: translateX(-2px);
+}
+/* ── Sienna skin active session border ────────────────────────────────── */
+:root[data-skin="sienna"] .chat-content-rtl .session-item.active {
+  border-left: none;
+  border-right: 2px solid var(--accent);
 }
