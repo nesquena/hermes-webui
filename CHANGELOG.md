@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [v0.51.84] — 2026-05-17 — Release BH (stage-377 — 1-PR Docker hygiene — agent-image upgrade docs + read-only WebUI source mount + chown prune widening)
+
+### Changed
+
+- **PR #2470** — Multi-container Docker hygiene pass. The `hermes-agent-src` named volume in `docker-compose.two-container.yml` and `docker-compose.three-container.yml` is now mounted **read-only** on the WebUI service (the WebUI only reads it to install the agent's Python dependencies at startup), bringing the actual mount mode in line with the existing `docs/docker.md` architecture diagram. To keep `docker_init.bash` startup compatible with the new read-only mount, `chown_home_hermeswebui` now prunes the entire `/home/hermeswebui/.hermes/hermes-agent` subtree from the ownership walk instead of only `.git/objects` — the WebUI never writes to the agent source, so the previous narrower carve-out was always a nicety, and on a `:ro` mount it would have returned `EROFS` and killed startup under `set -e`. The widened prune also subsumes the original #2237 macOS bind-mount case (the `.git/objects` packs are inside the now-pruned subtree). The default `${HERMES_WORKSPACE:-~/workspace}` workspace bind is changed to `${HERMES_WORKSPACE:-${HOME}/workspace}` so the path resolves consistently across Linux, macOS, WSL2, and Docker Desktop on Windows (matching the single-container `docker-compose.yml` convention). No behaviour change for users who set `HERMES_WORKSPACE` explicitly.
+
+### Documentation
+
+- **PR #2470** — `docs/docker.md` gains an **"Upgrading the agent container"** section documenting the root cause of [#1416](https://github.com/nesquena/hermes-webui/issues/1416): the `hermes-agent-src` named volume caches the agent's `/opt/hermes` source tree on first run, and Docker reuses the cached volume on every subsequent `compose up` — even after `docker pull` of a newer agent image. The new section gives the canonical `down → docker volume rm → pull → up -d` recipe and the same upgrade pointer is mirrored as a comment block in both multi-container compose files. A new **"What the multi-container setup isolates (and what it doesn't)"** section explicitly frames the two/three-container setups as **process, network, and resource isolation, not filesystem isolation** — calibrating expectations for users who reach for multi-container expecting a trust boundary between the chat UI and the agent.
+
 ## [v0.51.83] — 2026-05-17 — Release BG (stage-376 — 12-PR contributor batch — chat-start adapter parity + populated-core journal recovery + thinking card dedup + context metadata refresh + model cache fingerprint + stream fade cap + manual cron delivery + active-session spinner + email gateway label + thinking copy button + /theme i18n + compact activity semantics)
 
 ### Added
