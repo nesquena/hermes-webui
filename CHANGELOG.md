@@ -8,6 +8,7 @@
 - Recover already-journaled visible assistant text and tool cards even when restart repair first syncs a populated Hermes core transcript into an otherwise empty WebUI sidecar. The core-sync branch now merges non-duplicate run-journal output before clearing stale stream state, closing the rare #2427 carve-out where recoverable partial output could be silently skipped. Fixes #2434.
 - Compact live Thinking cards now reuse the same timeline card across sequential tool calls, preventing repeated Thinking cards from stacking during one multi-tool turn.
 - Refresh context-window metadata when a session's resolved model changes during load or when the user switches models, so high-context models do not stay stuck on a stale prior window and trigger premature compression. Fixes #2442.
+- **PR #2445** by @Michaelyklam (fixes #2443) — `/api/models` now fingerprints model-catalog inputs as part of its persisted cache metadata, so server-side catalog additions and Codex local catalog changes invalidate `models_cache.json` immediately instead of waiting for the 24-hour TTL or manual cache deletion.
 
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
