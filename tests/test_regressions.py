@@ -823,6 +823,37 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
         "token handler must only create the live answer segment once visible answer text starts"
 
 
+def test_send_shows_assistant_pending_after_stream_id_is_known(cleanup_test_sessions):
+    """#2429: submitted turns should show assistant-side pending feedback before
+    the first assistant token/tool event arrives.
+
+    appendThinking() is intentionally guarded by S.activeStreamId to avoid stale
+    stream events painting the wrong session. send() must therefore create the
+    initial assistant placeholder after /api/chat/start returns a stream id.
+    """
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    chat_start_idx = src.find("api('/api/chat/start'")
+    assert chat_start_idx >= 0, "could not find /api/chat/start POST in send()"
+    active_stream_idx = src.find("S.activeStreamId = streamId;", chat_start_idx)
+    assert active_stream_idx >= 0, "send() must assign S.activeStreamId from /api/chat/start"
+    pending_idx = src.find("appendThinking();", active_stream_idx)
+    assert pending_idx >= 0, (
+        "send() must append an assistant pending placeholder after S.activeStreamId "
+        "is known, otherwise appendThinking() returns before painting anything"
+    )
+    attach_idx = src.find("attachLiveStream(activeSid, streamId", chat_start_idx)
+    assert attach_idx >= 0, "send() must attach the live stream after /api/chat/start"
+    assert active_stream_idx < pending_idx < attach_idx, (
+        "assistant pending placeholder must appear after stream id assignment and "
+        "before the SSE stream waits for first token/tool events"
+    )
+    premature_window = src[chat_start_idx - 900:chat_start_idx]
+    assert "appendThinking();" not in premature_window, (
+        "send() must not call appendThinking() before /api/chat/start because "
+        "S.activeStreamId is still null and the guard makes it a no-op"
+    )
+
+
 def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):
     """R19e: later reasoning after a tool call must render in a fresh card."""
     src = (REPO_ROOT / "static/messages.js").read_text()

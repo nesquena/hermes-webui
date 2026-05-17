@@ -273,7 +273,7 @@ async function send(){
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
+  S.messages.push(userMsg);renderMessages();setBusy(true);
   // First optimistic pass: make the local user turn visible before /api/chat/start
   // can save pending state on the server.
   if(typeof upsertActiveSessionForLocalTurn==='function'){
@@ -336,6 +336,10 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    // appendThinking() is guarded by S.activeStreamId so stale stream events
+    // cannot paint the wrong session. Create the assistant-side pending state
+    // after the stream id is known, before the first SSE token/tool event.
+    if(S.session&&S.session.session_id===activeSid) appendThinking();
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
     if(typeof updateSendBtn==='function') updateSendBtn();

@@ -16,7 +16,7 @@ class TestSidebarFirstTurnVisibility:
             "send() must optimistically upsert the active session into the sidebar "
             "as soon as the local user message is pushed."
         )
-        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);")
+        push_idx = src.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
         helper_idx = src.index("upsertActiveSessionForLocalTurn", push_idx)
         start_idx = src.index("api('/api/chat/start'", push_idx)
         assert helper_idx < start_idx, (

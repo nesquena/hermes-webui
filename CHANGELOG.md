@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Show the assistant-side pending state immediately after a chat turn receives its stream id, so the transcript reflects that the assistant is working before the first token, reasoning, or tool event arrives. Fixes #2429.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.
