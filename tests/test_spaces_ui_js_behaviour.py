@@ -1581,6 +1581,87 @@ async function dispatchWindowMessage(data, opts) {
       source: 'eval(SECRET_VALUE_DO_NOT_LEAK)',
       renderer: '<script>bad()</script>',
     });
+  } else if (scenario === 'runtimeNestedBlockedRuntimeAlias') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Queue this benign-looking prompt',
+      payload: {
+        messageType: 'capy:data:put',
+        source: 'eval(SECRET_VALUE_DO_NOT_LEAK)',
+        renderer: '<script>bad()</script>',
+      },
+      messages: [
+        { type: 'capy:raw:eval', source: 'SECRET_VALUE_DO_NOT_LEAK' },
+      ],
+    });
+  } else if (scenario === 'runtimeNestedConflictingRuntimeAliases') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Queue this benign-looking prompt',
+      message: {
+        type: 'capy:ready',
+        messageType: 'capy:agent:prompt',
+        source: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+    });
+  } else if (scenario === 'runtimeNestedRuntimeAliasTooComplex') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    const many = [];
+    for (let i = 0; i < 140; i += 1) many.push({ label: 'safe-' + i });
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Queue this complex prompt',
+      payload: { nested: many, source: 'SECRET_VALUE_DO_NOT_LEAK' },
+    });
+  } else if (scenario === 'runtimeNestedBenignNonCapyAliases') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    const match = root.innerHTML.match(/data-runtime-token="([^"]+)"/);
+    if (!match) throw new Error('runtime token missing from widget detail shell');
+    await dispatchWindowMessage({
+      type: 'capy:agent:prompt',
+      runtime_token: match[1],
+      space_id: 'lab',
+      widget_id: 'weather',
+      prompt: 'Refresh safely',
+      payload: { type: 'form.submit', messageType: 'ui.event', source: 'benign widget metadata' },
+    });
   } else if (scenario === 'runtimeMismatchedCamelCaseSelectors') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -3432,6 +3513,69 @@ def test_spaces_ui_sandbox_postmessage_rejects_conflicting_camelcase_message_typ
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_nested_blocked_runtime_aliases_without_dialog_or_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedBlockedRuntimeAlias")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox message blocked" in out["rootHtml"]
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Sandbox message blocked: capy:data:put" not in out["rootHtml"]
+    assert "Sandbox message blocked: capy:raw:eval" not in out["rootHtml"]
+    assert "Queue this benign-looking prompt" not in out["rootHtml"]
+    assert "eval(" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_nested_conflicting_runtime_aliases_without_dialog_or_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedConflictingRuntimeAliases")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox message blocked" in out["rootHtml"]
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Sandbox message blocked: capy:ready" not in out["rootHtml"]
+    assert "Sandbox message blocked: capy:agent:prompt" not in out["rootHtml"]
+    assert "Queue this benign-looking prompt" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_rejects_too_complex_nested_runtime_payload_without_dialog_or_network_call(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedRuntimeAliasTooComplex")
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+    assert "Sandbox message blocked" in out["rootHtml"]
+    assert "Sandbox prompt queued" not in out["rootHtml"]
+    assert "Queue this complex prompt" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_sandbox_postmessage_allows_nested_benign_non_capy_alias_labels(driver_path):
+    out = _run_spaces_scenario(driver_path, "runtimeNestedBenignNonCapyAliases")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+
+    assert "Sandbox event bridge" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert body == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "agent.prompt",
+        "prompt": "Refresh safely",
+        "payload": {"source": "sandbox-postmessage", "message_type": "capy:agent:prompt"},
+    }
+    assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "Sandbox message blocked" not in out["rootHtml"]
+    assert "form.submit" not in out["rootHtml"]
+    assert "ui.event" not in out["rootHtml"]
 
 
 def test_spaces_ui_sandbox_postmessage_rejects_mismatched_camelcase_selectors(driver_path):

@@ -1321,7 +1321,70 @@
     const aliases = [type, messageType, camelMessageType].filter(Boolean);
     if (aliases.some(function(value){ return value.toLowerCase() !== aliases[0].toLowerCase(); })) return { type: '', blocked: true };
     const selected = aliases[0] || '';
-    return { type: selected, blocked: isBlockedRuntimeMessageType(selected) };
+    const nestedInfo = nestedRuntimeMessageTypeInfo(data);
+    return { type: selected, blocked: isBlockedRuntimeMessageType(selected) || nestedInfo.blocked };
+  }
+
+  function nestedRuntimeMessageTypeInfo(value){
+    let blocked = false;
+    let inspected = 0;
+    const maxDepth = 6;
+    const maxInspectedNodes = 120;
+    const seen = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+    const hasOwn = Object.prototype.hasOwnProperty;
+    function charge(){
+      inspected += 1;
+      if (inspected > maxInspectedNodes) blocked = true;
+      return !blocked;
+    }
+    function visit(current, depth){
+      if (blocked || !current || typeof current !== 'object') return;
+      if (depth > maxDepth) {
+        blocked = true;
+        return;
+      }
+      if (!charge()) return;
+      if (seen) {
+        if (seen.has(current)) return;
+        seen.add(current);
+      }
+      if (Array.isArray(current)) {
+        for (let i = 0; i < current.length && !blocked; i += 1) {
+          if (!charge()) return;
+          visit(current[i], depth + 1);
+        }
+        return;
+      }
+      const aliases = [];
+      ['type', 'message_type', 'messageType'].forEach(function(key){
+        if (blocked || !hasOwn.call(current, key)) return;
+        const raw = String(current[key] || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (!/^capy:/i.test(raw)) return;
+        const messageType = runtimeMessageTypeValue(raw);
+        if (!messageType) {
+          blocked = true;
+          return;
+        }
+        aliases.push(messageType);
+      });
+      if (blocked) return;
+      if (aliases.some(function(messageType){ return messageType.toLowerCase() !== aliases[0].toLowerCase(); })) {
+        blocked = true;
+        return;
+      }
+      if (aliases.some(function(messageType){ return isBlockedRuntimeMessageType(messageType); })) {
+        blocked = true;
+        return;
+      }
+      for (const key in current) {
+        if (blocked) break;
+        if (!hasOwn.call(current, key)) continue;
+        if (!charge()) break;
+        visit(current[key], depth + 1);
+      }
+    }
+    visit(value, 0);
+    return { blocked };
   }
 
   function runtimeMessageType(data){
