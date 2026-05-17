@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2432** by @Michaelyklam (closes #2426) — Add a Catppuccin skin to Appearance settings. The single opt-in skin maps light mode to Catppuccin Latte and dark mode to Catppuccin Mocha, using Mauve as the accent while preserving the existing theme/skin persistence and no-build-step architecture.
+
 ## [v0.51.81] — 2026-05-17 — Release BE (stage-374 — 6-PR batch — cost-history POSIX lock + prompt-cache tokens + Plugins panel i18n + pending-placeholder chat + journal-replay partial recovery + default-off RuntimeAdapter Slice 2 seam)
 
 ### Added
