@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2452** by @Michaelyklam (fixes #2451) — Manual WebUI cron triggers now deliver the same final response or failure notice as scheduled cron runs, while still saving output files and recording delivery errors separately from job execution failures.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added

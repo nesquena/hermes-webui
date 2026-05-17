@@ -754,7 +754,14 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     agent config/.env while running. When no job profile is selected, both homes
     are the same and legacy server-default behavior is preserved.
     """
+    import importlib
+
     from cron.jobs import mark_job_run, save_job_output
+
+    _cron_scheduler = importlib.import_module("cron.scheduler")
+
+    _silent_marker = getattr(_cron_scheduler, "SILENT_MARKER", "[SILENT]")
+    _deliver_result = getattr(_cron_scheduler, "_deliver_result", None)
 
     job_id = job.get("id", "")
     execution_profile_home = execution_profile_home or profile_home
@@ -772,10 +779,28 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
             job, execution_profile_home
         )
 
-        # Persist output and run metadata back to the job's owning cron store,
-        # even when the selected execution profile is different.
+        # Persist output, deliver the same content the scheduled cron path would
+        # send, and write run metadata back to the job's owning cron store even
+        # when the selected execution profile is different.
         def _persist_success():
             save_job_output(job_id, output)
+
+            deliver_content = (
+                final_response
+                if success
+                else f"⚠️ Cron job '{job.get('name', job_id)}' failed:\n{error}"
+            )
+            should_deliver = bool(deliver_content)
+            if should_deliver and success and _silent_marker in deliver_content.strip().upper():
+                should_deliver = False
+
+            delivery_error = None
+            if should_deliver and _deliver_result is not None:
+                try:
+                    delivery_error = _deliver_result(job, deliver_content)
+                except Exception as de:
+                    delivery_error = str(de)
+                    logger.error("Delivery failed for manual cron job %s: %s", job_id, de)
 
             # Match the scheduled cron path: an apparently successful run with no
             # final response should not leave the job looking healthy.
@@ -784,7 +809,14 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
                 _success = False
                 _error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
-            mark_job_run(job_id, _success, _error)
+            try:
+                mark_job_run(job_id, _success, _error, delivery_error=delivery_error)
+            except TypeError:
+                # Older/fake cron.jobs modules used by focused WebUI tests may
+                # not expose the newer delivery_error parameter. Real Hermes
+                # scheduler builds do, so this is only a compatibility shim for
+                # legacy test doubles and deployments.
+                mark_job_run(job_id, _success, _error)
 
         _with_cron_home(profile_home, _persist_success)
     except Exception as e:
