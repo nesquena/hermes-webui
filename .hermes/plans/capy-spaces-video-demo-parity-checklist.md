@@ -84,10 +84,24 @@ Recently landed:
 
 Next checkpoint emphasis:
 
-1. Safe admin/recovery and rollback/time-travel before richer generated widgets or local-service dashboards.
-2. Research Harness as the preferred vertical demo: widget event → Capy run → live progress widgets → markdown artifact → PDF/export patch → rollback.
-3. Explicit sandbox/postMessage/event contract before trusted generated UI expands.
-4. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, and security status.
+1. OpenHuman-inspired context layer foundations: Memory Tree, source freshness, output compaction, autonomy indicators, model-routing hints, and structured progress events.
+2. Safe admin/recovery and rollback/time-travel before richer generated widgets or local-service dashboards.
+3. Research Harness as the preferred vertical demo: widget event → Capy run → live progress widgets → markdown artifact → PDF/export patch → rollback.
+4. Explicit sandbox/postMessage/event contract before trusted generated UI expands.
+5. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
+
+## OpenHuman-Inspired Context Layer Demo Criteria
+
+These are additive demo criteria for the new roadmap track. They do not replace the Space Agent video parity criteria below; they raise the bar for saying Capy has become a context-aware autonomous workspace.
+
+- **Memory freshness card visible:** Spaces/WebUI shows local-only source counts, stale counts, last refresh status, and clear empty/error states without exposing raw fetched content.
+- **Relevant memory slices visible:** Space detail and/or creator preview shows bounded cited memory snippets tied to the current Space, with provenance and redaction status.
+- **Compaction evidence visible:** Long tool/subagent/browser output receipts show original size, compacted size, retained artifact handles/citations, and redaction status where applicable.
+- **Progress panel visible:** Long-running creator/research/development flows expose structured tool/subagent/progress events with bounded metadata and no raw prompt/API-auth/generated-code leakage.
+- **Autonomy mode visible:** Actions show `Supervised`, `Semi-autonomous`, or `Autonomous` mode with a short explanation of what approvals/gates are still required.
+- **Prompt-injection preflight visible:** High-risk ingested source/context boundaries show pass/warn/block status before context can influence creator-loop or agent actions.
+- **Model routing hints visible:** Provider/model routing choices remain compatible with Brendan's OpenAI/xAI/LM Studio setup and are explained without pivoting to OpenHuman's subscription/backend model.
+- **Run-all smokes include context status:** Demo smoke receipts include memory/ingestion/compaction/progress status only as metadata; hostile source/renderer/script/API-auth fixtures remain absent from the DOM.
 
 ## Bottom line
 

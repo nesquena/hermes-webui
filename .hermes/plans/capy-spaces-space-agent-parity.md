@@ -13,6 +13,29 @@ Last updated: 2026-05-17 05:16 CDT on branch `feat/capy-spaces-foundation`.
 
 Current latest known completed code slice: Capy Spaces package import/export Space-tool aliases now reject ambient current-space selectors on non-current package actions before package import/export side effects, while preserving `space.current.*` export behavior and metadata-only package receipts. Use `git log -1 --oneline` for the exact commit hash.
 
+## OpenHuman-Inspired Expansion Track
+
+Canonical roadmap: `.hermes/plans/capy-openhuman-inspired-roadmap.md`.
+Implementation handoff/evidence: `.hermes/plans/2026-05-17_123717-openhuman-inspired-capy-roadmap.md` and `/tmp/openhuman-review.md`.
+
+Decision summary:
+
+- Adopt selected OpenHuman product/architecture ideas clean-room: Memory Tree, auto-fetch/source freshness, TokenJuice-style output compaction, user-visible autonomy modes, prompt-injection preflight, model routing hints, and structured progress events.
+- Do **not** pivot to OpenHuman, do **not** rewrite Hermes/Capy as Rust/Tauri, and do **not** copy GPLv3 OpenHuman code, tests, schemas, comments, or fixtures.
+- Keep Hermes as the persistent autonomous gateway/tool/cron/subagent layer and Capy Spaces as the safe metadata-only production canvas with recovery, revision history, sandbox preview, approval gates, and visual QA.
+
+Roadmap priority for upcoming autonomous sprints:
+
+1. Phase 0 plan-doc alignment and architecture inventory.
+2. Phase 1 clean-room Capy Memory Tree design/MVP.
+3. Phase 2 TokenJuice-style output compaction.
+4. Phase 3 auto-fetch source registry and memory freshness UI.
+5. Phase 4 Spaces-aware relevant-memory panel and creator-loop context.
+6. Phase 5 autonomy policy, prompt-injection preflight, and model routing visibility.
+7. Phase 6 structured progress-event stream.
+
+Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
+
 Recent completed slices:
 
 - `fix(spaces): reject ambient package tool selectors`
