@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2457** by @Michaelyklam (closes #2456) — Email gateway sessions imported from Hermes Agent `state.db` now normalize as messaging sessions and show an `Email` source label in the WebUI sidebar instead of falling through as unlabelled generic agent sessions. Keeps the Python source-normalization contract, gateway status platform labels, and frontend handoff/sidebar whitelist in sync.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added

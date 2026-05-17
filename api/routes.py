@@ -4183,6 +4183,7 @@ def handle_get(handler, parsed) -> bool:
             "telegram": "Telegram",
             "discord": "Discord",
             "slack": "Slack",
+            "email": "Email",
             "web": "Web",
             "api": "API",
         }
