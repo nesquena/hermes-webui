@@ -741,6 +741,134 @@ class TestNonEmptyMessagesPendingCleared:
         assert len(s.tool_calls) == 2
         assert s.tool_calls[0]["assistant_msg_idx"] == s.tool_calls[1]["assistant_msg_idx"]
 
+    def test_core_sync_branch_recovers_visible_journal_output(self, hermes_home, monkeypatch):
+        """The empty-sidecar + populated-core repair branch should still restore
+        already-journaled visible output from the interrupted stream."""
+        s = _make_session(messages=[])
+        s.pending_user_message = "Check maintainer activity"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = "core_journal_stream"
+        s.save()
+
+        core_messages = [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ]
+        core_path = _write_core_transcript(hermes_home, s.session_id, core_messages)
+
+        append_run_event(
+            s.session_id,
+            "core_journal_stream",
+            "token",
+            {"text": "I will check GitHub first."},
+        )
+        append_run_event(
+            s.session_id,
+            "core_journal_stream",
+            "tool",
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
+            },
+        )
+        append_run_event(
+            s.session_id,
+            "core_journal_stream",
+            "tool_complete",
+            {"name": "terminal", "duration": 1.2, "is_error": False},
+        )
+        append_run_event(
+            s.session_id,
+            "core_journal_stream",
+            "token",
+            {"text": "The first check finished before the restart."},
+        )
+
+        result = _apply_core_sync_or_error_marker(
+            s,
+            core_path,
+            stream_id_for_recheck="core_journal_stream",
+        )
+
+        assert result is True
+        contents = [m.get("content", "") for m in s.messages]
+        assert contents[:2] == [m["content"] for m in core_messages]
+        recovered_users = [m for m in s.messages if m.get("_recovered")]
+        assert len(recovered_users) == 1
+        assert recovered_users[0]["role"] == "user"
+        assert recovered_users[0]["content"] == "Check maintainer activity"
+        assert any("I will check GitHub first." in c for c in contents)
+        assert any("The first check finished before the restart." in c for c in contents)
+        assert s.tool_calls, "journaled tool starts should become visible settled tool cards"
+        assert s.tool_calls[0]["name"] == "terminal"
+        error_msgs = [m for m in s.messages if m.get("_error")]
+        assert len(error_msgs) == 1
+        assert "partial output above was recovered" in error_msgs[0]["content"]
+        assert s.pending_user_message is None
+        assert s.active_stream_id is None
+
+    def test_core_sync_branch_does_not_duplicate_journal_output_already_in_core(
+        self, hermes_home, monkeypatch
+    ):
+        """If the core transcript already contains the same visible output, the
+        journal repair must not append a second copy."""
+        s = _make_session(messages=[])
+        s.pending_user_message = "Check maintainer activity"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = "duplicate_core_journal_stream"
+        s.save()
+
+        core_messages = [
+            {"role": "user", "content": "Check maintainer activity"},
+            {"role": "assistant", "content": "I will check GitHub first."},
+        ]
+        core_tool_calls = [
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "snippet": "gh pr list --repo nesquena/hermes-webui",
+                "assistant_msg_idx": 1,
+                "done": True,
+            },
+        ]
+        core_path = _write_core_transcript(
+            hermes_home,
+            s.session_id,
+            core_messages,
+            tool_calls=core_tool_calls,
+        )
+
+        append_run_event(
+            s.session_id,
+            "duplicate_core_journal_stream",
+            "token",
+            {"text": "I will check GitHub first."},
+        )
+        append_run_event(
+            s.session_id,
+            "duplicate_core_journal_stream",
+            "tool",
+            {
+                "name": "terminal",
+                "preview": "gh pr list --repo nesquena/hermes-webui",
+                "args": {"command": "gh pr list --repo nesquena/hermes-webui"},
+            },
+        )
+
+        result = _apply_core_sync_or_error_marker(
+            s,
+            core_path,
+            stream_id_for_recheck="duplicate_core_journal_stream",
+        )
+
+        assert result is True
+        contents = [m.get("content", "") for m in s.messages]
+        assert contents.count("I will check GitHub first.") == 1
+        assert len(s.tool_calls) == 1
+        assert s.tool_calls[0]["name"] == "terminal"
+        assert not [m for m in s.messages if m.get("_error")]
+
 
 class TestLastResortSyncDelegation:
     """_last_resort_sync_from_core delegates to the shared helpers
