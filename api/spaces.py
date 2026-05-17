@@ -3743,6 +3743,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "reposition": {"mode": "metadata-only", "applied": False, "request": request},
         }
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
+        _space_tool_reject_ambient_current_selectors(data)
         result = duplicate_space_metadata_only(
             _space_tool_current_id(data),
             target_space_id=_space_tool_target_space_id_alias(data) or None,
@@ -3751,21 +3752,27 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, **result, "space": space}
     if name in {"space.spaces.savespacemeta", "space.current.savemeta"}:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         result = save_space_meta_from_tool(data)
         response = {"ok": True, "action": name, **result}
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
     if name in {"space.spaces.savespacelayout", "space.current.savelayout"}:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         result = save_space_layout_from_tool(data)
         response = {"ok": True, "action": name, **result}
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
     if name == "space.spaces.repairlayout":
+        _space_tool_reject_ambient_current_selectors(data)
         result = repair_space_layout_from_tool(data)
         return {"ok": True, "action": name, **result}
     if name == "space.spaces.rearrangewidgets":
+        _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         raw_widgets = data.get("widgets") or data.get("widgetLayouts") or data.get("widget_layouts") or []
         if not isinstance(raw_widgets, list):
@@ -3798,10 +3805,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "revision_event_ids": revision_event_ids,
         }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
+        _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_space(space_id)
         return {"ok": True, "action": name, **result}
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
+        _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widgets = _space_tool_widgets_payload(data, bulk=name.endswith("upsertwidgets"))
         saved_widgets: list[dict[str, Any]] = []
@@ -3876,6 +3885,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             },
         }
     if name == "space.spaces.renderwidget":
+        _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_payload, omitted_count = _space_tool_render_widget_payload(data)
         result = upsert_widget(space_id, widget_payload)
@@ -3889,6 +3899,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "render": {"mode": "metadata-only", "executed": False, "omitted_field_count": omitted_count},
         }
     if name in {"space.spaces.patchwidget", "space.current.patchwidget"}:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
@@ -3898,6 +3910,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["active_space_id"] = space_id
         return response
     if name == "space.spaces.togglewidgets":
+        _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
         toggled_widgets: list[dict[str, Any]] = []
@@ -3920,6 +3933,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "revision_event_ids": revision_event_ids,
         }
     if name in {"space.spaces.deletewidget", "space.spaces.removewidget", "space.current.deletewidget", "space.current.removewidget"}:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = delete_widget(space_id, widget_id)
@@ -3933,6 +3948,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.current.removewidgets",
         "space.current.deletewidgets",
     }:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
         revision_event_ids: list[str] = []
@@ -3957,6 +3974,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.current.removeallwidgets",
         "space.current.deleteallwidgets",
     }:
+        if not name.startswith("space.current."):
+            _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = [widget["id"] for widget in list_widgets(space_id)]
         revision_event_ids = []

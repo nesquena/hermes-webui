@@ -1124,6 +1124,98 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
 
 
 
+@pytest.mark.parametrize("ambient_key", ["activeSpaceId", "active_space_id", "currentSpaceId", "current_space_id"])
+@pytest.mark.parametrize(
+    ("action", "payload"),
+    [
+        ("space.spaces.saveSpaceMeta", {"spaceId": "ambient-source-mutation-lab", "title": "Ambient Rename"}),
+        (
+            "space.spaces.saveSpaceLayout",
+            {
+                "spaceId": "ambient-source-mutation-lab",
+                "widgetIds": ["weather-card"],
+                "widgetPositions": {"weather-card": {"x": 2, "y": 3}},
+            },
+        ),
+        ("space.spaces.repairLayout", {"spaceId": "ambient-source-mutation-lab"}),
+        (
+            "space.spaces.rearrangeWidgets",
+            {"spaceId": "ambient-source-mutation-lab", "widgets": [{"id": "weather-card", "x": 3, "y": 4}]},
+        ),
+        ("space.spaces.toggleWidgets", {"spaceId": "ambient-source-mutation-lab", "widgetIds": ["weather-card"]}),
+        (
+            "space.spaces.upsertWidget",
+            {
+                "spaceId": "ambient-source-mutation-lab",
+                "widget": {"id": "new-card", "kind": "markdown", "title": "New Card"},
+            },
+        ),
+        (
+            "space.spaces.upsertWidgets",
+            {
+                "spaceId": "ambient-source-mutation-lab",
+                "widgets": [{"id": "new-card", "kind": "markdown", "title": "New Card"}],
+            },
+        ),
+        (
+            "space.spaces.renderWidget",
+            {
+                "spaceId": "ambient-source-mutation-lab",
+                "widget": {"id": "render-card", "kind": "markdown", "title": "Render Card"},
+            },
+        ),
+        (
+            "space.spaces.patchWidget",
+            {"spaceId": "ambient-source-mutation-lab", "widgetId": "weather-card", "patch": {"title": "Patched"}},
+        ),
+        ("space.spaces.deleteWidget", {"spaceId": "ambient-source-mutation-lab", "widgetId": "weather-card"}),
+        ("space.spaces.removeWidgets", {"spaceId": "ambient-source-mutation-lab", "widgetIds": ["weather-card"]}),
+        ("space.spaces.removeAllWidgets", {"spaceId": "ambient-source-mutation-lab"}),
+        ("space.spaces.removeSpace", {"spaceId": "ambient-source-mutation-lab"}),
+        ("space.spaces.duplicateSpace", {"spaceId": "ambient-source-mutation-lab"}),
+    ],
+)
+def test_space_tool_adapter_rejects_ambient_current_selectors_for_non_current_source_mutation_aliases_metadata_only(
+    monkeypatch, tmp_path, action, payload, ambient_key
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "ambient-source-mutation-lab", "name": "Ambient Source Mutation Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "weather-card", "kind": "weather", "title": "Weather Card", "layout": {"x": 1, "y": 1, "w": 5, "h": 3}},
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "notes-card", "kind": "markdown", "title": "Notes Card"},
+    )
+    spaces.run_space_tool(
+        "space.spaces.saveSpaceLayout",
+        {
+            "spaceId": created["space_id"],
+            "widgetIds": ["weather-card", "notes-card"],
+            "widgetPositions": {"weather-card": {"x": 1, "y": 1}, "notes-card": {"x": 6, "y": 1}},
+            "widgetSizes": {"weather-card": {"w": 5, "h": 3}, "notes-card": {"w": 4, "h": 4}},
+        },
+    )
+    before_spaces = spaces.list_spaces()
+    before_detail = spaces.read_space_detail(created["space_id"])
+
+    request = dict(payload)
+    request[ambient_key] = created["space_id"]
+    request["renderer"] = "<script>ambientLeak()</script>"
+    request["api_key"] = "SECRET_VALUE_DO_NOT_LEAK"
+
+    with pytest.raises(ValueError, match="Non-current actions require explicit space_id/spaceId") as excinfo:
+        spaces.run_space_tool(action, request)
+    message = str(excinfo.value)
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in message
+    assert "<script>" not in message
+    assert "api_key" not in message
+
+    assert spaces.list_spaces() == before_spaces
+    assert spaces.read_space_detail(created["space_id"]) == before_detail
+
+
 def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "current-layout-lab", "name": "Current Layout Lab"})
