@@ -348,7 +348,7 @@ def test_post_turn_lifecycle_marks_completion_without_commit():
     src = Path(streaming_mod.__file__).read_text(encoding="utf-8")
 
     save_pos = src.index("s.save()")
-    lifecycle_marker = src.index("_memory_lifecycle_commit_sid = s.session_id", save_pos)
+    lifecycle_marker = src.index("mark_turn_completed(s.session_id, agent=agent)", save_pos)
     cancel_check = src.index("cancel_event.is_set()", save_pos)
     completed_journal = src.index('"completed"', save_pos)
     sync_to_state_db = src.index("# Sync to state.db", save_pos)
@@ -363,11 +363,12 @@ def test_post_turn_lifecycle_marks_completion_without_commit():
 
     # The post-turn block must contain mark_turn_completed but NOT
     # commit_session_memory — extraction is a boundary concern.
-    block_start = src.index("if _memory_lifecycle_commit_sid:", save_pos)
+    block_start = src.rindex("if not ephemeral:", save_pos, lifecycle_marker)
     block_end_pos = src.index("# Sync to state.db", save_pos)
     post_turn_block = src[block_start:block_end_pos]
     assert "mark_turn_completed" in post_turn_block
     assert "commit_session_memory" not in post_turn_block
+    assert "per-session writeback lock" in post_turn_block
 
 
 def test_multiple_completed_turns_coalesce_into_single_boundary_commit():

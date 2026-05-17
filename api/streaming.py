@@ -3915,8 +3915,6 @@ def _run_agent_streaming(
                         logger.debug("Failed to append cancelled turn journal event", exc_info=True)
                 put('cancel', {'message': 'Cancelled by user'})
                 return
-            _memory_lifecycle_commit_sid = None
-            _memory_lifecycle_commit_agent = None
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
                     logger.info(
@@ -4516,23 +4514,22 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Failed to append completed turn journal event", exc_info=True)
                 if not ephemeral:
-                    _memory_lifecycle_commit_sid = s.session_id
-                    _memory_lifecycle_commit_agent = agent
-            # ── Memory-provider lifecycle: mark turn completed (CLI parity) ──
-            # Completed, non-ephemeral turns are marked dirty/uncommitted so
-            # boundary drains know there is work.  Per CLI semantics, the
-            # actual memory extraction/commit happens only at session boundaries
-            # (new session creation, LRU eviction, shutdown drain) — NOT after
-            # every completed turn.  This mirrors Hermes CLI where
-            # run_agent.py::_sync_external_memory_for_turn() records messages
-            # but only AIAgent.commit_memory_session()/shutdown_memory_provider()
-            # trigger extraction via provider on_session_end().
-            if _memory_lifecycle_commit_sid:
-                try:
-                    from api.session_lifecycle import mark_turn_completed
-                    mark_turn_completed(_memory_lifecycle_commit_sid, agent=_memory_lifecycle_commit_agent)
-                except Exception:
-                    logger.debug("Memory lifecycle mark failed for session %s", _memory_lifecycle_commit_sid, exc_info=True)
+                    # ── Memory-provider lifecycle: mark turn completed (CLI parity) ──
+                    # Completed, non-ephemeral turns are marked dirty/uncommitted so
+                    # boundary drains know there is work.  Per CLI semantics, the
+                    # actual memory extraction/commit happens only at session boundaries
+                    # (new session creation, LRU eviction, shutdown drain) — NOT after
+                    # every completed turn.  This mirrors Hermes CLI where
+                    # run_agent.py::_sync_external_memory_for_turn() records messages
+                    # but only AIAgent.commit_memory_session()/shutdown_memory_provider()
+                    # trigger extraction via provider on_session_end().  The mark is
+                    # in-memory bookkeeping, not provider I/O, so keep it inside the
+                    # per-session writeback lock to preserve completed-turn ordering.
+                    try:
+                        from api.session_lifecycle import mark_turn_completed
+                        mark_turn_completed(s.session_id, agent=agent)
+                    except Exception:
+                        logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings
