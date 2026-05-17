@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- **PR #TBD** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC after the Slice 2 seam shipped by marking Slice 2 complete and defining the first Slice 3a cancel-control gate. The new gate scopes Stop Generation through `RuntimeAdapter.cancel_run(...)` only, pins behavior-preserving cancellation, journal/status coherence, idempotent duplicate cancel, and explicit non-goals for approval/clarify, queue/goal, runner/sidecar, and public chat-start response changes.
+
 ## [v0.51.83] — 2026-05-17 — Release BG (stage-376 — 12-PR contributor batch — chat-start adapter parity + populated-core journal recovery + thinking card dedup + context metadata refresh + model cache fingerprint + stream fade cap + manual cron delivery + active-session spinner + email gateway label + thinking copy button + /theme i18n + compact activity semantics)
 
 ### Added
