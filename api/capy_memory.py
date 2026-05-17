@@ -7,6 +7,7 @@ injection checks, approval gates, or rollback/recovery controls.
 from __future__ import annotations
 
 import hashlib
+import ntpath
 import os
 import re
 import sqlite3
@@ -20,7 +21,7 @@ _MAX_TEXT_LEN = 500
 
 _UNSAFE_KEY_RE = re.compile(
     r"renderer|html|script|source|data|code|body|generated[_-]?code|generatedbody|rendercode|widgetbody|"
-    r"api[_-]?key|apiauth|authorization|bearer|token|secret|password|credential|"
+    r"api[_-]?key|api[_-]?auth|apiauth|authorization|bearer|token|secret|password|credential|"
     r"^on[a-z]+$",
     re.IGNORECASE,
 )
@@ -29,6 +30,17 @@ _UNSAFE_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|bearer\s+placeholder|raw\s+prompt|"
     r"system\s+prompt|developer\s+prompt|prompt\s+injection|ignore\s+previous\s+instructions|"
     r"<[^>]+\bon[a-z]+\s*=",
+    re.IGNORECASE,
+)
+
+_UNSAFE_PUBLIC_VALUE_RE = re.compile(
+    r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|ignore\s+previous\s+instructions|"
+    r"credential|password|secret(?!ary)|token(?!ization)|authorization|cookie|"
+    r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])|"
+    r"(?:^|[._/\s])(?:html|script|source|data|body|code)(?:$|[._/\s])|"
+    r"(?:html|script|source|data|body|code)(?:panel|widget|module|source|body)",
     re.IGNORECASE,
 )
 
@@ -449,6 +461,250 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_PUBLIC_SCALAR_TYPES = (str, int, float, bool)
+
+
+def _is_present_public_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
+
+
+def _safe_public_text(value: Any, *, limit: int = _MAX_TEXT_LEN) -> str:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return ""
+    text = _safe_text(value, limit=limit)
+    if not text or _UNSAFE_PUBLIC_VALUE_RE.search(text):
+        return ""
+    return text
+
+
+def _safe_public_id(value: Any, *, fallback: str = "") -> str:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return fallback
+    raw_text = _safe_text(value, limit=160)
+    if not raw_text or _UNSAFE_PUBLIC_VALUE_RE.search(raw_text):
+        return fallback
+    text = _safe_id(value, fallback="")
+    if not text or _UNSAFE_PUBLIC_VALUE_RE.search(text):
+        return fallback
+    return text
+
+
+def _safe_public_text_with_drop(value: Any, *, limit: int = _MAX_TEXT_LEN, fallback: str = "") -> tuple[str, int]:
+    safe = _safe_public_text(value, limit=limit)
+    if safe:
+        return safe, 0
+    return fallback, 1 if _is_present_public_value(value) else 0
+
+
+def _safe_public_id_with_drop(value: Any, *, fallback: str = "") -> tuple[str, int]:
+    safe = _safe_public_id(value)
+    if safe:
+        return safe, 0
+    return fallback, 1 if _is_present_public_value(value) else 0
+
+
+def _safe_public_id_list(value: Any, *, limit: int = 12) -> tuple[list[str], int]:
+    if not isinstance(value, list):
+        return [], 1 if _is_present_public_value(value) else 0
+    raw_items = value
+    safe_items: list[str] = []
+    dropped = 0
+    for item in raw_items[: max(0, limit)]:
+        raw_value = item
+        if isinstance(item, dict):
+            raw_value = item.get("id") or item.get("widget_id") or item.get("widgetId") or item.get("name")
+        safe = _safe_public_id(raw_value)
+        if safe:
+            safe_items.append(safe)
+        else:
+            dropped += 1
+    if len(raw_items) > limit:
+        dropped += len(raw_items) - limit
+    return safe_items, dropped
+
+
+def _canonical_artifact_record(
+    *,
+    source_type: str,
+    space_id: str,
+    body_title: str,
+    body_lines: list[str],
+    origin_uri: str,
+    dropped_field_count: int,
+) -> dict[str, Any]:
+    body = "\n".join([f"# {body_title}", "", *body_lines]).strip() + "\n"
+    content_sha256 = _sha256(body)
+    source_id_seed = f"{source_type}:{space_id}:{origin_uri}:{content_sha256}"
+    source_id = "cmt-src-" + _sha256(source_id_seed)[:24]
+    chunk_id = "cmt-chunk-" + _sha256(f"{source_id}:0:{content_sha256}")[:24]
+    redaction_status = "dropped_fields" if dropped_field_count else "none"
+    frontmatter = _frontmatter(
+        {
+            "source_id": source_id,
+            "source_type": source_type,
+            "origin_uri": origin_uri,
+            "space_id": space_id,
+            "content_sha256": content_sha256,
+            "redaction_status": redaction_status,
+        }
+    )
+    return {
+        "source_id": source_id,
+        "chunk_id": chunk_id,
+        "source_type": source_type,
+        "origin_uri": origin_uri,
+        "space_id": space_id,
+        "content_sha256": content_sha256,
+        "redaction_status": redaction_status,
+        "dropped_field_count": dropped_field_count,
+        "markdown": frontmatter + "\n\n" + body,
+    }
+
+
+def canonicalize_space_revision_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a deterministic, metadata-only memory record for a Space revision event."""
+    if not isinstance(event, dict):
+        raise ValueError("space revision event must be a mapping")
+
+    dropped_field_count = _scan_for_unsafe(event)
+    space_id, dropped = _safe_public_id_with_drop(event.get("space_id") or event.get("spaceId"), fallback="space")
+    dropped_field_count += dropped
+    event_id, dropped = _safe_public_id_with_drop(event.get("event_id") or event.get("eventId") or event.get("revision_event_id"))
+    dropped_field_count += dropped
+    event_type, dropped = _safe_public_text_with_drop(
+        event.get("event_type") or event.get("eventType") or event.get("type"),
+        limit=120,
+        fallback="space.revision",
+    )
+    dropped_field_count += dropped
+    reason, dropped = _safe_public_text_with_drop(event.get("reason") or event.get("checkpoint_reason"), limit=400)
+    dropped_field_count += dropped
+    timeline_state, dropped = _safe_public_text_with_drop(event.get("timeline_state") or event.get("timelineState"), limit=80)
+    dropped_field_count += dropped
+
+    body_lines: list[str] = ["## Revision metadata"]
+    _append_line(body_lines, "space_id", space_id)
+    _append_line(body_lines, "event_id", event_id)
+    _append_line(body_lines, "event_type", event_type)
+    _append_line(body_lines, "reason", reason)
+    _append_line(body_lines, "timeline_state", timeline_state)
+
+    raw_restore_diff = event.get("restore_diff")
+    restore_diff = raw_restore_diff if isinstance(raw_restore_diff, dict) else {}
+    if not isinstance(raw_restore_diff, dict) and _is_present_public_value(raw_restore_diff):
+        dropped_field_count += 1
+    if restore_diff:
+        body_lines.extend(["", "## Restore diff"])
+        for field in ("widgets_to_add", "widgets_to_update", "widgets_to_remove"):
+            items, dropped = _safe_public_id_list(restore_diff.get(field), limit=20)
+            dropped_field_count += dropped
+            if items:
+                body_lines.append(f"- {field}: {', '.join(items)}")
+
+    origin = f"capy-space://{space_id}/revision/{event_id or _sha256(event_type)[:12]}"
+    return _canonical_artifact_record(
+        source_type="space_revision_event",
+        space_id=space_id,
+        body_title="Space revision event",
+        body_lines=body_lines,
+        origin_uri=origin,
+        dropped_field_count=dropped_field_count,
+    )
+
+
+def canonicalize_space_widget_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Return a deterministic, metadata-only memory record for a Space widget event."""
+    if not isinstance(event, dict):
+        raise ValueError("space widget event must be a mapping")
+
+    dropped_field_count = _scan_for_unsafe(event)
+    space_id, dropped = _safe_public_id_with_drop(event.get("space_id") or event.get("spaceId"), fallback="space")
+    dropped_field_count += dropped
+    widget_id, dropped = _safe_public_id_with_drop(event.get("widget_id") or event.get("widgetId") or event.get("id"))
+    dropped_field_count += dropped
+    event_id, dropped = _safe_public_id_with_drop(event.get("event_id") or event.get("eventId"))
+    dropped_field_count += dropped
+    event_name, dropped = _safe_public_text_with_drop(event.get("event_name") or event.get("eventName") or event.get("name"), limit=120, fallback="widget.event")
+    dropped_field_count += dropped
+    status, dropped = _safe_public_text_with_drop(event.get("status"), limit=80, fallback="queued")
+    dropped_field_count += dropped
+
+    body_lines: list[str] = ["## Widget event metadata"]
+    _append_line(body_lines, "space_id", space_id)
+    _append_line(body_lines, "widget_id", widget_id)
+    _append_line(body_lines, "event_id", event_id)
+    _append_line(body_lines, "event_name", event_name)
+    _append_line(body_lines, "status", status)
+
+    origin = f"capy-space://{space_id}/widget/{widget_id or 'widget'}/event/{event_id or _sha256(event_name)[:12]}"
+    return _canonical_artifact_record(
+        source_type="space_widget_event",
+        space_id=space_id,
+        body_title="Space widget event",
+        body_lines=body_lines,
+        origin_uri=origin,
+        dropped_field_count=dropped_field_count,
+    )
+
+
+def canonicalize_visual_qa_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Return a deterministic, metadata-only memory record for a visual QA report."""
+    if not isinstance(report, dict):
+        raise ValueError("visual QA report must be a mapping")
+
+    dropped_field_count = _scan_for_unsafe(report)
+    space_id, dropped = _safe_public_id_with_drop(report.get("space_id") or report.get("spaceId"), fallback="space")
+    dropped_field_count += dropped
+    surface, dropped = _safe_public_text_with_drop(report.get("surface") or report.get("title"), limit=200, fallback="Visual QA")
+    dropped_field_count += dropped
+    status, dropped = _safe_public_text_with_drop(report.get("status") or report.get("result"), limit=80, fallback="unknown")
+    dropped_field_count += dropped
+    raw_screenshot_path = report.get("screenshot_path")
+    screenshot_value = ntpath.basename(raw_screenshot_path) if isinstance(raw_screenshot_path, str) else raw_screenshot_path
+    screenshot_name, dropped = _safe_public_text_with_drop(screenshot_value, limit=240)
+    dropped_field_count += dropped
+
+    body_lines: list[str] = ["## Visual QA metadata"]
+    _append_line(body_lines, "space_id", space_id)
+    _append_line(body_lines, "surface", surface)
+    _append_line(body_lines, "status", status)
+    _append_line(body_lines, "screenshot", screenshot_name)
+
+    raw_findings = report.get("findings")
+    if isinstance(raw_findings, list):
+        findings: list[Any] = raw_findings
+    else:
+        findings = []
+        if _is_present_public_value(raw_findings):
+            dropped_field_count += 1
+    safe_findings: list[str] = []
+    for finding in findings[:10]:
+        safe = _safe_public_text(finding, limit=300)
+        if safe:
+            safe_findings.append(safe)
+        else:
+            dropped_field_count += 1
+    if len(findings) > 10:
+        dropped_field_count += len(findings) - 10
+    if safe_findings:
+        body_lines.extend(["", "## Findings"])
+        body_lines.extend(f"- {finding}" for finding in safe_findings)
+
+    origin = f"capy-space://{space_id}/visual-qa/{_sha256(surface + status + screenshot_name)[:12]}"
+    return _canonical_artifact_record(
+        source_type="visual_qa_report",
+        space_id=space_id,
+        body_title="Visual QA report",
+        body_lines=body_lines,
+        origin_uri=origin,
+        dropped_field_count=dropped_field_count,
+    )
+
+
 def _append_line(lines: list[str], label: str, value: Any) -> None:
     safe = _safe_text(value)
     if safe:
@@ -524,6 +780,9 @@ def canonicalize_space_manifest(space: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "canonicalize_space_manifest",
+    "canonicalize_space_revision_event",
+    "canonicalize_space_widget_event",
+    "canonicalize_visual_qa_report",
     "ingest_source",
     "init_memory_tree",
     "memory_status",
