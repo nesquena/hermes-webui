@@ -284,12 +284,23 @@ def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max
     payloads can still carry postMessage-shaped envelopes under app data keys such as
     message/event/messages. Treat only capy-shaped nested discriminator values as runtime
     contract selectors so benign nested labels like {"type": "form.submit"} stay intact.
+    Complexity overflow fails closed because skipped nodes could hide blocked runtime messages.
     """
     found: list[str] = []
+    inspected = 0
+
+    def charge_node() -> None:
+        nonlocal inspected
+        inspected += 1
+        if inspected > max_items:
+            raise ValueError("Blocked by widget runtime contract")
 
     def visit(current: Any, depth: int) -> None:
-        if depth > max_depth or len(found) >= max_items:
+        if depth > max_depth:
+            raise ValueError("Blocked by widget runtime contract")
+        if not isinstance(current, (dict, list)):
             return
+        charge_node()
         if isinstance(current, dict):
             aliases: list[str] = []
             for key in ("type", "message_type", "messageType"):
@@ -306,19 +317,17 @@ def _nested_payload_runtime_message_types(value: Any, *, max_depth: int = 6, max
                 raise ValueError("Blocked by widget runtime contract")
             for message_type in aliases:
                 found.append(message_type)
-                if len(found) >= max_items:
-                    return
+                if len(found) > max_items:
+                    raise ValueError("Blocked by widget runtime contract")
             for index, nested in enumerate(current.values()):
                 if index >= max_items:
-                    break
+                    raise ValueError("Blocked by widget runtime contract")
                 visit(nested, depth + 1)
-                if len(found) >= max_items:
-                    return
         elif isinstance(current, list):
-            for nested in current[:max_items]:
+            for index, nested in enumerate(current):
+                if index >= max_items:
+                    raise ValueError("Blocked by widget runtime contract")
                 visit(nested, depth + 1)
-                if len(found) >= max_items:
-                    return
 
     visit(value, 0)
     return found

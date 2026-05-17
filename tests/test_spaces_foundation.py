@@ -14484,6 +14484,40 @@ def test_widget_event_rejects_nested_conflicting_runtime_message_aliases_metadat
     assert "<script" not in serialized
 
 
+def test_widget_event_rejects_nested_runtime_payload_complexity_overflow(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "nested-runtime-overflow", "name": "Nested Runtime Overflow"})
+    spaces.upsert_widget(created["space_id"], {"id": "sandbox", "kind": "html", "title": "Sandbox"})
+
+    too_deep: dict[str, object] = {"query": "safe"}
+    cursor = too_deep
+    for _ in range(8):
+        cursor["message"] = {"query": "safe"}
+        cursor = cursor["message"]
+    cursor["messageType"] = "capy:agent:prompt"
+
+    too_wide = {"messages": [{"query": f"safe-{index}"} for index in range(85)]}
+    too_wide["messages"].append({"messageType": "capy:agent:prompt"})
+
+    for payload in (too_deep, too_wide):
+        with pytest.raises(ValueError, match="runtime contract"):
+            spaces.queue_widget_event(
+                created["space_id"],
+                "sandbox",
+                "agent.prompt",
+                payload,
+                prompt="Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                session_id="SECRET_VALUE_DO_NOT_LEAK",
+            )
+
+    events = spaces.list_widget_events(created["space_id"], "sandbox")
+    serialized = json.dumps(events).lower()
+    assert events == []
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "capy:agent:prompt" not in serialized
+
+
 def test_widget_event_route_accepts_camelcase_runtime_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "camel-route-runtime", "name": "Camel Route Runtime"})
