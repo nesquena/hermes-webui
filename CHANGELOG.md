@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2415** by @Michaelyklam (fixes #2399) — `providers.only_configured` and other scalar flags under the top-level `providers:` config mapping no longer appear as fake provider groups in the model picker. Provider detection now only seeds picker groups from known provider ids/aliases or dict-shaped provider configs, so filtering flags cannot render as `Only-Configured`.
+
 ## [v0.51.79] — 2026-05-16 — Release BC (stage-372 — 5-PR batch — text-mode image history fix + Activity-group compression boundary + named custom provider routing + quota chip Settings toggle + RFC docs)
 
 ### Added
