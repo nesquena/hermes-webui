@@ -11,6 +11,7 @@
 - **PR #2445** by @Michaelyklam (fixes #2443) — `/api/models` now fingerprints model-catalog inputs as part of its persisted cache metadata, so server-side catalog additions and Codex local catalog changes invalidate `models_cache.json` immediately instead of waiting for the 24-hour TTL or manual cache deletion.
 - **PR #2450** by @Michaelyklam (fixes #2447) — Cap the optional streaming word-fade drain after the final `done` SSE event so very large or bursty completed responses are rendered from the canonical session promptly instead of keeping the chat in a live/working state until Stop is pressed.
 - **PR #2452** by @Michaelyklam (fixes #2451) — Manual WebUI cron triggers now deliver the same final response or failure notice as scheduled cron runs, while still saving output files and recording delivery errors separately from job execution failures.
+- Keep the sidebar spinner in sync with server session metadata when the currently open session has finished but the browser still has stale local busy state (#2454).
 
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
