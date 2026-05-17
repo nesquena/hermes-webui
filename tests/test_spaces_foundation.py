@@ -8436,6 +8436,90 @@ def test_space_tool_adapter_non_current_repair_aliases_reject_ambient_current_se
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_non_current_repair_aliases_reject_nested_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "noncurrent-repair-nested-target", "name": "Nested Repair Target"})
+    ambient = spaces.create_space({"space_id": "noncurrent-repair-nested-ambient", "name": "Nested Ambient Space"})
+    before_target = spaces.read_space(target["space_id"])
+    before_ambient = spaces.read_space(ambient["space_id"])
+    before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    for action in (
+        "space.recovery.repair_space",
+        "space.safe_mode.repair",
+        "space.admin.repair",
+        "space.admin.recovery.repair_space",
+    ):
+        with pytest.raises(ValueError, match="current-space selectors"):
+            spaces.run_space_tool(
+                action,
+                {
+                    "spaceId": target["space_id"],
+                    "prompt": "repair renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+                    "payload": {
+                        "safe_note": "must not queue",
+                        "nested": [
+                            {"activeSpaceId": ambient["space_id"]},
+                            {"details": {"current_space_id": target["space_id"]}},
+                        ],
+                    },
+                    "session_id": "session renderer SECRET_VALUE_DO_NOT_LEAK",
+                },
+            )
+
+    serialized = json.dumps(spaces.recovery_snapshot()).lower()
+    assert spaces.read_space(target["space_id"]) == before_target
+    assert spaces.read_space(ambient["space_id"]) == before_ambient
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+    assert spaces.list_space_repair_events(target["space_id"]) == []
+    assert spaces.list_space_repair_events(ambient["space_id"]) == []
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_space_tool_adapter_non_current_repair_accepts_benign_deep_scalar_payload(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "noncurrent-repair-deep-safe", "name": "Deep Safe Repair"})
+
+    queued = spaces.run_space_tool(
+        "space.recovery.repair_space",
+        {
+            "spaceId": target["space_id"],
+            "prompt": "repair safe layout labels",
+            "payload": {
+                "action": "repair-space",
+                "safe_note": "layout repair",
+                "nested": {"l1": {"l2": {"l3": {"l4": {"label": "safe deep scalar"}}}}},
+            },
+        },
+    )
+
+    assert queued["queued"] is True
+    assert queued["event_name"] == "agent.repair"
+    assert spaces.list_space_repair_events(target["space_id"])[0]["event_id"] == queued["event_id"]
+
+
+def test_space_tool_adapter_non_current_repair_rejects_overwide_payloads_before_side_effects(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "noncurrent-repair-wide-target", "name": "Wide Repair Target"})
+    before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="current-space selectors"):
+        spaces.run_space_tool(
+            "space.recovery.repair_space",
+            {
+                "spaceId": target["space_id"],
+                "prompt": "repair safe layout labels",
+                "payload": {"items": list(range(150))},
+            },
+        )
+
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+    assert spaces.list_space_repair_events(target["space_id"]) == []
+
+
 def test_space_tool_adapter_non_current_quarantine_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

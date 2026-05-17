@@ -3174,9 +3174,31 @@ def _space_tool_non_current_space_id(payload: dict[str, Any]) -> str:
 
 def _space_tool_reject_ambient_current_selectors(payload: dict[str, Any]) -> None:
     """Reject active/current selectors on non-current tool actions."""
-    for key in ("active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"):
-        if str(payload.get(key) or "").strip():
-            raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
+    ambient_names = {"active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"}
+    inspected = 0
+
+    def reject() -> None:
+        raise ValueError("Non-current actions require explicit space_id/spaceId; use space.current.* for current-space selectors")
+
+    def visit(value: Any, depth: int = 0) -> None:
+        nonlocal inspected
+        inspected += 1
+        if inspected > 120:
+            reject()
+        if not isinstance(value, (dict, list, tuple)):
+            return
+        if depth > 6:
+            reject()
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in ambient_names and nested is not None and str(nested).strip():
+                    reject()
+                visit(nested, depth + 1)
+            return
+        for nested in value:
+            visit(nested, depth + 1)
+
+    visit(payload)
 
 
 def _space_tool_widget_id_alias(payload: dict[str, Any]) -> str:
