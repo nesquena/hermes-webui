@@ -965,6 +965,27 @@ global.fetch = async function(path, opts = {}) {
       { event_id: 'rev-data-lab', event_type: 'space.created', space_id: 'data-lab', created_at: 1709999900, details: { name: 'Daily Data Dashboard' }, restore_preview: { name: 'Daily Data Dashboard', widget_count: 1, widgets: [{ id: 'timeline', title: 'Timeline', kind: 'status' }] }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [] } },
     ] });
   }
+  if (path === 'api/spaces/memory?space_id=lab') {
+    return response({
+      space_id: 'lab',
+      limit: 5,
+      local_only: true,
+      results: [
+        {
+          source_id: 'cmt-src-lab',
+          chunk_id: 'cmt-chunk-lab',
+          source_type: 'space_manifest',
+          title: 'Lab Space manifest',
+          origin_uri: 'capy-space://lab',
+          space_id: 'lab',
+          snippet: 'Memory Tree route smoke stores safe metadata for Lab widgets and OpenHuman inspired source context.',
+          redaction_status: 'dropped_fields',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
+      ],
+    });
+  }
   if (path === 'api/spaces/revisions?space_id=lab&limit=10' || path === 'api/spaces/revisions?space_id=lab') {
     const labRevisions = [
       { event_id: 'rev3', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000060, timeline_state: 'future', is_return_to_present_candidate: false, details: { widget_id: 'weather', fields: ['layout'], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab intermediate', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather intermediate', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_diff: { has_changes: false, widget_count_delta: 0, widgets_to_add: [], widgets_to_remove: [], widgets_to_update: [], space_fields_to_update: [], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
@@ -2840,6 +2861,21 @@ def test_spaces_ui_open_space_renders_space_agent_like_canvas_shell_metadata_onl
     assert "left:32%;top:48%;width:35%;min-height:30px" not in canvas_html
     assert {"path": "api/spaces/get?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert {"path": "api/spaces/revisions?space_id=lab&limit=10", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_open_space_renders_memory_tree_context_card(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+
+    assert "Memory Tree context" in out["rootHtml"]
+    assert "Local-only Spaces memory" in out["rootHtml"]
+    assert "Lab Space manifest" in out["rootHtml"]
+    assert "OpenHuman inspired source context" in out["rootHtml"]
+    assert "space_manifest · capy-space://lab · dropped_fields" in out["rootHtml"]
+    assert {"path": "api/spaces/memory?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
@@ -5585,8 +5621,9 @@ def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detai
     assert out["dialogs"][0]["confirmLabel"] == "Delete data slot"
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "key": "research-summary"}
-    assert out["calls"][-2]["path"] == "api/spaces/get?space_id=lab"
-    assert out["calls"][-1]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-3]["path"] == "api/spaces/get?space_id=lab"
+    assert out["calls"][-2]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-1]["path"] == "api/spaces/memory?space_id=lab"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
@@ -5642,8 +5679,9 @@ def test_spaces_ui_restore_revision_uses_shared_confirm_and_reload_without_widge
     assert "Restore" in out["dialogs"][0]["confirmLabel"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "event_id": "rev1"}
-    assert out["calls"][-2]["path"] == "api/spaces/get?space_id=lab"
-    assert out["calls"][-1]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-3]["path"] == "api/spaces/get?space_id=lab"
+    assert out["calls"][-2]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-1]["path"] == "api/spaces/memory?space_id=lab"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
@@ -5660,8 +5698,9 @@ def test_spaces_ui_restore_widget_revision_posts_widget_only_and_refreshes_detai
     assert out["dialogs"][0]["confirmLabel"] == "Restore widget"
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "event_id": "rev1", "widget_id": "weather"}
-    assert out["calls"][-2]["path"] == "api/spaces/get?space_id=lab"
-    assert out["calls"][-1]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-3]["path"] == "api/spaces/get?space_id=lab"
+    assert out["calls"][-2]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
+    assert out["calls"][-1]["path"] == "api/spaces/memory?space_id=lab"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]

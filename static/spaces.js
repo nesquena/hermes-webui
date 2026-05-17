@@ -740,14 +740,15 @@
       const results = await Promise.all([
         fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId)),
         fetchSpacesJson('api/spaces/revisions?space_id='+encodeURIComponent(safeSpaceId)+'&limit=10'),
+        fetchSpacesJson('api/spaces/memory?space_id='+encodeURIComponent(safeSpaceId)).catch(function(){ return {results: [], local_only: true, unavailable: true}; }),
       ]);
-      root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || []);
+      root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || [], results[2] || {});
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Space detail unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
   }
 
-  function renderSpaceDetail(space, revisions){
+  function renderSpaceDetail(space, revisions, memoryData){
     const spaceId = space.space_id || '';
     const name = space.name || spaceId || 'Untitled';
     const description = space.description || '';
@@ -767,8 +768,31 @@
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(safeSpaceRevisionLabel(space.revision_event_id, 'none'))+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="checkpointSpace" data-space-id="'+escapeHtml(spaceId)+'">Checkpoint</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
+      renderSpaceMemoryContext(memoryData || {}) +
       renderSharedDataSlots(spaceId, space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
+  }
+
+  function renderSpaceMemoryContext(memoryData){
+    const results = Array.isArray(memoryData && memoryData.results) ? memoryData.results.slice(0, 5) : [];
+    const localOnly = memoryData && memoryData.local_only !== false;
+    const unavailable = memoryData && memoryData.unavailable === true;
+    const rows = results.length ? results.map(function(item){
+      if (!item || typeof item !== 'object') return '';
+      const title = safeDisplayMetadataText(item.title || item.source_id || 'Memory source', 'Memory source') || 'Memory source';
+      const snippet = safeDisplayMetadataText(item.snippet || '', '') || '';
+      const sourceType = safeDisplayMetadataText(item.source_type || 'source', 'source') || 'source';
+      const origin = safeDisplayMetadataText(item.origin_uri || '', '') || '';
+      const redaction = safeDisplayMetadataText(item.redaction_status || 'none', 'none') || 'none';
+      const meta = [sourceType, origin, redaction].filter(Boolean).join(' · ');
+      return '<div class="capy-spaces-widget capy-spaces-memory-source"><div><strong>'+escapeHtml(title)+'</strong>' +
+        (snippet ? '<div class="capy-spaces-muted">'+escapeHtml(snippet)+'</div>' : '') +
+        '<div class="capy-spaces-muted">'+escapeHtml(meta)+'</div></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No relevant memory admitted for this Space yet.</div>';
+    const status = unavailable ? 'Memory route unavailable; continuing without context.' : (localOnly ? 'Local-only Spaces memory' : 'Spaces memory');
+    return '<div class="capy-spaces-card capy-spaces-memory-context"><h3>Memory Tree context</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(status)+' · metadata-only snippets · generated code and credentials remain redacted.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
   function renderSpaceAgentCanvasShell(space, widgets){
