@@ -4281,12 +4281,12 @@ html[lang^="ar"] .hljs {
 }
 /* User messages float right, assistant messages float left */
 .chat-content-rtl .msg-row[data-role="user"] .msg-body {
-  margin-left: 0;
-  margin-right: auto;
-}
-.chat-content-rtl .msg-row[data-role="assistant"] .msg-body {
   margin-left: auto;
   margin-right: 0;
+}
+.chat-content-rtl .msg-row[data-role="assistant"] .msg-body {
+  margin-left: 0;
+  margin-right: auto;
 }
 /* Session active indicator on right side */
 .chat-content-rtl .session-item.active {
