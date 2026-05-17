@@ -786,33 +786,30 @@ def _resolve_login_locale_key(raw_lang: str | None) -> str:
     return "en"
 
 # ── Login page (self-contained, no external deps) ────────────────────────────
-# Uses Neo design tokens inline: warm parchment light / neutral dark,
-# gold accent, restrained radius, no gradients or heavy shadows.
+# Uses Neo skin tokens: cyan accent, navy dark, blue-grey light.
 _LOGIN_PAGE_HTML = """<!doctype html>
 <html lang="{{LANG}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{BOT_NAME}} — {{LOGIN_TITLE}}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#FEFCF7;--surface:#F3EEE3;--border:rgba(0,0,0,.1);
-  --text:#1A1610;--muted:#5C5344;--accent:#B8860B;--accent-hover:#996F08;
-  --input-bg:rgba(0,0,0,.03);--focus-ring:rgba(184,134,11,.35);
+  --bg:#F2F6FB;--surface:#FFFFFF;--border:#D6E1EE;
+  --text:#0B1726;--muted:#54637A;--accent:#0288A8;--accent-hover:#016B85;
+  --input-bg:rgba(2,136,168,0.04);--focus-ring:rgba(2,136,168,0.30);
   --error:#C62828;
   --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
 }
 @media(prefers-color-scheme:dark){:root{
-  --bg:#0D0D1A;--surface:#1A1A2E;--border:rgba(255,255,255,.1);
-  --text:#FFF8DC;--muted:#C0C0C0;--accent:#FFD700;--accent-hover:#FFBF00;
-  --input-bg:rgba(255,255,255,.04);--focus-ring:rgba(255,215,0,.35);
+  --bg:#070B17;--surface:#121A2E;--border:#1F2A44;
+  --text:#E6F4FF;--muted:#8AA0BD;--accent:#00E5FF;--accent-hover:#00B8D4;
+  --input-bg:rgba(0,229,255,0.05);--focus-ring:rgba(0,229,255,0.32);
   --error:#EF5350;
 }}
 body{background:var(--bg);color:var(--text);font-family:var(--font-ui);
   height:100vh;display:flex;align-items:center;justify-content:center}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:36px 32px;width:320px;text-align:center}
-.logo{width:48px;height:48px;border-radius:8px;background:var(--accent);
-  display:flex;align-items:center;justify-content:center;
-  font-weight:800;font-size:20px;color:var(--bg);margin:0 auto 12px}
+.logo{width:64px;height:64px;border-radius:50%;object-fit:cover;margin:0 auto 12px}
 h1{font-size:18px;font-weight:600;margin-bottom:4px}
 .sub{font-size:12px;color:var(--muted);margin-bottom:24px}
 input{width:100%;padding:10px 14px;border-radius:8px;border:1px solid var(--border);
@@ -826,7 +823,7 @@ button:hover{background:var(--accent);color:var(--bg)}
 .err{color:var(--error);font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
-  <div class="logo">{{BOT_NAME_INITIAL}}</div>
+  <img class="logo" src="/static/brand/neo-ico-128.webp" alt="{{BOT_NAME}}" width="64" height="64">
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
@@ -874,7 +871,6 @@ def handle_get(handler, parsed) -> bool:
         ]
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
-            .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
