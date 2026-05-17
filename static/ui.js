@@ -2706,7 +2706,7 @@ function renderMd(raw){
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
     if(!isSep(rows[1]))return block;
-    const _protectPipes=r=>r.replace(/([([{<][^)\]}>]*)[|]([^)\]}>]*[)\]}>])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);
+    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([{<][^)\]}'>]*)[|]([^)\]}'>]*[)\]}>])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
     const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
     const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
     const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
