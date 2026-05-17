@@ -123,8 +123,8 @@ def test_hero_card_in_index_html():
     assert 'id="heroGreetingTime"' in html
     assert 'class="hero-greeting-welcome"' in html
     assert 'class="hero-greeting-summary"' in html
-    # neo-avatar.svg replaced by neo-ico.png in empty state (visual refinement)
-    assert "neo-ico.png" in html
+    # neo-avatar.svg replaced by neo-ico-128.webp in empty state (visual refinement)
+    assert "neo-ico-128.webp" in html
 
 
 # ── CSS ────────────────────────────────────────────────────────────────────

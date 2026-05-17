@@ -71,6 +71,6 @@ def test_index_initial_chrome_uses_neo_assets():
     assert 'href="static/favicon-32.png"' in INDEX_HTML
     assert 'href="static/favicon.ico"' in INDEX_HTML
     assert 'href="static/apple-touch-icon.png"' in INDEX_HTML
-    assert 'src="static/brand/neo-ico.png"' in INDEX_HTML
+    assert 'src="static/brand/neo-ico-128.webp"' in INDEX_HTML
     assert "Hermes caduceus" not in INDEX_HTML
     assert "Message Neo" in INDEX_HTML

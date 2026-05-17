@@ -122,16 +122,18 @@ def test_mermaid_render_failure_removes_temporary_error_dom():
 
 # ── index.html ────────────────────────────────────────────────────────────────
 
-def test_katex_css_in_index_html():
-    """KaTeX CSS must be loaded in index.html."""
-    assert 'katex@0.16' in INDEX, \
-        'KaTeX CSS CDN link not found in index.html'
+def test_katex_css_loaded_dynamically():
+    """KaTeX CSS must be loaded on demand by renderKatexBlocks() in ui.js."""
+    assert 'katex@0.16' in UI_JS, \
+        'KaTeX CSS vendor path not found in ui.js (expected lazy-load in renderKatexBlocks)'
+    assert 'katex.min.css' in UI_JS, \
+        'katex.min.css reference not found in ui.js'
 
 
-def test_katex_css_has_sri_hash():
-    """KaTeX CSS link in index.html must have an SRI integrity hash."""
-    assert 'sha384-5TcZemv2l' in INDEX or 'integrity' in INDEX and 'katex' in INDEX, \
-        'KaTeX CSS SRI integrity hash not found in index.html'
+def test_katex_js_has_sri_hash_in_ui():
+    """KaTeX JS loaded by ui.js must have an SRI integrity hash."""
+    assert "script.integrity='sha384-" in UI_JS or 'script.integrity="sha384-' in UI_JS, \
+        'KaTeX JS SRI integrity hash not found in ui.js'
 
 
 # ── style.css ─────────────────────────────────────────────────────────────────

@@ -39,9 +39,9 @@ def test_hamburger_lucide_style():
 
 
 def test_brand_neo_ico_24():
-    assert 'src="static/brand/neo-ico.png"' in HTML, \
-        "Brand icon must use neo-ico.png (not neo-mark.svg)"
-    ico_pos = HTML.find("neo-ico.png")
+    assert 'src="static/brand/neo-ico-128.webp"' in HTML, \
+        "Brand icon must use neo-ico-128.webp"
+    ico_pos = HTML.find("neo-ico-128.webp")
     snippet = HTML[ico_pos - 50:ico_pos + 100]
     assert 'width="24" height="24"' in snippet, \
         "Brand icon must be 24x24"
