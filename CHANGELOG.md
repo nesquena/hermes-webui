@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #TBD** by @Michaelyklam (refs #1925) — Add the default-off `RuntimeAdapter` Slice 2 seam. `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` now routes chat start through a `LegacyJournalRuntimeAdapter` facade over the existing legacy streaming path, while the default remains `legacy-direct`. The new adapter interface/payload classes expose start/observe/status/cancel/approval/clarify methods and delegate controls to existing handlers without introducing a runner, sidecar, new process-local queues, cached agents, cancellation registries, or callback registries.
+
 ### Documentation
 
 - **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.

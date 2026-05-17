@@ -7731,16 +7731,56 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
-        response = _start_chat_stream_for_session(
-            s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            diag=diag,
+        from api.runtime_adapter import (
+            LegacyJournalRuntimeAdapter,
+            StartRunRequest,
+            runtime_adapter_enabled,
         )
+
+        if runtime_adapter_enabled():
+            def _legacy_start_run(request: StartRunRequest) -> dict:
+                return _start_chat_stream_for_session(
+                    s,
+                    msg=request.message,
+                    attachments=request.attachments,
+                    workspace=request.workspace or workspace,
+                    model=request.model or model,
+                    model_provider=request.provider or model_provider,
+                    normalized_model=normalized_model,
+                    diag=diag,
+                )
+
+            adapter = LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+            result = adapter.start_run(
+                StartRunRequest(
+                    session_id=s.session_id,
+                    message=msg,
+                    attachments=attachments,
+                    workspace=workspace,
+                    profile=getattr(s, "profile", None),
+                    provider=model_provider,
+                    model=model,
+                    source="webui",
+                    metadata={"route": "/api/chat/start"},
+                )
+            )
+            response = dict(result.payload)
+            response.setdefault("stream_id", result.stream_id)
+            response.setdefault("session_id", result.session_id)
+            response.setdefault("run_id", result.run_id)
+            response.setdefault("status", result.status)
+            response.setdefault("active_controls", result.active_controls)
+        else:
+            response = _start_chat_stream_for_session(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                diag=diag,
+            )
         status = int(response.pop("_status", 200) or 200)
         diag.stage("response_write") if diag else None
         return j(handler, response, status=status)
