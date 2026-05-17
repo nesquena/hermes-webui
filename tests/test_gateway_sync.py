@@ -797,6 +797,7 @@ def test_agent_session_source_normalization_contract():
 
     cases = {
         'cli': ('cli', 'CLI'),
+        'email': ('messaging', 'Email'),
         'weixin': ('messaging', 'Weixin'),
         'telegram': ('messaging', 'Telegram'),
         'discord': ('messaging', 'Discord'),
@@ -816,6 +817,14 @@ def test_agent_session_source_normalization_contract():
             assert normalized['raw_source'] == raw_source
         else:
             assert normalized['raw_source'] is None
+
+
+def test_sessions_js_treats_email_as_messaging_source():
+    """Email gateway sessions should receive the same sidebar metadata as other messaging channels."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+    assert "'email'" in src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
+    assert "email: 'Email'" in src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
 
 def test_cross_source_parent_child_is_not_collapsed_into_root_metadata(cleanup_test_sessions):
