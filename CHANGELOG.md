@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Tighten `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` `/api/chat/start` response shape parity so the adapter seam does not add `run_id`, unconditional `status`, or `active_controls` fields beyond the legacy response contract. Fixes #2435.
+
 ## [v0.51.81] — 2026-05-17 — Release BE (stage-374 — 6-PR batch — cost-history POSIX lock + prompt-cache tokens + Plugins panel i18n + pending-placeholder chat + journal-replay partial recovery + default-off RuntimeAdapter Slice 2 seam)
 
 ### Added

@@ -7800,9 +7800,6 @@ def _handle_chat_start(handler, body, diag=None):
             response = dict(result.payload)
             response.setdefault("stream_id", result.stream_id)
             response.setdefault("session_id", result.session_id)
-            response.setdefault("run_id", result.run_id)
-            response.setdefault("status", result.status)
-            response.setdefault("active_controls", result.active_controls)
         else:
             response = _start_chat_stream_for_session(
                 s,

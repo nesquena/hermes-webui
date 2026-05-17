@@ -119,3 +119,17 @@ def test_chat_start_route_selects_adapter_only_when_flag_enabled():
     assert "LegacyJournalRuntimeAdapter" in start_body
     assert "_start_chat_stream_for_session(" in start_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in start_body, "route should use runtime_adapter_enabled(), not inline env checks"
+
+
+def test_chat_start_adapter_response_shape_stays_legacy_compatible():
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    start_idx = src.index("def _handle_chat_start")
+    start_body = src[start_idx:src.index("def _resolve_chat_workspace_with_recovery", start_idx)]
+
+    assert "response = dict(result.payload)" in start_body
+    assert 'response.setdefault("stream_id", result.stream_id)' in start_body
+    assert 'response.setdefault("session_id", result.session_id)' in start_body
+    assert 'response.setdefault("run_id", result.run_id)' not in start_body
+    assert 'response.setdefault("status", result.status)' not in start_body
+    assert 'response.setdefault("active_controls", result.active_controls)' not in start_body
