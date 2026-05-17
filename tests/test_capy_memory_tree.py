@@ -1,4 +1,6 @@
+import io
 import json
+from urllib.parse import urlparse
 
 import pytest
 
@@ -197,3 +199,96 @@ def test_relevant_memory_for_space_filters_by_space_id(tmp_path, monkeypatch):
     assert relevant["local_only"] is True
     assert relevant["space_id"] == "source-space"
     assert [item["source_id"] for item in relevant["results"]] == [source_record["source_id"]]
+
+
+class _RouteHandler:
+    def __init__(self):
+        self.rfile = io.BytesIO(b"")
+        self.wfile = io.BytesIO()
+        self.headers = {"Accept-Encoding": "", "Host": "127.0.0.1:8787"}
+        self.status = None
+        self.sent_headers = []
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def json_body(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+def _route_get(path):
+    import api.routes as routes
+
+    handler = _RouteHandler()
+    handled = routes.handle_get(handler, urlparse(path))
+    return handled, handler.status, handler.json_body()
+
+
+def test_capy_memory_status_route_returns_bounded_local_counts(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    ingest_source(canonicalize_space_manifest(_hostile_space_manifest()))
+
+    handled, status, body = _route_get("/api/capy-memory/status")
+
+    assert handled is None
+    assert status == 200
+    assert body == {
+        "available": True,
+        "local_only": True,
+        "db_exists": True,
+        "source_count": 1,
+        "chunk_count": 1,
+        "stale_source_count": 0,
+        "last_error_count": 0,
+    }
+
+
+def test_capy_memory_search_route_filters_and_redacts(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    record = canonicalize_space_manifest(_hostile_space_manifest())
+    ingest_source(record)
+    ingest_source(canonicalize_space_manifest({"space_id": "other-space", "name": "Other Space"}))
+
+    handled, status, body = _route_get("/api/capy-memory/search?q=dashboard&space_id=source-space&limit=2")
+
+    assert handled is None
+    assert status == 200
+    assert body["query"] == "dashboard"
+    assert body["space_id"] == "source-space"
+    assert body["local_only"] is True
+    assert [item["source_id"] for item in body["results"]] == [record["source_id"]]
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_spaces_memory_route_requires_space_id_and_returns_relevant_memory(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    record = canonicalize_space_manifest(_hostile_space_manifest())
+    ingest_source(record)
+
+    handled, status, missing = _route_get("/api/spaces/memory")
+    assert handled is None
+    assert status == 400
+    assert "space_id" in missing["error"]
+
+    handled, status, body = _route_get("/api/spaces/memory?spaceId=source-space&limit=5")
+
+    assert handled is None
+    assert status == 200
+    assert body["space_id"] == "source-space"
+    assert body["local_only"] is True
+    assert [item["source_id"] for item in body["results"]] == [record["source_id"]]
