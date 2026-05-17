@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- **PR #2416** by @Michaelyklam (refs #1925) — Expand the runtime-adapter RFC with the concrete Slice 2 adapter-seam contract: minimal `RuntimeAdapter` methods, payload fields, `legacy-direct` / `legacy-journal` feature-flag rollback path, legacy-backend mapping, explicit non-goals, and adapter-seam acceptance tests. Keeps the next step scoped to a reversible protocol-translator boundary over the journaled legacy path, not a runner/sidecar or execution-ownership move.
+
 ## [v0.51.80] — 2026-05-17 — Release BD (stage-373 — 2-PR batch — provider config flag filter + stale compaction greeting heuristic)
 
 ### Fixed
