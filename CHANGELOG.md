@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2460** by @Michaelyklam (closes #2449) — Add a copy button to Thinking card headers so users can copy the card's reasoning text without selecting the `<pre>` manually. The button stops header-toggle propagation and shows the same short checkmark feedback pattern used by existing copy actions.
+
 ## [v0.51.82] — 2026-05-17 — Release BF (stage-375 — 2-PR batch — table renderer pipe protection + Catppuccin appearance skin)
 
 ### Added
