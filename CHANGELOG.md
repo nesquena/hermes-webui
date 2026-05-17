@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **PR (TBD)** — Multi-container Docker hygiene pass. The `hermes-agent-src` named volume in `docker-compose.two-container.yml` and `docker-compose.three-container.yml` is now mounted **read-only** on the WebUI service (the WebUI only reads it to install the agent's Python dependencies at startup), bringing the actual mount mode in line with the existing `docs/docker.md` architecture diagram. The default `${HERMES_WORKSPACE:-~/workspace}` workspace bind is changed to `${HERMES_WORKSPACE:-${HOME}/workspace}` so the path resolves consistently across Linux, macOS, WSL2, and Docker Desktop on Windows (matching the single-container `docker-compose.yml` convention). No behaviour change for users who set `HERMES_WORKSPACE` explicitly.
+
+### Documentation
+
+- **PR (TBD)** — `docs/docker.md` gains an **"Upgrading the agent container"** section documenting the root cause of [#1416](https://github.com/nesquena/hermes-webui/issues/1416): the `hermes-agent-src` named volume caches the agent's `/opt/hermes` source tree on first run, and Docker reuses the cached volume on every subsequent `compose up` — even after `docker pull` of a newer agent image. The new section gives the canonical `down → docker volume rm → pull → up -d` recipe and the same upgrade pointer is mirrored as a comment block in both multi-container compose files. A new **"What the multi-container setup isolates (and what it doesn't)"** section explicitly frames the two/three-container setups as **process, network, and resource isolation, not filesystem isolation** — calibrating expectations for users who reach for multi-container expecting a trust boundary between the chat UI and the agent.
+
 ## [v0.51.83] — 2026-05-17 — Release BG (stage-376 — 12-PR contributor batch — chat-start adapter parity + populated-core journal recovery + thinking card dedup + context metadata refresh + model cache fingerprint + stream fade cap + manual cron delivery + active-session spinner + email gateway label + thinking copy button + /theme i18n + compact activity semantics)
 
 ### Added

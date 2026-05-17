@@ -91,14 +91,16 @@ services:
       # Same hermes home as the agent — shares config, sessions, state
       - hermes-home:/home/hermeswebui/.hermes
       # Agent source mounted where docker_init.bash expects it.
-      # At startup the init script runs:
-      #   uv pip install /home/hermeswebui/.hermes/hermes-agent
-      # which installs the agent and all its Python dependencies.
-      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
+      # Mounted read-only — the WebUI only reads this volume to install
+      # the agent's Python dependencies at startup (`uv pip install`).
+      # Read-only enforces that defence-in-depth at the kernel layer.
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
       # Override with: HERMES_WORKSPACE=/your/path docker compose up
-      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
+      # ${HOME} is used rather than `~` so the default resolves the same way
+      # across Linux, macOS, WSL2, and Docker Desktop on Windows.
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
@@ -129,5 +131,17 @@ networks:
     driver: bridge
 
 volumes:
+  # IMPORTANT — upgrading the agent image:
+  #   The `hermes-agent-src` volume is initialised from the agent image's
+  #   `/opt/hermes` on first `up`, and Docker reuses the volume verbatim on
+  #   later runs — even after `docker pull` of a newer agent image. After
+  #   upgrading the agent image, run:
+  #
+  #     docker compose down
+  #     docker volume rm <project>_hermes-agent-src
+  #     docker compose pull
+  #     docker compose up -d
+  #
+  #   The full procedure (and why) is documented in docs/docker.md.
   hermes-home:
   hermes-agent-src:
