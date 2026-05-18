@@ -1,14 +1,22 @@
-"""Integration tests: PR #2279 (next-turn drain, A) + PR #2242 (SSE drain, B) coexist
-without duplicating wakeups for the same background process_id.
+"""Integration tests: the merged upstream PR #2279 (next-turn drain, A) +
+our-original Option B SSE/server-side drain coexist without duplicating
+wakeups for the same background process_id.
 
-These tests verify the shared dedupe contract via api.config.PROCESS_COMPLETE_EVENTS_SEEN:
-- If B's SSE drain fires first (proactive case), A's next-turn drain must skip the
-  same process_id.
-- If A's drain fires first (SSE-disconnected case), B's drain must not re-emit a
-  duplicate SSE event.
+These tests verify the shared dedupe contract via the REAL merged upstream
+key — process_registry._completion_consumed (checked by
+process_registry.is_completion_consumed()):
+- If B's drain fires first (proactive case), it marks the registry
+  consumed-marker so A's next-turn drain skips the same process_id.
+- If A's (real merged #2279) drain fires first (SSE-disconnected case), it
+  marks the same registry consumed-marker so B's drain early-returns.
 
-The two paths run in *different* hot paths (background thread vs. agent turn start),
-but they share the same per-session dedupe set, so a wakeup can only happen once.
+api.config.PROCESS_COMPLETE_EVENTS_SEEN remains as B's own private
+secondary dedupe (duplicate enqueue within this module) but is NOT the
+cross-A/B contract — the real merged #2279 never writes it.
+
+The two paths run in *different* hot paths (background thread vs. agent turn
+start) but share process_registry._completion_consumed, so a wakeup can only
+happen once.
 """
 from __future__ import annotations
 
@@ -38,12 +46,25 @@ class _FakeProcessRegistry:
 
 
 def _install_fake_registry(monkeypatch, fake):
-    """Inject the fake registry into both tools.process_registry and any cached imports."""
+    """Inject the fake registry into tools.process_registry for the test.
+
+    IMPORTANT (rebase isolation fix): use ONLY monkeypatch.setitem so both
+    sys.modules entries are restored to their real/absent state on teardown.
+    The prior implementation did sys.modules.setdefault("tools", ...) which
+    is an UNTRACKED mutation — when real `tools` was not yet imported it
+    permanently leaked a non-package fake `tools` into sys.modules, breaking
+    any later test that does `from tools.process_registry import ...` (e.g.
+    test_session_channel_option_x). With the merged upstream #2279 those
+    real-`tools`-importing tests now share the same pytest session, so the
+    leak became a hard cross-file failure.
+    """
     import sys
     mod = types.ModuleType("tools.process_registry")
     mod.process_registry = fake
-    tools_mod = sys.modules.setdefault("tools", types.ModuleType("tools"))
+    tools_mod = types.ModuleType("tools")
     tools_mod.process_registry = mod  # type: ignore[attr-defined]
+    # Both setitem calls are monkeypatch-tracked: on teardown each key is
+    # restored to its prior value, or deleted if it was absent — no leak.
     monkeypatch.setitem(sys.modules, "tools", tools_mod)
     monkeypatch.setitem(sys.modules, "tools.process_registry", mod)
 
@@ -98,8 +119,17 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
 
 
 def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
-    """A drains and wakes the agent; later B's queue read of the same id is a no-op
-    because PROCESS_COMPLETE_EVENTS_SEEN already contains it."""
+    """A (the REAL merged upstream #2279 next-turn drain) drains and wakes the
+    agent; later B's queue read of the same id is a no-op because the SHARED
+    upstream dedupe key (process_registry._completion_consumed) already
+    contains it.
+
+    Re-pointed for the rebase: the real merged #2279 drain dedupes ONLY via
+    process_registry.is_completion_consumed() — it does NOT populate
+    api.config.PROCESS_COMPLETE_EVENTS_SEEN (that set is ours-original and
+    private to api.background_process). So the cross-A/B contract is the
+    registry consumed-marker, not PROCESS_COMPLETE_EVENTS_SEEN.
+    """
     fake = _FakeProcessRegistry()
     fake.register("p2", "sess-2")
     _install_fake_registry(monkeypatch, fake)
@@ -125,15 +155,22 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
     assert len(notifications) == 1
     assert "Background process p2 completed" in notifications[0]
 
-    # A marked the seen-set
-    assert "p2" in _cfg.PROCESS_COMPLETE_EVENTS_SEEN["sess-2"]
-    # A also marked agent-registry-consumed (via _mark_process_completion_consumed)
+    # The REAL merged #2279 A-drain marks the SHARED upstream dedupe key
+    # (registry consumed-marker) — NOT our private PROCESS_COMPLETE_EVENTS_SEEN.
     assert fake.is_completion_consumed("p2")
+    assert "sess-2" not in _cfg.PROCESS_COMPLETE_EVENTS_SEEN, (
+        "real upstream #2279 A-drain must NOT populate our private "
+        "PROCESS_COMPLETE_EVENTS_SEEN set"
+    )
 
-    # Now if B's drain thread were to see another spurious event for the same id
-    # (e.g. duplicate enqueue), _process_one must early-return on the seen set.
+    # Now if B's drain thread sees another spurious event for the same id
+    # (duplicate enqueue), _process_one must early-return on the SHARED
+    # registry consumed-marker that A set — no double wakeup.
     bp._process_one(evt)  # second time
-    # seen set unchanged; no extra PENDING_PROCESS_COMPLETIONS entries beyond
-    # what B may have already added (it adds one regardless of dedupe; that's
-    # harmless because routes._start_chat_stream_for_session drains the marker).
-    assert _cfg.PROCESS_COMPLETE_EVENTS_SEEN["sess-2"] == {"p2"}
+    assert fake.is_completion_consumed("p2")
+    # B early-returned on the shared key BEFORE reaching its own seen-set, so
+    # PROCESS_COMPLETE_EVENTS_SEEN stays unpopulated for this session (proves
+    # the cross-A/B dedupe used the real upstream key, not ours).
+    assert "sess-2" not in _cfg.PROCESS_COMPLETE_EVENTS_SEEN
+    # And no duplicate wakeup marker was queued by the second B pass.
+    assert "sess-2" not in _cfg.PENDING_PROCESS_COMPLETIONS

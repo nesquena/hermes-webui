@@ -369,10 +369,32 @@ def _process_one(evt: dict) -> None:
         # registry but a non-WebUI session_key. Ignore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         return
-    # Idempotency: if we've already emitted for this (session_id, process_id)
-    # pair, skip the duplicate. Two _move_to_finished() callers (kill_process
-    # racing the reader thread) can occasionally enqueue twice despite the
-    # process_registry guard.
+    # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
+    # The real merged #2279 next-turn drain
+    # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
+    # process_registry.is_completion_consumed() / _completion_consumed — it
+    # does NOT populate PROCESS_COMPLETE_EVENTS_SEEN (that set is ours-original
+    # and private to this module). So the cross-A/B shared dedupe contract is
+    # process_registry._completion_consumed, NOT PROCESS_COMPLETE_EVENTS_SEEN.
+    # If the upstream A-drain already delivered this process_id (A-first
+    # order), it marked _completion_consumed; B must early-return here or it
+    # would double-fire a wakeup. This guard aligns our B-drain to the real
+    # upstream key (verified against origin/master streaming.py).
+    if process_id:
+        try:
+            from tools.process_registry import process_registry as _pr
+            if _pr.is_completion_consumed(process_id):
+                return
+        except Exception:
+            logger.debug(
+                "is_completion_consumed check failed on B drain; "
+                "falling back to PROCESS_COMPLETE_EVENTS_SEEN gate",
+                exc_info=True,
+            )
+    # Secondary (ours-original) idempotency: if we've already emitted for this
+    # (session_id, process_id) pair via THIS module, skip the duplicate. Two
+    # _move_to_finished() callers (kill_process racing the reader thread) can
+    # occasionally enqueue twice despite the process_registry guard.
     seen = _cfg.PROCESS_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
     if process_id and process_id in seen:
         return
@@ -381,11 +403,13 @@ def _process_one(evt: dict) -> None:
     payload = _build_payload(evt, session_id)
     _emit_to_session_streams(session_id, "process_complete", payload)
     _cfg.PENDING_PROCESS_COMPLETIONS.add(session_id)
-    # Mark the event consumed in the agent's process registry so PR #2279's
-    # next-turn drain (api/streaming._drain_webui_process_notifications)
-    # treats this process_id as already-delivered and does not re-fire a
-    # wakeup. Best-effort: private API access; failures are logged-debug
-    # because the secondary PROCESS_COMPLETE_EVENTS_SEEN gate still applies.
+    # Mark the event consumed in the agent's process registry so the REAL
+    # merged PR #2279's next-turn drain
+    # (api/streaming._drain_webui_process_notifications) treats this process_id
+    # as already-delivered and does not re-fire a wakeup (B-first order).
+    # This is the SHARED upstream dedupe key — best-effort private API access;
+    # failures are logged-debug because the secondary PROCESS_COMPLETE_EVENTS
+    # _SEEN gate still applies for THIS module's own duplicates.
     if process_id:
         try:
             from tools.process_registry import process_registry as _pr

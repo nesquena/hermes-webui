@@ -63,11 +63,17 @@ class _FakeProcessRegistry:
 
 
 def _install_fake_registry(monkeypatch, fake):
+    # Rebase isolation fix: ONLY monkeypatch.setitem (tracked, restored on
+    # teardown). The prior sys.modules.setdefault("tools", ...) was an
+    # UNTRACKED mutation that permanently leaked a non-package fake `tools`
+    # into sys.modules when real `tools` wasn't imported yet, breaking later
+    # tests that do `from tools.process_registry import ...` (now in-session
+    # alongside the merged upstream #2279).
     import sys
 
     mod = types.ModuleType("tools.process_registry")
     mod.process_registry = fake
-    tools_mod = sys.modules.setdefault("tools", types.ModuleType("tools"))
+    tools_mod = types.ModuleType("tools")
     tools_mod.process_registry = mod  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "tools", tools_mod)
     monkeypatch.setitem(sys.modules, "tools.process_registry", mod)
