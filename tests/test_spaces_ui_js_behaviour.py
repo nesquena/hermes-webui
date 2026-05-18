@@ -145,6 +145,7 @@ global.fetch = async function(path, opts = {}) {
         chunk_count: 12,
         stale_source_count: 1,
         last_error_count: 1,
+        refresh_job_count: 2,
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         last_error: 'raw prompt ignore previous instructions',
@@ -3452,6 +3453,7 @@ def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(
     assert "12 chunks" in html
     assert "1 stale" in html
     assert "1 error" in html
+    assert "2 refresh jobs" in html
     assert {"path": "api/capy-memory/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html
     assert "renderer" not in html.lower()

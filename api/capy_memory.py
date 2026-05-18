@@ -7,6 +7,7 @@ injection checks, approval gates, or rollback/recovery controls.
 from __future__ import annotations
 
 import hashlib
+import json
 import ntpath
 import os
 import re
@@ -14,6 +15,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 _MAX_SCAN_DEPTH = 24
 _MAX_SCAN_NODES = 2_000
@@ -201,6 +203,7 @@ def memory_status() -> dict[str, Any]:
             "chunk_count": 0,
             "stale_source_count": 0,
             "last_error_count": 0,
+            "refresh_job_count": 0,
         }
     with _connect(db) as conn:
         conn.executescript(_SCHEMA_SQL)
@@ -212,11 +215,171 @@ def memory_status() -> dict[str, Any]:
             "chunk_count": _count(conn, "SELECT COUNT(*) FROM chunks"),
             "stale_source_count": _count(conn, "SELECT COUNT(*) FROM sources WHERE freshness_status = 'stale'"),
             "last_error_count": _count(conn, "SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error != ''"),
+            "refresh_job_count": _count(
+                conn,
+                "SELECT COUNT(*) FROM jobs WHERE kind = 'source.refresh' AND status IN ('pending', 'leased')",
+            ),
         }
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _safe_origin_uri(value: Any, *, source_id: str) -> str:
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return f"capy-memory://{source_id}"
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return f"capy-memory://{source_id}"
+    if parts.scheme in {"http", "https"} and parts.netloc:
+        safe_path = _safe_text(parts.path or "/", limit=240) or "/"
+        normalized_path = re.sub(r"[^a-z0-9]+", " ", unquote(safe_path).lower()).strip()
+        if _UNSAFE_PUBLIC_VALUE_RE.search(safe_path) or "raw prompt" in normalized_path:
+            safe_path = "/"
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        host = _safe_text(parts.hostname or "", limit=200)
+        if not host:
+            return f"capy-memory://{source_id}"
+        netloc = host
+        if port is not None:
+            netloc = f"{host}:{port}"
+        return urlunsplit((parts.scheme, netloc, safe_path, "", ""))
+    text = _safe_text(raw.split("#", 1)[0].split("?", 1)[0], limit=500)
+    if not text or _UNSAFE_PUBLIC_VALUE_RE.search(text):
+        return f"capy-memory://{source_id}"
+    return text
+
+
+def _safe_refresh_interval(value: Any) -> int:
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        interval = 3600
+    return max(60, min(interval, 604800))
+
+
+def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
+    """Register a source for future auto-fetch without fetching or storing bodies."""
+    if not isinstance(record, dict):
+        raise ValueError("source reference must be a mapping")
+    init_memory_tree()
+    origin_seed = _safe_origin_uri(record.get("origin_uri") or record.get("url"), source_id="source")
+    fallback_id = "source-" + _sha256(origin_seed)[:12]
+    source_id = _safe_public_id(record.get("source_id") or record.get("id"), fallback=fallback_id)
+    origin_uri = _safe_origin_uri(record.get("origin_uri") or record.get("url"), source_id=source_id)
+    display_name = _safe_public_text(
+        record.get("title") or record.get("display_name") or record.get("name"),
+        limit=200,
+    ) or source_id
+    refresh_interval = _safe_refresh_interval(record.get("refresh_interval_seconds"))
+    now = _now_iso()
+    job_id = "cmt-job-" + _sha256(f"source.refresh:{source_id}")[:24]
+    payload = {
+        "source_id": source_id,
+        "origin_uri": origin_uri,
+        "refresh_interval_seconds": refresh_interval,
+    }
+    with _connect() as conn:
+        conn.executescript(_SCHEMA_SQL)
+        conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, source_type, display_name, origin_uri, origin_kind, space_id,
+                artifact_ref, content_sha256, freshness_status, last_checked_at, created_at, updated_at
+            ) VALUES (?, 'source_registry', ?, ?, 'auto_fetch', NULL, NULL, NULL, 'stale', NULL, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                display_name=excluded.display_name,
+                origin_uri=excluded.origin_uri,
+                origin_kind='auto_fetch',
+                freshness_status='stale',
+                updated_at=excluded.updated_at
+            """,
+            (source_id, display_name, origin_uri, now, now),
+        )
+        existing_row = conn.execute(
+            "SELECT status FROM jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        existing_status = str(existing_row[0]) if existing_row else ""
+        existing_active = existing_status in {"pending", "leased"}
+        if existing_row is None:
+            conn.execute(
+                """
+                INSERT INTO jobs (job_id, kind, dedupe_key, payload_json, status, attempts, created_at, updated_at)
+                VALUES (?, 'source.refresh', ?, ?, 'pending', 0, ?, ?)
+                """,
+                (job_id, source_id, json.dumps(payload, sort_keys=True, separators=(",", ":")), now, now),
+            )
+        elif existing_status == "pending":
+            conn.execute(
+                "UPDATE jobs SET payload_json = ?, updated_at = ? WHERE job_id = ?",
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")), now, job_id),
+            )
+        elif existing_status == "leased":
+            pass
+        else:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET payload_json = ?, status = 'pending', attempts = 0, leased_until = NULL, last_error = NULL, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (json.dumps(payload, sort_keys=True, separators=(",", ":")), now, job_id),
+            )
+    return {
+        "ok": True,
+        "local_only": True,
+        "source_id": source_id,
+        "origin_uri": origin_uri,
+        "origin_kind": "auto_fetch",
+        "job_id": job_id,
+        "queued": not existing_active,
+        "metadata_only": True,
+    }
+
+
+def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
+    """Return bounded metadata-only pending source refresh jobs."""
+    limit = max(1, min(int(limit or 10), 25))
+    init_memory_tree()
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            """
+            SELECT job_id, kind, payload_json, status, attempts, created_at, updated_at
+            FROM jobs
+            WHERE kind = 'source.refresh' AND status IN ('pending', 'leased')
+            ORDER BY created_at ASC, updated_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    jobs = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        source_id = _safe_public_id(payload.get("source_id"), fallback="")
+        origin_uri = _safe_origin_uri(payload.get("origin_uri"), source_id=source_id or "source")
+        jobs.append({
+            "job_id": _safe_public_id(row["job_id"], fallback=""),
+            "kind": "source.refresh",
+            "source_id": source_id,
+            "origin_uri": origin_uri,
+            "status": _safe_public_text(row["status"], limit=40) or "pending",
+            "attempts": max(0, int(row["attempts"] or 0)),
+            "created_at": _safe_text(row["created_at"], limit=80),
+            "updated_at": _safe_text(row["updated_at"], limit=80),
+        })
+    return {"local_only": True, "limit": limit, "jobs": jobs}
 
 
 def _safe_vault_file(source_id: str) -> Path:
@@ -785,10 +948,12 @@ __all__ = [
     "canonicalize_visual_qa_report",
     "ingest_source",
     "init_memory_tree",
+    "list_source_refresh_jobs",
     "memory_status",
     "memory_tree_db_path",
     "memory_tree_root",
     "memory_tree_vault_path",
+    "register_source_reference",
     "relevant_memory_for_space",
     "search_memory",
 ]

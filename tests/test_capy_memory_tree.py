@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 from urllib.parse import urlparse
 
 import pytest
@@ -11,8 +12,11 @@ from api.capy_memory import (
     canonicalize_visual_qa_report,
     ingest_source,
     init_memory_tree,
+    list_source_refresh_jobs,
     memory_status,
+    memory_tree_db_path,
     relevant_memory_for_space,
+    register_source_reference,
     search_memory,
 )
 
@@ -427,7 +431,133 @@ def test_memory_status_returns_local_only_counts(tmp_path, monkeypatch):
         "chunk_count": 0,
         "stale_source_count": 0,
         "last_error_count": 0,
+        "refresh_job_count": 0,
     }
+
+
+def test_register_source_reference_queues_metadata_only_refresh_job(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "openhuman-memory-tree",
+        "title": "OpenHuman Memory Tree <script>bad()</script>",
+        "origin_uri": "https://example.test/docs/memory-tree?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+        "refresh_interval_seconds": 3600,
+        "source": "renderer body should not be stored",
+    })
+
+    jobs = list_source_refresh_jobs(limit=5)
+    status = memory_status()
+    serialized = json.dumps({"receipt": receipt, "jobs": jobs, "status": status}, sort_keys=True).lower()
+
+    assert receipt["ok"] is True
+    assert receipt["source_id"] == "openhuman-memory-tree"
+    assert receipt["queued"] is True
+    assert receipt["origin_kind"] == "auto_fetch"
+    assert status["source_count"] == 1
+    assert status["chunk_count"] == 0
+    assert status["stale_source_count"] == 1
+    assert status["refresh_job_count"] == 1
+    assert len(jobs["jobs"]) == 1
+    assert jobs["jobs"][0]["kind"] == "source.refresh"
+    assert jobs["jobs"][0]["source_id"] == "openhuman-memory-tree"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert jobs["jobs"][0]["origin_uri"] == "https://example.test/docs/memory-tree"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_is_idempotent_by_source_id(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    first = register_source_reference({"source_id": "docs", "origin_uri": "https://example.test/docs"})
+    second = register_source_reference({"source_id": "docs", "origin_uri": "https://example.test/docs?token=SECRET_VALUE_DO_NOT_LEAK"})
+
+    jobs = list_source_refresh_jobs(limit=5)
+
+    assert first["job_id"] == second["job_id"]
+    assert first["queued"] is True
+    assert second["queued"] is False
+    assert memory_status()["refresh_job_count"] == 1
+    assert [job["source_id"] for job in jobs["jobs"]] == ["docs"]
+
+
+def test_register_source_reference_strips_url_credentials_and_raw_prompt_paths(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "credential-docs",
+        "origin_uri": "https://user:SECRET_VALUE_DO_NOT_LEAK@example.test/raw-prompt/notes?token=SECRET_VALUE_DO_NOT_LEAK",
+    })
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"receipt": receipt, "jobs": jobs}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "https://example.test/"
+    assert jobs["jobs"][0]["origin_uri"] == "https://example.test/"
+    assert "user:" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw-prompt" not in serialized
+    assert "token" not in serialized
+
+
+def test_register_source_reference_requeues_terminal_job_status(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    first = register_source_reference({"source_id": "retry-docs", "origin_uri": "https://example.test/retry"})
+
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'completed', attempts = 4, leased_until = '2099-01-01T00:00:00Z', last_error = 'SECRET_VALUE_DO_NOT_LEAK' WHERE job_id = ?",
+            (first["job_id"],),
+        )
+
+    second = register_source_reference({"source_id": "retry-docs", "origin_uri": "https://example.test/retry"})
+    jobs = list_source_refresh_jobs(limit=5)
+
+    assert second["queued"] is True
+    assert memory_status()["refresh_job_count"] == 1
+    assert jobs["jobs"] == [{
+        "job_id": first["job_id"],
+        "kind": "source.refresh",
+        "source_id": "retry-docs",
+        "origin_uri": "https://example.test/retry",
+        "status": "pending",
+        "attempts": 0,
+        "created_at": jobs["jobs"][0]["created_at"],
+        "updated_at": jobs["jobs"][0]["updated_at"],
+    }]
+
+
+def test_register_source_reference_does_not_mutate_leased_job_payload(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    first = register_source_reference({"source_id": "leased-docs", "origin_uri": "https://example.test/original"})
+
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        before = conn.execute("SELECT payload_json FROM jobs WHERE job_id = ?", (first["job_id"],)).fetchone()[0]
+        conn.execute(
+            "UPDATE jobs SET status = 'leased', leased_until = '2099-01-01T00:00:00Z' WHERE job_id = ?",
+            (first["job_id"],),
+        )
+
+    second = register_source_reference({"source_id": "leased-docs", "origin_uri": "https://example.test/changed"})
+
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        after = conn.execute("SELECT payload_json FROM jobs WHERE job_id = ?", (first["job_id"],)).fetchone()[0]
+
+    assert second["queued"] is False
+    assert after == before
 
 
 def test_ingest_source_is_idempotent_by_source_id_and_hash(tmp_path, monkeypatch):
@@ -495,10 +625,16 @@ def test_relevant_memory_for_space_filters_by_space_id(tmp_path, monkeypatch):
 
 
 class _RouteHandler:
-    def __init__(self):
-        self.rfile = io.BytesIO(b"")
+    def __init__(self, body=None):
+        raw = json.dumps(body or {}).encode("utf-8")
+        self.rfile = io.BytesIO(raw)
         self.wfile = io.BytesIO()
-        self.headers = {"Accept-Encoding": "", "Host": "127.0.0.1:8787"}
+        self.headers = {
+            "Accept-Encoding": "",
+            "Host": "127.0.0.1:8787",
+            "Content-Length": str(len(raw)),
+            "Content-Type": "application/json",
+        }
         self.status = None
         self.sent_headers = []
 
@@ -523,6 +659,40 @@ def _route_get(path):
     return handled, handler.status, handler.json_body()
 
 
+def _route_post(path, body):
+    import api.routes as routes
+
+    handler = _RouteHandler(body)
+    handled = routes.handle_post(handler, urlparse(path))
+    return handled, handler.status, handler.json_body()
+
+
+def test_capy_memory_source_register_route_queues_metadata_only_refresh_job(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    handled, status, body = _route_post("/api/capy-memory/source/register", {
+        "source_id": "roadmap-docs",
+        "origin_uri": "https://example.test/roadmap?api_key=SECRET_VALUE_DO_NOT_LEAK#raw-prompt",
+        "title": "Roadmap source <script>bad()</script>",
+        "body": "renderer should never be echoed",
+    })
+
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert handled is None
+    assert status == 200
+    assert body["source_id"] == "roadmap-docs"
+    assert body["origin_uri"] == "https://example.test/roadmap"
+    assert body["metadata_only"] is True
+    assert memory_status()["refresh_job_count"] == 1
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_capy_memory_status_route_returns_bounded_local_counts(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
@@ -541,6 +711,7 @@ def test_capy_memory_status_route_returns_bounded_local_counts(tmp_path, monkeyp
         "chunk_count": 1,
         "stale_source_count": 0,
         "last_error_count": 0,
+        "refresh_job_count": 0,
     }
 
 

@@ -188,7 +188,8 @@
     const chunkCount = safeNonNegativeCount(status && status.chunk_count);
     const staleCount = safeNonNegativeCount(status && status.stale_source_count);
     const errorCount = safeNonNegativeCount(status && status.last_error_count);
-    const state = unavailable ? 'Memory status unavailable' : (errorCount ? 'Needs attention' : (staleCount ? 'Refresh recommended' : 'Fresh'));
+    const refreshJobCount = safeNonNegativeCount(status && status.refresh_job_count);
+    const state = unavailable ? 'Memory status unavailable' : (errorCount ? 'Needs attention' : (staleCount || refreshJobCount ? 'Refresh recommended' : 'Fresh'));
     const subtitle = unavailable ? 'Memory freshness will appear when the local Memory Tree route is available.' : (localOnly ? 'Local-only context layer' : 'Context layer');
     return '<section class="capy-spaces-memory-freshness" aria-label="Memory freshness">' +
       '<div><div class="capy-spaces-product-eyebrow">MEMORY</div><h3>Memory freshness</h3><p>'+escapeHtml(subtitle)+' · metadata-only source status.</p></div>' +
@@ -197,6 +198,7 @@
       renderMemoryFreshnessStat(chunkCount, 'chunks') +
       renderMemoryFreshnessStat(staleCount, 'stale') +
       renderMemoryFreshnessStat(errorCount, 'error') +
+      renderMemoryFreshnessStat(refreshJobCount, 'refresh jobs') +
       '</div>' +
       '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
       '</section>';

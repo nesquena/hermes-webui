@@ -4222,6 +4222,17 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("Capy policy preflight failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/source/register":
+        try:
+            from api.capy_memory import register_source_reference
+
+            return j(handler, register_source_reference(body))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Capy memory source registration failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
