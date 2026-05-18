@@ -383,6 +383,84 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     return emitted
 
 
+# ── Coupling contract: agent ProcessRegistry cross-A/B dedupe key ──────────
+# This WebUI drain (B) and the merged upstream PR #2279 next-turn drain (A)
+# dedupe a process_id against a SINGLE shared key inside the agent's
+# ``tools.process_registry.ProcessRegistry``:
+#
+#   * READ  side: the PUBLIC ``is_completion_consumed(process_id)`` method
+#     (used in ``_process_one`` above) — stable public API.
+#   * WRITE side: there is NO public ``mark_completion_consumed`` upstream, so
+#     B must reach into the registry's private ``_completion_consumed`` set
+#     (guarded by its private ``_lock``) to set the shared marker A reads.
+#
+# That private WRITE coupling is what Copilot review #2242 comment #4 flagged.
+# The long-term fix is an upstream PUBLIC ``mark_completion_consumed`` — see
+# the test ``test_registry_completion_consumed_contract`` which fails CI LOUD
+# the moment ``_completion_consumed`` / ``_lock`` / ``is_completion_consumed``
+# is renamed or retyped upstream, instead of a future rename silently
+# reintroducing the double-wakeup bug. ``_mark_registry_completion_consumed``
+# narrows the exception handling so a rename is logged at ERROR (visible in
+# errors.log + monitoring) rather than swallowed by a broad ``except`` at
+# DEBUG. ImportError stays best-effort (the registry is legitimately absent in
+# non-agent unit-test contexts; this module's own
+# ``PROCESS_COMPLETE_EVENTS_SEEN`` still dedupes B's own duplicates there).
+_REGISTRY_CONSUMED_CONTRACT = ("_lock", "_completion_consumed", "is_completion_consumed")
+
+
+def _mark_registry_completion_consumed(process_id: str) -> None:
+    """Set the shared cross-A/B dedupe marker on the agent ProcessRegistry.
+
+    Couples to ``ProcessRegistry`` privates (``_lock`` /
+    ``_completion_consumed``) because no public ``mark_completion_consumed``
+    exists upstream (the read side uses the public
+    ``is_completion_consumed``). A future upstream rename must FAIL LOUD, not
+    silently reintroduce the double-wakeup: an ``AttributeError`` / ``TypeError``
+    from the private access is logged at ERROR with a contract-violation
+    message (and ``test_registry_completion_consumed_contract`` breaks CI at
+    test time). Only ``ImportError`` is treated as best-effort/expected (the
+    registry is absent in pure unit-test contexts).
+    """
+    try:
+        from tools.process_registry import process_registry as _pr
+    except ImportError:
+        # Agent registry not importable (e.g. isolated unit test) — B's own
+        # PROCESS_COMPLETE_EVENTS_SEEN gate still prevents this module's
+        # duplicates; cross-A/B dedupe is moot when A isn't running either.
+        logger.debug(
+            "tools.process_registry not importable; skipping shared "
+            "completion-consumed marker (best-effort, expected off-agent)",
+            exc_info=True,
+        )
+        return
+    try:
+        lock = _pr._lock
+        consumed = _pr._completion_consumed
+    except AttributeError:
+        logger.error(
+            "ProcessRegistry coupling contract VIOLATED: expected private "
+            "attrs %s for cross-A/B wakeup dedupe are missing — an upstream "
+            "rename has broken the shared marker; process_complete wakeups may "
+            "now double-fire. A public mark_completion_consumed() upstream is "
+            "the durable fix (Copilot #2242 review #4).",
+            _REGISTRY_CONSUMED_CONTRACT,
+            exc_info=True,
+        )
+        return
+    try:
+        with lock:
+            consumed.add(process_id)
+    except (AttributeError, TypeError):
+        logger.error(
+            "ProcessRegistry coupling contract VIOLATED: _lock/"
+            "_completion_consumed changed shape (not a Lock / not a set) — "
+            "cross-A/B wakeup dedupe is broken; wakeups may double-fire. "
+            "Upstream public mark_completion_consumed() is the durable fix "
+            "(Copilot #2242 review #4).",
+            exc_info=True,
+        )
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -459,16 +537,10 @@ def _process_one(evt: dict) -> None:
     # merged PR #2279's next-turn drain
     # (api/streaming._drain_webui_process_notifications) treats this process_id
     # as already-delivered and does not re-fire a wakeup (B-first order).
-    # This is the SHARED upstream dedupe key — best-effort private API access;
-    # failures are logged-debug because the secondary PROCESS_COMPLETE_EVENTS
-    # _SEEN gate still applies for THIS module's own duplicates.
+    # This is the SHARED upstream dedupe key (see _mark_registry_completion_
+    # consumed for the coupling contract + why a future rename now fails loud).
     if process_id:
-        try:
-            from tools.process_registry import process_registry as _pr
-            with _pr._lock:
-                _pr._completion_consumed.add(process_id)
-        except Exception:
-            logger.debug("Failed to mark process completion consumed on B drain", exc_info=True)
+        _mark_registry_completion_consumed(process_id)
 
     # ── Option Z (PRIMARY): server-side wakeup, NO browser round-trip ──────
     # The SSE emit above is now demoted to a pure live-view layer (an open tab

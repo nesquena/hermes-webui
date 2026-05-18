@@ -174,3 +174,80 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
     assert "sess-2" not in _cfg.PROCESS_COMPLETE_EVENTS_SEEN
     # And no duplicate wakeup marker was queued by the second B pass.
     assert "sess-2" not in _cfg.PENDING_PROCESS_COMPLETIONS
+
+
+def test_registry_completion_consumed_contract():
+    """Copilot #2242 review #4 — fail CI LOUD if the agent ProcessRegistry
+    private cross-A/B dedupe surface is renamed/retyped upstream.
+
+    The WebUI B-drain has no public ``mark_completion_consumed`` to call, so
+    it reaches into ``ProcessRegistry._completion_consumed`` (under
+    ``._lock``) to set the shared marker that the public
+    ``is_completion_consumed`` reads. If a future upstream refactor renames
+    any of these, the double-wakeup bug would silently come back. This test
+    pins the contract so the rename breaks HERE (visibly) instead.
+    """
+    from tools.process_registry import ProcessRegistry
+    from api import background_process as bp
+
+    pr = ProcessRegistry()
+    for attr in bp._REGISTRY_CONSUMED_CONTRACT:
+        assert hasattr(pr, attr), (
+            f"ProcessRegistry.{attr} is gone — the WebUI cross-A/B wakeup "
+            f"dedupe coupling (Copilot #2242 #4) is broken. Either restore it "
+            f"or add a PUBLIC mark_completion_consumed() upstream and switch "
+            f"api/background_process._mark_registry_completion_consumed to it."
+        )
+    # Shape contract: the write target must be a set-like (supports .add) and
+    # the guard must be a usable context manager (supports `with`).
+    assert hasattr(pr._completion_consumed, "add"), (
+        "ProcessRegistry._completion_consumed is no longer a set-like "
+        "(.add gone) — cross-A/B wakeup dedupe write would fail."
+    )
+    assert hasattr(pr._lock, "__enter__") and hasattr(pr._lock, "__exit__"), (
+        "ProcessRegistry._lock is no longer a context manager — the guarded "
+        "marker write in _mark_registry_completion_consumed would fail."
+    )
+    assert callable(pr.is_completion_consumed), (
+        "ProcessRegistry.is_completion_consumed must stay a public method "
+        "(the cross-A/B dedupe READ side depends on it)."
+    )
+
+    # End-to-end: the public read sees what the guarded private write sets
+    # (the exact mechanism _mark_registry_completion_consumed relies on).
+    pid = "proc_contract_test"
+    assert pr.is_completion_consumed(pid) is False
+    with pr._lock:
+        pr._completion_consumed.add(pid)
+    assert pr.is_completion_consumed(pid) is True
+
+
+def test_mark_registry_completion_consumed_fails_loud_on_rename(monkeypatch, caplog):
+    """A renamed private attr must log ERROR (contract violation), NOT be
+    swallowed silently at DEBUG (the pre-Copilot-#4 behavior)."""
+    import logging
+
+    class _RenamedRegistry:
+        # Simulates an upstream rename: _completion_consumed -> _consumed_v2.
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._consumed_v2: set[str] = set()
+
+        def is_completion_consumed(self, pid: str) -> bool:
+            return pid in self._consumed_v2
+
+    fake = _RenamedRegistry()
+    _install_fake_registry(monkeypatch, fake)
+
+    from api import background_process as bp
+
+    with caplog.at_level(logging.ERROR, logger="api.background_process"):
+        bp._mark_registry_completion_consumed("p-renamed")
+
+    assert any(
+        "coupling contract VIOLATED" in r.message and r.levelno >= logging.ERROR
+        for r in caplog.records
+    ), "a renamed registry private attr must surface as an ERROR, not a silent DEBUG"
+    # The marker was NOT set (the bug it guards against), but it failed LOUD so
+    # CI / monitoring catches it instead of double-firing wakeups silently.
+    assert not fake.is_completion_consumed("p-renamed")
