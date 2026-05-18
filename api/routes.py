@@ -4209,6 +4209,19 @@ def handle_post(handler, parsed) -> bool:
             receipt.pop(key, None)
         return receipt
 
+    if parsed.path == "/api/capy-policy/preflight":
+        try:
+            from api.capy_policy import prompt_preflight
+
+            prompt = body.get("prompt") if "prompt" in body else body.get("text")
+            boundary = body.get("boundary") or "creator_preview"
+            return j(handler, prompt_preflight(prompt, boundary=boundary))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Capy policy preflight failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
