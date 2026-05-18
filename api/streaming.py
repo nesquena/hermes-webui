@@ -147,11 +147,47 @@ WebUI progress contract:
 """.strip()
 
 
-def _webui_ephemeral_system_prompt(personality_prompt: Optional[str]) -> str:
+def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
+    """Return safe WebUI session metadata for the agent's ephemeral context.
+
+    Messaging gateways inject platform/channel context before each run. Browser
+    sessions do not have a chat platform wrapper, so provide an explicit, small
+    surface description here instead of relying on the model to infer where it
+    is running from the transcript alone.
+    """
+    if not isinstance(surface_context, dict):
+        return ""
+
+    lines = [
+        "WebUI session context:",
+        "- This browser session is not the same live transcript as Telegram, Discord, Slack, or other messaging surfaces.",
+        "- Use durable memory, saved sessions, and available tools for cross-surface recall instead of assuming those transcripts are in this browser chat.",
+    ]
+    fields = (
+        ("source", "Source"),
+        ("session_id", "Session ID"),
+        ("profile", "Profile"),
+        ("workspace", "Workspace"),
+    )
+    for key, label in fields:
+        raw = surface_context.get(key)
+        value = str(raw).strip() if raw is not None else ""
+        if value:
+            lines.append(f"- {label}: {value}")
+    return "\n".join(lines)
+
+
+def _webui_ephemeral_system_prompt(
+    personality_prompt: Optional[str],
+    surface_context: Optional[dict] = None,
+) -> str:
     """Build WebUI-only runtime instructions that are not persisted to history."""
     parts = []
     if personality_prompt:
         parts.append(str(personality_prompt).strip())
+    surface_prompt = _webui_surface_context_prompt(surface_context)
+    if surface_prompt:
+        parts.append(surface_prompt)
     parts.append(_WEBUI_VISIBLE_PROGRESS_PROMPT)
     return "\n\n".join(part for part in parts if part)
 
@@ -3839,7 +3875,15 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(_personality_prompt)
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                _personality_prompt,
+                surface_context={
+                    'source': 'webui',
+                    'session_id': session_id,
+                    'profile': getattr(s, 'profile', None),
+                    'workspace': s.workspace,
+                },
+            )
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent

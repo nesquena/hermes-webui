@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Add browser-surface session context to WebUI agent turns so the agent can distinguish a WebUI chat from messaging-platform transcripts while keeping the metadata ephemeral and out of saved history.
+
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed
