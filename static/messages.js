@@ -2475,6 +2475,14 @@ function startSessionStream(sid) {
         const evSid = d.session_id || sid;
         const streamId = String(d.stream_id || '');
         if (!streamId || evSid !== sid) return;
+        // `recovered` marks an on-subscribe replay from the server: the tab
+        // (re)connected to /api/session/stream AFTER the original
+        // fire-and-forget server_turn_started had already been broadcast, so
+        // the live stream is mid-flight. Attach via the reconnecting (replay)
+        // path so the renderer rebuilds from the run journal instead of
+        // expecting token 0 (which would render a truncated turn). A fresh
+        // (non-recovered) frame still attaches from the first token.
+        const recovered = !!d.recovered;
         // Only drive the renderer when this session is the one on screen.
         const isCurrent = (typeof _isSessionCurrentPane === 'function')
           ? _isSessionCurrentPane(sid)
@@ -2486,8 +2494,9 @@ function startSessionStream(sid) {
         if (S.activeStreamId === streamId) return;
         const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
         if (existingLive && existingLive.streamId === streamId) return;
-        // Mirror the loadSession reattach setup, but NOT reconnecting so the
-        // turn renders from its first token.
+        // Mirror the loadSession reattach setup. For a fresh frame the turn
+        // renders from its first token; for a recovered (replay) frame
+        // attachLiveStream reconstructs the in-progress stream.
         S.busy = true;
         S.activeStreamId = streamId;
         if (S.session && S.session.session_id === sid) S.session.active_stream_id = streamId;
@@ -2498,7 +2507,11 @@ function startSessionStream(sid) {
         if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
         if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
         if (typeof attachLiveStream === 'function') {
-          attachLiveStream(sid, streamId, (S.session && S.session.pending_attachments) || []);
+          attachLiveStream(
+            sid, streamId,
+            (S.session && S.session.pending_attachments) || [],
+            recovered ? {reconnecting: true} : {},
+          );
         }
         if (typeof renderSessionList === 'function') void renderSessionList();
       } catch (_) {}

@@ -192,6 +192,44 @@ def get_session_channel(session_id: str) -> Optional[SessionChannel]:
         return SESSION_CHANNELS.get(session_id)
 
 
+def active_stream_id_for_session(session_id: str) -> Optional[str]:
+    """Return the stream_id of the live run for *session_id*, or None.
+
+    Used by the per-session SSE handler's on-subscribe recovery: the
+    ``server_turn_started`` fan-out in ``routes.start_session_turn`` is a
+    fire-and-forget broadcast with NO replay buffer (SessionChannel.emit
+    drops to whoever is subscribed *at that instant*). A tab whose
+    ``/api/session/stream`` EventSource is momentarily absent at the emit
+    instant — a transient SSE drop, a reverse-proxy idle-timeout, or browser
+    connection-pool starvation — misses the frame permanently and the
+    server-initiated wakeup turn never renders live (the user must hard-
+    refresh). The server-side wakeup itself still ran and persisted; only the
+    live-view was lost. The handler replays a synthetic ``server_turn_started``
+    to a freshly-subscribed tab using this lookup so the open tab self-heals.
+
+    Keys on ACTIVE_RUNS (worker-lifecycle registry) — the same source
+    ``_session_has_active_turn`` / ``_emit_to_session_streams`` already trust
+    to map a stream back to its owning session. Returns the first matching
+    stream_id (a session has at most one live run; cancel/reconnect can
+    briefly hold two — either is a valid attach target, the frontend dedupes
+    by stream_id).
+    """
+    from api import config as _cfg
+
+    try:
+        with _cfg.ACTIVE_RUNS_LOCK:
+            for _stream_id, meta in (_cfg.ACTIVE_RUNS or {}).items():
+                if isinstance(meta, dict) and meta.get("session_id") == session_id:
+                    return str(_stream_id)
+    except Exception:
+        logger.debug(
+            "active_stream_id_for_session lookup failed for %s",
+            session_id,
+            exc_info=True,
+        )
+    return None
+
+
 def _reaper_loop() -> None:
     logger.info("SessionChannel reaper thread started")
     while not _REAPER_STOP.is_set():
