@@ -30,6 +30,15 @@ REPO_ROOT  = TESTS_DIR.parent.resolve()
 HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
+# ── Keep tests/manual/ out of automated collection ────────────────────────
+# tests/manual/ holds operator-run BEFORE/AFTER reproduction scripts (e.g.
+# repro_wakeup_hang.py) that spawn threads, sleep tens of seconds, and assert
+# via process exit code -- they are NOT pytest tests. A nested conftest.py in
+# that dir would collide with the top-level `from conftest import ...` imports
+# the suite uses (no packages / rootdir-relative module names), so the ignore
+# is declared here instead.
+collect_ignore_glob = ["manual/*.py"]
+
 # ── Test server config ────────────────────────────────────────────────────
 # Port and state dir auto-derive from the repo path when no env var is set,
 # giving every worktree its own isolated port (20000-29999) and state directory.

@@ -12,12 +12,16 @@ prefer_cache forced off): the wakeup blocks on the hung probe — exactly the
 
 AFTER (shipped behaviour): start_session_turn resolves with
 prefer_cached_catalog=True (never touches the live rebuild) AND the rebuild is
-budget-bounded as defense-in-depth — the wakeup turn starts in well under a
+budget-bounded as defense-in-depth -- the wakeup turn starts in well under a
 second using the persisted session model.
 
-Run:
-  /home/islaliu/.hermes/hermes-agent/venv/bin/python \
-    tests/manual_repro_wakeup_hang.py
+Run (from the repo root, with the Hermes Agent venv python -- any interpreter
+that can import this repo's ``api`` package works):
+
+    python tests/manual/repro_wakeup_hang.py
+
+Exits 0 on PASS, 1 on FAIL. Not collected by pytest (see
+tests/manual/conftest.py); this is an operator-run reproduction, not a test.
 """
 
 from __future__ import annotations
@@ -25,7 +29,12 @@ from __future__ import annotations
 import os as _os
 import sys as _sys
 
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+# Repo root is two levels up: <repo>/tests/manual/repro_wakeup_hang.py
+_REPO_ROOT = _os.path.dirname(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+)
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
 
 import sys
 import time
