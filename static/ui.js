@@ -1914,7 +1914,69 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
-if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetScrollDirectionTracker;
+if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+/* ── Pull-to-refresh for PWA standalone (Android) ── */
+(function(){
+  if(typeof document==='undefined') return;
+  const isStandalone=window.navigator?.standalone||matchMedia('(display-mode:standalone),(display-mode:fullscreen)').matches;
+  if(!isStandalone) return;
+  const el=document.getElementById('messages');
+  if(!el) return;
+  let _ptrState=0; // 0=idle, 1=pulling, 2=ready
+  let _ptrStartY=0;
+  let _ptrCurrentY=0;
+  const THRESHOLD=80;
+  let _indicator=null;
+  function _ptrCreateIndicator(){
+    if(_indicator) return;
+    _indicator=document.createElement('div');
+    _indicator.className='pull-to-refresh-indicator';
+    _indicator.innerHTML='<span class="ptr-icon">↓</span> <span class="ptr-text">Pull to refresh</span>';
+    el.parentNode.insertBefore(_indicator,el);
+  }
+  function _ptrUpdate(progress){
+    _ptrCreateIndicator();
+    const pulling=progress<1;
+    _indicator.classList.toggle('active',progress>0);
+    const icon=_indicator.querySelector('.ptr-icon');
+    const text=_indicator.querySelector('.ptr-text');
+    if(icon) icon.classList.toggle('ready',!pulling);
+    if(text) text.textContent=pulling?'Pull to refresh':'Release to refresh';
+  }
+  function _ptrReset(){
+    _ptrState=0;
+    _ptrStartY=0;
+    _ptrCurrentY=0;
+    if(_indicator) _indicator.classList.remove('active');
+  }
+  el.addEventListener('touchstart',function(e){
+    if(el.scrollTop>0||_ptrState!==0) return;
+    _ptrStartY=e.touches[0].clientY;
+    _ptrState=1;
+  },{passive:true});
+  el.addEventListener('touchmove',function(e){
+    if(_ptrState!==1) return;
+    _ptrCurrentY=e.touches[0].clientY;
+    const pull=_ptrCurrentY-_ptrStartY;
+    if(pull<0){ _ptrReset(); return; }
+    /* If not at the top, smooth-scroll to top first.
+       Next pull gesture will trigger the refresh. */
+    if(el.scrollTop>0){
+      el.scrollTo({top:0,behavior:'smooth'});
+      _ptrReset();
+      return;
+    }
+    const progress=Math.min(pull/THRESHOLD,1);
+    _ptrUpdate(progress);
+    _ptrState=progress>=1?2:1;
+    if(progress>0.3) e.preventDefault();
+  },{passive:false});
+  el.addEventListener('touchend',function(){
+    if(_ptrState===2){ window.location.reload(); return; }
+    _ptrReset();
+  },{passive:true});
+  el.addEventListener('touchcancel',_ptrReset,{passive:true});
+})();
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;

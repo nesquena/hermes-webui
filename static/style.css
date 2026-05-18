@@ -425,6 +425,18 @@
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
     }
+    /* Pull-to-refresh indicator for PWA standalone mode */
+    .pull-to-refresh-indicator{position:absolute;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;font-size:13px;color:var(--muted);pointer-events:none;opacity:0;transform:translateY(-100%);transition:opacity .2s,transform .2s;background:var(--bg);border-bottom:1px solid var(--border);}
+    .pull-to-refresh-indicator.active{opacity:1;transform:translateY(0);}
+    .pull-to-refresh-indicator .ptr-icon{display:inline-block;transition:transform .2s;font-size:16px;}
+    .pull-to-refresh-indicator .ptr-icon.ready{transform:rotate(180deg);color:var(--accent);}
+    /* Reload button — visible only in PWA standalone / fullscreen */
+    .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
+    .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
+    @media (display-mode: standalone), (display-mode: fullscreen){
+      :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
+      .app-titlebar-reload{display:inline-flex;}
+    }
   }
   html{background:var(--sidebar);}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
