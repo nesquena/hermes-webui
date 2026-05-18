@@ -1643,6 +1643,28 @@ def build_agent_context(space_id: str | None) -> str:
             )
         if len(widget_events) > 10:
             lines.append(f"- … {len(widget_events) - 10} more queued widget event(s) omitted")
+    try:
+        from api.capy_memory import relevant_memory_for_space
+
+        memory_hits = relevant_memory_for_space(sid, limit=3).get("results") or []
+    except Exception:
+        memory_hits = []
+    if memory_hits:
+        lines.append("relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):")
+        for hit in memory_hits[:3]:
+            if not isinstance(hit, dict):
+                continue
+            source_id = _active_context_value(hit.get("source_id"), 160)
+            source_type = _active_context_value(hit.get("source_type"), 80)
+            redaction_status = _active_context_value(hit.get("redaction_status"), 80)
+            raw_snippet = str(hit.get("snippet") or "")
+            heading_index = raw_snippet.find("# ")
+            if heading_index >= 0:
+                raw_snippet = raw_snippet[heading_index:]
+            snippet = _active_context_value(raw_snippet, 700)
+            if not (source_id or source_type or snippet):
+                continue
+            lines.append(f"- {source_id}|{source_type}|{redaction_status}|{snippet}")
     revision = _public_revision_event_id(space.get("revision_event_id"))
     if revision:
         lines.append(f"revision_event_id: {revision}")

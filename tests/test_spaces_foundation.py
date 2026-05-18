@@ -15800,6 +15800,54 @@ def test_active_space_context_uses_recovery_safe_stub_for_disabled_space(monkeyp
     assert "api_key" not in serialized
 
 
+def test_active_space_context_includes_relevant_memory_tree_slices(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    created = spaces.create_space(
+        {
+            "space_id": "memory-context-lab",
+            "name": "Memory Context Lab",
+            "agent_instructions": "Use cited memory only as advisory context.",
+        }
+    )
+    spaces.upsert_widget(created["space_id"], {"id": "safe-widget", "kind": "status", "title": "Safe Widget"})
+
+    from api.capy_memory import canonicalize_space_manifest, ingest_source, init_memory_tree
+
+    init_memory_tree()
+    record = canonicalize_space_manifest(
+        {
+            "space_id": created["space_id"],
+            "name": "Memory Context Lab",
+            "description": "Roadmap note for safe creator context",
+            "widgets": [
+                {
+                    "id": "safe-widget",
+                    "kind": "status",
+                    "title": "Safe Widget",
+                    "renderer": "<script>bad()</script>",
+                    "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+                }
+            ],
+        }
+    )
+    ingest_source(record)
+
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert "relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):" in context
+    assert record["source_id"] in context
+    assert "space_manifest" in context
+    assert "Roadmap note for safe creator context" in context
+    assert "safe-widget" in context
+    serialized = context.lower()
+    assert "<script" not in serialized
+    assert "bad()" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw prompt" not in serialized
+
+
 def test_streaming_agent_prompt_includes_active_space_context(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
