@@ -37,6 +37,12 @@
       } catch (memoryErr) {
         memoryStatus = {unavailable: true, local_only: true};
       }
+      let policyStatus = {unavailable: true, local_only: true};
+      try {
+        policyStatus = await fetchSpacesJson('api/capy-policy/status');
+      } catch (policyErr) {
+        policyStatus = {unavailable: true, local_only: true};
+      }
       const data = await fetchSpacesJson('api/spaces');
       if (!data.enabled) {
         root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces disabled</h3><div class="capy-spaces-muted">Set HERMES_WEBUI_SPACES_ENABLED=1 to enable the foundation shell.</div></div>';
@@ -44,7 +50,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus);
+      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, policyStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -114,14 +120,14 @@
       '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div></div>';
   }
 
-  function renderSpacesList(spaces, demos, memoryStatus){
+  function renderSpacesList(spaces, demos, memoryStatus, policyStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
-    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}) +
+    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, policyStatus || {}) +
       renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
   }
 
-  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus){
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, policyStatus){
     return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
       '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
       '<div class="capy-spaces-product-topbar">' +
@@ -158,6 +164,7 @@
       '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
       '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
       renderMemoryFreshnessCard(memoryStatus || {}) +
+      renderAutonomyPolicyCard(policyStatus || {}) +
       '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
       '<div class="capy-spaces-product-panels">' + renderSpaceAgentPanelPills(activeSpaceId) + '</div>' +
       '</section>';
@@ -191,6 +198,55 @@
   function renderMemoryFreshnessStat(value, label){
     const count = safeNonNegativeCount(value);
     return '<span>'+escapeHtml(String(count))+' '+escapeHtml(label)+'</span>';
+  }
+
+  function renderAutonomyPolicyCard(status){
+    const unavailable = status && status.unavailable === true;
+    const mode = safePolicyMode(status && status.mode);
+    const label = unavailable ? 'Policy unavailable' : (safeDisplayMetadataText(status && status.label, '') || safePolicyLabel(mode));
+    const summary = unavailable
+      ? 'Autonomy policy will appear when the local policy route is available.'
+      : (safeDisplayMetadataText(status && status.summary, '') || 'Visible trust controls keep high-risk actions gated.');
+    const gateLabels = safePolicyGateLabels(status && status.approval_gates);
+    const promptStatus = safeDisplayMetadataText(status && status.prompt_preflight && status.prompt_preflight.status, 'required') || 'required';
+    const routeHint = safeModelRouteHint(status && status.model_routing && status.model_routing.default_hint);
+    return '<section class="capy-spaces-autonomy-policy" aria-label="Autonomy policy">' +
+      '<div><div class="capy-spaces-product-eyebrow">POLICY</div><h3>Autonomy policy</h3><p>'+escapeHtml(summary)+'</p></div>' +
+      '<div class="capy-spaces-autonomy-policy-stats">' +
+      '<span>'+escapeHtml(label)+'</span>' +
+      gateLabels.map(function(gate){ return '<span>'+escapeHtml(gate)+'</span>'; }).join('') +
+      '<span>Prompt preflight '+escapeHtml(promptStatus)+'</span>' +
+      (routeHint ? '<span>Model route hint: '+escapeHtml(routeHint)+'</span>' : '') +
+      '</div>' +
+      '</section>';
+  }
+
+  function safePolicyMode(value){
+    const mode = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s-]+/g, '_');
+    return /^(supervised|semi_autonomous|autonomous)$/.test(mode) ? mode : 'supervised';
+  }
+
+  function safePolicyLabel(mode){
+    if (mode === 'autonomous') return 'Autonomous';
+    if (mode === 'semi_autonomous') return 'Semi-autonomous';
+    return 'Supervised';
+  }
+
+  function safePolicyGateLabels(gates){
+    const map = {
+      creator_commit: 'Creator commit approval',
+      destructive_external_action: 'Destructive action approval',
+      generated_widget_execution: 'Generated widget execution approval',
+      credential_change: 'Credential-change approval'
+    };
+    const values = Array.isArray(gates) ? gates : [];
+    const labels = values.map(function(gate){ return map[String(gate || '').trim()]; }).filter(Boolean);
+    return labels.length ? labels.slice(0, 4) : ['Creator commit approval'];
+  }
+
+  function safeModelRouteHint(value){
+    const hint = String(value == null ? '' : value).trim().toLowerCase();
+    return /^hint:(fast|reasoning|vision|summarize|code|local)$/.test(hint) ? hint : '';
   }
 
   function safeNonNegativeCount(value){

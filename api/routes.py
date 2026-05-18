@@ -3063,6 +3063,15 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("capy memory search failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-policy/status":
+        try:
+            from api.capy_policy import policy_status
+
+            return j(handler, policy_status())
+        except Exception as exc:
+            logger.exception("capy policy status failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 

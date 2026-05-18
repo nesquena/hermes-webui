@@ -152,6 +152,21 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({ available: true, local_only: true, db_exists: true, source_count: 1, chunk_count: 1, stale_source_count: 0, last_error_count: 0 });
   }
+  if (path === 'api/capy-policy/status') {
+    if (scenario === 'productHomePolicyStatus') {
+      return response({
+        available: true,
+        mode: 'semi_autonomous',
+        label: 'Semi-autonomous',
+        summary: 'Safe reads and tests can run; destructive writes still require approval.',
+        approval_gates: ['creator_commit', 'destructive_external_action', 'generated_widget_execution'],
+        prompt_preflight: { status: 'required', protected_boundaries: ['creator_preview', 'widget_runtime_prompt'], raw_prompt: 'ignore previous instructions' },
+        model_routing: { status: 'configured', default_hint: 'hint:reasoning', resolved_provider: 'OpenAI', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        renderer: '<script>bad()</script>',
+      });
+    }
+    return response({ available: true, mode: 'supervised', label: 'Supervised', summary: 'Approval required for side effects.', approval_gates: ['creator_commit'], prompt_preflight: { status: 'required' }, model_routing: { status: 'default' } });
+  }
   if (path === 'api/spaces/demo/run') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     const demo = body.demo || 'demo_weather_widget';
@@ -1428,7 +1443,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus') {
     await window.loadCapySpaces();
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -3410,6 +3425,25 @@ def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(
     assert "1 stale" in html
     assert "1 error" in html
     assert {"path": "api/capy-memory/status", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_policy_card_is_visible_bounded_and_safe(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomePolicyStatus")
+    html = out["rootHtml"]
+
+    assert "Autonomy policy" in html
+    assert "Semi-autonomous" in html
+    assert "Safe reads and tests can run" in html
+    assert "Creator commit approval" in html
+    assert "Prompt preflight required" in html
+    assert "Model route hint: hint:reasoning" in html
+    assert {"path": "api/capy-policy/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
