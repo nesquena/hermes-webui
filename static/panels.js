@@ -230,6 +230,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  // Stop the 1500ms gateway status interval when leaving the Profiles panel
+  // so we don't leak pollers across panel switches.
+  if (prevPanel === 'profiles' && nextPanel !== 'profiles') {
+    if (typeof _stopAllGatewayPollers === 'function') _stopAllGatewayPollers();
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
@@ -3507,6 +3512,7 @@ function renderSkills(skills) {
   }
   const box = $('skillsList');
   box.innerHTML = '';
+
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
     const collapsed = _collapsedCats.has(cat);
@@ -4158,8 +4164,14 @@ function _positionProfileDropdown(){
   dd.style.left=`${left}px`;
 }
 
-function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
+function renderWorkspaceDropdownInto(dd, workspaces, currentWs, opts){
   if(!dd)return;
+  opts=opts||{};
+  const onSelect=typeof opts.onSelect==='function'
+    ? opts.onSelect
+    : (path,name)=>switchToWorkspace(path,name);
+  const includeSessionActions=opts.includeSessionActions!==false;
+  const includeManageAction=opts.includeManageAction!==false;
   dd.innerHTML='';
 
   // ── Search row ──────────────────────────────────────────────────────────
@@ -4205,7 +4217,7 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
       opt.dataset.name=w.name||'';
       opt.dataset.path=w.path||'';
       opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-      opt.onclick=()=>switchToWorkspace(w.path,w.name);
+      opt.onclick=()=>onSelect(w.path,w.name,w);
       listContainer.appendChild(opt);
     }
     listContainer.appendChild(noResults);
@@ -4218,38 +4230,43 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   sc.addEventListener('click',()=>{ si.value=''; filterWs(''); si.focus(); });
 
   // ── Footer actions ────────────────────────────────────────────────────────
-  dd.appendChild(document.createElement('div')).className='ws-divider';
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_new_worktree_conversation'),
-    t('workspace_new_worktree_conversation_meta'),
-    li('git-branch',12),
-    async()=>{
-      closeWsDropdown();
-      try{
-        await newSession(false,{worktree:true});
-        await renderSessionList();
-        const msg=$('msg');
-        if(msg)msg.focus();
-        showToast(t('workspace_worktree_created'));
-      }catch(e){
-        showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+  const appendDivider=()=>{const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);};
+  if(includeSessionActions){
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_new_worktree_conversation'),
+      t('workspace_new_worktree_conversation_meta'),
+      li('git-branch',12),
+      async()=>{
+        closeWsDropdown();
+        try{
+          await newSession(false,{worktree:true});
+          await renderSessionList();
+          const msg=$('msg');
+          if(msg)msg.focus();
+          showToast(t('workspace_worktree_created'));
+        }catch(e){
+          showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+        }
       }
-    }
-  ));
-  dd.appendChild(document.createElement('div')).className='ws-divider';
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_choose_path'),
-    t('workspace_choose_path_meta'),
-    li('folder',12),
-    ()=>promptWorkspacePath()
-  ));
-  const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_manage'),
-    t('workspace_manage_meta'),
-    li('settings',12),
-    ()=>{closeWsDropdown();mobileSwitchPanel('workspaces');}
-  ));
+    ));
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_choose_path'),
+      t('workspace_choose_path_meta'),
+      li('folder',12),
+      ()=>promptWorkspacePath()
+    ));
+  }
+  if(includeManageAction){
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_manage'),
+      t('workspace_manage_meta'),
+      li('settings',12),
+      ()=>{closeWsDropdown();mobileSwitchPanel('workspaces');}
+    ));
+  }
 }
 
 function toggleWsDropdown(){
@@ -4292,23 +4309,32 @@ function toggleComposerWsDropdown(){
 function closeWsDropdown(){
   const dd=$('wsDropdown');
   const composerDd=$('composerWsDropdown');
+  const profileDd=$('profileDefaultWorkspaceDropdown');
   const composerChip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
+  const profileChip=$('profileDefaultWorkspaceChip');
   if(dd)dd.classList.remove('open');
   if(composerDd)composerDd.classList.remove('open');
+  if(profileDd)profileDd.classList.remove('open');
   if(composerChip)composerChip.classList.remove('active');
   if(mobileAction)mobileAction.classList.remove('active');
+  if(profileChip)profileChip.classList.remove('active');
 }
 document.addEventListener('click',e=>{
   if(
     !e.target.closest('#composerWorkspaceChip') &&
     !e.target.closest('#composerMobileWorkspaceAction') &&
-    !e.target.closest('#composerWsDropdown')
+    !e.target.closest('#composerWsDropdown') &&
+    !e.target.closest('#profileDefaultWorkspaceChip') &&
+    !e.target.closest('#profileDefaultWorkspaceDropdown')
   ) closeWsDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerWsDropdown');
   if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
+  const profileDd=$('profileDefaultWorkspaceDropdown');
+  const profileChip=$('profileDefaultWorkspaceChip');
+  if(profileDd&&profileDd.classList.contains('open')) _positionProfileDefaultWorkspaceDropdown(profileChip, profileDd);
 });
 
 async function loadWorkspacesPanel(){
@@ -4786,6 +4812,583 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
+function _profileSkillsCountMeta(p){
+  if (!p) return '';
+  if (typeof p.skill_enabled_count !== 'number' || typeof p.skill_total !== 'number') return '';
+  return `${p.skill_enabled_count} / ${p.skill_total} skills`;
+}
+
+function _syncProfileAvatarState(data){
+  if(!data||!Array.isArray(data.profiles)||typeof setProfileAvatarMap!=='function') return;
+  const active=(S.activeProfile&&data.profiles.some(p=>p.name===S.activeProfile))?S.activeProfile:(data.active||'default');
+  setProfileAvatarMap(data.profiles, active);
+}
+
+function _profileAvatarForUi(profile, classes){
+  const name=(profile&&profile.name)||'H';
+  const fallback=name.charAt(0).toUpperCase()||'H';
+  const shape=(typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(profile&&profile.avatar_shape):'circle';
+  let avatar=profile&&profile.avatar;
+  let state='';
+  const mode=(typeof _normalizeProfileAvatarMode==='function')
+    ? _normalizeProfileAvatarMode(profile&&profile.avatar_mode)
+    : String(profile&&profile.avatar_mode||'static').toLowerCase();
+  if(mode==='reactive'){
+    const effective=profile&&profile.effective_reactive_avatar&&profile.effective_reactive_avatar.idle;
+    if(effective&&effective.avatar){
+      avatar=effective.avatar;
+      state='idle';
+    }else{
+      const idleSlot=profile&&profile.reactive_avatar&&profile.reactive_avatar.slots&&profile.reactive_avatar.slots.idle;
+      if(idleSlot&&idleSlot.url){
+        avatar={type:'asset',value:idleSlot.url};
+        state='idle';
+      }
+    }
+  }
+  if(typeof _profileAvatarMarkup==='function') return _profileAvatarMarkup(avatar,{fallback,shape,classes,title:name,state});
+  return `<div class="${esc(classes||'profile-avatar')}">${esc(fallback)}</div>`;
+}
+
+function _profileModelGroupsFromComposer(){
+  const sel=$('modelSelect');
+  const groups=[];
+  if(!sel) return groups;
+  const pushGroup=(provider,label,options)=>{
+    const models=options.map(opt=>({value:opt.value,label:opt.textContent||getModelLabel(opt.value),provider})).filter(m=>m.value);
+    if(models.length) groups.push({provider:provider||'',label:label||provider||'Models',models});
+  };
+  for(const child of Array.from(sel.children)){
+    if(child.tagName==='OPTGROUP'){
+      pushGroup((child.dataset&&child.dataset.provider)||'', child.label||'', Array.from(child.children));
+    }else if(child.tagName==='OPTION'){
+      pushGroup('', 'Models', [child]);
+    }
+  }
+  return groups;
+}
+
+function _profileProviderForModel(modelValue, groups){
+  const explicit=(typeof _providerFromModelValue==='function')?_providerFromModelValue(modelValue):'';
+  if(explicit) return explicit;
+  for(const g of groups||[]){
+    if((g.models||[]).some(m=>m.value===modelValue)) return g.provider||'';
+  }
+  return '';
+}
+
+// Legacy v2 identity-controls hydrator + its save path (_hydrateProfileIdentityControls,
+// _saveProfileModelSettings, _profileMarkModelDirty, _profileSetInlineStatus) were removed
+// on 2026-05-15 as part of the Runtime tile rework. The v3 layout never
+// renders #profileInlineProvider/#profileInlineModel/#profileInlineReasoning, so the
+// helpers had no live callers; the new _hydrateProfileDefaultModel + _persistProfileDefaultModel
+// pair (further below) covers the same /api/profile/settings POST contract with auto-save.
+
+let _profileAvatarUploadDataUrl='';
+const PROFILE_AVATAR_UPLOAD_MAX_BYTES=3*1024*1024;
+const PROFILE_REACTIVE_AVATAR_UPLOAD_MAX_BYTES=5*1024*1024;
+const PROFILE_REACTIVE_AVATAR_SLOTS=[
+  {key:'idle',label:'Idle',hint:'Waiting between turns'},
+  {key:'thinking',label:'Thinking',hint:'Reasoning or planning'},
+  {key:'talking',label:'Talking',hint:'Streaming text'},
+  {key:'working',label:'Working',hint:'Tools, files, or web work'},
+  {key:'error',label:'Error',hint:'Recoverable failure state'},
+];
+let _profileAvatarDialogSettings=null;
+let _profileReactiveAvatarUploads={};
+let _profileReactiveAvatarClearSlots=new Set();
+let _profileAvatarDialogPreviewState='idle';
+
+function _setProfileAvatarDialogMessage(message,tone){
+  const el=$('profileAvatarDialogMessage');
+  if(!el) return;
+  const text=String(message||'').trim();
+  el.textContent=text;
+  el.hidden=!text;
+  el.dataset.tone=tone||'';
+}
+
+function _profileAvatarRuntimeModeFromDialog(){
+  const active=document.querySelector('[data-avatar-runtime-mode].active');
+  const mode=(active&&active.dataset.avatarRuntimeMode)||'static';
+  return mode==='reactive'?'reactive':'static';
+}
+
+function _setProfileAvatarRuntimeMode(mode){
+  mode=mode==='reactive'?'reactive':'static';
+  document.querySelectorAll('[data-avatar-runtime-mode]').forEach(btn=>{
+    const active=btn.dataset.avatarRuntimeMode===mode;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  const staticWrap=$('profileAvatarStaticEditor');
+  const reactiveWrap=$('profileAvatarReactiveEditor');
+  const previewStates=$('profileAvatarPreviewStateControls');
+  if(staticWrap) staticWrap.hidden=mode!=='static';
+  if(reactiveWrap) reactiveWrap.hidden=mode!=='reactive';
+  if(previewStates) previewStates.hidden=mode!=='reactive';
+  _refreshProfileAvatarDialogPreview();
+}
+
+function _profileAvatarUploadTypeAllowed(file){
+  if(!file) return false;
+  const type=String(file.type||'').toLowerCase();
+  const name=String(file.name||'').toLowerCase();
+  return /^image\/(png|jpe?g|gif|webp)$/.test(type)||/\.(png|jpe?g|gif|webp)$/.test(name);
+}
+
+function _profileReactiveSlotMeta(slot){
+  if(_profileReactiveAvatarClearSlots.has(slot)) return null;
+  const upload=_profileReactiveAvatarUploads[slot];
+  if(upload&&upload.previewUrl) return {url:upload.previewUrl,filename:upload.file&&upload.file.name,uploaded:true};
+  const settings=_profileAvatarDialogSettings||{};
+  const slots=settings.reactive_avatar&&settings.reactive_avatar.slots||{};
+  return slots&&slots[slot]||null;
+}
+
+function _profileReactiveAvatarForSlot(slot){
+  const meta=_profileReactiveSlotMeta(slot);
+  return meta&&meta.url?{type:'asset',value:meta.url}:null;
+}
+
+function _normalizeProfileAvatarPreviewState(state){
+  const normalized=String(state||'idle').trim().toLowerCase();
+  return PROFILE_REACTIVE_AVATAR_SLOTS.some(slot=>slot.key===normalized)?normalized:'idle';
+}
+
+function _profileReactivePreviewSlot(desiredState){
+  desiredState=_normalizeProfileAvatarPreviewState(desiredState);
+  const orderedSlots=[desiredState];
+  if(desiredState!=='idle') orderedSlots.push('idle');
+  PROFILE_REACTIVE_AVATAR_SLOTS.forEach(slot=>{
+    if(!orderedSlots.includes(slot.key)) orderedSlots.push(slot.key);
+  });
+  for(const slot of orderedSlots){
+    const avatar=_profileReactiveAvatarForSlot(slot);
+    if(avatar) return slot;
+  }
+  return null;
+}
+
+function _profileReactivePreviewAvatar(desiredState){
+  desiredState=_normalizeProfileAvatarPreviewState(desiredState);
+  const orderedSlots=[desiredState];
+  if(desiredState!=='idle') orderedSlots.push('idle');
+  PROFILE_REACTIVE_AVATAR_SLOTS.forEach(slot=>{
+    if(!orderedSlots.includes(slot.key)) orderedSlots.push(slot.key);
+  });
+  for(const slot of orderedSlots){
+    const avatar=_profileReactiveAvatarForSlot(slot);
+    if(avatar) return avatar;
+  }
+  if(_profileAvatarDialogSettings&&_profileAvatarDialogSettings.avatar) return _profileAvatarDialogSettings.avatar;
+  try{return _profileAvatarRuntimeModeFromDialog()==='static'?_profileAvatarPayloadFromDialog():null;}catch(_){return null;}
+}
+
+function _setProfileAvatarPreviewState(state){
+  _profileAvatarDialogPreviewState=_normalizeProfileAvatarPreviewState(state);
+  document.querySelectorAll('[data-avatar-preview-state]').forEach(btn=>{
+    const active=btn.dataset.avatarPreviewState===_profileAvatarDialogPreviewState;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  _refreshProfileAvatarDialogPreview();
+}
+
+function _refreshReactiveAvatarSlotRows(){
+  PROFILE_REACTIVE_AVATAR_SLOTS.forEach(slotInfo=>{
+    const slot=slotInfo.key;
+    const meta=_profileReactiveSlotMeta(slot);
+    const preview=$(`profileReactiveAvatar${slot}Preview`);
+    const status=$(`profileReactiveAvatar${slot}Status`);
+    if(preview){
+      const avatar=meta&&meta.url?{type:'asset',value:meta.url}:null;
+      preview.innerHTML=avatar&&typeof _profileAvatarMarkup==='function'
+        ? _profileAvatarMarkup(avatar,{fallback:slotInfo.label.charAt(0),shape:_profileAvatarShapeFromDialog(),classes:'profile-avatar--slot',title:slotInfo.label})
+        : `<div class="profile-avatar profile-avatar--slot profile-avatar-shape--${esc(_profileAvatarShapeFromDialog())} profile-avatar--fallback">${esc(slotInfo.label.charAt(0))}</div>`;
+    }
+    if(status){
+      if(_profileReactiveAvatarUploads[slot]) status.textContent=`Selected: ${_profileReactiveAvatarUploads[slot].file.name}`;
+      else if(_profileReactiveAvatarClearSlots.has(slot)) status.textContent='Will clear on save';
+      else if(meta&&meta.filename) status.textContent=`Saved: ${meta.filename}`;
+      else status.textContent='Using fallback';
+    }
+  });
+}
+
+function _revokeReactiveAvatarUploadUrls(){
+  Object.values(_profileReactiveAvatarUploads||{}).forEach(upload=>{
+    if(upload&&upload.previewUrl){
+      try{URL.revokeObjectURL(upload.previewUrl);}catch(_){}
+    }
+  });
+}
+
+function _chooseProfileAvatarEmoji(value){
+  const input=$('profileAvatarEmoji');
+  if(input){
+    input.value=value;
+    _setProfileAvatarDialogMode('emoji');
+    _setProfileAvatarDialogMessage('', '');
+    _refreshProfileAvatarDialogPreview();
+    input.focus();
+  }
+}
+
+function _profileAvatarDialogModeFromAvatar(avatar){
+  const normalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(avatar):null;
+  if(!normalized) return 'emoji';
+  if(normalized.type==='image') return 'upload';
+  return normalized.type||'emoji';
+}
+
+function _setProfileAvatarDialogMode(mode){
+  mode=['emoji','url','upload','asset'].includes(mode)?mode:'emoji';
+  document.querySelectorAll('[data-avatar-mode]').forEach(btn=>{
+    const active=btn.dataset.avatarMode===mode;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  document.querySelectorAll('[data-profile-avatar-pane]').forEach(pane=>{
+    pane.hidden=pane.dataset.profileAvatarPane!==mode;
+  });
+  _refreshProfileAvatarDialogPreview();
+}
+
+function _profileAvatarShapeFromDialog(){
+  const active=document.querySelector('[data-avatar-shape].active');
+  const shape=(active&&active.dataset.avatarShape)||'circle';
+  return (typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(shape):shape;
+}
+
+function _setProfileAvatarDialogShape(shape){
+  const normalized=(typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(shape):'circle';
+  document.querySelectorAll('[data-avatar-shape]').forEach(btn=>{
+    const active=btn.dataset.avatarShape===normalized;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  _refreshReactiveAvatarSlotRows();
+  _refreshProfileAvatarDialogPreview();
+}
+
+function _profileAvatarPreviewMarkup(profileName,avatar,shape,state){
+  const fallback=String(profileName||'H').trim().slice(0,2).toUpperCase()||'H';
+  if(typeof _profileAvatarMarkup==='function'){
+    return _profileAvatarMarkup(avatar,{fallback,shape,classes:'profile-avatar--dialog',title:profileName,state});
+  }
+  return _profileAvatarForUi({name:profileName,avatar,avatar_shape:shape},'profile-avatar--dialog');
+}
+
+function _profileAvatarPayloadFromDialog(){
+  const active=document.querySelector('[data-avatar-mode].active');
+  const mode=(active&&active.dataset.avatarMode)||'emoji';
+  if(mode==='emoji'){
+    const value=($('profileAvatarEmoji')&&$('profileAvatarEmoji').value.trim())||'';
+    if(!value) throw new Error('Choose an emoji avatar or clear the avatar.');
+    return {type:'emoji',value};
+  }
+  if(mode==='url'){
+    const value=($('profileAvatarUrl')&&$('profileAvatarUrl').value.trim())||'';
+    if(!value) throw new Error('Enter an image or GIF URL.');
+    return {type:'url',value};
+  }
+  if(mode==='upload'){
+    if(!_profileAvatarUploadDataUrl) throw new Error('Choose an image, GIF, or WebP file.');
+    return {type:'image',value:_profileAvatarUploadDataUrl};
+  }
+  const value=($('profileAvatarAsset')&&$('profileAvatarAsset').value.trim())||'';
+  if(!value) throw new Error('Enter a safe asset reference.');
+  return {type:'asset',value};
+}
+
+function _refreshProfileAvatarDialogPreview(){
+  const node=$('profileAvatarDialogPreview');
+  if(!node) return;
+  const profileName=node.dataset.profileName||(_currentProfileDetail&&_currentProfileDetail.name)||'H';
+  const runtimeMode=_profileAvatarRuntimeModeFromDialog();
+  const previewState=_normalizeProfileAvatarPreviewState(_profileAvatarDialogPreviewState);
+  const summary=$('profileAvatarPreviewSummary');
+  try{
+    const avatar=runtimeMode==='reactive'
+      ? _profileReactivePreviewAvatar(previewState)
+      : _profileAvatarPayloadFromDialog();
+    if(!avatar&&runtimeMode!=='reactive') throw new Error('No avatar preview');
+    node.innerHTML=_profileAvatarPreviewMarkup(profileName,avatar,_profileAvatarShapeFromDialog(),runtimeMode==='reactive'?previewState:'');
+    node.dataset.previewState=runtimeMode==='reactive'?previewState:'static';
+    if(summary){
+      if(runtimeMode==='reactive'){
+        const desired=PROFILE_REACTIVE_AVATAR_SLOTS.find(slot=>slot.key===previewState);
+        const sourceSlot=_profileReactivePreviewSlot(previewState);
+        const source=sourceSlot&&PROFILE_REACTIVE_AVATAR_SLOTS.find(slot=>slot.key===sourceSlot);
+        if(sourceSlot&&sourceSlot!==previewState) summary.textContent=`${desired?desired.label:'Selected'} is falling back to ${source?source.label.toLowerCase():sourceSlot}.`;
+        else if(sourceSlot) summary.textContent=`Previewing the ${source?source.label.toLowerCase():sourceSlot} animation slot.`;
+        else summary.textContent='No animation slot is saved yet; the profile fallback remains available.';
+      }else{
+        summary.textContent='Static avatar preview. Reactive uploads stay saved when you switch modes.';
+      }
+    }
+  }catch(_){
+    const current=_currentProfileDetail&&_currentProfileDetail.name===profileName?_currentProfileDetail:null;
+    const shape=_profileAvatarShapeFromDialog();
+    node.innerHTML=_profileAvatarForUi(Object.assign({}, current||{name:profileName}, {avatar_shape:shape}),'profile-avatar--dialog');
+    node.dataset.previewState=runtimeMode==='reactive'?previewState:'static';
+    if(summary) summary.textContent='Preview is using the current profile avatar until the selected input is valid.';
+  }
+  _refreshReactiveAvatarSlotRows();
+}
+
+function _openProfileAvatarDialog(profileName){
+  const dialog=$('profileAvatarDialog');
+  if(!dialog) return;
+  const profile=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(p=>p.name===profileName):_currentProfileDetail;
+  const avatar=(profile&&profile.avatar)||null;
+  const normalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(avatar):null;
+  const shape=(profile&&profile.avatar_shape)||'circle';
+  _revokeReactiveAvatarUploadUrls();
+  _profileReactiveAvatarUploads={};
+  _profileReactiveAvatarClearSlots=new Set();
+  _profileAvatarDialogPreviewState='idle';
+  _profileAvatarDialogSettings={
+    name:profileName,
+    avatar,
+    avatar_shape:shape,
+    avatar_mode:(profile&&profile.avatar_mode)||'static',
+    reactive_avatar:(profile&&profile.reactive_avatar)||{version:1,updated_at:null,slots:{}},
+    effective_reactive_avatar:(profile&&profile.effective_reactive_avatar)||{},
+  };
+  _profileAvatarUploadDataUrl=normalized&&normalized.type==='image'?normalized.value:'';
+  if($('profileAvatarEmoji')) $('profileAvatarEmoji').value=normalized&&normalized.type==='emoji'?normalized.value:'🤖';
+  if($('profileAvatarUrl')) $('profileAvatarUrl').value=normalized&&normalized.type==='url'?normalized.value:'';
+  if($('profileAvatarAsset')) $('profileAvatarAsset').value=normalized&&normalized.type==='asset'?normalized.value:'';
+  _setProfileAvatarDialogMessage('', '');
+  const preview=$('profileAvatarDialogPreview');
+  if(preview) preview.dataset.profileName=profileName;
+  dialog.hidden=false;
+  _setProfileAvatarDialogShape(shape);
+  _setProfileAvatarDialogMode(_profileAvatarDialogModeFromAvatar(avatar));
+  _setProfileAvatarPreviewState('idle');
+  _setProfileAvatarRuntimeMode(_profileAvatarDialogSettings.avatar_mode);
+  _refreshReactiveAvatarSlotRows();
+  const file=$('profileAvatarUpload');
+  if(file) file.value='';
+  PROFILE_REACTIVE_AVATAR_SLOTS.forEach(slot=>{const input=$(`profileReactiveAvatar${slot.key}`);if(input) input.value='';});
+  api(`/api/profile/avatar-settings?name=${encodeURIComponent(profileName)}`).then(settings=>{
+    if(!settings||$('profileAvatarDialog')?.hidden) return;
+    const currentName=$('profileAvatarDialogPreview')&&$('profileAvatarDialogPreview').dataset.profileName;
+    if(currentName!==profileName) return;
+    _profileAvatarDialogSettings=settings;
+    const freshAvatar=settings.avatar||null;
+    const freshNormalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(freshAvatar):null;
+    _profileAvatarUploadDataUrl=freshNormalized&&freshNormalized.type==='image'?freshNormalized.value:'';
+    if($('profileAvatarEmoji')) $('profileAvatarEmoji').value=freshNormalized&&freshNormalized.type==='emoji'?freshNormalized.value:'🤖';
+    if($('profileAvatarUrl')) $('profileAvatarUrl').value=freshNormalized&&freshNormalized.type==='url'?freshNormalized.value:'';
+    if($('profileAvatarAsset')) $('profileAvatarAsset').value=freshNormalized&&freshNormalized.type==='asset'?freshNormalized.value:'';
+    _setProfileAvatarDialogShape(settings.avatar_shape||shape);
+    _setProfileAvatarDialogMode(_profileAvatarDialogModeFromAvatar(freshAvatar));
+    _setProfileAvatarRuntimeMode(settings.avatar_mode||'static');
+    _refreshReactiveAvatarSlotRows();
+  }).catch(e=>{
+    _setProfileAvatarDialogMessage('Avatar settings load failed: '+(e.message||String(e)),'error');
+  });
+}
+
+function _closeProfileAvatarDialog(){
+  const dialog=$('profileAvatarDialog');
+  if(dialog) dialog.hidden=true;
+  _profileAvatarUploadDataUrl='';
+  _profileAvatarDialogSettings=null;
+  _profileReactiveAvatarClearSlots=new Set();
+  _revokeReactiveAvatarUploadUrls();
+  _profileReactiveAvatarUploads={};
+}
+
+function _readProfileAvatarFile(file){
+  return new Promise((resolve,reject)=>{
+    if(!file) return reject(new Error('Choose an image, GIF, or WebP file.'));
+    if(!_profileAvatarUploadTypeAllowed(file)) return reject(new Error('Avatar upload must be PNG, JPEG, GIF, or WebP.'));
+    if(file.size>PROFILE_AVATAR_UPLOAD_MAX_BYTES) return reject(new Error('Avatar upload must be 3 MB or smaller.'));
+    const reader=new FileReader();
+    reader.onload=()=>resolve(String(reader.result||''));
+    reader.onerror=()=>reject(new Error('Could not read avatar file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function _handleProfileAvatarUpload(file){
+  _setProfileAvatarDialogMessage('Reading image…','info');
+  return _readProfileAvatarFile(file).then(v=>{
+    _profileAvatarUploadDataUrl=v;
+    _refreshProfileAvatarDialogPreview();
+    _setProfileAvatarDialogMessage('Image ready. Save avatar to apply it.','success');
+  }).catch(e=>{
+    _profileAvatarUploadDataUrl='';
+    _refreshProfileAvatarDialogPreview();
+    _setProfileAvatarDialogMessage(e.message||String(e),'error');
+    if(typeof showToast==='function') showToast(e.message||String(e),4000,'error');
+  });
+}
+
+function _handleReactiveAvatarUpload(slot,file){
+  const slotInfo=PROFILE_REACTIVE_AVATAR_SLOTS.find(s=>s.key===slot);
+  if(!slotInfo) return;
+  try{
+    if(!file) throw new Error('Choose an image, GIF, or WebP file.');
+    if(!_profileAvatarUploadTypeAllowed(file)) throw new Error('Reactive avatars must be PNG, JPEG, GIF, or WebP.');
+    if(file.size>PROFILE_REACTIVE_AVATAR_UPLOAD_MAX_BYTES) throw new Error('Reactive avatar uploads must be 5 MB or smaller.');
+    const prior=_profileReactiveAvatarUploads[slot];
+    if(prior&&prior.previewUrl) try{URL.revokeObjectURL(prior.previewUrl);}catch(_){}
+    _profileReactiveAvatarUploads[slot]={file,previewUrl:URL.createObjectURL(file)};
+    _profileReactiveAvatarClearSlots.delete(slot);
+    _setProfileAvatarDialogMessage(`${slotInfo.label} animation selected. Save avatar to apply it.`,'success');
+    _refreshProfileAvatarDialogPreview();
+  }catch(e){
+    delete _profileReactiveAvatarUploads[slot];
+    _setProfileAvatarDialogMessage(e.message||String(e),'error');
+    if(typeof showToast==='function') showToast(e.message||String(e),4000,'error');
+    _refreshProfileAvatarDialogPreview();
+  }
+}
+
+function _clearReactiveAvatarSlot(slot){
+  if(!PROFILE_REACTIVE_AVATAR_SLOTS.some(s=>s.key===slot)) return;
+  const prior=_profileReactiveAvatarUploads[slot];
+  if(prior&&prior.previewUrl) try{URL.revokeObjectURL(prior.previewUrl);}catch(_){}
+  delete _profileReactiveAvatarUploads[slot];
+  _profileReactiveAvatarClearSlots.add(slot);
+  const input=$(`profileReactiveAvatar${slot}`);
+  if(input) input.value='';
+  _setProfileAvatarDialogMessage('Slot will be cleared when you save.','info');
+  _refreshProfileAvatarDialogPreview();
+}
+
+async function _postProfileAvatarSettings(form){
+  const url=new URL('api/profile/avatar-settings',document.baseURI||location.href);
+  const res=await fetch(url.href,{method:'POST',body:form,credentials:'include'});
+  const text=await res.text();
+  let data=null;
+  try{data=text?JSON.parse(text):null;}catch(_){}
+  if(!res.ok){
+    const err=new Error((data&&(data.error||data.message))||text||res.statusText||'Avatar save failed');
+    err.status=res.status;
+    throw err;
+  }
+  return data||{};
+}
+
+function _mergeProfileAvatarSettings(profileName, updated){
+  const apply=p=>{
+    if(!p) return;
+    p.avatar=updated.avatar||null;
+    p.avatar_shape=updated.avatar_shape||'circle';
+    p.avatar_mode=updated.avatar_mode||'static';
+    p.reactive_avatar=updated.reactive_avatar||{version:1,updated_at:null,slots:{}};
+    p.effective_reactive_avatar=updated.effective_reactive_avatar||{};
+  };
+  const p=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(x=>x.name===profileName):null;
+  apply(p);
+  if(_currentProfileDetail&&_currentProfileDetail.name===profileName) apply(_currentProfileDetail);
+}
+
+function _replaceProfileAvatarElement(node, profile, classes){
+  if(!node||!profile) return;
+  const wrap=document.createElement('div');
+  wrap.innerHTML=_profileAvatarForUi(profile,classes);
+  const next=wrap.firstElementChild;
+  if(next) node.replaceWith(next);
+}
+
+function _profileForAvatarSurfaceRefresh(profileName){
+  if(_profilesCache&&Array.isArray(_profilesCache.profiles)){
+    const cached=_profilesCache.profiles.find(x=>x.name===profileName);
+    if(cached) return cached;
+  }
+  if(_currentProfileDetail&&_currentProfileDetail.name===profileName) return _currentProfileDetail;
+  return null;
+}
+
+function _refreshProfileAvatarSurfaces(profileName){
+  const profile=_profileForAvatarSurfaceRefresh(profileName);
+  if(!profile) return;
+  const selectorName=CSS.escape(profileName);
+  const card=document.querySelector(`.profile-card[data-name="${selectorName}"]`);
+  if(card){
+    _replaceProfileAvatarElement(card.querySelector('.profile-card-header .profile-avatar'),profile,'profile-avatar--card');
+  }
+  if(_currentProfileDetail&&_currentProfileDetail.name===profileName){
+    const hero=$('profileHeroAvatar');
+    if(hero){
+      const shape=(typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(profile.avatar_shape):'circle';
+      hero.classList.remove('profile-avatar-shape--square','profile-avatar-shape--circle');
+      hero.classList.add(`profile-avatar-shape--${shape}`);
+      const heroAvatar=Array.from(hero.children).find(el=>el.classList&&el.classList.contains('profile-avatar'));
+      _replaceProfileAvatarElement(heroAvatar,profile,'profile-avatar--hero');
+    }
+  }
+  const dropdown=$('profileDropdown');
+  const option=dropdown&&dropdown.querySelector(`.profile-opt[data-name="${selectorName}"]`);
+  if(option){
+    _replaceProfileAvatarElement(option.querySelector('.profile-opt-main .profile-avatar'),profile,'profile-avatar--dropdown');
+  }
+}
+
+async function refreshActiveProfileAvatarSettings(profileName){
+  if(!profileName) profileName=S.activeProfile||'default';
+  try{
+    const settings=await api(`/api/profile/avatar-settings?name=${encodeURIComponent(profileName)}`);
+    if(typeof setProfileAvatarEntry==='function') setProfileAvatarEntry(profileName,settings);
+    if((S.activeProfile||'default')===profileName&&typeof setActiveProfileAvatarSettings==='function'){
+      setActiveProfileAvatarSettings(settings);
+    }
+    _mergeProfileAvatarSettings(profileName,settings);
+    return settings;
+  }catch(_){
+    return null;
+  }
+}
+
+async function _saveProfileAvatar(profileName, clear, opts={}){
+  const btn=$('profileAvatarSave');
+  if(btn){btn.disabled=true;btn.style.opacity='0.55';}
+  try{
+    const form=new FormData();
+    const avatar_shape=_profileAvatarShapeFromDialog();
+    const runtimeMode=_profileAvatarRuntimeModeFromDialog();
+    form.append('name',profileName);
+    form.append('avatar_shape',avatar_shape);
+    form.append('avatar_mode',clear?'static':runtimeMode);
+    if(clear){
+      form.append('avatar','null');
+    }else if(runtimeMode==='static'){
+      form.append('avatar',JSON.stringify(_profileAvatarPayloadFromDialog()));
+    }
+    if(opts.clearReactive) form.append('clear_reactive_avatar','true');
+    else if(_profileReactiveAvatarClearSlots.size) form.append('clear_slots',Array.from(_profileReactiveAvatarClearSlots).join(','));
+    Object.entries(_profileReactiveAvatarUploads).forEach(([slot,upload])=>{
+      if(upload&&upload.file) form.append(`slot_${slot}`,upload.file,upload.file.name);
+    });
+    _setProfileAvatarDialogMessage(clear?'Clearing static avatar…':opts.clearReactive?'Clearing animations…':'Saving avatar…','info');
+    const updated=await _postProfileAvatarSettings(form);
+    _mergeProfileAvatarSettings(profileName,updated);
+    if(_profilesCache) _syncProfileAvatarState(_profilesCache);
+    if(typeof setProfileAvatarEntry==='function') setProfileAvatarEntry(profileName,updated);
+    const isActive=(S.activeProfile||(_profilesCache&&_profilesCache.active)||'default')===profileName;
+    if(isActive&&typeof setActiveProfileAvatarSettings==='function') setActiveProfileAvatarSettings(updated);
+    if(typeof currentSessionProfile==='function'&&currentSessionProfile()===profileName&&typeof refreshAssistantProfileAvatars==='function'){
+      refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true});
+    }
+    _closeProfileAvatarDialog();
+    _refreshProfileAvatarSurfaces(profileName);
+    showToast(clear?'Profile static avatar cleared':opts.clearReactive?'Profile avatar animations cleared':'Profile avatar saved');
+  }catch(e){
+    const message='Profile avatar save failed: '+(e.message||String(e));
+    _setProfileAvatarDialogMessage(message,'error');
+    showToast(message,4000,'error');
+  }finally{
+    if(btn){btn.disabled=false;btn.style.opacity='';}
+  }
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -4815,36 +5418,72 @@ async function loadProfilesPanel() {
     const activeName = (S.activeProfile && data.profiles.some(p => p.name === S.activeProfile))
       ? S.activeProfile
       : (data.active || 'default');
+    _syncProfileAvatarState(data);
     for (const p of data.profiles) {
       const card = document.createElement('div');
       card.className = 'profile-card';
       card.dataset.name = p.name;
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
-      if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
-      const gwDot = p.gateway_running
-        ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
-        : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
+      const skillsMeta = _profileSkillsCountMeta(p);
+      if (skillsMeta) meta.push(skillsMeta);
+      const gatewayState = _profileCardGatewayPhase(p);
+      const gatewayLabel = _profileCardGatewayLabel(gatewayState);
+      const gatewaySignal = `<span class="profile-card-gateway profile-wifi" data-profile-name="${esc(p.name)}" data-state="${esc(gatewayState)}" aria-hidden="true" title="${esc(gatewayLabel)}">${li('wifi',15)}</span><span class="sr-only">${esc(gatewayLabel)}</span>`;
       const isActive = p.name === activeName;
-      const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
-      const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const activeBadge = isActive ? `<span class="profile-card-active-pill">${esc(t('profile_active'))}</span>` : '';
+      const ariaLabelParts = [p.name];
+      if (isActive) ariaLabelParts.push('(active)');
+      ariaLabelParts.push(gatewayLabel);
+      card.setAttribute('aria-label', ariaLabelParts.join(' '));
+      if (isActive) card.setAttribute('aria-current', 'true');
       card.innerHTML = `
         <div class="profile-card-header">
-          <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+          ${_profileAvatarForUi(p,'profile-avatar--card')}
+          <div class="profile-card-copy">
+            <div class="profile-card-name${isActive ? ' is-active' : ''}"><span class="profile-card-name-text">${esc(p.name)}</span>${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
+          <div class="profile-card-actions">${gatewaySignal}<button type="button" class="profile-card-chat-btn" aria-label="Start chat with ${esc(p.name)}" title="Start chat">${li('message-square',15)}</button></div>
         </div>`;
-      card.onclick = () => openProfileDetail(p.name, card);
+      card.onclick = (ev) => {
+        if (ev.target && ev.target.closest && ev.target.closest('.profile-card-chat-btn')) return;
+        openProfileDetail(p.name, card);
+        if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+      };
+      card.onkeydown = (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        if (ev.target && ev.target.closest && ev.target.closest('.profile-card-chat-btn')) return;
+        ev.preventDefault();
+        openProfileDetail(p.name, card);
+        if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+      };
+      const chatBtn = card.querySelector('.profile-card-chat-btn');
+      if (chatBtn) chatBtn.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        startChatWithProfile(p.name);
+      };
       if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
       panel.appendChild(card);
     }
-    // Re-render detail with fresh data if we have one and we're not in a form
+    // Re-render detail with fresh data if we have one and we're not in a form.
+    // If no detail is selected, auto-select the active/default so the detail
+    // pane is never blank when profiles exist.
     if (_currentProfileDetail && _profileMode !== 'create') {
       const refreshed = data.profiles.find(p => p.name === _currentProfileDetail.name);
       if (refreshed) _renderProfileDetail(refreshed, data.active);
       else _clearProfileDetail();
+    } else if (!_currentProfileDetail && _profileMode !== 'create') {
+      const auto = data.profiles.find(p => p.name === activeName) || data.profiles[0];
+      if (auto) {
+        const targetCard = panel.querySelector(`.profile-card[data-name="${CSS.escape(auto.name)}"]`);
+        if (targetCard) targetCard.classList.add('active');
+        _renderProfileDetail(auto, data.active);
+      }
     }
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
@@ -4874,6 +5513,11 @@ function _renderProfileConceptHelp(activeName){
 }
 
 function _renderProfileDetail(p, activeName){
+  // Tear down any active gateway poller from a previous render before
+  // re-wiring this one. _renderProfileDetail is called from three paths
+  // (openProfileDetail, loadProfilesPanel periodic refresh, cancelProfileForm
+  // restore) — every path must pass through cleanup to avoid leaked pollers.
+  _stopAllGatewayPollers();
   _currentProfileDetail = p;
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
@@ -4882,52 +5526,3301 @@ function _renderProfileDetail(p, activeName){
   title.textContent = p.name;
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
-  const statusBadge = isActive
-    ? `<span class="detail-badge active">${esc(t('profile_active'))}</span>`
-    : `<span class="detail-badge">Inactive</span>`;
-  const defaultBadge = isDefault ? ` <span class="detail-badge">${esc(t('profile_default_label'))}</span>` : '';
-  const gwBadge = p.gateway_running
-    ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
-    : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
-  const rows = [];
-  rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
-  rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
-  if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
-  if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
-  if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
-  rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-  if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
-  if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
+
+  // Profile screen rework v3 (2026-05-14):
+  //   Row 1 — hero dossier (256×256 avatar + activity line + description + inline actions)
+  //   Row 2 — runtime panel · gateway tile · skills tile (3-col)
+  //   Row 3 — files grid (Lucide icons)
   body.innerHTML = `
-    <div class="main-view-content">
-      <div class="detail-card">
-        <div class="detail-card-title">Profile</div>
-        ${rows.join('')}
+    <div class="main-view-content profile-detail-v3">
+      ${_profileOpsAvatarDialog(p)}
+      ${_profileHeroDossier(p, isActive, isDefault)}
+      <div class="profile-ops-grid" aria-label="${esc(p.name)} operations controls">
+        ${_profileRuntimePanel(p, isActive)}
+        ${_profileGatewayTile(p)}
+        ${_profileSkillsTile(p, isActive)}
+        ${_profileContextCompressionTile(p)}
+        ${_profileWorkstepBudgetTile(p)}
+        ${_profileToolAccessTile(p)}
       </div>
+      ${_profileFilesSection(p)}
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+  const runtimeHydrationSeq = _primeProfileRuntimeControls(p);
+  _hydrateProfileDescription(p).catch(e=>console.warn('profile description failed',e));
+  _hydrateProfileActivity(p).catch(e=>console.warn('profile activity failed',e));
+  _hydrateProfileRuntimeSettings(p, runtimeHydrationSeq).catch(e=>console.warn('profile runtime settings failed',e));
+  _loadProfileSkillsTile(p).catch(e=>console.warn('profile skills tile failed',e));
+  _bindProfileOpsConsole(p, isActive, isDefault);
+}
+
+// ── v3 helpers ───────────────────────────────────────────────────────────
+// Placeholder helpers landed here; their full bodies are filled in by
+// subsequent commits in the rework series (Tasks 9-13 + 15). Keeping them
+// as no-op-renderers so the skeleton still produces a working page during
+// the transition.
+function _profileHeroDossier(p, isActive, isDefault){
+  const name = esc(p.name);
+  // Active is conveyed by the inline pill — there is intentionally no bare
+  // status dot next to the profile name in v3 (the pill carries it).
+  const activeControl = isActive
+    ? `<span class="profile-active-pill"><span class="profile-active-pill__dot" aria-hidden="true"></span>Active</span>`
+    : `<button id="opsMakeActive" class="profile-active-pill profile-active-pill--action" type="button" aria-label="Make ${name} active profile">Make Active</button>`;
+  // The destructive Remove item is gated for the default profile by both
+  // a `disabled` attribute on the menu item AND a guard in the click handler.
+  const removeDisabled = isDefault ? 'disabled aria-disabled="true"' : '';
+  const removeTitle = isDefault
+    ? 'The default profile cannot be removed.'
+    : 'Permanently delete this profile.';
+  const avatarShape = (typeof _normalizeProfileAvatarShape==='function') ? _normalizeProfileAvatarShape(p.avatar_shape) : 'circle';
+  return `
+    <section class="profile-hero" aria-labelledby="profileHeroName">
+      <div class="profile-hero-avatar profile-avatar-shape--${esc(avatarShape)}" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
+        ${_profileAvatarForUi(p, 'profile-avatar--hero')}
+        <button id="profileHeroAvatarEdit" type="button" class="profile-hero-avatar-edit" aria-label="Change avatar" title="Change avatar">✎</button>
+      </div>
+      <div class="profile-hero-body">
+        <div id="profileHeroName" class="profile-hero-name">${name}${activeControl ? ' ' + activeControl : ''}</div>
+        <div id="profileHeroActivity" class="profile-hero-activity empty" aria-live="polite"><span class="muted">Loading activity…</span></div>
+        <div class="profile-hero-description-row">
+          <div id="profileHeroDescription" class="profile-hero-description placeholder" role="button" tabindex="0" title="Click to edit description">Loading description…</div>
+          <button id="profileHeroDescriptionEdit" type="button" class="profile-hero-description-edit" aria-label="Edit description" title="Edit description">✎</button>
+        </div>
+        <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
+          <label class="profile-response-mode-control">
+            <span>Response Style</span>
+            <select id="profileResponseModeSelect" class="profile-ops-select" aria-label="Response style for ${name}">
+              <option value="">Soul-driven</option>
+              <option value="concise">concise</option>
+              <option value="technical">technical</option>
+              <option value="teacher">teacher</option>
+              <option value="kawaii">kawaii</option>
+              <option value="hype">hype</option>
+            </select>
+          </label>
+          <label class="profile-default-workspace-control">
+            <span>Default space</span>
+            <div class="profile-default-workspace-wrap">
+              <button class="composer-workspace-chip profile-default-workspace-chip" id="profileDefaultWorkspaceChip" type="button" title="Choose default space for ${name}">
+                <span class="composer-workspace-icon" aria-hidden="true">${li('folder',14)}</span>
+                <span class="composer-workspace-label profile-default-workspace-value" id="profileDefaultWorkspaceValue">Loading…</span>
+                <span class="composer-workspace-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <button type="button" id="profileDefaultWorkspaceClear" class="profile-runtime-icon-btn profile-default-workspace-clear" title="Clear default space" aria-label="Clear default space">${li('x',14)}</button>
+              <div class="ws-dropdown profile-default-workspace-dropdown" id="profileDefaultWorkspaceDropdown"></div>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div class="profile-hero-menu-host">
+        <button id="profileHeroMenuButton" type="button" class="profile-hero-menu-button"
+          aria-haspopup="menu" aria-expanded="false" aria-controls="profileHeroMenu"
+          aria-label="More profile actions" title="More actions">⋯</button>
+        <div id="profileHeroMenu" class="profile-hero-menu" role="menu" hidden>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="rename">Rename…</button>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="edit-description">Change description…</button>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="duplicate">Duplicate…</button>
+          <div class="profile-hero-menu-divider" role="separator"></div>
+          <button class="profile-hero-menu-item danger" type="button" role="menuitem" data-ops-action="remove"
+            ${removeDisabled} title="${removeTitle}">Remove…</button>
+        </div>
+      </div>
+    </section>`;
+}
+
+// ── Description + activity hydration (network) ──────────────────────────
+//
+// The hero "description" is a short, user-authored summary of the profile's
+// purpose, stored at webui.description in config.yaml. It is intentionally
+// separate from SOUL.md (the agent's persona / voice for the model itself).
+// Clicking the line — or the pencil button — opens an inline textarea editor.
+
+const _PROFILE_DESCRIPTION_MAX = 280;
+const _PROFILE_DESCRIPTION_PLACEHOLDER = 'Add a short description so you remember what this profile is for.';
+let _profileDescriptionCurrent = '';
+
+function _renderProfileDescriptionView(text){
+  const host = $('profileHeroDescription');
+  if (!host) return;
+  _profileDescriptionCurrent = (typeof text === 'string') ? text : '';
+  if (_profileDescriptionCurrent) {
+    host.textContent = _profileDescriptionCurrent;
+    host.classList.remove('placeholder');
+  } else {
+    host.textContent = _PROFILE_DESCRIPTION_PLACEHOLDER;
+    host.classList.add('placeholder');
+  }
+}
+
+async function _hydrateProfileDescription(profile){
+  const host = $('profileHeroDescription');
+  if (!host || !profile || !profile.name) return;
+  try {
+    const data = await api('/api/profile/persona?name=' + encodeURIComponent(profile.name));
+    _renderProfileDescriptionView(data && typeof data.description === 'string' ? data.description : '');
+  } catch (e) {
+    host.textContent = 'Could not load description.';
+    host.classList.add('placeholder');
+    _profileDescriptionCurrent = '';
+  }
+}
+
+function _enterProfileDescriptionEdit(profile){
+  const host = $('profileHeroDescription');
+  if (!host || !profile || !profile.name) return;
+  // Idempotent: if already editing, focus the existing textarea instead of re-rendering.
+  if (host.dataset.editing === '1') {
+    const ta = host.querySelector('textarea');
+    if (ta) ta.focus();
+    return;
+  }
+  host.dataset.editing = '1';
+  host.classList.remove('placeholder');
+  const current = _profileDescriptionCurrent;
+  host.innerHTML = `
+    <textarea class="profile-hero-description-edit-textarea" maxlength="${_PROFILE_DESCRIPTION_MAX}" rows="3" aria-label="Profile description">${esc(current)}</textarea>
+    <div class="profile-hero-description-edit-actions">
+      <span class="profile-hero-description-counter muted" aria-live="polite">${current.length}/${_PROFILE_DESCRIPTION_MAX}</span>
+      <button type="button" class="profile-ops-button" data-desc-action="cancel">Cancel</button>
+      <button type="button" class="profile-ops-button primary" data-desc-action="save">Save</button>
+    </div>`;
+  const ta = host.querySelector('textarea');
+  const counter = host.querySelector('.profile-hero-description-counter');
+  if (ta) {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    ta.addEventListener('input', () => {
+      if (counter) counter.textContent = ta.value.length + '/' + _PROFILE_DESCRIPTION_MAX;
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); _exitProfileDescriptionEdit(profile, /*save*/false); }
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); _exitProfileDescriptionEdit(profile, /*save*/true); }
+    });
+  }
+  host.querySelectorAll('[data-desc-action]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      // Stop propagation so the host's click listener doesn't see the bubble
+      // AFTER _exitProfileDescriptionEdit has already cleared dataset.editing —
+      // the guard there checks editing === '1' and would re-enter edit mode
+      // immediately, breaking both Cancel (appears to do nothing) and Save
+      // (leaves the editor open after the POST resolves).
+      ev.stopPropagation();
+      _exitProfileDescriptionEdit(profile, btn.dataset.descAction === 'save');
+    });
+  });
+  // Textarea clicks must not bubble to the host either — the host guard checks
+  // dataset.editing === '1' which is currently true, so the bug only bites
+  // when the inner handler flips that flag first, but defense in depth is cheap.
+  const taEl = host.querySelector('textarea');
+  if (taEl) taEl.addEventListener('click', (ev) => ev.stopPropagation());
+}
+
+async function _exitProfileDescriptionEdit(profile, save){
+  const host = $('profileHeroDescription');
+  if (!host) return;
+  if (!save) {
+    host.dataset.editing = '';
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    return;
+  }
+  const ta = host.querySelector('textarea');
+  if (!ta) return;
+  const next = (ta.value || '').trim();
+  if (next === _profileDescriptionCurrent) {
+    host.dataset.editing = '';
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    return;
+  }
+  // Optimistic: show "Saving…" while the POST is in flight.
+  host.dataset.editing = '';
+  host.textContent = 'Saving…';
+  host.classList.add('placeholder');
+  try {
+    const result = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify({ name: profile.name, description: next }),
+    });
+    const saved = (result && typeof result.description === 'string') ? result.description : next;
+    _renderProfileDescriptionView(saved);
+  } catch (e) {
+    console.warn('save description failed', e);
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    if (typeof toast === 'function') toast('Could not save description');
+  }
+}
+
+function _formatRelativeTime(iso){
+  if (!iso) return null;
+  const t0 = Date.parse(iso);
+  if (!Number.isFinite(t0)) return null;
+  const secs = Math.max(1, Math.round((Date.now() - t0) / 1000));
+  if (secs < 60) return secs + 's ago';
+  const mins = Math.round(secs / 60); if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);  if (hrs < 24) return hrs + ' h ago';
+  const days = Math.round(hrs / 24);  if (days === 1) return 'yesterday';
+  if (days < 30) return days + ' days ago';
+  const months = Math.round(days / 30);
+  return months + ' mo ago';
+}
+
+async function _hydrateProfileActivity(profile){
+  const el = $('profileHeroActivity');
+  if (!el || !profile || !profile.name) return;
+  try {
+    const a = await api('/api/profile/activity?name=' + encodeURIComponent(profile.name));
+    const isEmpty = !(a.sessions_week | 0) && !a.last_used_at && !a.gateway_last_run_at;
+    if (isEmpty) {
+      el.className = 'profile-hero-activity empty';
+      el.innerHTML = `<span class="muted">No activity yet — start a chat to see usage here.</span>`;
+      return;
+    }
+    const parts = [];
+    if (a.last_used_at) {
+      const rel = _formatRelativeTime(a.last_used_at);
+      parts.push(`Last used <b>${esc(rel || a.last_used_at)}</b>`);
+    }
+    if (a.sessions_week) {
+      parts.push(`<b>${a.sessions_week}</b> session${a.sessions_week === 1 ? '' : 's'} this week`);
+    }
+    if (a.spend_week_usd != null) {
+      parts.push(`~<b>$${Number(a.spend_week_usd).toFixed(2)}</b> spend`);
+    }
+    if (a.gateway_last_run_at) {
+      const rel = _formatRelativeTime(a.gateway_last_run_at);
+      parts.push(`gateway last ran <b>${esc(rel || a.gateway_last_run_at)}</b>`);
+    }
+    el.className = 'profile-hero-activity';
+    el.innerHTML = parts.join(' · ');
+  } catch (e) {
+    el.className = 'profile-hero-activity empty';
+    el.innerHTML = `<span class="muted">Activity unavailable.</span>`;
+  }
+}
+function _profileRuntimePanel(p, isActive){
+  // Runtime tile: compact profile-level model routing. All model controls
+  // reuse the chat composer's model picker through renderModelDropdown(opts).
+  return `
+    <article class="profile-ops-tile profile-default-model-tile profile-runtime-tile" aria-labelledby="opsRuntimeTitle">
+      <div class="profile-ops-tile-head profile-default-model-head">
+        <div class="profile-default-model-titles">
+          <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span>
+        </div>
+      </div>
+      <div class="profile-runtime-rows" aria-label="Runtime controls for ${esc(p.name)}">
+        <div class="profile-runtime-group">
+          <span class="profile-runtime-row-label">Default Model</span>
+          <div class="profile-default-model-chiprow">
+            <div class="composer-model-wrap profile-default-model-wrap">
+              <button class="composer-model-chip" id="profileDefaultModelChip" type="button" title="Default model for new sessions in this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
+                <span class="composer-model-label" id="profileDefaultModelLabel">Loading…</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="model-dropdown profile-default-model-dropdown" id="profileDefaultModelDropdown"></div>
+              <select id="profileDefaultModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+            </div>
+            <div class="composer-model-wrap profile-default-model-wrap profile-reasoning-wrap">
+              <button class="composer-model-chip composer-reasoning-chip" id="profileDefaultReasoningChip" type="button" title="Reasoning effort for new sessions in this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('brain',14)}</span>
+                <span class="composer-model-label" id="profileDefaultReasoningLabel">Default</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="composer-reasoning-dropdown profile-default-reasoning-dropdown" id="profileDefaultReasoningDropdown"></div>
+            </div>
+          </div>
+        </div>
+        <div class="profile-runtime-group">
+          <span class="profile-runtime-row-label">Fallback Model</span>
+          <div class="profile-default-model-chiprow profile-fallback-chiprow">
+            <div class="composer-model-wrap profile-default-model-wrap">
+              <button class="composer-model-chip" id="profileFallbackModelChip" type="button" title="Fallback model for this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('corner-down-right',14)}</span>
+                <span class="composer-model-label" id="profileFallbackModelLabel">None</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="model-dropdown profile-default-model-dropdown" id="profileFallbackModelDropdown"></div>
+              <select id="profileFallbackModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+            </div>
+            <button type="button" id="profileFallbackClear" class="profile-runtime-icon-btn" title="Clear fallback model" aria-label="Clear fallback model">${li('x',14)}</button>
+          </div>
+        </div>
+        <button type="button" id="profileAuxModelsButton" class="profile-ops-button profile-aux-models-button profile-runtime-footer-action">
+          ${li('sliders-horizontal',14)}<span>Configure auxiliary tool models</span>
+        </button>
+      </div>
+    </article>`;
+}
+
+function _profileContextCompressionTile(p){
+  return `
+    <article class="profile-ops-tile profile-context-compression-tile" aria-labelledby="profileCompressionTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileCompressionTitle">Context compression</span>
+      </div>
+      <span class="profile-ops-tile-note">Auto-compress long chats</span>
+      <input id="profileCompressionThreshold" class="profile-range" type="range" min="10" max="95" step="5" value="50" aria-label="Compression threshold">
+      <div class="profile-compression-detail-row">
+        <span id="profileCompressionSummary">Threshold 50%, protect last 20 messages.</span>
+        <label class="profile-mini-number">Protect <input id="profileCompressionProtectLast" type="number" min="0" max="200" step="1" value="20"></label>
+      </div>
+    </article>`;
+}
+
+function _profileWorkstepBudgetTile(p){
+  return `
+    <article class="profile-ops-tile profile-workstep-budget-tile" aria-labelledby="profileWorkstepTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileWorkstepTitle">Work-step budget</span>
+      </div>
+      <input id="profileMaxTurnsSlider" class="profile-range" type="range" min="10" max="1000" step="10" value="150" aria-label="Work-step budget">
+      <input id="profileMaxTurnsInput" class="profile-number-input" type="number" min="1" max="1000" step="1" value="150" aria-label="Work-step budget value">
+      <span class="profile-ops-tile-note">agent/tool iterations per user turn</span>
+    </article>`;
+}
+
+const _PROFILE_TOOLSET_GROUPS = [
+  ['terminal', 'Terminal'],
+  ['file', 'Files'],
+  ['web', 'Web'],
+  ['browser', 'Browser'],
+  ['cronjob', 'Cron'],
+  ['image_gen', 'Image'],
+];
+
+function _profileToolAccessTile(p){
+  const buttons = _PROFILE_TOOLSET_GROUPS.map(([id,label]) =>
+    `<button type="button" class="profile-toolset-pill" data-toolset="${esc(id)}" aria-pressed="false">${esc(label)}</button>`
+  ).join('');
+  return `
+    <article class="profile-ops-tile profile-tool-access-tile" aria-labelledby="profileToolAccessTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileToolAccessTitle">Tool access</span>
+      </div>
+      <span class="profile-ops-tile-note">Friendly capability groups instead of raw toolset IDs by default.</span>
+      <div class="profile-toolset-pills">${buttons}</div>
+    </article>`;
+}
+
+// ── Gateway tile state (v3 — 5-phase, toggle UX) ──────────────────────
+//
+// Per-profile state cache, keyed by profile name. The tile DOM holds at
+// most one profile's tile at a time (the detail view), but the map
+// persists across detail-open/close so a re-open shows the last known
+// phase before the first status poll lands.
+const _gatewayStateByProfile = new Map();
+// Active pollers keyed by profile name → setTimeout handle.
+const _gatewayPollers = new Map();
+// ── Per-profile messaging-platforms cache (spec 2026-05-16) ───────────
+// Map<name → {ok, platforms:[...], message?, fetchedAt}>. Shared between
+// the gateway tile's count badge and the modal's first render so we only
+// pay for one /api/profile/gateway/platforms fetch per 30s window.
+const _platformsByProfile = new Map();
+const _PLATFORMS_CACHE_TTL_MS = 30000;
+const _GATEWAY_TRANSIENT_PHASES = new Set(['starting', 'stopping']);
+const _GATEWAY_INFO_PHASES = new Set(['failed', 'unknown', 'unavailable']);
+const _GATEWAY_TRANSIENT_POLL_MS = 1500;
+const _GATEWAY_STABLE_POLL_MS = 12000;
+
+function _gatewayLabelForPhase(phase){
+  switch(phase){
+    case 'starting': return 'Starting';
+    case 'running': return 'Running';
+    case 'stopping': return 'Stopping';
+    case 'failed': return 'Start Failed';
+    case 'unknown': return 'Unknown';
+    case 'unavailable': return 'Unavailable';
+    default: return 'Stopped';
+  }
+}
+
+function _gatewayToggleLabelForPhase(phase){
+  switch(phase){
+    case 'starting': return 'Starting…';
+    case 'running': return 'On';
+    case 'stopping': return 'Stopping…';
+    case 'failed': return 'Failed';
+    case 'unknown': return 'Check status';
+    case 'unavailable': return 'Unavailable';
+    default: return 'Off';
+  }
+}
+
+function _gatewayInfoSummary(state){
+  if (!state) return 'Gateway status detail unavailable.';
+  const phase = state.phase || 'unknown';
+  const reason = state.health && state.health.reason ? state.health.reason : 'no reason provided';
+  const detail = state.detail || state.last_error || 'No additional detail.';
+  return `${_gatewayLabelForPhase(phase)}: ${reason}. ${detail}`.slice(0, 220);
+}
+
+function _gatewayInfoReason(state){
+  return state && state.health && state.health.reason ? state.health.reason : '—';
+}
+
+function _gatewayInfoVisible(phase){
+  return _GATEWAY_INFO_PHASES.has(phase || 'stopped');
+}
+
+function _profileCardGatewayPhase(profile){
+  const seedPhase = profile && profile.gateway_running ? 'running' : 'stopped';
+  if (!profile || !profile.name) return seedPhase;
+  if (!_gatewayStateByProfile.has(profile.name)) {
+    _gatewayStateByProfile.set(profile.name, {
+      phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
+    });
+  }
+  const state = _gatewayStateByProfile.get(profile.name);
+  return (state && state.phase) || seedPhase;
+}
+
+function _profileCardGatewayLabel(phase){
+  const normalized = phase || 'stopped';
+  if (normalized === 'running') return t('profile_gateway_running');
+  if (normalized === 'stopped') return t('profile_gateway_stopped');
+  return `Gateway ${_gatewayLabelForPhase(normalized).toLowerCase()}`;
+}
+
+function _repaintProfileCardGateway(profileName, phase){
+  if (!profileName) return;
+  const label = _profileCardGatewayLabel(phase);
+  document.querySelectorAll(`.profile-card-gateway[data-profile-name="${CSS.escape(profileName)}"]`).forEach(icon => {
+    icon.setAttribute('data-state', phase || 'stopped');
+    icon.setAttribute('title', label);
+    const sr = icon.nextElementSibling;
+    if (sr && sr.classList && sr.classList.contains('sr-only')) sr.textContent = label;
+  });
+}
+
+function _repaintGatewayTile(profileName){
+  const state = _gatewayStateByProfile.get(profileName);
+  if (!state) return;
+  const tile = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
+  const phase = state.phase || 'stopped';
+  _repaintProfileCardGateway(profileName, phase);
+  if (!tile) return;  // tile not currently rendered for this profile
+  const controlUnavailable = state.control_available === false || phase === 'unavailable';
+  const infoVisible = _gatewayInfoVisible(phase);
+  const summary = _gatewayInfoSummary(state);
+  const wifi = tile.querySelector('#profileGatewayWifi');
+  const info = tile.querySelector('[data-gateway-info]');
+  const toggle = tile.querySelector('#opsGatewayToggle');
+  const toggleLabel = tile.querySelector('#opsGatewayToggleLabel');
+  if (wifi) wifi.setAttribute('data-state', phase);
+  if (info) {
+    info.hidden = !infoVisible;
+    info.setAttribute('data-tooltip', summary);
+    info.setAttribute('aria-label', `View gateway status details for ${profileName}`);
+  }
+  if (toggle) {
+    toggle.setAttribute('data-state', phase);
+    toggle.setAttribute('aria-checked', phase === 'running' ? 'true' : 'false');
+    toggle.setAttribute('data-error', infoVisible ? summary : '');
+    toggle.disabled = controlUnavailable || _GATEWAY_TRANSIENT_PHASES.has(phase);
+    toggle.setAttribute('aria-disabled', toggle.disabled ? 'true' : 'false');
+  }
+  if (toggleLabel) toggleLabel.textContent = _gatewayToggleLabelForPhase(phase);
+  // Refresh the platforms button count from the cache. The button itself
+  // is part of .profile-gateway-control; we only touch its count span and
+  // its disabled/title state when the cache reports hermes-agent missing.
+  const platformsBtn = tile.querySelector('.profile-gateway-platforms-btn');
+  if (platformsBtn) {
+    const cached = _platformsByProfile.get(profileName);
+    const countNode = platformsBtn.querySelector('[data-platforms-count]');
+    if (countNode) countNode.textContent = String(_platformsConfiguredCount(cached));
+    const unavailable = !!(cached && cached.ok === false);
+    platformsBtn.disabled = unavailable;
+    platformsBtn.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
+    if (unavailable && cached && cached.message) {
+      platformsBtn.setAttribute('title', cached.message);
+      platformsBtn.setAttribute('aria-label', cached.message);
+    }
+  }
+}
+
+// ── Messaging-platforms config (spec 2026-05-16) ──────────────────────
+//
+// Per-profile messaging-platform credentials live in <HERMES_HOME>/.env
+// and are edited through a modal launched from the Gateway tile. The
+// modal is profile-scoped — every call resolves the profile from the
+// `name` argument, never from active state — and reuses the existing
+// `.profile-skills-manager-overlay` chrome.
+//
+// The cache (`_platformsByProfile`, declared above) is shared between
+// the tile's count badge and the modal's first paint so we only pay
+// for one /api/profile/gateway/platforms fetch per 30s window. The
+// modal refreshes the cache in the background on open and after every
+// Save/Clear.
+
+function _platformsConfiguredCount(payload){
+  if (!payload || payload.ok === false || !Array.isArray(payload.platforms)) return 0;
+  let n = 0;
+  for (const pf of payload.platforms) {
+    if (pf && pf.status === 'configured') n++;
+  }
+  return n;
+}
+
+async function _loadProfilePlatforms(name, opts){
+  if (!name) return null;
+  const force = !!(opts && opts.force);
+  const cached = _platformsByProfile.get(name);
+  const now = Date.now();
+  if (!force && cached && cached.fetchedAt && (now - cached.fetchedAt) < _PLATFORMS_CACHE_TTL_MS) {
+    return cached;
+  }
+  try {
+    const fresh = await api('/api/profile/gateway/platforms?name=' + encodeURIComponent(name));
+    fresh.fetchedAt = Date.now();
+    _platformsByProfile.set(name, fresh);
+    return fresh;
+  } catch (e) {
+    // Surface as ok:false so the UI degrades the same way as the
+    // server-side "hermes-agent not available" path.
+    const errPayload = { ok: false, message: e && e.message ? e.message : String(e), fetchedAt: Date.now() };
+    _platformsByProfile.set(name, errPayload);
+    return errPayload;
+  }
+}
+
+function _renderPlatformCard(platform, profileName){
+  if (!platform) return '';
+  const key = esc(platform.key || '');
+  const label = esc(platform.label || platform.key || 'Unknown');
+  const emoji = esc(platform.emoji || '🔌');
+  const status = platform.status === 'configured' ? 'configured'
+               : platform.status === 'partial' ? 'partial'
+               : 'not_configured';
+  const statusLabel = status === 'configured' ? '● Configured'
+                    : status === 'partial' ? '● Partial'
+                    : '○ Not configured';
+  // Default expansion: partial expanded (call-to-action), others collapsed.
+  // Not-configured cards expand on click; configured cards collapse to
+  // show a clean status row and expand to reveal Replace controls.
+  const openByDefault = status === 'partial';
+  const openClass = openByDefault ? ' open' : '';
+  const isPlugin = !!platform.is_plugin;
+  let fieldsHTML = '';
+  if (isPlugin) {
+    const required = Array.isArray(platform.required_env) ? platform.required_env : [];
+    const setEnv = new Set(Array.isArray(platform.set_env) ? platform.set_env : []);
+    fieldsHTML += `<div class="pf-plugin-note">Plugin platform — schema-light fallback. Set the required environment variables directly.</div>`;
+    for (const varName of required) {
+      const isSet = setEnv.has(varName);
+      // Plugin fields default to password (no metadata available); show
+      // Replace pattern if currently set, empty input otherwise.
+      fieldsHTML += `
+        <div class="platforms-field">
+          <div class="pf-field-label"><span>${esc(varName)}</span></div>
+          ${isSet ? `
+            <div class="pf-secret-row">
+              <input class="pf-input" type="password" value="••••••••••" disabled aria-label="${esc(varName)} (set)">
+              <button type="button" class="pf-secret-replace" data-pf-replace="${esc(varName)}">Replace</button>
+            </div>
+          ` : `
+            <input class="pf-input" type="password" name="${esc(varName)}" autocomplete="off" spellcheck="false">
+          `}
+        </div>`;
+    }
+  } else {
+    const vars = Array.isArray(platform.vars) ? platform.vars : [];
+    for (const v of vars) {
+      const varName = esc(v.name || '');
+      const prompt = esc(v.prompt || v.name || '');
+      const help = v.help ? `<div class="pf-field-help">${esc(v.help)}</div>` : '';
+      const optionalBadge = v.required === false
+        ? `<span class="pf-field-optional">optional</span>`
+        : '';
+      const missingRequired = (v.required !== false) && !v.is_set;
+      const labelExtra = missingRequired && status === 'partial'
+        ? `<span class="pf-field-required-missing">required · missing</span>` : '';
+      if (v.password) {
+        if (v.is_set) {
+          fieldsHTML += `
+            <div class="platforms-field" data-required="${v.required === false ? 'false' : 'true'}">
+              <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+              <div class="pf-secret-row">
+                <input class="pf-input" type="password" value="••••••••••••••••••" disabled aria-label="${prompt} (set)">
+                <button type="button" class="pf-secret-replace" data-pf-replace="${varName}">Replace</button>
+              </div>
+              ${help}
+            </div>`;
+        } else {
+          fieldsHTML += `
+            <div class="platforms-field${missingRequired ? ' is-missing' : ''}" data-required="${v.required === false ? 'false' : 'true'}">
+              <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+              <input class="pf-input" type="password" name="${varName}" autocomplete="off" spellcheck="false" placeholder="">
+              ${help}
+            </div>`;
+        }
+      } else {
+        // Non-password values round-trip — pre-fill from `value` when present.
+        const val = typeof v.value === 'string' ? esc(v.value) : '';
+        fieldsHTML += `
+          <div class="platforms-field" data-required="${v.required === false ? 'false' : 'true'}">
+            <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+            <input class="pf-input" type="text" name="${varName}" value="${val}" autocomplete="off" spellcheck="false">
+            ${help}
+          </div>`;
+      }
+    }
+  }
+  return `
+    <article class="platforms-card${openClass}" data-platform-key="${key}" data-platform-status="${status}">
+      <div class="platforms-card-head" data-platforms-toggle>
+        <span class="platforms-card-title">
+          <span class="platforms-card-emoji">${emoji}</span>
+          <span class="platforms-card-name">${label}${isPlugin ? ' <span class="platforms-card-plugin-tag">plugin</span>' : ''}</span>
+        </span>
+        <span class="platforms-card-right">
+          <span class="pf-status" data-status="${status}">${statusLabel}</span>
+          <span class="platforms-card-chevron" aria-hidden="true">›</span>
+        </span>
+      </div>
+      <div class="platforms-card-body">
+        ${fieldsHTML}
+        <div class="pf-actions">
+          <button type="button" class="pf-btn danger" data-platform-clear="${key}">Clear</button>
+          <div class="pf-actions-right">
+            <button type="button" class="pf-btn" data-platform-cancel="${key}">Cancel</button>
+            <button type="button" class="pf-btn primary" data-platform-save="${key}">Save ${label}</button>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+function _platformsModalEscape(ev){
+  if (ev.key === 'Escape') _closePlatformsManager();
+}
+
+function _closePlatformsManager(){
+  const overlay = document.getElementById('profilePlatformsManagerOverlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', _platformsModalEscape, true);
+}
+
+async function _openPlatformsManager(profileName){
+  if (!profileName) return;
+  // Render the overlay shell immediately with a loading state so the
+  // modal pops without waiting for the fetch.
+  _closePlatformsManager();
+  const overlay = document.createElement('div');
+  overlay.id = 'profilePlatformsManagerOverlay';
+  // Reuse the existing skills-manager overlay chrome for backdrop, blur,
+  // and centering — keeps modal styling consistent across the WebUI.
+  overlay.className = 'profile-skills-manager-overlay platforms-manager-overlay';
+  overlay.innerHTML = `
+    <div class="profile-skills-manager-card platforms-manager-card" role="dialog" aria-modal="true" aria-labelledby="profilePlatformsManagerTitle">
+      <div class="profile-skills-manager-head">
+        <div class="profile-skills-manager-head-text">
+          <div class="profile-skills-manager-kicker">Messaging</div>
+          <h3 class="profile-skills-manager-title" id="profilePlatformsManagerTitle">Messaging platforms for <span id="profilePlatformsManagerName">${esc(profileName)}</span></h3>
+          <div class="profile-skills-manager-subtitle">Credentials are saved to this profile's .env file. Toggle the gateway after saving to verify connection.</div>
+        </div>
+        <div class="profile-skills-manager-actions">
+          <button type="button" class="profile-skills-manager-close" aria-label="Close" data-platforms-close>&times;</button>
+        </div>
+      </div>
+      <div id="profilePlatformsManagerBody" class="platforms-manager-list">
+        <div class="profile-skills-loading">Loading messaging platforms…</div>
+      </div>
+      <div class="profile-skills-manager-footer platforms-manager-footer">
+        <span class="platforms-manager-hint" id="profilePlatformsManagerHint"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  // Close affordances. Background click closes; inner card click does NOT
+  // propagate so Save/Cancel/Replace inside the card cannot race the host
+  // listener and silently re-enter edit mode (project memory:
+  // feedback_inline_editor_click_bubble).
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) _closePlatformsManager();
+  });
+  const card = overlay.querySelector('.platforms-manager-card');
+  if (card) card.addEventListener('click', (ev) => { ev.stopPropagation(); });
+  const closeBtn = overlay.querySelector('[data-platforms-close]');
+  if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); _closePlatformsManager(); };
+  document.addEventListener('keydown', _platformsModalEscape, true);
+
+  // Fetch fresh payload. _loadProfilePlatforms uses the 30s TTL cache,
+  // so if the tile already warmed it on render we paint instantly.
+  const payload = await _loadProfilePlatforms(profileName, { force: false });
+  if (!document.getElementById('profilePlatformsManagerOverlay')) return;
+  _paintPlatformsManagerBody(profileName, payload);
+}
+
+function _paintPlatformsManagerBody(profileName, payload){
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (!body) return;
+  if (!payload || payload.ok === false) {
+    const msg = (payload && payload.message) || 'hermes-agent not available';
+    body.innerHTML = `<div class="profile-skills-error">${esc(msg)}</div>`;
+    return;
+  }
+  const platforms = Array.isArray(payload.platforms) ? payload.platforms : [];
+  if (platforms.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">No platforms available.</div>`;
+    return;
+  }
+  body.innerHTML = platforms.map(pf => _renderPlatformCard(pf, profileName)).join('');
+  _bindPlatformsManagerHandlers(profileName, body);
+}
+
+function _bindPlatformsManagerHandlers(profileName, body){
+  body.querySelectorAll('[data-platforms-toggle]').forEach(head => {
+    head.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const card = head.closest('.platforms-card');
+      if (card) card.classList.toggle('open');
+    });
+  });
+  body.querySelectorAll('[data-pf-replace]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const varName = btn.getAttribute('data-pf-replace') || '';
+      const field = btn.closest('.platforms-field');
+      if (!field) return;
+      field.innerHTML = `
+        <div class="pf-field-label"><span>${esc(varName)}</span></div>
+        <input class="pf-input" type="password" name="${esc(varName)}" autocomplete="off" spellcheck="false" placeholder="" autofocus>`;
+      const input = field.querySelector('input');
+      if (input) input.focus();
+    });
+  });
+  body.querySelectorAll('[data-platform-cancel]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const card = btn.closest('.platforms-card');
+      if (!card) return;
+      // Re-render the card from the cached payload so unsaved edits are
+      // discarded. Then collapse it.
+      const key = card.getAttribute('data-platform-key');
+      const cached = _platformsByProfile.get(profileName);
+      const pf = cached && Array.isArray(cached.platforms)
+        ? cached.platforms.find(x => x.key === key) : null;
+      if (pf) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = _renderPlatformCard(pf, profileName);
+        const fresh = tmp.firstElementChild;
+        if (fresh) {
+          card.replaceWith(fresh);
+          _bindPlatformsManagerHandlers(profileName, body);
+        }
+      } else {
+        card.classList.remove('open');
+      }
+    });
+  });
+  body.querySelectorAll('[data-platform-save]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const key = btn.getAttribute('data-platform-save') || '';
+      const card = btn.closest('.platforms-card');
+      if (!card) return;
+      const values = {};
+      card.querySelectorAll('input[name]').forEach(inp => {
+        // Skip disabled "set" inputs (the •••• placeholder for password
+        // fields that are already set and not currently being replaced).
+        if (inp.disabled) return;
+        values[inp.name] = inp.value;
+      });
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await _savePlatform(profileName, key, values);
+        _setPlatformsManagerHint('Saved. Toggle the gateway to verify connection.');
+      } catch (e) {
+        _setPlatformsManagerHint('Save failed: ' + (e && e.message ? e.message : String(e)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  body.querySelectorAll('[data-platform-clear]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const key = btn.getAttribute('data-platform-clear') || '';
+      btn.disabled = true;
+      try {
+        await _clearPlatform(profileName, key);
+        _setPlatformsManagerHint('Cleared. Toggle the gateway to apply.');
+      } catch (e) {
+        _setPlatformsManagerHint('Clear failed: ' + (e && e.message ? e.message : String(e)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function _setPlatformsManagerHint(text){
+  const hint = document.getElementById('profilePlatformsManagerHint');
+  if (hint) hint.textContent = text || '';
+}
+
+async function _savePlatform(name, platformKey, values){
+  if (!name || !platformKey) return null;
+  const result = await api('/api/profile/gateway/platform?name=' + encodeURIComponent(name), {
+    method: 'POST',
+    body: JSON.stringify({ platform: platformKey, values: values || {} }),
+  });
+  // Refresh cache, repaint tile count, and repaint the modal so the
+  // saved card flips to its new status (configured/partial) in place.
+  const fresh = await _loadProfilePlatforms(name, { force: true });
+  _repaintGatewayTile(name);
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (body) _paintPlatformsManagerBody(name, fresh);
+  return result;
+}
+
+async function _clearPlatform(name, platformKey){
+  if (!name || !platformKey) return null;
+  const result = await api('/api/profile/gateway/platform?name=' + encodeURIComponent(name) +
+                           '&platform=' + encodeURIComponent(platformKey), {
+    method: 'DELETE',
+  });
+  const fresh = await _loadProfilePlatforms(name, { force: true });
+  _repaintGatewayTile(name);
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (body) _paintPlatformsManagerBody(name, fresh);
+  return result;
+}
+
+function _profileGatewayTile(p){
+  const name = esc(p.name);
+  // Provisional phase from the gateway_running flag; the live state
+  // map (if present) wins. The poller is the authoritative updater.
+  const seedPhase = p.gateway_running ? 'running' : 'stopped';
+  if (!_gatewayStateByProfile.has(p.name)) {
+    _gatewayStateByProfile.set(p.name, {
+      phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
+    });
+  }
+  const state = _gatewayStateByProfile.get(p.name);
+  const phase = state.phase || 'stopped';
+  const toggleLabel = _gatewayToggleLabelForPhase(phase);
+  const summary = _gatewayInfoSummary(state);
+  const infoHidden = _gatewayInfoVisible(phase) ? '' : ' hidden';
+  const controlUnavailable = state.control_available === false || phase === 'unavailable' || _GATEWAY_TRANSIENT_PHASES.has(phase);
+  const isRunning = phase === 'running';
+  const ariaChecked = isRunning ? 'true' : 'false';
+  // Platforms button: rendered unconditionally in every gateway phase.
+  // Credential configuration is independent of lifecycle control — the
+  // button is only disabled when hermes-agent is not importable on the
+  // server (cached payload has ok=false).
+  const platformsCached = _platformsByProfile.get(p.name);
+  const platformsCount = _platformsConfiguredCount(platformsCached);
+  const platformsBtnDisabled = !!(platformsCached && platformsCached.ok === false);
+  const platformsTitle = platformsBtnDisabled
+    ? (platformsCached.message || 'hermes-agent not available')
+    : `Configure messaging platforms for ${p.name}`;
+  return `
+    <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label profile-gateway-label" id="opsGatewayTitle">Agent Gateway</span>
+        <span class="profile-wifi profile-wifi-xl" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',36)}</span>
+      </div>
+      <div class="profile-gateway-control">
+        <div class="profile-gateway-toggle-group">
+          <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
+                  role="switch" aria-checked="${ariaChecked}" aria-disabled="${controlUnavailable ? 'true' : 'false'}"
+                  ${controlUnavailable ? 'disabled' : ''}
+                  data-profile-name="${name}" data-gateway-toggle data-state="${phase}"
+                  data-error="${esc(summary)}">
+            <span class="profile-gateway-toggle-track" aria-hidden="true">
+              <span class="profile-gateway-toggle-thumb"></span>
+            </span>
+            <span class="profile-gateway-toggle-label" id="opsGatewayToggleLabel">${esc(toggleLabel)}</span>
+          </button>
+          <button type="button" class="profile-gateway-info has-tooltip has-tooltip--bottom-right has-tooltip--wrap"
+                  data-gateway-info data-tooltip="${esc(summary)}"
+                  aria-label="View gateway status details for ${name}"${infoHidden}>ⓘ</button>
+        </div>
+        <button type="button" class="profile-gateway-platforms-btn"
+                data-profile-name="${name}" data-platforms-action="${name}"
+                title="${esc(platformsTitle)}"
+                aria-label="${esc(platformsTitle)}"${platformsBtnDisabled ? ' disabled aria-disabled="true"' : ''}>
+          <span class="profile-gateway-platforms-icon" aria-hidden="true">⚙</span>
+          <span class="profile-gateway-platforms-label">Platforms · <span class="profile-gateway-platforms-count" data-platforms-count>${platformsCount}</span></span>
+        </button>
+      </div>
+    </article>`;
+}
+
+function _profileSkillsTile(p, isActive){
+  // Counts must come from /api/profile/skills, which knows the full visible
+  // skill universe and this profile's disabled set. /api/profiles skill_count
+  // is row metadata and can vary per profile before hydration.
+  return `
+    <article class="profile-ops-tile" aria-labelledby="opsSkillsTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span>
+        <span class="profile-ops-status-pill" id="opsSkillsPill">
+          <span id="opsSkillsDot" class="profile-status-dot off" aria-hidden="true"></span>
+          <span id="opsSkillsPillLabel">Loading skills…</span>
+        </span>
+      </div>
+      <div>
+        <span class="profile-ops-tile-value" id="opsSkillsValue">Loading skills…</span>
+        <div id="opsSkillsTopChips" class="profile-skill-top" role="list"></div>
+      </div>
+      <div class="profile-ops-control-row">
+        <button class="profile-ops-button" type="button" data-ops-action="skills">Manage</button>
+      </div>
+    </article>`;
+}
+// _hydrateProfileDescription / _hydrateProfileActivity — bodies above.
+
+// ── Default-model tile (rework 2026-05-15) ─────────────────────────────
+//
+// The default-model tile shares the chat composer's picker — same chrome
+// (.composer-model-chip + .model-dropdown), same renderer
+// (renderModelDropdown from ui.js, called with opts pointing at the tile's
+// own select + dropdown), same row layout, search, badges, custom-ID
+// input. Selecting a row auto-saves to /api/profile/settings. Reasoning
+// chip mirrors the chat composer's reasoning options exactly (none ·
+// minimal · low · medium · high · xhigh); the chip label reads "Default"
+// when no override is set (matches the composer's empty-state label).
+
+let _profileRuntimeSettings = null;
+let _profileRuntimeHydrationSeq = 0;
+let _profileRuntimeDirty = null;
+const _PROFILE_COMPRESSION_DEFAULTS = {
+  enabled: true,
+  threshold: 0.5,
+  target_ratio: 0.5,
+  protect_last_n: 20,
+  protect_first_n: 0,
+};
+
+function _freshProfileRuntimeDirty(){
+  return {
+    default_model: false,
+    default_reasoning: false,
+    fallback_model: false,
+    response_mode: false,
+    compression: false,
+    max_turns: false,
+    default_workspace: false,
+    toolsets: false,
+    auxiliary_models: false,
+  };
+}
+
+function _markProfileRuntimeDirty(key){
+  if (!_profileRuntimeDirty) _profileRuntimeDirty = _freshProfileRuntimeDirty();
+  if (Object.prototype.hasOwnProperty.call(_profileRuntimeDirty, key)) {
+    _profileRuntimeDirty[key] = true;
+  }
+}
+
+function _isCurrentProfileRuntimeHydration(profileName, seq){
+  return Number.isFinite(seq)
+    && seq === _profileRuntimeHydrationSeq
+    && _currentProfileDetail
+    && _currentProfileDetail.name === profileName;
+}
+
+function _primeProfileRuntimeControls(profile){
+  const seq = ++_profileRuntimeHydrationSeq;
+  _profileRuntimeDirty = _freshProfileRuntimeDirty();
+  if (!profile || !profile.name) return seq;
+
+  _profileRuntimeSettings = {
+    fallback_model: {},
+    response_mode: '',
+    compression: Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS),
+    max_turns: null,
+    default_workspace: profile.default_workspace || '',
+    toolsets: [],
+    toolsets_configured: false,
+    auxiliary_models: [],
+  };
+  _populateProfileDefaultModelSelect(profile);
+  _populateProfileModelSelect('profileFallbackModelSelect', '', null);
+  _applyProfileDefaultModelChip(profile.model || '');
+  _applyProfileDefaultReasoningChip('');
+  _applyProfileFallbackModelChip('');
+  _applyProfileResponseMode('');
+  _applyProfileCompression(_PROFILE_COMPRESSION_DEFAULTS);
+  _applyProfileMaxTurns(undefined);
+  _applyProfileDefaultWorkspace(profile.default_workspace || '');
+  _applyProfileToolsets([], false);
+  _wireProfileDefaultModelHandlers(profile.name);
+  _wireProfileRuntimeSettingHandlers(profile.name);
+  return seq;
+}
+
+async function _hydrateProfileRuntimeSettings(profile, seq){
+  if (!profile || !profile.name) return;
+  const token = Number.isFinite(seq) ? seq : _profileRuntimeHydrationSeq;
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+  // Wait for the composer's model catalog before mirroring it into the
+  // profile's hidden select. Without this, the picker can paint empty
+  // immediately after a profile switch.
+  const ready = window._modelDropdownReady;
+  if (ready && typeof ready.then === 'function') {
+    try { await ready; } catch (_) {}
+  }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+  if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
+    try { await populateModelDropdown(); } catch (_) {}
+  }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+
+  let settings = {};
+  try {
+    settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name) + '&include_avatar=0');
+  } catch (_) { settings = {}; }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+
+  const dirty = _profileRuntimeDirty || _freshProfileRuntimeDirty();
+  const prior = _profileRuntimeSettings || {};
+  const next = Object.assign({}, prior, settings || {});
+  if (dirty.default_reasoning) next.reasoning_effort = prior.reasoning_effort || '';
+  if (dirty.fallback_model) next.fallback_model = prior.fallback_model || {};
+  if (dirty.response_mode) next.response_mode = prior.response_mode || '';
+  if (dirty.compression) next.compression = prior.compression || _profileCompressionPayload();
+  if (dirty.max_turns) next.max_turns = prior.max_turns;
+  if (dirty.default_workspace) next.default_workspace = prior.default_workspace || profile.default_workspace || '';
+  if (dirty.toolsets) {
+    next.toolsets = prior.toolsets || [];
+    next.toolsets_configured = !!prior.toolsets_configured;
+  }
+  if (dirty.auxiliary_models) next.auxiliary_models = prior.auxiliary_models || [];
+  _profileRuntimeSettings = next;
+
+  const fallback = (_profileRuntimeSettings && _profileRuntimeSettings.fallback_model) || {};
+  const defaultModelChip = $('profileDefaultModelChip');
+  const fallbackModelChip = $('profileFallbackModelChip');
+  const currentDefaultModel = defaultModelChip ? (defaultModelChip.dataset.modelValue || '') : '';
+  const currentFallbackModel = fallbackModelChip ? (fallbackModelChip.dataset.modelValue || '') : '';
+  _populateProfileModelSelect(
+    'profileDefaultModelSelect',
+    dirty.default_model ? currentDefaultModel : (profile.model || ''),
+    profile.provider || null
+  );
+  _populateProfileModelSelect(
+    'profileFallbackModelSelect',
+    dirty.fallback_model ? currentFallbackModel : (fallback.model || ''),
+    fallback.provider || null
+  );
+  if (!dirty.default_model) _applyProfileDefaultModelChip(profile.model || '');
+  if (!dirty.default_reasoning) {
+    _applyProfileDefaultReasoningChip(typeof _profileRuntimeSettings.reasoning_effort === 'string' ? _profileRuntimeSettings.reasoning_effort : '');
+  }
+  if (!dirty.fallback_model) _applyProfileFallbackModelChip(fallback.model || '');
+  if (!dirty.response_mode) _applyProfileResponseMode(_profileRuntimeSettings.response_mode || '');
+  if (!dirty.compression) _applyProfileCompression(_profileRuntimeSettings.compression || {});
+  if (!dirty.max_turns) _applyProfileMaxTurns(_profileRuntimeSettings.max_turns);
+  if (!dirty.default_workspace) _applyProfileDefaultWorkspace(_profileRuntimeSettings.default_workspace || profile.default_workspace || '');
+  if (!dirty.toolsets) _applyProfileToolsets(_profileRuntimeSettings.toolsets || [], !!_profileRuntimeSettings.toolsets_configured);
+  _wireProfileDefaultModelHandlers(profile.name);
+  _wireProfileRuntimeSettingHandlers(profile.name);
+}
+
+async function _hydrateProfileDefaultModel(profile){ return _hydrateProfileRuntimeSettings(profile); }
+
+function _populateProfileDefaultModelSelect(profile){
+  _populateProfileModelSelect('profileDefaultModelSelect', profile && profile.model || '', profile && profile.provider || null);
+}
+
+function _populateProfileModelSelect(selectId, currentModel, preferredProvider){
+  // Mirror #modelSelect's optgroups into the profile's hidden select so the
+  // composer's renderer (renderModelDropdown) sees the same catalog when
+  // called with opts pointing at this select.
+  const sel = $(selectId);
+  const composerSel = $('modelSelect');
+  if (!sel || !composerSel) return;
+  sel.innerHTML = '';
+  for (const child of Array.from(composerSel.children)) {
+    if (child.tagName === 'OPTGROUP') {
+      const og = document.createElement('optgroup');
+      og.label = child.label || '';
+      if (child.dataset && child.dataset.provider) og.dataset.provider = child.dataset.provider;
+      for (const opt of Array.from(child.children)) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.textContent;
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+    } else if (child.tagName === 'OPTION') {
+      const o = document.createElement('option');
+      o.value = child.value;
+      o.textContent = child.textContent;
+      sel.appendChild(o);
+    }
+  }
+  // Seed the value to the profile's current model so renderModelDropdown's
+  // .active row highlight lands on the right row.
+  const current = currentModel || '';
+  if (current && typeof _applyModelToDropdown === 'function') {
+    _applyModelToDropdown(current, sel, preferredProvider || null);
+  } else if (current) {
+    sel.value = current;
+  }
+}
+
+function _applyProfileDefaultModelChip(modelValue){
+  const label = $('profileDefaultModelLabel');
+  const chip = $('profileDefaultModelChip');
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'Select model…';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.title = 'Default model: ' + text;
+  }
+}
+
+function _applyProfileFallbackModelChip(modelValue){
+  const label = $('profileFallbackModelLabel');
+  const chip = $('profileFallbackModelChip');
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'None';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.classList.toggle('inactive', !modelValue);
+    chip.title = modelValue ? ('Fallback model: ' + text) : 'No profile-specific fallback model';
+  }
+  const clear = $('profileFallbackClear');
+  if (clear) clear.disabled = !modelValue;
+}
+
+function _applyProfileDefaultReasoningChip(effort){
+  const norm = String(effort || '').trim().toLowerCase();
+  const label = $('profileDefaultReasoningLabel');
+  const chip = $('profileDefaultReasoningChip');
+  if (!label || !chip) return;
+  // Composer parity: chip shows "Default" when no override is set, else the
+  // effort label (lowercase, matching the composer chip's display style via
+  // _formatReasoningEffortLabel() in ui.js).
+  const display = (typeof _formatReasoningEffortLabel === 'function')
+    ? _formatReasoningEffortLabel(norm)
+    : (norm || 'Default');
+  label.textContent = display;
+  chip.dataset.effort = norm;
+  const inactive = !norm || norm === 'none';
+  chip.classList.toggle('inactive', inactive);
+}
+
+function _applyProfileResponseMode(mode){
+  const sel = $('profileResponseModeSelect');
+  if (!sel) return;
+  const value = String(mode || '').trim().toLowerCase();
+  sel.value = ['concise','technical','teacher','kawaii','hype'].includes(value) ? value : '';
+}
+
+function _profileCompressionState(){
+  const current = (_profileRuntimeSettings && _profileRuntimeSettings.compression) || {};
+  return Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS, current || {});
+}
+
+function _applyProfileCompression(raw){
+  const c = Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS, raw || {});
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  if (threshold) threshold.value = String(Math.round((Number(c.threshold) || 0.5) * 100));
+  if (protect) protect.value = String(Number.isFinite(Number(c.protect_last_n)) ? Number(c.protect_last_n) : 20);
+  _syncProfileCompressionSummary();
+}
+
+function _syncProfileCompressionSummary(){
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  const summary = $('profileCompressionSummary');
+  if (!summary) return;
+  const pct = Math.max(10, Math.min(95, parseInt(threshold && threshold.value || '50', 10) || 50));
+  const last = Math.max(0, Math.min(200, parseInt(protect && protect.value || '20', 10) || 0));
+  summary.textContent = `Threshold ${pct}%, protect last ${last} messages.`;
+}
+
+function _applyProfileMaxTurns(value){
+  const n = Math.max(1, Math.min(1000, parseInt(value || '150', 10) || 150));
+  const slider = $('profileMaxTurnsSlider');
+  const input = $('profileMaxTurnsInput');
+  if (slider) slider.value = String(Math.max(10, Math.min(1000, Math.round(n / 10) * 10)));
+  if (input) input.value = String(n);
+}
+
+function _applyProfileDefaultWorkspace(value){
+  const path = String(value || '').trim();
+  const el = $('profileDefaultWorkspaceValue');
+  const chip = $('profileDefaultWorkspaceChip');
+  const clear = $('profileDefaultWorkspaceClear');
+  const label = path ? getWorkspaceFriendlyName(path) : 'No default space set';
+  if (el) el.textContent = label;
+  if (chip) {
+    chip.dataset.workspace = path;
+    chip.classList.toggle('inactive', !path);
+    chip.title = path || 'No default space set';
+  }
+  if (clear) {
+    clear.disabled = !path;
+    clear.hidden = !path;
+  }
+}
+
+function _refreshProfileCardRuntimeMeta(profileName){
+  const p = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(x => x.name === profileName)
+    : null;
+  if (!p) return;
+  const card = document.querySelector(`.profile-card[data-name="${CSS.escape(profileName)}"]`);
+  const metaEl = card ? card.querySelector('.profile-card-meta') : null;
+  if (!metaEl) return;
+  const meta = [];
+  if (p.model) meta.push(p.model.split('/').pop());
+  if (p.provider) meta.push(p.provider);
+  metaEl.textContent = meta.length ? meta.join(' · ') : t('profile_no_configuration');
+}
+
+function _applyProfileToolsets(toolsets, configured){
+  const defaultToolsets = _PROFILE_TOOLSET_GROUPS.map(([id]) => id);
+  const selected = new Set(Array.isArray(toolsets) && (configured || toolsets.length) ? toolsets : defaultToolsets);
+  document.querySelectorAll('.profile-toolset-pill[data-toolset]').forEach(btn => {
+    const on = selected.has(btn.dataset.toolset);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+function _wireProfileDefaultModelHandlers(profileName){
+  const modelChip = $('profileDefaultModelChip');
+  const fallbackChip = $('profileFallbackModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  if (modelChip) {
+    modelChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultModelDropdown(profileName); };
+  }
+  if (fallbackChip) {
+    fallbackChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileFallbackModelDropdown(profileName); };
+  }
+  if (reasoningChip) {
+    reasoningChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultReasoningDropdown(profileName); };
+  }
+}
+
+function _closeProfileDefaultDropdowns(){
+  ['profileDefaultModelDropdown', 'profileFallbackModelDropdown', 'profileDefaultReasoningDropdown'].forEach(id => {
+    const el = $(id); if (el) el.classList.remove('open');
+  });
+  ['profileDefaultModelChip', 'profileFallbackModelChip', 'profileDefaultReasoningChip'].forEach(id => {
+    const el = $(id); if (el) el.classList.remove('active');
+  });
+}
+
+function _toggleProfileDefaultModelDropdown(profileName){
+  const dd = $('profileDefaultModelDropdown');
+  const chip = $('profileDefaultModelChip');
+  const sel = $('profileDefaultModelSelect');
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  // Close any other dropdowns in the page first so two pickers can't be
+  // open simultaneously.
+  closeWsDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  // Use the composer's parameterised picker — same search input, configured
+  // badges, group headings with counts, custom-ID row. (The hidden select
+  // is the canonical source of truth for the renderer.)
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileDefaultModelPicked(profileName, value),
+    onClose: () => _closeProfileDefaultDropdowns(),
+    // The tile subtitle already states this scope; suppress the in-dropdown
+    // duplicate scope-note for the profile case (composer keeps its default).
+    scopeNote: "",
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+function _toggleProfileFallbackModelDropdown(profileName){
+  const dd = $('profileFallbackModelDropdown');
+  const chip = $('profileFallbackModelChip');
+  const sel = $('profileFallbackModelSelect');
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  closeWsDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileFallbackModelPicked(profileName, value),
+    onClose: () => _closeProfileDefaultDropdowns(),
+    scopeNote: "",
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+// Flip-up logic: a profile-tile chip can sit near the viewport bottom on
+// short laptop screens, where opening downward (.profile-default-model-dropdown
+// CSS default: top:calc(100% + 4px)) would clip the option list. If there's
+// more headroom above the chip than below it, flip the dropdown above the
+// chip instead. The CSS owns the resting position; this helper toggles a
+// .flipped class that switches top↔bottom.
+function _positionProfileDefaultDropdown(chip, dd){
+  if(!chip || !dd) return;
+  const chipRect = chip.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const spaceBelow = vh - chipRect.bottom;
+  const spaceAbove = chipRect.top;
+  const ddHeight = dd.offsetHeight || 320; // matches .model-dropdown max-height
+  // Open upward when below-space is too tight AND above-space is more
+  // generous. Threshold: dropdown's measured/expected height + a small
+  // breathing margin so the last row isn't flush against the viewport edge.
+  const minBelow = ddHeight + 12;
+  const flip = (spaceBelow < minBelow) && (spaceAbove > spaceBelow);
+  dd.classList.toggle('flipped', flip);
+}
+
+async function _onProfileDefaultModelPicked(profileName, value){
+  _markProfileRuntimeDirty('default_model');
+  const sel = $('profileDefaultModelSelect');
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  if (!sel) { _closeProfileDefaultDropdowns(); return; }
+  // Capture prior values BEFORE optimistic UI update so a failed POST can
+  // revert without re-fetching from the server.
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    reasoning: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
+  // Mirror selectModelFromDropdown's custom-model handling: if the value
+  // isn't an existing option (custom ID typed into the picker's input),
+  // append a temporary option so sel.value sticks.
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+  _applyProfileDefaultModelChip(value);
+  _closeProfileDefaultDropdowns();
+  await _persistProfileDefaultModel(profileName, priors);
+}
+
+async function _onProfileFallbackModelPicked(profileName, value){
+  _markProfileRuntimeDirty('fallback_model');
+  const sel = $('profileFallbackModelSelect');
+  const chip = $('profileFallbackModelChip');
+  if (!sel) { _closeProfileDefaultDropdowns(); return; }
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: chip ? (chip.dataset.modelValue || '') : '',
+  };
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+  _applyProfileFallbackModelChip(value);
+  _closeProfileDefaultDropdowns();
+  await _persistProfileFallbackModel(profileName, priors);
+}
+
+function _toggleProfileDefaultReasoningDropdown(profileName){
+  const dd = $('profileDefaultReasoningDropdown');
+  const chip = $('profileDefaultReasoningChip');
+  if (!dd || !chip) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  closeWsDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  // Use the chat composer's reasoning renderer (parameterised in ui.js) so
+  // both surfaces share the same row set + click semantics. The onSelect
+  // callback owns the auto-save flow; renderReasoningDropdown attaches
+  // ev.stopPropagation() on each row so the composer's document-level
+  // .reasoning-option click handler does NOT also fire here.
+  renderReasoningDropdown({
+    dropdown: dd,
+    current: chip.dataset.effort || '',
+    onSelect: (value) => _onProfileDefaultReasoningPicked(profileName, value),
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+function _onProfileDefaultReasoningPicked(profileName, value){
+  _markProfileRuntimeDirty('default_reasoning');
+  // Capture prior values BEFORE optimistic UI update so a failed POST can
+  // revert without re-fetching from the server.
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  const sel = $('profileDefaultModelSelect');
+  const priors = {
+    selValue: sel ? (sel.value || '') : '',
+    modelValue: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    reasoning: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
+  _applyProfileDefaultReasoningChip(value);
+  _closeProfileDefaultDropdowns();
+  _persistProfileDefaultModel(profileName, priors);
+}
+
+async function _persistProfileDefaultModel(profileName, priors){
+  const token = _profileRuntimeHydrationSeq;
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  const sel = $('profileDefaultModelSelect');
+  const modelValue = modelChip ? (modelChip.dataset.modelValue || '') : '';
+  // Prior values are captured at the call site (before the optimistic UI
+  // update). If a caller doesn't pass them — e.g. legacy callers — fall back
+  // to the profiles cache for model/provider; reasoning has no other source.
+  const priorProfile = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(x => x.name === profileName) : null;
+  const priorModel = (priors && typeof priors.modelValue === 'string')
+    ? priors.modelValue
+    : (priorProfile ? (priorProfile.model || '') : '');
+  const priorProvider = priorProfile ? (priorProfile.provider || null) : null;
+  const priorReasoning = (priors && typeof priors.reasoning === 'string')
+    ? priors.reasoning : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string')
+    ? priors.selValue : (sel ? sel.value : '');
+  // Derive the provider from the chosen model (its option's optgroup) the
+  // same way the chat composer does — _modelStateForSelect handles both
+  // explicit @provider:model values and optgroup-tagged options.
+  const modelState = (sel && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue, model_provider: null };
+  const body = {
+    name: profileName,
+    model: modelState.model || modelValue,
+    provider: modelState.model_provider || null,
+    reasoning_effort: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
+  try {
+    const updated = await api('/api/profile/settings', { method: 'POST', body: JSON.stringify(body) });
+    // Update the profiles cache so the profile card reflects the new
+    // model/provider without an extra fetch.
+    const p = (_profilesCache && Array.isArray(_profilesCache.profiles))
+      ? _profilesCache.profiles.find(x => x.name === profileName) : null;
+    if (p) Object.assign(p, updated);
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      Object.assign(_currentProfileDetail, updated);
+    }
+    // If we're editing the active profile and no chat session has been
+    // started yet, mirror onto the chat composer's #modelSelect so the
+    // composer chip updates without a reload — matches the legacy
+    // _saveProfileModelSettings behaviour.
+    const isActive = (S.activeProfile || (_profilesCache && _profilesCache.active) || 'default') === profileName;
+    if (isActive) {
+      const composerSel = $('modelSelect');
+      if (composerSel && updated.model && typeof _applyModelToDropdown === 'function') {
+        const resolved = _applyModelToDropdown(updated.model, composerSel, updated.provider || null) || updated.model;
+        if (S.session && !(S.messages && S.messages.length)) {
+          S.session.model = resolved;
+          S.session.model_provider = updated.provider || modelState.model_provider || null;
+        }
+        if (typeof syncModelChip === 'function') syncModelChip();
+        if (typeof syncTopbar === 'function') syncTopbar();
+      }
+    }
+    _refreshProfileCardRuntimeMeta(profileName);
+  } catch (e) {
+    // Revert the optimistic chip + select-mirror state so the UI no longer
+    // claims a value the server doesn't have. Toast the failure (no inline
+    // "Saved" diode by design — failure is the only state worth surfacing).
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      try {
+        if (sel) {
+          if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) {
+            sel.value = priorSelValue;
+          } else if (priorModel && typeof _applyModelToDropdown === 'function') {
+            _applyModelToDropdown(priorModel, sel, priorProvider);
+          }
+        }
+        _applyProfileDefaultModelChip(priorModel);
+        _applyProfileDefaultReasoningChip(priorReasoning);
+      } catch (revertErr) {
+        console.warn('Default model revert failed:', revertErr);
+      }
+      showToast('Default model save failed: ' + (e && e.message ? e.message : e));
+    }
+    console.warn('Default model save failed:', e);
+  }
+}
+
+async function _persistProfileFallbackModel(profileName, priors){
+  const token = _profileRuntimeHydrationSeq;
+  const chip = $('profileFallbackModelChip');
+  const sel = $('profileFallbackModelSelect');
+  const modelValue = chip ? (chip.dataset.modelValue || '') : '';
+  const priorModel = (priors && typeof priors.modelValue === 'string') ? priors.modelValue : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string') ? priors.selValue : '';
+  const modelState = (sel && modelValue && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue, model_provider: null };
+  const provider = _profileProviderForPickerValue(sel, modelValue, modelState);
+  if (modelValue && !provider) {
+    if (sel) {
+      if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+      else sel.value = '';
+    }
+    _applyProfileFallbackModelChip(priorModel);
+    showToast('Pick a fallback model from a configured provider.', 4000, 'error');
+    return;
+  }
+  const fallback_model = modelValue ? {
+    provider,
+    model: modelState.model || modelValue,
+  } : {};
+  try {
+    const updated = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, fallback_model }),
+    });
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
+      Object.assign(_currentProfileDetail, updated);
+    }
+  } catch (e) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      if (sel) {
+        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+        else sel.value = '';
+      }
+      _applyProfileFallbackModelChip(priorModel);
+      showToast('Fallback model save failed: ' + (e && e.message ? e.message : e), 4000, 'error');
+    }
+    console.warn('Fallback model save failed:', e);
+  }
+}
+
+async function _persistProfileSetting(profileName, patch, onFailure){
+  const token = _profileRuntimeHydrationSeq;
+  try {
+    const updated = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify(Object.assign({ name: profileName }, patch || {})),
+    });
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
+      Object.assign(_currentProfileDetail, updated);
+    }
+    return updated;
+  } catch (e) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token) && typeof onFailure === 'function') onFailure(e);
+    console.warn('Profile setting save failed:', e);
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      showToast('Profile setting save failed: ' + (e && e.message ? e.message : e), 4000, 'error');
+    }
+    throw e;
+  }
+}
+
+function _positionProfileDefaultWorkspaceDropdown(chip, dd){
+  if(!chip || !dd) return;
+  const chipRect = chip.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const spaceBelow = vh - chipRect.bottom;
+  const spaceAbove = chipRect.top;
+  const ddHeight = dd.offsetHeight || 320;
+  dd.classList.toggle('flipped', (spaceBelow < ddHeight + 12) && (spaceAbove > spaceBelow));
+}
+
+function _toggleProfileDefaultWorkspaceDropdown(profileName){
+  const dd = $('profileDefaultWorkspaceDropdown');
+  const chip = $('profileDefaultWorkspaceChip');
+  if (!dd || !chip) return;
+  if (dd.classList.contains('open')) { closeWsDropdown(); return; }
+  closeProfileDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  closeWsDropdown();
+  const token = _profileRuntimeHydrationSeq;
+  loadWorkspaceList().then(data => {
+    if (!_isCurrentProfileRuntimeHydration(profileName, token)) return;
+    const current = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace)
+      || (chip.dataset.workspace || '');
+    _applyProfileDefaultWorkspace(current);
+    renderWorkspaceDropdownInto(dd, data.workspaces, current, {
+      includeSessionActions: false,
+      onSelect: (path) => {
+        _markProfileRuntimeDirty('default_workspace');
+        const prior = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace) || '';
+        const next = String(path || '').trim();
+        closeWsDropdown();
+        _applyProfileDefaultWorkspace(next);
+        _persistProfileDefaultWorkspace(profileName, next, prior).catch(()=>{});
+      },
+    });
+    dd.classList.add('open');
+    chip.classList.add('active');
+    _positionProfileDefaultWorkspaceDropdown(chip, dd);
+  });
+}
+
+async function _persistProfileDefaultWorkspace(profileName, next, prior){
+  const token = _profileRuntimeHydrationSeq;
+  const updated = await _persistProfileSetting(
+    profileName,
+    { default_workspace: String(next || '').trim() },
+    () => {
+      if (_isCurrentProfileRuntimeHydration(profileName, token)) _applyProfileDefaultWorkspace(prior || '');
+    }
+  );
+  const saved = updated && typeof updated.default_workspace === 'string'
+    ? updated.default_workspace
+    : String(next || '').trim();
+  if (_isCurrentProfileRuntimeHydration(profileName, token)) _applyProfileDefaultWorkspace(saved);
+  const active = S.activeProfile || (_profilesCache && _profilesCache.active) || 'default';
+  if (active === profileName) {
+    S._profileDefaultWorkspace = saved;
+    if (typeof syncWorkspaceDisplays === 'function') syncWorkspaceDisplays();
+  }
+  return updated;
+}
+
+function _profileCompressionPayload(){
+  const current = _profileCompressionState();
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  return Object.assign({}, current, {
+    enabled: true,
+    threshold: (Math.max(10, Math.min(95, parseInt(threshold && threshold.value || '50', 10) || 50)) / 100),
+    protect_last_n: Math.max(0, Math.min(200, parseInt(protect && protect.value || '20', 10) || 0)),
+  });
+}
+
+function _selectedProfileToolsets(){
+  return Array.from(document.querySelectorAll('.profile-toolset-pill.active[data-toolset]'))
+    .map(btn => btn.dataset.toolset)
+    .filter(Boolean);
+}
+
+function _profileProviderForPickerValue(sel, modelValue, modelState){
+  const stateProvider = modelState && modelState.model_provider ? String(modelState.model_provider).trim() : '';
+  if (stateProvider) return stateProvider;
+  const value = String(modelValue || '').trim();
+  const slashProvider = value.includes('/') ? value.split('/')[0].trim() : '';
+  if (!slashProvider || !sel) return '';
+  for (const group of Array.from(sel.querySelectorAll('optgroup[data-provider]'))) {
+    if (String(group.dataset.provider || '').trim() === slashProvider) return slashProvider;
+  }
+  return '';
+}
+
+function _wireProfileRuntimeSettingHandlers(profileName){
+  const fallbackClear = $('profileFallbackClear');
+  if (fallbackClear) fallbackClear.onclick = async (ev) => {
+    ev.stopPropagation();
+    _markProfileRuntimeDirty('fallback_model');
+    const chip = $('profileFallbackModelChip');
+    const sel = $('profileFallbackModelSelect');
+    const priors = {
+      selValue: sel ? (sel.value || '') : '',
+      modelValue: chip ? (chip.dataset.modelValue || '') : '',
+    };
+    if (sel) sel.value = '';
+    _applyProfileFallbackModelChip('');
+    await _persistProfileFallbackModel(profileName, priors);
+  };
+
+  const auxBtn = $('profileAuxModelsButton');
+  if (auxBtn) auxBtn.onclick = () => _openProfileAuxModels(profileName);
+
+  const response = $('profileResponseModeSelect');
+  if (response) response.onchange = () => {
+    _markProfileRuntimeDirty('response_mode');
+    const prior = (_profileRuntimeSettings && _profileRuntimeSettings.response_mode) || '';
+    _persistProfileSetting(profileName, { response_mode: response.value }, () => _applyProfileResponseMode(prior)).catch(()=>{});
+  };
+
+  [$('profileCompressionThreshold'), $('profileCompressionProtectLast')]
+    .filter(Boolean)
+    .forEach(el => {
+      el.oninput = () => {
+        _markProfileRuntimeDirty('compression');
+        _syncProfileCompressionSummary();
+      };
+      el.onchange = () => {
+        _markProfileRuntimeDirty('compression');
+        _syncProfileCompressionSummary();
+        const prior = (_profileRuntimeSettings && _profileRuntimeSettings.compression) || {};
+        _persistProfileSetting(profileName, { compression: _profileCompressionPayload() }, () => _applyProfileCompression(prior)).catch(()=>{});
+      };
+    });
+
+  const maxSlider = $('profileMaxTurnsSlider');
+  const maxInput = $('profileMaxTurnsInput');
+  const saveMaxTurns = (value, prior) => {
+    _markProfileRuntimeDirty('max_turns');
+    const n = Math.max(1, Math.min(1000, parseInt(value || '150', 10) || 150));
+    _applyProfileMaxTurns(n);
+    _persistProfileSetting(profileName, { max_turns: n }, () => _applyProfileMaxTurns(prior)).catch(()=>{});
+  };
+  if (maxSlider) {
+    maxSlider.oninput = () => {
+      _markProfileRuntimeDirty('max_turns');
+      if (maxInput) maxInput.value = maxSlider.value;
+    };
+    maxSlider.onchange = () => saveMaxTurns(maxSlider.value, _profileRuntimeSettings && _profileRuntimeSettings.max_turns);
+  }
+  if (maxInput) maxInput.onchange = () => saveMaxTurns(maxInput.value, _profileRuntimeSettings && _profileRuntimeSettings.max_turns);
+
+  const workspaceChip = $('profileDefaultWorkspaceChip');
+  if (workspaceChip) {
+    workspaceChip.onclick = (ev) => {
+      ev.stopPropagation();
+      _toggleProfileDefaultWorkspaceDropdown(profileName);
+    };
+  }
+  const workspaceClear = $('profileDefaultWorkspaceClear');
+  if (workspaceClear) workspaceClear.onclick = async (ev) => {
+    ev.stopPropagation();
+    _markProfileRuntimeDirty('default_workspace');
+    const current = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace) || '';
+    _applyProfileDefaultWorkspace('');
+    closeWsDropdown();
+    _persistProfileDefaultWorkspace(profileName, '', current).catch(()=>{});
+  };
+
+  document.querySelectorAll('.profile-toolset-pill[data-toolset]').forEach(btn => {
+    btn.onclick = () => {
+      _markProfileRuntimeDirty('toolsets');
+      btn.classList.toggle('active');
+      btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');
+      const prior = (_profileRuntimeSettings && _profileRuntimeSettings.toolsets) || [];
+      const priorConfigured = !!(_profileRuntimeSettings && _profileRuntimeSettings.toolsets_configured);
+      _persistProfileSetting(profileName, { toolsets: _selectedProfileToolsets() }, () => _applyProfileToolsets(prior, priorConfigured)).catch(()=>{});
+    };
+  });
+}
+
+function _profileAuxiliaryModels(){
+  const models = _profileRuntimeSettings && Array.isArray(_profileRuntimeSettings.auxiliary_models)
+    ? _profileRuntimeSettings.auxiliary_models
+    : [];
+  return models.length ? models : [
+    { task: 'vision', label: 'Vision', description: 'Image and multimodal interpretation.', provider: '', model: '' },
+    { task: 'web_extract', label: 'Web extraction', description: 'Extract and summarize web page content.', provider: '', model: '' },
+    { task: 'compression', label: 'Compression', description: 'Summarize long session context.', provider: '', model: '' },
+    { task: 'session_search', label: 'Session search', description: 'Search and synthesize prior sessions.', provider: '', model: '' },
+    { task: 'skills_hub', label: 'Skills hub', description: 'Skill discovery and routing support.', provider: '', model: '' },
+    { task: 'approval', label: 'Approval', description: 'Policy and approval helper calls.', provider: '', model: '' },
+    { task: 'mcp', label: 'MCP', description: 'MCP tool routing helper calls.', provider: '', model: '' },
+    { task: 'title_generation', label: 'Title generation', description: 'Short chat and session titles.', provider: '', model: '' },
+    { task: 'triage_specifier', label: 'Triage specifier', description: 'Clarify routing and task specification.', provider: '', model: '' },
+    { task: 'curator', label: 'Curator', description: 'Curated summaries and organization.', provider: '', model: '' },
+  ];
+}
+
+function _profileAuxDomId(task, suffix){
+  return 'profileAux_' + String(task || '').replace(/[^a-z0-9_-]/gi, '_') + '_' + suffix;
+}
+
+function _openProfileAuxModels(profileName){
+  _closeProfileAuxModels();
+  const tasks = _profileAuxiliaryModels();
+  const rows = tasks.map(item => {
+    const task = esc(item.task || '');
+    const label = esc(item.label || item.task || '');
+    const desc = esc(item.description || '');
+    const chipId = _profileAuxDomId(item.task, 'chip');
+    const labelId = _profileAuxDomId(item.task, 'label');
+    const ddId = _profileAuxDomId(item.task, 'dropdown');
+    const selectId = _profileAuxDomId(item.task, 'select');
+    return `
+      <div class="profile-aux-model-row" data-aux-task="${task}">
+        <div class="profile-aux-model-text">
+          <span class="profile-aux-model-name">${label}</span>
+          <span class="profile-aux-model-desc">${desc}</span>
+        </div>
+        <div class="profile-aux-model-control">
+          <div class="composer-model-wrap profile-default-model-wrap profile-aux-model-wrap">
+            <button class="composer-model-chip profile-aux-model-chip" id="${chipId}" type="button" title="Auxiliary model for ${label}">
+              <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
+              <span class="composer-model-label" id="${labelId}">Auto</span>
+              <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+            </button>
+            <div class="model-dropdown profile-default-model-dropdown profile-aux-model-dropdown" id="${ddId}"></div>
+            <select id="${selectId}" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+          </div>
+          <button type="button" class="profile-runtime-icon-btn profile-aux-clear" data-aux-clear="${task}" title="Clear auxiliary model" aria-label="Clear ${label} auxiliary model">${li('x',14)}</button>
+        </div>
+      </div>`;
+  }).join('');
+  const overlay = document.createElement('div');
+  overlay.id = 'profileAuxModelsOverlay';
+  overlay.className = 'profile-skills-manager-overlay';
+  overlay.innerHTML = `
+    <div class="profile-skills-manager-card profile-aux-models-card" role="dialog" aria-modal="true" aria-labelledby="profileAuxModelsTitle">
+      <div class="profile-skills-manager-head">
+        <div class="profile-skills-manager-head-text">
+          <div class="profile-skills-manager-kicker">Runtime</div>
+          <h3 class="profile-skills-manager-title" id="profileAuxModelsTitle">Auxiliary tool models</h3>
+          <div class="profile-skills-manager-subtitle">Set cheaper or specialized models for profile helper tasks.</div>
+        </div>
+        <button type="button" class="profile-skills-manager-close" data-aux-close aria-label="Close">×</button>
+      </div>
+      <div class="profile-skills-manager-body profile-aux-models-body">
+        ${rows}
+      </div>
+      <div class="profile-skills-manager-footer">
+        <span class="profile-skills-manager-note">Clear a row to let Hermes resolve that auxiliary task from its normal runtime defaults.</span>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) _closeProfileAuxModels();
+  });
+  const closeBtn = overlay.querySelector('[data-aux-close]');
+  if (closeBtn) closeBtn.onclick = _closeProfileAuxModels;
+  tasks.forEach(item => {
+    const selectId = _profileAuxDomId(item.task, 'select');
+    _populateProfileModelSelect(selectId, item.model || '', item.provider || null);
+    _applyProfileAuxModelChip(item.task, item.model || '');
+  });
+  _wireProfileAuxModelHandlers(profileName);
+}
+
+function _closeProfileAuxModels(){
+  const overlay = $('profileAuxModelsOverlay');
+  if (overlay) overlay.remove();
+}
+
+function _closeProfileAuxDropdowns(){
+  document.querySelectorAll('.profile-aux-model-dropdown.open').forEach(el => {
+    el.classList.remove('open');
+    el.classList.remove('flipped');
+  });
+  document.querySelectorAll('.profile-aux-model-chip.active').forEach(el => el.classList.remove('active'));
+}
+
+function _findProfileAuxModel(task){
+  return _profileAuxiliaryModels().find(item => item.task === task) || { task, provider: '', model: '' };
+}
+
+function _applyProfileAuxModelChip(task, modelValue){
+  const label = $(_profileAuxDomId(task, 'label'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  const clear = document.querySelector(`[data-aux-clear="${CSS.escape(task)}"]`);
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'Auto';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.classList.toggle('inactive', !modelValue);
+    chip.title = modelValue ? ('Auxiliary model: ' + text) : 'Use Hermes default for this auxiliary task';
+  }
+  if (clear) clear.disabled = !modelValue;
+}
+
+function _wireProfileAuxModelHandlers(profileName){
+  _profileAuxiliaryModels().forEach(item => {
+    const task = item.task;
+    const chip = $(_profileAuxDomId(task, 'chip'));
+    if (chip) {
+      chip.onclick = (ev) => {
+        ev.stopPropagation();
+        _toggleProfileAuxModelDropdown(profileName, task);
+      };
+    }
+  });
+  document.querySelectorAll('[data-aux-clear]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      _markProfileRuntimeDirty('auxiliary_models');
+      const task = btn.dataset.auxClear || '';
+      const chip = $(_profileAuxDomId(task, 'chip'));
+      const sel = $(_profileAuxDomId(task, 'select'));
+      const priors = {
+        selValue: sel ? (sel.value || '') : '',
+        modelValue: chip ? (chip.dataset.modelValue || '') : '',
+      };
+      if (sel) sel.value = '';
+      _applyProfileAuxModelChip(task, '');
+      await _persistProfileAuxModel(profileName, task, '', priors);
+    };
+  });
+}
+
+function _toggleProfileAuxModelDropdown(profileName, task){
+  const dd = $(_profileAuxDomId(task, 'dropdown'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  const sel = $(_profileAuxDomId(task, 'select'));
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileAuxDropdowns(); return; }
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  _closeProfileAuxDropdowns();
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileAuxModelPicked(profileName, task, value),
+    onClose: () => _closeProfileAuxDropdowns(),
+    scopeNote: "",
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+async function _onProfileAuxModelPicked(profileName, task, value){
+  _markProfileRuntimeDirty('auxiliary_models');
+  const sel = $(_profileAuxDomId(task, 'select'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  if (!sel) { _closeProfileAuxDropdowns(); return; }
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: chip ? (chip.dataset.modelValue || '') : '',
+  };
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+  _applyProfileAuxModelChip(task, value);
+  _closeProfileAuxDropdowns();
+  await _persistProfileAuxModel(profileName, task, value, priors);
+}
+
+async function _persistProfileAuxModel(profileName, task, modelValue, priors){
+  const token = _profileRuntimeHydrationSeq;
+  const sel = $(_profileAuxDomId(task, 'select'));
+  const priorModel = (priors && typeof priors.modelValue === 'string') ? priors.modelValue : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string') ? priors.selValue : '';
+  const modelState = (sel && modelValue && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue || '', model_provider: null };
+  const provider = _profileProviderForPickerValue(sel, modelValue, modelState);
+  if (modelValue && !provider) {
+    if (sel) {
+      if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+      else sel.value = '';
+    }
+    _applyProfileAuxModelChip(task, priorModel);
+    showToast('Pick an auxiliary model from a configured provider.', 4000, 'error');
+    return;
+  }
+  const patch = {};
+  patch[task] = modelValue ? {
+    provider,
+    model: modelState.model || modelValue,
+  } : { provider: '', model: '' };
+  try {
+    const updated = await _persistProfileSetting(profileName, { auxiliary_models: patch });
+    if (_isCurrentProfileRuntimeHydration(profileName, token) && updated && Array.isArray(updated.auxiliary_models)) {
+      updated.auxiliary_models.forEach(item => _applyProfileAuxModelChip(item.task, item.model || ''));
+    }
+  } catch (_) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      if (sel) {
+        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+        else sel.value = '';
+      }
+      _applyProfileAuxModelChip(task, priorModel);
+    }
+  }
+}
+
+// Click-outside / Escape closes the default-model dropdowns.
+document.addEventListener('click', (ev) => {
+  if (!ev.target.closest('.profile-default-model-wrap')) _closeProfileDefaultDropdowns();
+  if (!ev.target.closest('.profile-aux-model-wrap')) _closeProfileAuxDropdowns();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') _closeProfileDefaultDropdowns();
+  if (ev.key === 'Escape') {
+    _closeProfileAuxDropdowns();
+    if ($('profileAuxModelsOverlay')) _closeProfileAuxModels();
+  }
+});
+
+// ── Skills tile — top-3 enabled chips ──────────────────────────────────
+
+const _profileSkillsCache = Object.create(null);
+
+async function _loadProfileSkillsTile(profile){
+  // Accept either a profile object {name:...} or a plain name string.
+  const profileName = profile && typeof profile === 'object' ? profile.name : profile;
+  if (!profileName) return;
+  let data;
+  try {
+    data = await api('/api/profile/skills?name=' + encodeURIComponent(profileName));
+  } catch (e) {
+    // Backend unreachable / agent missing — leave the initial render in place.
+    return;
+  }
+  _profileSkillsCache[profileName] = data;
+  // Only repaint if the user is still on this profile.
+  if (!_currentProfileDetail || _currentProfileDetail.name !== profileName) return;
+  _applyProfileSkillsSummary(data);
+}
+
+function _applyProfileSkillsSummary(data){
+  if (!data) return;
+  const enabled_count = data.enabled_count || 0;
+  const total_count = data.total_count || 0;
+  const dot = $('opsSkillsDot');
+  const pillLabel = $('opsSkillsPillLabel');
+  const value = $('opsSkillsValue');
+  const chips = $('opsSkillsTopChips');
+  if (dot) { dot.classList.remove('ok','off'); dot.classList.add(enabled_count > 0 ? 'ok' : 'off'); }
+  if (pillLabel) pillLabel.textContent = `${enabled_count} / ${total_count} enabled`;
+  if (value) {
+    if (total_count === 0) value.textContent = 'No skills installed';
+    else if (enabled_count === 0) value.textContent = 'No skills enabled';
+    else value.textContent = 'Top in this profile';
+  }
+  if (chips) {
+    const sample = (data.skills || [])
+      .filter(s => s.enabled)
+      .slice(0, 3);
+    if (sample.length && enabled_count > 0) {
+      const extra = enabled_count - sample.length;
+      const parts = sample.map(s => {
+        const label = esc(s.label || s.name || 'skill');
+        const icon = s.icon ? esc(s.icon) + ' ' : '';
+        return `<span class="profile-skill-chip" role="listitem">${icon}${label}</span>`;
+      });
+      if (extra > 0) parts.push(`<span class="profile-skill-more">+${extra} more</span>`);
+      chips.innerHTML = parts.join('');
+    } else {
+      chips.innerHTML = '';
+    }
+  }
+}
+
+// ── Per-profile Skills manager modal ─────────────────────────────────────
+//
+// Opened from the Ops Console "Manage" button. Lists every skill visible
+// to the profile with a toggle per row; the Edit button opens a markdown
+// editor for the shared skill content (writes back to the same file the
+// agent reads at runtime).
+
+let _skillsManagerProfile = null;
+let _skillsManagerFilter = '';
+
+// Pending-state model for the batched Save/Cancel UX.
+//
+// The modal holds a draft disabled-set in memory. Toggling a row mutates
+// _skillsManagerPendingDisabled only — no network call until Save. This keeps
+// the disk write to a single POST per editing session and gives the user a
+// clear "I'm done experimenting" commit boundary.
+let _skillsManagerSkills = [];          // [{name, description, category, source, path}]
+let _skillsManagerInitialDisabled = null;   // Set<string> — server state at open
+let _skillsManagerPendingDisabled = null;   // Set<string> — what Save will write
+let _skillsManagerCategories = [];
+let _skillsManagerSaving = false;
+
+function _skillsManagerIsDirty(){
+  if (!_skillsManagerInitialDisabled || !_skillsManagerPendingDisabled) return false;
+  if (_skillsManagerInitialDisabled.size !== _skillsManagerPendingDisabled.size) return true;
+  for (const v of _skillsManagerPendingDisabled) {
+    if (!_skillsManagerInitialDisabled.has(v)) return true;
+  }
+  return false;
+}
+
+function _skillsManagerPendingDelta(){
+  // Returns {willDisable, willEnable} arrays of skill names.
+  const a = _skillsManagerInitialDisabled || new Set();
+  const b = _skillsManagerPendingDisabled || new Set();
+  const willDisable = [];
+  const willEnable = [];
+  for (const v of b) if (!a.has(v)) willDisable.push(v);
+  for (const v of a) if (!b.has(v)) willEnable.push(v);
+  return { willDisable, willEnable };
+}
+
+async function _openProfileSkillsManager(profileName){
+  if (!profileName) return;
+  _skillsManagerProfile = profileName;
+  _skillsManagerFilter = '';
+  _skillsManagerSkills = [];
+  _skillsManagerInitialDisabled = null;
+  _skillsManagerPendingDisabled = null;
+  _skillsManagerCategories = [];
+  _skillsManagerSaving = false;
+  // Reuse the cached payload from the tile hydrator when available so the
+  // modal pops instantly; refresh in the background regardless.
+  const cached = _profileSkillsCache[profileName];
+  _renderSkillsManagerModal(cached || { ok: true, profile: profileName, skills: [], enabled_count: 0, total_count: 0 }, !cached);
+  try {
+    const fresh = await api('/api/profile/skills?name=' + encodeURIComponent(profileName));
+    _profileSkillsCache[profileName] = fresh;
+    if (_skillsManagerProfile === profileName) _renderSkillsManagerModal(fresh, false);
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _applyProfileSkillsSummary(fresh);
+    }
+  } catch (e) {
+    if (_skillsManagerProfile === profileName) {
+      const body = $('profileSkillsManagerBody');
+      if (body) body.innerHTML = `<div class="profile-skills-error">Failed to load skills: ${esc(e.message || String(e))}</div>`;
+    }
+  }
+}
+
+async function _attemptCloseSkillsManager(){
+  if (_skillsManagerSaving) return;
+  if (_skillsManagerIsDirty()) {
+    const ok = await showConfirmDialog({
+      title: 'Discard pending changes?',
+      message: 'You have unsaved toggle changes. Closing now will discard them.',
+      confirmLabel: 'Discard',
+      cancelLabel: 'Keep editing',
+      danger: true,
+      focusCancel: true,
+    });
+    if (!ok) return;
+  }
+  _closeProfileSkillsManager();
+}
+
+function _closeProfileSkillsManager(){
+  _skillsManagerProfile = null;
+  _skillsManagerSkills = [];
+  _skillsManagerInitialDisabled = null;
+  _skillsManagerPendingDisabled = null;
+  _skillsManagerSaving = false;
+  const overlay = $('profileSkillsManagerOverlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', _skillsManagerEscape, true);
+}
+
+function _skillsManagerEscape(ev){
+  if (ev.key === 'Escape') _attemptCloseSkillsManager();
+}
+
+function _renderSkillsManagerModal(data, loading){
+  let overlay = $('profileSkillsManagerOverlay');
+  const firstRender = !overlay;
+  if (firstRender) {
+    overlay = document.createElement('div');
+    overlay.id = 'profileSkillsManagerOverlay';
+    overlay.className = 'profile-skills-manager-overlay';
+    overlay.innerHTML = `
+      <div class="profile-skills-manager-card" role="dialog" aria-modal="true" aria-labelledby="profileSkillsManagerTitle">
+        <div class="profile-skills-manager-head">
+          <div class="profile-skills-manager-head-text">
+            <div class="profile-skills-manager-kicker">Skills</div>
+            <h3 class="profile-skills-manager-title" id="profileSkillsManagerTitle">Skills for <span id="profileSkillsManagerName"></span></h3>
+            <div class="profile-skills-manager-subtitle" id="profileSkillsManagerSummary"></div>
+          </div>
+          <div class="profile-skills-manager-actions">
+            <span id="profileSkillsManagerDirtyPill" class="profile-ops-status-pill" data-state="saved" aria-live="polite">
+              <span class="profile-status-dot ok" aria-hidden="true"></span>
+              <span id="profileSkillsManagerDirtyLabel">No changes</span>
+            </span>
+            <button type="button" class="profile-ops-button primary" data-skills-manager-save disabled>Save</button>
+            <button type="button" class="profile-skills-manager-close" aria-label="Close">&times;</button>
+          </div>
+        </div>
+        <div class="profile-skills-manager-toolbar">
+          <input type="search" id="profileSkillsManagerSearch" placeholder="Filter by name, description, or category…" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="profileSkillsManagerBody" class="profile-skills-manager-body"></div>
+        <div class="profile-skills-manager-footer">
+          <span class="profile-skills-manager-note">Toggling enabled/disabled is scoped to this agent. Editing a skill changes content shared by every agent that uses it.</span>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('.profile-skills-manager-close').onclick = _attemptCloseSkillsManager;
+    overlay.querySelector('[data-skills-manager-save]').onclick = _saveSkillsManager;
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target === overlay) _attemptCloseSkillsManager();
+    });
+    const search = overlay.querySelector('#profileSkillsManagerSearch');
+    if (search) {
+      search.value = _skillsManagerFilter;
+      search.addEventListener('input', () => {
+        _skillsManagerFilter = search.value || '';
+        _paintSkillsManagerRows();
+      });
+    }
+    document.addEventListener('keydown', _skillsManagerEscape, true);
+  }
+  const nameEl = $('profileSkillsManagerName');
+  if (nameEl) nameEl.textContent = data.profile || _skillsManagerProfile || '';
+  // Seed pending-state on first render (or when we still have no state),
+  // then prefer the in-memory pending set across subsequent refreshes so
+  // the user's mid-edit toggles survive a background reload.
+  const all = Array.isArray(data && data.skills) ? data.skills : [];
+  _skillsManagerSkills = all.map(s => ({
+    name: s.name,
+    description: s.description,
+    category: s.category,
+    source: s.source,
+    path: s.path,
+  }));
+  _skillsManagerCategories = Array.isArray(data && data.categories) ? data.categories : [];
+  if (_skillsManagerInitialDisabled === null) {
+    const seed = new Set(all.filter(s => !s.enabled).map(s => s.name));
+    _skillsManagerInitialDisabled = seed;
+    _skillsManagerPendingDisabled = new Set(seed);
+  } else {
+    // Drop any pending entries for skills that no longer exist server-side.
+    const known = new Set(all.map(s => s.name));
+    for (const v of [..._skillsManagerPendingDisabled]) {
+      if (!known.has(v)) _skillsManagerPendingDisabled.delete(v);
+    }
+  }
+  const body = $('profileSkillsManagerBody');
+  if (body && loading) body.innerHTML = '<div class="profile-skills-loading">Loading skills…</div>';
+  _paintSkillsManagerRows();
+  _paintSkillsManagerFooter();
+}
+
+function _paintSkillsManagerFooter(){
+  const total = _skillsManagerSkills.length;
+  const pendingDisabled = _skillsManagerPendingDisabled || new Set();
+  const enabledNow = total - pendingDisabled.size;
+  const summary = $('profileSkillsManagerSummary');
+  if (summary) {
+    summary.textContent = total === 0
+      ? 'No skills visible to this agent yet.'
+      : `${enabledNow} of ${total} enabled${_skillsManagerCategories.length
+          ? ` · ${_skillsManagerCategories.length} categor${_skillsManagerCategories.length === 1 ? 'y' : 'ies'}`
+          : ''}`;
+  }
+  const dirty = _skillsManagerIsDirty();
+  const pill = $('profileSkillsManagerDirtyPill');
+  const label = $('profileSkillsManagerDirtyLabel');
+  const dot = pill ? pill.querySelector('.profile-status-dot') : null;
+  if (pill) pill.dataset.state = dirty ? 'dirty' : 'saved';
+  if (dot) { dot.classList.remove('ok','warn'); dot.classList.add(dirty ? 'warn' : 'ok'); }
+  if (label) {
+    if (!dirty) {
+      label.textContent = 'No changes';
+    } else {
+      const { willDisable, willEnable } = _skillsManagerPendingDelta();
+      const n = willDisable.length + willEnable.length;
+      label.textContent = `${n} change${n === 1 ? '' : 's'} pending`;
+    }
+  }
+  const overlay = $('profileSkillsManagerOverlay');
+  const save = overlay ? overlay.querySelector('[data-skills-manager-save]') : null;
+  if (save) save.disabled = !dirty || _skillsManagerSaving;
+}
+
+function _paintSkillsManagerRows(){
+  const body = $('profileSkillsManagerBody');
+  if (!body) return;
+  const all = _skillsManagerSkills;
+  if (all.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">
+      <p>No skills are visible to this agent yet.</p>
+      <p class="profile-skills-empty-hint">Drop SKILL.md folders into this profile's <code>skills/</code> directory, or configure <code>skills.external_dirs</code> in its <code>config.yaml</code>.</p>
+    </div>`;
+    return;
+  }
+  const filter = (_skillsManagerFilter || '').trim().toLowerCase();
+  const rows = filter
+    ? all.filter(s =>
+        (s.name || '').toLowerCase().includes(filter) ||
+        (s.description || '').toLowerCase().includes(filter) ||
+        (s.category || '').toLowerCase().includes(filter))
+    : all;
+  if (rows.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">No skills match "${esc(filter)}".</div>`;
+    return;
+  }
+  const initial = _skillsManagerInitialDisabled || new Set();
+  const pending = _skillsManagerPendingDisabled || new Set();
+  // Group by category for readability.
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.category || 'Uncategorized';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const groupKeys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+  const sections = groupKeys.map(cat => {
+    const items = groups.get(cat).map(s => {
+      const isEnabledPending = !pending.has(s.name);
+      const wasEnabledInitial = !initial.has(s.name);
+      const isDirty = isEnabledPending !== wasEnabledInitial;
+      const checked = isEnabledPending ? 'checked' : '';
+      const desc = s.description ? `<span class="profile-skill-row-desc">${esc(s.description)}</span>` : '';
+      const pendingChip = isDirty
+        ? `<span class="profile-skill-row-pending" title="Unsaved change">${isEnabledPending ? 'will enable' : 'will disable'}</span>`
+        : '';
+      return `
+        <div class="profile-skill-row${isDirty ? ' is-pending' : ''}" data-skill-name="${esc(s.name)}">
+          <label class="profile-skill-row-toggle" title="Enable / disable for this agent">
+            <input type="checkbox" data-skill-toggle="${esc(s.name)}" ${checked}>
+            <span class="profile-skill-row-switch" aria-hidden="true"></span>
+          </label>
+          <div class="profile-skill-row-text">
+            <span class="profile-skill-row-name">${esc(s.name)}${pendingChip}</span>
+            ${desc}
+          </div>
+          <button type="button" class="profile-ops-button profile-skill-row-edit" data-skill-edit="${esc(s.name)}">Edit</button>
+        </div>`;
+    }).join('');
+    return `
+      <section class="profile-skill-group">
+        <h4 class="profile-skill-group-title">${esc(cat)}</h4>
+        <div class="profile-skill-group-list">${items}</div>
+      </section>`;
+  });
+  body.innerHTML = sections.join('');
+  // Wire toggles and edit buttons.
+  body.querySelectorAll('[data-skill-toggle]').forEach(input => {
+    input.addEventListener('change', () => _toggleProfileSkill(input.dataset.skillToggle, input.checked));
+  });
+  body.querySelectorAll('[data-skill-edit]').forEach(btn => {
+    btn.addEventListener('click', () => _editProfileSkillContent(btn.dataset.skillEdit));
+  });
+}
+
+function _toggleProfileSkill(skillName, enabled){
+  if (!skillName || !_skillsManagerPendingDisabled) return;
+  if (enabled) _skillsManagerPendingDisabled.delete(skillName);
+  else _skillsManagerPendingDisabled.add(skillName);
+  _paintSkillsManagerRows();
+  _paintSkillsManagerFooter();
+}
+
+async function _saveSkillsManager(){
+  if (!_skillsManagerProfile || !_skillsManagerPendingDisabled) return;
+  if (!_skillsManagerIsDirty()) return;
+  const profileName = _skillsManagerProfile;
+  const disabled = Array.from(_skillsManagerPendingDisabled).sort();
+  _skillsManagerSaving = true;
+  _paintSkillsManagerFooter();
+  try {
+    const result = await api('/api/profile/skills', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, disabled }),
+    });
+    _profileSkillsCache[profileName] = result;
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _applyProfileSkillsSummary(result);
+    }
+    _skillsManagerSaving = false;
+    // Saved → clear pending state so close doesn't prompt.
+    _skillsManagerInitialDisabled = null;
+    _skillsManagerPendingDisabled = null;
+    _closeProfileSkillsManager();
+    showToast('Skills saved.');
+  } catch (e) {
+    _skillsManagerSaving = false;
+    _paintSkillsManagerFooter();
+    showToast('Failed to save skills: ' + (e.message || e));
+  }
+}
+
+async function _editProfileSkillContent(skillName){
+  const profileName = _skillsManagerProfile;
+  if (!profileName || !skillName) return;
+  let payload;
+  try {
+    payload = await api('/api/profile/skill_content?name=' + encodeURIComponent(profileName) +
+                        '&skill=' + encodeURIComponent(skillName));
+  } catch (e) {
+    showToast('Could not open skill: ' + (e.message || e));
+    return;
+  }
+  _closeProfileSkillsManager();
+  _openSkillContentEditor(profileName, skillName, payload && payload.content != null ? payload.content : '');
+}
+
+function _openSkillContentEditor(profileName, skillName, content){
+  const body = $('profileDetailBody');
+  const title = $('profileDetailTitle');
+  if (!body || !title) return;
+  title.innerHTML = `<span style="cursor:pointer;color:var(--link)" onclick="openProfileDetail('${esc(profileName)}')">${esc(profileName)}</span> / skill · ${esc(skillName)}`;
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card profile-file-editor-card">
+        <div class="profile-file-editor-toolbar">
+          <button class="profile-ops-button" type="button" data-skill-editor-back>← Back to skills</button>
+          <div class="profile-file-editor-titlebar">
+            <span class="profile-file-editor-name">${esc(skillName)}</span>
+            <span class="profile-file-editor-meta">shared skill content · markdown</span>
+          </div>
+          <span id="profileSkillSaveState" class="profile-ops-status-pill" data-state="saved"><span class="profile-status-dot ok" aria-hidden="true"></span><span>Saved</span></span>
+          <button id="btnSaveProfileSkill" class="profile-ops-button primary" type="button">Save</button>
+        </div>
+        <textarea id="profileSkillEditor" rows="24" spellcheck="false"
+          class="profile-file-editor-textarea"
+          placeholder="# Skill name&#10;Markdown body — what this skill does, when to invoke it, and any required state."></textarea>
+      </div>
+    </div>`;
+  const ta = $('profileSkillEditor');
+  if (ta) ta.value = content || '';
+  const pill = $('profileSkillSaveState');
+  if (ta && pill) {
+    ta.addEventListener('input', () => {
+      if (pill.dataset.state === 'dirty') return;
+      pill.dataset.state = 'dirty';
+      const dot = pill.querySelector('.profile-status-dot');
+      const lbl = pill.querySelector('span:last-child');
+      if (dot) { dot.classList.remove('ok'); dot.classList.add('warn'); }
+      if (lbl) lbl.textContent = 'Unsaved';
+    });
+  }
+  const back = body.querySelector('[data-skill-editor-back]');
+  if (back) back.onclick = () => {
+    openProfileDetail(profileName);
+    // Reopen the manager once the detail re-renders.
+    setTimeout(() => _openProfileSkillsManager(profileName), 60);
+  };
+  const saveBtn = $('btnSaveProfileSkill');
+  if (saveBtn) saveBtn.onclick = () => _saveProfileSkillContent(profileName, skillName);
+}
+
+async function _saveProfileSkillContent(profileName, skillName){
+  const ta = $('profileSkillEditor');
+  const btn = $('btnSaveProfileSkill');
+  if (!ta) return;
+  const content = ta.value;
+  if (btn) btn.disabled = true;
+  try {
+    const result = await api('/api/profile/skill_content', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, skill: skillName, content }),
+    });
+    if (result && result.ok) {
+      showToast(`Saved ${skillName}`);
+      const pill = $('profileSkillSaveState');
+      if (pill) {
+        pill.dataset.state = 'saved';
+        const dot = pill.querySelector('.profile-status-dot');
+        const lbl = pill.querySelector('span:last-child');
+        if (dot) { dot.classList.remove('warn'); dot.classList.add('ok'); }
+        if (lbl) lbl.textContent = 'Saved';
+      }
+    } else {
+      showToast('Save failed: ' + (result && result.error || 'unknown error'));
+    }
+  } catch (e) {
+    showToast('Save failed: ' + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// _profileIdentityPlane: removed in profile screen rework v3 (2026-05-14).
+// Replaced by _profileHeroDossier (256×256 avatar, inline action buttons, no
+// overflow menu, no bare green diode next to the name).
+
+// _profileOpsTiles: removed in profile screen rework v3 (2026-05-14).
+// Split into three smaller renderers (_profileRuntimePanel,
+// _profileGatewayTile, _profileSkillsTile). The Active and Ready tiles
+// from v2 are dropped — Active is conveyed by the inline pill in the hero
+// dossier, .env readiness by the file widget's status text.
+
+function _profileFilesSection(p){
+  const profileName = esc(p.name);
+  // Status strings match the spec's Files-grid table exactly (validator
+  // F#16): three Markdowns, env Configured/Not-configured · hidden, YAML.
+  const envStatus = p.has_env ? 'Configured · hidden' : 'Not configured · hidden';
+  const envClass = p.has_env ? '' : 'warn';
+  // Lucide icons replace the single-letter badges from v2 so the files row
+  // shares iconography with the rest of the webUI (icons.js).
+  const files = [
+    { name: 'SOUL.md',             icon: 'user',      label: 'SOUL.md',          desc: 'Persona & principles.',           status: 'Markdown', statusClass: '' },
+    { name: 'memories/MEMORY.md',  icon: 'brain',     label: 'Memory',           desc: 'Long-lived notes.',               status: 'Markdown', statusClass: '' },
+    { name: 'memories/USER.md',    icon: 'settings',  label: 'User preferences', desc: 'Taste & defaults.',               status: 'Markdown', statusClass: '' },
+    { name: '.env',                icon: 'lock',      label: '.env',             desc: 'Provider credentials.',           status: envStatus,  statusClass: envClass },
+    { name: 'config.yaml',         icon: 'file-code', label: 'config.yaml',      desc: 'Runtime defaults.',               status: 'YAML',     statusClass: '' },
+  ];
+  const widgets = files.map(f => `
+    <button class="profile-file-widget" type="button" data-profile-file="${esc(f.name)}">
+      <span class="profile-file-icon">${li(f.icon, 16)}</span>
+      <span>
+        <span class="profile-file-name">${esc(f.label)}</span>
+        <span class="profile-file-desc">${esc(f.desc)}</span>
+      </span>
+      <span class="profile-file-status ${f.statusClass}">${esc(f.status)}</span>
+    </button>`).join('');
+  return `
+    <section class="profile-ops-files-section" aria-labelledby="opsFilesTitle">
+      <div class="profile-ops-files-head">
+        <div>
+          <div class="profile-section-label">Profile files</div>
+          <h3 class="profile-ops-files-title" id="opsFilesTitle">Editable source files for ${profileName}</h3>
+        </div>
+      </div>
+      <div class="profile-ops-files-grid">${widgets}</div>
+    </section>`;
+}
+
+// Old v2 _profileFilesSection swallowed below; the call site uses the v3
+// version above. The v2 body had the same shape but with single-letter icons.
+function _profileOpsAvatarDialog(p){
+  const profileName = esc(p.name);
+  const slotRows = PROFILE_REACTIVE_AVATAR_SLOTS.map(slot => {
+    const key = esc(slot.key);
+    const inputId = `profileReactiveAvatar${key}`;
+    return `
+            <div class="profile-reactive-slot" data-reactive-slot="${key}">
+              <div id="${inputId}Preview" class="profile-reactive-slot-preview"></div>
+              <div class="profile-reactive-slot-copy">
+                <div class="profile-reactive-slot-title">${esc(slot.label)}</div>
+                <div class="profile-reactive-slot-hint">${esc(slot.hint)}</div>
+                <div id="${inputId}Status" class="profile-reactive-slot-status">Using fallback</div>
+              </div>
+              <input id="${inputId}" class="profile-reactive-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" tabindex="-1" aria-hidden="true" onchange="_handleReactiveAvatarUpload('${key}',this.files&&this.files[0])">
+              <div class="profile-reactive-slot-actions">
+                <button type="button" class="profile-reactive-slot-upload" onclick="$('${inputId}')&&$('${inputId}').click()">Choose</button>
+                <button type="button" class="profile-reactive-slot-clear" onclick="_clearReactiveAvatarSlot('${key}')">Clear</button>
+              </div>
+            </div>`;
+  }).join('');
+  const previewStates = PROFILE_REACTIVE_AVATAR_SLOTS.map(slot => `
+              <button type="button" data-avatar-preview-state="${esc(slot.key)}" onclick="_setProfileAvatarPreviewState('${esc(slot.key)}')">${esc(slot.label)}</button>`).join('');
+  return `
+    <div id="profileAvatarDialog" class="profile-avatar-dialog" hidden>
+      <div class="profile-avatar-dialog-card" role="dialog" aria-label="Change profile avatar">
+        <div class="profile-avatar-dialog-head">
+          <div>
+            <div class="profile-avatar-dialog-title">Change avatar</div>
+            <div class="profile-avatar-dialog-subtitle">Choose a static avatar or upload reactive animation slots for live chat.</div>
+          </div>
+          <button type="button" class="profile-avatar-dialog-close" onclick="_closeProfileAvatarDialog()" aria-label="Close">×</button>
+        </div>
+        <div class="profile-avatar-dialog-body profile-avatar-dialog-layout">
+          <aside class="profile-avatar-preview-panel" aria-label="Avatar preview">
+            <div class="profile-avatar-section-label">Live preview</div>
+            <div class="profile-avatar-preview-frame">
+              <div id="profileAvatarDialogPreview" class="profile-avatar-dialog-preview" data-profile-name="${profileName}">${_profileAvatarForUi(p,'profile-avatar--dialog')}</div>
+            </div>
+            <div id="profileAvatarPreviewStateControls" class="profile-avatar-preview-states" role="group" aria-label="Preview reactive state" hidden>
+${previewStates}
+            </div>
+            <div id="profileAvatarPreviewSummary" class="profile-avatar-preview-summary">Static avatar preview. Reactive uploads stay saved when you switch modes.</div>
+          </aside>
+          <div class="profile-avatar-editor-panel">
+            <section class="profile-avatar-editor-section" aria-label="Avatar behavior">
+              <div class="profile-avatar-section-label">Behavior</div>
+              <div class="profile-avatar-runtime-row profile-avatar-segmented" role="group" aria-label="Avatar behavior">
+                <button type="button" class="profile-avatar-mode-card" data-avatar-runtime-mode="static" onclick="_setProfileAvatarRuntimeMode('static')">
+                  <span class="profile-avatar-runtime-option-title">Static</span>
+                  <span class="profile-avatar-runtime-option-copy">One image or emoji across every state.</span>
+                </button>
+                <button type="button" class="profile-avatar-mode-card" data-avatar-runtime-mode="reactive" onclick="_setProfileAvatarRuntimeMode('reactive')">
+                  <span class="profile-avatar-runtime-option-title">Reactive</span>
+                  <span class="profile-avatar-runtime-option-copy">Use animation slots for idle, thinking, talking, work, and errors.</span>
+                </button>
+              </div>
+            </section>
+            <section class="profile-avatar-editor-section" aria-label="Avatar frame">
+              <div class="profile-avatar-section-label">Frame</div>
+              <div class="profile-avatar-shape-row profile-avatar-mini-segment" role="group" aria-label="Avatar shape">
+                <button type="button" data-avatar-shape="square" onclick="_setProfileAvatarDialogShape('square')">Square</button>
+                <button type="button" data-avatar-shape="circle" onclick="_setProfileAvatarDialogShape('circle')">Circle</button>
+              </div>
+            </section>
+            <section id="profileAvatarStaticEditor" class="profile-avatar-editor-section" aria-label="Static avatar editor">
+              <div class="profile-avatar-section-label">Static source</div>
+              <div class="profile-avatar-dialog-tabs profile-avatar-mini-segment" role="group" aria-label="Static avatar source">
+                <button type="button" data-avatar-mode="emoji" onclick="_setProfileAvatarDialogMode('emoji')">Emoji</button>
+                <button type="button" data-avatar-mode="upload" onclick="_setProfileAvatarDialogMode('upload')">Upload</button>
+                <button type="button" data-avatar-mode="url" onclick="_setProfileAvatarDialogMode('url')">Image URL</button>
+                <button type="button" data-avatar-mode="asset" onclick="_setProfileAvatarDialogMode('asset')">Asset</button>
+              </div>
+              <div data-profile-avatar-pane="emoji" class="profile-avatar-choice">
+                <label for="profileAvatarEmoji">Emoji</label>
+                <input id="profileAvatarEmoji" type="text" maxlength="64" placeholder="🤖" oninput="_refreshProfileAvatarDialogPreview()">
+                <div class="profile-avatar-emoji-grid" aria-label="Quick emoji avatars">
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('🤖')">🤖</button>
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('🧠')">🧠</button>
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('🧙‍♂️')">🧙‍♂️</button>
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('🛡️')">🛡️</button>
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('🔬')">🔬</button>
+                  <button type="button" onclick="_chooseProfileAvatarEmoji('✍️')">✍️</button>
+                </div>
+              </div>
+              <div data-profile-avatar-pane="upload" class="profile-avatar-choice" hidden>
+                <label for="profileAvatarUpload">Upload image, GIF, or WebP</label>
+                <input id="profileAvatarUpload" class="profile-static-upload-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" tabindex="-1" aria-hidden="true" onchange="_handleProfileAvatarUpload(this.files&&this.files[0])">
+                <div class="profile-static-upload-row">
+                  <button type="button" class="profile-static-upload-trigger" onclick="$('profileAvatarUpload')&&$('profileAvatarUpload').click()">Choose image</button>
+                  <span class="profile-static-upload-status">PNG, JPEG, GIF, or WebP up to 3 MB.</span>
+                </div>
+              </div>
+              <div data-profile-avatar-pane="url" class="profile-avatar-choice" hidden>
+                <label for="profileAvatarUrl">Image or GIF URL</label>
+                <input id="profileAvatarUrl" type="url" placeholder="https://example.com/avatar.gif" oninput="_refreshProfileAvatarDialogPreview()">
+              </div>
+              <div data-profile-avatar-pane="asset" class="profile-avatar-choice" hidden>
+                <label for="profileAvatarAsset">Safe asset reference</label>
+                <input id="profileAvatarAsset" type="text" spellcheck="false" placeholder="avatars/researcher.webp" oninput="_refreshProfileAvatarDialogPreview()">
+              </div>
+            </section>
+            <section id="profileAvatarReactiveEditor" class="profile-avatar-reactive-editor profile-avatar-editor-section" aria-label="Reactive avatar animation slots" hidden>
+              <div class="profile-avatar-section-label">Animation slots</div>
+              ${slotRows}
+            </section>
+          </div>
+        </div>
+        <div id="profileAvatarDialogMessage" class="profile-avatar-dialog-message" hidden></div>
+        <div class="profile-avatar-dialog-actions">
+          <button type="button" class="ws-action-btn ghost" onclick="_saveProfileAvatar('${profileName}',true)">Clear static</button>
+          <button type="button" class="ws-action-btn ghost" onclick="_saveProfileAvatar('${profileName}',false,{clearReactive:true})">Clear animations</button>
+          <div style="flex:1"></div>
+          <button type="button" class="ws-action-btn ghost" onclick="_closeProfileAvatarDialog()">Cancel</button>
+          <button id="profileAvatarSave" type="button" class="ws-action-btn" onclick="_saveProfileAvatar('${profileName}')">Save avatar</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+
+function _bindProfileOpsConsole(p, isActive, isDefault){
+  const profileName = p.name;
+  // Avatar — both the hero avatar tile and the corner pencil open the dialog.
+  const heroAvatar = $('profileHeroAvatar');
+  const heroAvatarEdit = $('profileHeroAvatarEdit');
+  const openAvatar = () => _openProfileAvatarDialog(profileName);
+  if (heroAvatar) {
+    heroAvatar.onclick = openAvatar;
+    heroAvatar.onkeydown = (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAvatar(); }
+    };
+  }
+  if (heroAvatarEdit) heroAvatarEdit.onclick = (ev) => { ev.stopPropagation(); openAvatar(); };
+
+  // Description — click the line or the pencil to enter inline-edit mode.
+  // The actual save happens in _exitProfileDescriptionEdit (POST settings).
+  const heroDesc = $('profileHeroDescription');
+  const heroDescEdit = $('profileHeroDescriptionEdit');
+  const enterDescEdit = () => _enterProfileDescriptionEdit(p);
+  if (heroDesc) {
+    heroDesc.addEventListener('click', (ev) => {
+      // Ignore clicks inside the active editor (textarea, action buttons).
+      if (heroDesc.dataset.editing === '1') return;
+      ev.preventDefault();
+      enterDescEdit();
+    });
+    heroDesc.addEventListener('keydown', (ev) => {
+      if (heroDesc.dataset.editing === '1') return;
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); enterDescEdit(); }
+    });
+  }
+  if (heroDescEdit) heroDescEdit.onclick = (ev) => { ev.stopPropagation(); enterDescEdit(); };
+
+  // Make active (only present when profile is inactive)
+  const makeActive = $('opsMakeActive');
+  if (makeActive && !isActive) {
+    makeActive.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (makeActive.disabled) return;
+      makeActive.disabled = true;
+      makeActive.setAttribute('aria-disabled', 'true');
+      makeActive.setAttribute('aria-busy', 'true');
+      try {
+        await _activateProfileFromPanel(profileName);
+      } catch (e) {
+        makeActive.disabled = false;
+        makeActive.removeAttribute('aria-disabled');
+        makeActive.removeAttribute('aria-busy');
+        showToast('Failed to activate: ' + (e.message || e));
+      }
+    });
+  }
+
+  // Hero overflow menu (top-right "⋯") — owns Rename / Change description /
+  // Duplicate / Remove. The action buttons inline beneath the description
+  // are reserved for Make Active.
+  const body = $('profileDetailBody');
+  const heroMenuBtn = $('profileHeroMenuButton');
+  const heroMenu = $('profileHeroMenu');
+  const closeHeroMenu = () => {
+    if (!heroMenu || heroMenu.hidden) return;
+    heroMenu.hidden = true;
+    if (heroMenuBtn) heroMenuBtn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', heroMenuOutside, true);
+    document.removeEventListener('keydown', heroMenuEsc, true);
+  };
+  const heroMenuOutside = (ev) => {
+    if (!heroMenu || heroMenu.contains(ev.target) || (heroMenuBtn && heroMenuBtn.contains(ev.target))) return;
+    closeHeroMenu();
+  };
+  const heroMenuEsc = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); closeHeroMenu(); if (heroMenuBtn) heroMenuBtn.focus(); } };
+  if (heroMenuBtn && heroMenu) {
+    heroMenuBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (heroMenu.hidden) {
+        heroMenu.hidden = false;
+        heroMenuBtn.setAttribute('aria-expanded', 'true');
+        // Defer registration so the opening click itself doesn't immediately close it.
+        setTimeout(() => {
+          document.addEventListener('click', heroMenuOutside, true);
+          document.addEventListener('keydown', heroMenuEsc, true);
+        }, 0);
+        const first = heroMenu.querySelector('.profile-hero-menu-item:not([disabled])');
+        if (first) first.focus();
+      } else {
+        closeHeroMenu();
+      }
+    });
+  }
+
+  if (body) {
+    body.querySelectorAll('[data-ops-action="rename"]').forEach(btn => {
+      btn.onclick = () => { closeHeroMenu(); _opsRenameProfile(profileName); };
+    });
+    body.querySelectorAll('[data-ops-action="duplicate"]').forEach(btn => {
+      btn.onclick = () => { closeHeroMenu(); _opsDuplicateProfile(profileName); };
+    });
+    body.querySelectorAll('[data-ops-action="edit-description"]').forEach(btn => {
+      btn.onclick = () => { closeHeroMenu(); _enterProfileDescriptionEdit(p); };
+    });
+    body.querySelectorAll('[data-ops-action="remove"]').forEach(btn => {
+      if (isDefault) return;  // default profile menu item stays disabled
+      btn.onclick = () => { closeHeroMenu(); deleteCurrentProfile(); };
+    });
+    body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
+      btn.onclick = () => _openProfileSkillsManager(profileName);
+    });
+    // Platforms button on the Gateway tile (spec 2026-05-16).
+    body.querySelectorAll('[data-platforms-action]').forEach(btn => {
+      btn.onclick = (ev) => { ev.stopPropagation(); _openPlatformsManager(profileName); };
+    });
+  }
+
+  // Gateway toggle (v3 — replaces data-gateway-action button row).
+  if (body) {
+    const toggle = body.querySelector('[data-gateway-toggle]');
+    if (toggle) {
+      toggle.onclick = () => _onGatewayToggle(profileName);
+    }
+    const info = body.querySelector('[data-gateway-info]');
+    if (info) {
+      info.onclick = () => _openGatewayInfoDialog(profileName);
+    }
+  }
+  // Kick off an initial status read for this profile so the seed phase
+  // is replaced by the authoritative server-side phase, then keep polling
+  // while this detail view remains visible (slow for stable phases, fast
+  // for starting/stopping).
+  _refreshGatewayStatus(profileName).then(() => {
+    _startGatewayPoller(profileName);
+  }).catch(() => {});
+  // Warm the platforms cache for the tile's count badge. The modal will
+  // reuse this payload on first open if the 30s TTL hasn't elapsed.
+  _loadProfilePlatforms(profileName, { force: false })
+    .then(() => _repaintGatewayTile(profileName))
+    .catch(() => {});
+
+  // Profile file widgets — scoped to the detail body (review F2).
+  if (body) body.querySelectorAll('[data-profile-file]').forEach(btn => {
+    btn.onclick = () => _openProfileFileEditor(profileName, btn.dataset.profileFile);
+  });
+}
+
+// v2 overflow-menu helpers — kept temporarily so any lingering reference
+// doesn't ReferenceError; the v3 hero doesn't use them. Safe to remove in
+// the cleanup commit (Task 18).
+function _opsOverflowOutsideClick(ev){ /* v2 only — no-op in v3 */ }
+function _opsOverflowEscape(ev){ /* v2 only — no-op in v3 */ }
+
+async function _profileChatDefaults(profileName){
+  const summary = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(p => p && p.name === profileName)
+    : null;
+  let settings = null;
+  if (_currentProfileDetail && _currentProfileDetail.name === profileName && _profileRuntimeSettings) {
+    settings = Object.assign({}, _currentProfileDetail, _profileRuntimeSettings);
+  } else {
+    try {
+      settings = await api('/api/profile/settings?name=' + encodeURIComponent(profileName) + '&include_avatar=0');
+    } catch (_) {
+      settings = {};
+    }
+  }
+  settings = settings || {};
+  const hasWorkspace = Object.prototype.hasOwnProperty.call(settings, 'default_workspace');
+  return {
+    profile: profileName,
+    model: settings.model || (summary && summary.model) || '',
+    model_provider: settings.provider || (summary && summary.provider) || null,
+    workspace: hasWorkspace ? (settings.default_workspace || null) : null,
+  };
+}
+
+async function startChatWithProfile(profileName){
+  if (!profileName) return;
+  try {
+    const defaults = await _profileChatDefaults(profileName);
+    await newSession(true, defaults);
+    if (typeof switchPanel === 'function') switchPanel('chat');
+    if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+    const msg = $('msg');
+    if (msg) msg.focus();
+  } catch (e) {
+    showToast('Start chat failed: ' + (e.message || e));
+  }
+}
+
+// ── In-app input dialog (replaces window.prompt) ────────────────────────
+//
+// showInputDialog renders a styled modal and returns a Promise<string|null>
+// that resolves to the entered string on Save, or null on Cancel / Esc /
+// click-outside. It enforces an optional `maxlength` + `pattern` and
+// surfaces a validation message inline so the user never leaves the dialog
+// for a bad input.
+
+const _PROFILE_NAME_MAX_LEN = 32;
+const _PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+const _PROFILE_NAME_HINT = 'Lowercase letters, digits, dash and underscore. Must start with a letter or digit.';
+
+function showInputDialog({
+  title, message, defaultValue, confirmLabel,
+  maxlength, pattern, patternError, placeholder, hint,
+} = {}) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById('inputDialogOverlay');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'inputDialogOverlay';
+    overlay.className = 'input-dialog';
+    overlay.innerHTML = `
+      <div class="input-dialog-card" role="dialog" aria-modal="true" aria-labelledby="inputDialogTitle">
+        <div class="input-dialog-head">
+          <div>
+            <div id="inputDialogTitle" class="input-dialog-title">${esc(title || 'Enter value')}</div>
+            ${message ? `<div class="input-dialog-message">${esc(message)}</div>` : ''}
+          </div>
+          <button type="button" class="input-dialog-close" data-input-action="cancel" aria-label="Close">×</button>
+        </div>
+        <input id="inputDialogValue" type="text" autocomplete="off" spellcheck="false"
+          ${maxlength ? `maxlength="${maxlength}"` : ''}
+          ${placeholder ? `placeholder="${esc(placeholder)}"` : ''}
+          value="${esc(defaultValue || '')}">
+        <div id="inputDialogCounter" class="input-dialog-counter muted">${maxlength ? `${(defaultValue||'').length}/${maxlength}` : '&nbsp;'}</div>
+        <div id="inputDialogError" class="input-dialog-error" hidden></div>
+        ${hint ? `<div class="input-dialog-hint muted">${esc(hint)}</div>` : ''}
+        <div class="input-dialog-actions">
+          <button type="button" class="profile-ops-button" data-input-action="cancel">Cancel</button>
+          <button type="button" class="profile-ops-button primary" data-input-action="confirm">${esc(confirmLabel || 'OK')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#inputDialogValue');
+    const counter = overlay.querySelector('#inputDialogCounter');
+    const errorEl = overlay.querySelector('#inputDialogError');
+
+    const cleanup = (value) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(value);
+    };
+    const cancel = () => cleanup(null);
+    const confirmInput = () => {
+      const v = (input.value || '').trim();
+      if (!v) { showError('A value is required.'); input.focus(); return; }
+      if (maxlength && v.length > maxlength) { showError(`Must be ${maxlength} characters or fewer.`); input.focus(); return; }
+      if (pattern && !pattern.test(v)) { showError(patternError || 'Invalid value.'); input.focus(); return; }
+      cleanup(v);
+    };
+    const showError = (msg) => {
+      if (!errorEl) return;
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+    };
+
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) cancel(); });
+    overlay.querySelectorAll('[data-input-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.inputAction === 'confirm') confirmInput(); else cancel();
+      });
+    });
+    input.addEventListener('input', () => {
+      if (counter && maxlength) counter.textContent = `${input.value.length}/${maxlength}`;
+      if (errorEl && !errorEl.hidden) errorEl.hidden = true;
+    });
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); confirmInput(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    // Defer focus so the input doesn't capture the click that opened it.
+    setTimeout(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 0);
+  });
+}
+
+async function _opsRenameProfile(profileName){
+  if (!profileName) return;
+  const newName = await showInputDialog({
+    title: 'Rename profile',
+    message: `Choose a new name for "${profileName}".`,
+    defaultValue: profileName,
+    confirmLabel: 'Rename',
+    maxlength: _PROFILE_NAME_MAX_LEN,
+    pattern: _PROFILE_NAME_PATTERN,
+    patternError: _PROFILE_NAME_HINT,
+    hint: _PROFILE_NAME_HINT,
+  });
+  if (!newName || newName === profileName) return;
+  try {
+    const result = await api('/api/profile/rename', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
+    if (result && result.was_active) {
+      S.activeProfile = result.new_name;
+    }
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _currentProfileDetail = { ..._currentProfileDetail, name: result.new_name };
+    }
+    showToast(`Renamed to "${result.new_name || newName}"`);
+    await loadProfilesPanel();
+    if (result && result.new_name) openProfileDetail(result.new_name);
+  } catch (e) {
+    showToast('Rename failed: ' + (e.message || e));
+  }
+}
+
+async function _opsDuplicateProfile(profileName){
+  if (!profileName) return;
+  // Suggested copy name, truncated so the suffix doesn't push us over the cap.
+  let suggested = `${profileName}-copy`;
+  if (suggested.length > _PROFILE_NAME_MAX_LEN) {
+    suggested = suggested.slice(0, _PROFILE_NAME_MAX_LEN);
+  }
+  const newName = await showInputDialog({
+    title: 'Duplicate profile',
+    message: `Create a copy of "${profileName}".`,
+    defaultValue: suggested,
+    confirmLabel: 'Duplicate',
+    maxlength: _PROFILE_NAME_MAX_LEN,
+    pattern: _PROFILE_NAME_PATTERN,
+    patternError: _PROFILE_NAME_HINT,
+    hint: _PROFILE_NAME_HINT,
+  });
+  if (!newName) return;
+  try {
+    const result = await api('/api/profile/duplicate', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, new_name: newName })
+    });
+    showToast(`Duplicated to "${newName}"`);
+    await loadProfilesPanel();
+    const target = result && result.profile && result.profile.name ? result.profile.name : newName;
+    openProfileDetail(target);
+  } catch (e) {
+    showToast('Duplicate failed: ' + (e.message || e));
+  }
+}
+
+function _openGatewayInfoDialog(profileName){
+  const state = _gatewayStateByProfile.get(profileName) || { phase: 'unknown' };
+  const existing = document.getElementById('gatewayInfoDialogOverlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'gatewayInfoDialogOverlay';
+  overlay.className = 'gateway-info-dialog';
+  const phase = state.phase || 'unknown';
+  const source = state.status_source || '—';
+  const reason = _gatewayInfoReason(state);
+  const detail = state.detail || state.last_error || 'No additional detail was provided.';
+  const copyText = [
+    `Profile: ${profileName}`,
+    `Phase: ${phase}`,
+    `Status source: ${source}`,
+    `Health reason: ${reason}`,
+    '',
+    detail,
+  ].join('\n');
+  overlay.innerHTML = `
+    <div class="gateway-info-card" role="dialog" aria-modal="true" aria-labelledby="gatewayInfoDialogTitle">
+      <div class="input-dialog-head">
+        <div>
+          <div id="gatewayInfoDialogTitle" class="input-dialog-title">Gateway status details</div>
+          <div class="input-dialog-message">Copyable runtime detail for the selected profile gateway.</div>
+        </div>
+        <button type="button" class="input-dialog-close" data-gateway-info-action="close" aria-label="Close">×</button>
+      </div>
+      <dl class="gateway-info-grid">
+        <dt>Profile</dt><dd>${esc(profileName)}</dd>
+        <dt>Phase</dt><dd>${esc(_gatewayLabelForPhase(phase))}</dd>
+        <dt>Status source</dt><dd>${esc(source)}</dd>
+        <dt>Health reason</dt><dd>${esc(reason)}</dd>
+      </dl>
+      <textarea class="gateway-info-detail" readonly rows="8">${esc(detail)}</textarea>
+      <div class="input-dialog-actions">
+        <button type="button" class="profile-ops-button" data-gateway-info-action="copy">Copy</button>
+        <button type="button" class="profile-ops-button primary" data-gateway-info-action="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const detailEl = overlay.querySelector('.gateway-info-detail');
+  const closeBtn = overlay.querySelector('[data-gateway-info-action="close"]');
+  const opener = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"] [data-gateway-info]`);
+  const cleanup = () => {
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    if (opener) opener.focus();
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText);
+      showToast('Gateway details copied');
+    } catch (_) {
+      if (detailEl) {
+        detailEl.focus();
+        detailEl.select();
+        try { document.execCommand('copy'); showToast('Gateway details copied'); }
+        catch (e) { showToast('Copy failed: ' + (e && e.message || e)); }
+      }
+    }
+  };
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); cleanup(); } };
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) cleanup(); });
+  overlay.querySelectorAll('[data-gateway-info-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.gatewayInfoAction === 'copy') copy(); else cleanup();
+    });
+  });
+  document.addEventListener('keydown', onKey, true);
+  setTimeout(() => { if (closeBtn) closeBtn.focus(); }, 0);
+}
+
+// ── Gateway toggle handler + poller (v3) ──────────────────────────────
+
+async function _onGatewayToggle(profileName){
+  if (!profileName) return;
+  const state = _gatewayStateByProfile.get(profileName) || { phase: 'stopped' };
+  const phase = state.phase || 'stopped';
+  if (phase === 'starting' || phase === 'stopping') return;  // locked
+  if (state.control_available === false || phase === 'unavailable') {
+    _openGatewayInfoDialog(profileName);
+    return;
+  }
+
+  // Cancel any in-flight poller before the action so a stale 12s-cadence
+  // poll started from the running-state initial render cannot fire during
+  // the POST window and momentarily flip the UI back to 'stopping' after
+  // the action has already settled to 'stopped'. The post-action setTimeout
+  // below kicks off a fresh poller with the correct cadence.
+  _stopGatewayPoller(profileName);
+
+  const action = (phase === 'running') ? 'stop' : 'start';
+  const optimisticPhase = (action === 'start') ? 'starting' : 'stopping';
+  _gatewayStateByProfile.set(profileName, {
+    ...state, phase: optimisticPhase, last_error: null, detail: null,
+  });
+  _repaintGatewayTile(profileName);
+
+  try {
+    const result = await api('/api/profile/gateway', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, action }),
+    });
+    if (result && result.ok === false) {
+      _gatewayStateByProfile.set(profileName, {
+        ...state,
+        phase: result.phase || 'failed',
+        last_error: result.message || result.last_error || 'Gateway action failed.',
+        detail: result.detail || result.message || 'Gateway action failed.',
+        status_source: result.status_source || state.status_source || null,
+        health: result.health || state.health || null,
+        control_available: result.control_available !== false,
+        phase_started_at: null,
+        pid: null,
+      });
+      _repaintGatewayTile(profileName);
+      showToast(result.message || 'Gateway action failed.');
+      return;
+    }
+    if (result && result.phase) {
+      _gatewayStateByProfile.set(profileName, _normalizeGatewayStatus(result, state));
+      _repaintGatewayTile(profileName);
+    }
+    // Fast-track first refresh, then let the visible poller choose cadence.
+    setTimeout(() => _refreshGatewayStatus(profileName).then(() => {
+      _startGatewayPoller(profileName);
+    }).catch(() => {}), 250);
+  } catch (e) {
+    _gatewayStateByProfile.set(profileName, {
+      ...state,
+      phase: 'failed',
+      last_error: String((e && e.message) || e),
+      detail: String((e && e.message) || e),
+      phase_started_at: null,
+      pid: null,
+    });
+    _repaintGatewayTile(profileName);
+    showToast('Gateway action failed: ' + (e && e.message || e));
+  }
+}
+
+function _normalizeGatewayStatus(result, prior){
+  const prev = prior || {};
+  return {
+    ...prev,
+    phase: result.phase || 'stopped',
+    desired_enabled: result.desired_enabled === true,
+    control_available: result.control_available !== false,
+    status_source: result.status_source || null,
+    health: result.health || null,
+    detail: result.detail || null,
+    last_error: result.last_error || result.detail || null,
+    phase_started_at: result.phase_started_at || null,
+    pid: result.pid || null,
+    updated_at: result.updated_at || null,
+  };
+}
+
+async function _refreshGatewayStatus(profileName){
+  try {
+    const result = await api(
+      '/api/profile/gateway/status?name=' + encodeURIComponent(profileName)
+    );
+    if (!result || result.ok !== true) return null;
+    // Cache canonical contract fields: control_available, status_source,
+    // health, detail, desired_enabled, plus compatibility phase/pid fields.
+    _gatewayStateByProfile.set(profileName, _normalizeGatewayStatus(result, _gatewayStateByProfile.get(profileName)));
+    _repaintGatewayTile(profileName);
+    return result;
+  } catch (_) {
+    // Silent — leave previous state, the next poll will retry.
+    return null;
+  }
+}
+
+function _gatewayDetailVisible(profileName){
+  if (document.visibilityState === 'hidden') return false;
+  if (_currentPanel !== 'profiles') return false;
+  if (!_currentProfileDetail || _currentProfileDetail.name !== profileName) return false;
+  return !!document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
+}
+
+function _startGatewayPoller(profileName){
+  if (_gatewayPollers.has(profileName)) return;  // already polling
+  const schedule = (delay) => {
+    const handle = setTimeout(async () => {
+      if (document.visibilityState === 'hidden' || _currentPanel !== 'profiles' || !_currentProfileDetail || _currentProfileDetail.name !== profileName) { _stopGatewayPoller(profileName); return; }
+      if (!_gatewayDetailVisible(profileName)) { _stopGatewayPoller(profileName); return; }
+      const result = await _refreshGatewayStatus(profileName);
+      if (!_gatewayDetailVisible(profileName)) { _stopGatewayPoller(profileName); return; }
+      const state = _gatewayStateByProfile.get(profileName) || {};
+      const phase = (result && result.phase) || state.phase || 'stopped';
+      schedule(_GATEWAY_TRANSIENT_PHASES.has(phase) ? _GATEWAY_TRANSIENT_POLL_MS : _GATEWAY_STABLE_POLL_MS);
+    }, delay);
+    _gatewayPollers.set(profileName, handle);
+  };
+  const state = _gatewayStateByProfile.get(profileName) || {};
+  schedule(_GATEWAY_TRANSIENT_PHASES.has(state.phase) ? _GATEWAY_TRANSIENT_POLL_MS : _GATEWAY_STABLE_POLL_MS);
+}
+
+function _stopGatewayPoller(profileName){
+  const handle = _gatewayPollers.get(profileName);
+  if (handle) {
+    clearTimeout(handle);
+    _gatewayPollers.delete(profileName);
+  }
+}
+
+function _stopAllGatewayPollers(){
+  for (const handle of _gatewayPollers.values()) clearTimeout(handle);
+  _gatewayPollers.clear();
+}
+
+async function _openProfileFileEditor(profileName, filename) {
+  const body = $('profileDetailBody');
+  const title = $('profileDetailTitle');
+  if (!body || !title) return;
+  const _editorLabels = {'SOUL.md': 'SOUL.md', 'config.yaml': 'config.yaml', '.env': '.env', 'memories/MEMORY.md': 'Agent Memory', 'memories/USER.md': 'User Profile'};
+  const friendlyName = _editorLabels[filename] || filename;
+  title.innerHTML = `<span style="cursor:pointer;color:var(--link)" onclick="openProfileDetail('${esc(profileName)}')">${esc(profileName)}</span> / ${esc(friendlyName)}`;
+  body.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">Loading...</div>';
+  body.style.display = '';
+  try {
+    const qs = new URLSearchParams({name: profileName, file: filename});
+    const data = await api('/api/profile/files?' + qs);
+    const fileContent = (data && data.content != null) ? data.content : '';
+    const placeholder = filename === 'SOUL.md'
+      ? 'Define the agent personality, mission, and behavioral rules...'
+      : filename === 'config.yaml'
+      ? 'YAML configuration for model, provider, agent settings...'
+      : filename === 'memories/MEMORY.md'
+      ? 'Agent persistent memory - facts, patterns, and learned context...'
+      : filename === 'memories/USER.md'
+      ? 'User profile - preferences, communication style, personal context...'
+      : 'Environment variables (KEY=value per line)...';
+    body.innerHTML = `
+      <div class="main-view-content">
+        <div class="detail-card">
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">
+            <button class="panel-head-btn profile-file-editor-action has-tooltip has-tooltip--bottom" data-tooltip="Back" onclick="openProfileDetail('${esc(profileName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg><span class="panel-head-btn-label">Back</span></button>
+            <button id="btnSaveProfileFile" class="panel-head-btn primary profile-file-editor-action has-tooltip has-tooltip--bottom" data-tooltip="Save" onclick="_saveProfileFile('${esc(profileName)}','${esc(filename)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span class="panel-head-btn-label">Save</span></button>
+          </div>
+          <textarea id="profileFileEditor" rows="24" spellcheck="false"
+            style="width:100%;resize:vertical;font-family:var(--font-mono,monospace);font-size:13px;line-height:1.5;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)"
+            placeholder="${esc(placeholder)}">${esc(fileContent)}</textarea>
+        </div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = `<div style="padding:16px;color:var(--accent);font-size:12px">Error loading file: ${esc(e.message)}</div>`;
+  }
+}
+
+async function _saveProfileFile(profileName, filename) {
+  const editor = $('profileFileEditor');
+  const btn = $('btnSaveProfileFile');
+  if (!editor) return;
+  const content = editor.value;
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+  try {
+    const result = await api('/api/profile/files', {
+      method: 'POST',
+      body: JSON.stringify({name: profileName, file: filename, content: content})
+    });
+    if (result && result.ok) {
+      showToast(filename + ' saved');
+    } else {
+      showToast('Save failed: ' + (result.error || 'unknown error'));
+    }
+  } catch (e) {
+    showToast('Save failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+  }
 }
 
 function _setProfileHeaderButtons(mode, p, activeName){
-  const actBtn = $('btnActivateProfileDetail');
-  const delBtn = $('btnDeleteProfileDetail');
   const cancelBtn = $('btnCancelProfileDetail');
   const saveBtn = $('btnSaveProfileDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') {
-    const isActive = p && p.name === activeName;
-    const isDefault = !!(p && p.is_default);
-    if (isActive) hide(actBtn); else show(actBtn);
-    if (isDefault) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
-    hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
+    show(cancelBtn); show(saveBtn);
   } else {
-    [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+    [cancelBtn, saveBtn].forEach(hide);
   }
 }
 
@@ -4943,6 +8836,7 @@ function openProfileDetail(name, el){
 }
 
 function _clearProfileDetail(){
+  _stopAllGatewayPollers();
   _currentProfileDetail = null;
   _profileMode = 'empty';
   const title = $('profileDetailTitle');
@@ -4956,7 +8850,27 @@ function _clearProfileDetail(){
 
 async function activateCurrentProfile(){
   if (!_currentProfileDetail) return;
-  await switchToProfile(_currentProfileDetail.name);
+  await _activateProfileFromPanel(_currentProfileDetail.name);
+}
+
+async function _activateProfileFromPanel(profileName){
+  if (!profileName) return null;
+  const data = await api('/api/profile/switch', {
+    method: 'POST',
+    body: JSON.stringify({ name: profileName }),
+  });
+  S.activeProfile = (data && data.active) || profileName;
+  if (data) _syncProfileAvatarState(data);
+  const chipLabel = $('profileChipLabel');
+  if (chipLabel) chipLabel.textContent = S.activeProfile;
+  if (typeof applyBotName === 'function') applyBotName();
+  if (typeof syncTopbar === 'function') syncTopbar();
+  await loadProfilesPanel();
+  if (typeof renderSessionList === 'function') {
+    Promise.resolve(renderSessionList()).catch(() => {});
+  }
+  showToast(t('profile_switched', S.activeProfile));
+  return data;
 }
 
 async function deleteCurrentProfile(){
@@ -4978,20 +8892,24 @@ function renderProfileDropdown(data) {
   if (!dd) return;
   dd.innerHTML = '';
   const profiles = data.profiles || [];
-  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
-    ? S.activeProfile
+  const selectedProfile = (typeof currentSessionProfile === 'function') ? currentSessionProfile() : S.activeProfile;
+  const active = (selectedProfile && profiles.some(p => p.name === selectedProfile))
+    ? selectedProfile
     : (data.active || 'default');
+  _syncProfileAvatarState(data);
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
+    opt.dataset.name = p.name;
     const meta = [];
     if (p.model) meta.push(p.model.split('/').pop());
-    if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+    const skillsMeta = _profileSkillsCountMeta(p);
+    if (skillsMeta) meta.push(skillsMeta);
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
-      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
+    opt.innerHTML = `<div class="profile-opt-main">${_profileAvatarForUi(p,'profile-avatar--dropdown')}<div style="min-width:0;flex:1"><div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '') + `</div></div>`;
     opt.onclick = async () => {
       closeProfileDropdown();
       if (p.name === active) return;
@@ -5052,6 +8970,13 @@ async function switchToProfile(name) {
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
 
+  const visibleSessionProfile = S.session
+    ? (typeof currentSessionProfile === 'function' ? currentSessionProfile() : (S.session.profile || S.activeProfile || 'default'))
+    : (S.activeProfile || 'default');
+  const sessionHasLiveWork = Boolean(S.session && (
+    S.session.active_stream_id ||
+    S.session.pending_user_message
+  ));
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
   // we must not retag it.  We'll start a fresh session for the new profile instead.
@@ -5064,7 +8989,14 @@ async function switchToProfile(name) {
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     if (_switchGen !== _profileSwitchGeneration) return;
-    S.activeProfile = data.active || name;
+    const targetProfile = String((data && data.active) || name || 'default').trim() || 'default';
+    const profileDefaultModel = String((data && data.default_model) || '').trim();
+    const profileDefaultProvider = String((data && (data.active_provider || data.default_model_provider)) || '').trim() || null;
+    const profileDefaultWorkspace = data && data.default_workspace ? data.default_workspace : null;
+    const needsFreshProfileSession = Boolean(S.session && (sessionInProgress || visibleSessionProfile!==targetProfile));
+    S.activeProfile = targetProfile;
+    _syncProfileAvatarState(data);
+    if(typeof refreshActiveProfileAvatarSettings==='function') void refreshActiveProfileAvatarSettings(S.activeProfile);
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -5072,65 +9004,67 @@ async function switchToProfile(name) {
 
     // ── Model + Workspace ──────────────────────────────────────────────────
     // Apply the profile defaults returned by /api/profile/switch immediately.
-    // Refreshing the full model/workspace catalogs is useful, but it should not
-    // hold the visible switch animation open.
+    // The full model/workspace catalogs are refreshed in the background after
+    // the visible chat has moved to the requested profile.
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
     _workspaceList = null;
-    if (data.default_model) window._defaultModel = data.default_model;
-    if (data.default_model_provider) window._activeProvider = data.default_model_provider;
+    if(profileDefaultModel) window._defaultModel = profileDefaultModel;
+    if(profileDefaultProvider) window._activeProvider = profileDefaultProvider;
 
     // ── Apply model ────────────────────────────────────────────────────────
-    if (data.default_model) {
+    if (profileDefaultModel) {
+      window._defaultModel = profileDefaultModel;
       const sel = $('modelSelect');
-      const providerId = data.default_model_provider || window._activeProvider || null;
-      const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === data.default_model) : null;
+      const providerId = profileDefaultProvider || window._activeProvider || null;
+      const existingDefaultOpt = sel ? Array.from(sel.options).find(o => o.value === profileDefaultModel) : null;
       if (existingDefaultOpt && providerId && !existingDefaultOpt.dataset.provider) {
         existingDefaultOpt.dataset.provider = providerId;
       }
       if (sel && !existingDefaultOpt) {
         const opt = document.createElement('option');
-        opt.value = data.default_model;
-        opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(data.default_model) : data.default_model;
+        opt.value = profileDefaultModel;
+        opt.textContent = typeof getModelLabel === 'function' ? getModelLabel(profileDefaultModel) : profileDefaultModel;
         opt.dataset.custom = '1';
         if (providerId) opt.dataset.provider = providerId;
         sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
         sel.appendChild(opt);
       }
-      const resolved = _applyModelToDropdown(data.default_model, sel, providerId);
-      const modelToUse = resolved || data.default_model;
+      const resolved = _applyModelToDropdown(profileDefaultModel, sel, providerId);
+      const modelToUse = resolved || profileDefaultModel;
       const modelState = (typeof _modelStateForSelect==='function')
         ? _modelStateForSelect(sel, modelToUse)
-        : {model:modelToUse,model_provider:providerId};
+        : {model:modelToUse, model_provider:providerId};
       S._pendingProfileModel = modelToUse;
-      S._pendingProfileModelProvider = modelState.model_provider||providerId||null;
+      S._pendingProfileModelProvider = profileDefaultProvider || modelState.model_provider || providerId || null;
       // Only patch the in-memory session model if we're NOT about to replace the session
-      if (S.session && !sessionInProgress) {
+      if (S.session && !needsFreshProfileSession) {
         S.session.model = modelToUse;
-        S.session.model_provider = modelState.model_provider||providerId||null;
+        S.session.model_provider = profileDefaultProvider || modelState.model_provider || providerId || null;
       }
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────
-    if (data.default_workspace) {
+    if (profileDefaultWorkspace) {
       // Always store the persistent profile default — used for blank-page display
       // and workspace auto-bind throughout the session lifecycle (#804, #823).
-      S._profileDefaultWorkspace = data.default_workspace;
+      S._profileDefaultWorkspace = profileDefaultWorkspace;
       // Also set the one-shot flag consumed by newSession() so the first new
       // session after a profile switch inherits this workspace (#424).
-      S._profileSwitchWorkspace = data.default_workspace;
+      S._profileSwitchWorkspace = profileDefaultWorkspace;
 
-      if (S.session && !sessionInProgress) {
+      if (S.session && !needsFreshProfileSession) {
         // Empty session (no messages yet) — safe to update it in place
+        const sessionId = S.session.session_id;
+        S.session.workspace = profileDefaultWorkspace;
         try {
-          await api('/api/session/update', { method: 'POST', body: JSON.stringify({
-            session_id: S.session.session_id,
-            workspace: data.default_workspace,
+          void api('/api/session/update', { method: 'POST', body: JSON.stringify({
+            session_id: sessionId,
+            workspace: profileDefaultWorkspace,
             model: S.session.model,
             model_provider: S.session.model_provider||null,
-          })});
-          S.session.workspace = data.default_workspace;
+          })}).catch(() => {});
         } catch (_) {}
       }
     }
@@ -5143,13 +9077,30 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       const workspaceVisible = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
-      await newSession(false, {awaitWorkspaceLoad: workspaceVisible});
+      await newSession(false, {
+        profile:targetProfile,
+        ...(profileDefaultModel?{model:profileDefaultModel,model_provider:profileDefaultProvider||null}:{}),
+        ...(sessionHasLiveWork?{commitPrevious:false}:{}),
+        awaitWorkspaceLoad: workspaceVisible,
+      });
       if (_switchGen !== _profileSwitchGeneration) return;
       // Keep topbar chips (workspace/profile) in sync after creating the
       // new profile-scoped session.
       syncTopbar();
-      await renderSessionList();
-      showToast(t('profile_switched_new_conversation', name));
+      if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:true});
+      showToast(t('profile_switched_new_conversation', targetProfile));
+    } else if (needsFreshProfileSession) {
+      // The visible session belongs to another profile even if it has not yet
+      // accumulated visible messages. Create a correctly owned target-profile
+      // chat so syncTopbar() does not snap the picker back to the old owner.
+      await newSession(false, {
+        profile:targetProfile,
+        ...(profileDefaultModel?{model:profileDefaultModel,model_provider:profileDefaultProvider||null}:{}),
+        ...(sessionHasLiveWork?{commitPrevious:false}:{}),
+      });
+      syncTopbar();
+      if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:true});
+      showToast(t('profile_switched_new_conversation', targetProfile));
     } else {
       // No messages yet — just refresh the list and topbar in place
       await renderSessionList();
@@ -5161,7 +9112,7 @@ async function switchToProfile(name) {
         const dirLoad = loadDir('.');
         if (typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed') await dirLoad;
       }
-      showToast(t('profile_switched', name));
+      showToast(t('profile_switched', targetProfile));
     }
 
     await _profileSwitchPanelLoad();

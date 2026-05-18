@@ -873,7 +873,9 @@ $('btnNewChat').onclick=async()=>{
      && !S.session.pending_user_message){
     $('msg').focus();closeMobileSidebar();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  await newSession();
+  closeMobileSidebar();$('msg').focus();
+  if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -1109,7 +1111,9 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    await newSession();
+    closeMobileSidebar();$('msg').focus();
+    if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
@@ -1158,6 +1162,10 @@ $('msg').addEventListener('paste',e=>{
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
+// If the user typed while deferred scripts were still loading, no input event
+// was captured. Reconcile the send button from the textarea's current value
+// before the async boot work starts.
+if(typeof updateSendBtn==='function') updateSendBtn();
 
 function applyEmptyStateSuggestionPref(){
   if(!$('emptyState')) return;
@@ -1435,6 +1443,20 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+function _deferBootHydration(fn){
+  return new Promise(resolve=>{
+    const run=()=>{
+      try{
+        Promise.resolve(fn()).then(resolve).catch(()=>resolve(null));
+      }catch(_){
+        resolve(null);
+      }
+    };
+    if(typeof requestAnimationFrame==='function') requestAnimationFrame(()=>setTimeout(run,0));
+    else setTimeout(run,0);
+  });
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -1578,7 +1600,15 @@ function applyBotName(){
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  try{
+    const p=await api('/api/profile/active');
+    S.activeProfile=p.name||'default';
+    if(typeof setActiveProfileAvatarSettings==='function') setActiveProfileAvatarSettings(p);
+    else if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(p.avatar||null,p.avatar_shape);
+  }catch(e){
+    S.activeProfile='default';
+    if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(null);
+  }
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
@@ -1633,19 +1663,27 @@ function applyBotName(){
   };
   window._modelDropdownReady=null;
   window._ensureModelDropdownReady=_startBootModelDropdown;
-  setTimeout(()=>{
-    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
-  },0);
-  // Start independent boot fetches without holding the conversation list behind
-  // them. The sidebar can render from /api/sessions while workspace/onboarding
-  // metadata settles in parallel.
-  const _workspaceListReady=loadWorkspaceList();
-  const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
+  // Kick model dropdown hydration off eagerly but non-blocking — first call
+  // materializes the promise so subsequent `_ensureModelDropdownReady()` callers
+  // de-dup against the in-flight fetch.
+  _startBootModelDropdown();
+  // Hydrate non-critical metadata after the chat surface has had a paint.
+  // Completed setups should not wait for workspace/onboarding status before
+  // the composer can accept input.
+  const _workspaceListReady=_deferBootHydration(()=>loadWorkspaceList());
+  window._workspaceListReady=_workspaceListReady;
+  let _onboardingWizardReady;
+  if(_bootSettings&&_bootSettings.onboarding_completed===false){
+    _onboardingWizardReady=loadOnboardingWizard().catch(()=>false);
+    window._onboardingWizardReady=_onboardingWizardReady;
+    await _onboardingWizardReady;
+  }else{
+    _onboardingWizardReady=_deferBootHydration(()=>loadOnboardingWizard());
+    window._onboardingWizardReady=_onboardingWizardReady;
+  }
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
   await renderSessionList();
-  await _workspaceListReady;
-  await _onboardingReady;
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -1678,7 +1716,8 @@ function applyBotName(){
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        if(typeof renderSessionList==='function') await renderSessionList();
+        if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       await loadSession(saved);
@@ -1709,7 +1748,8 @@ function applyBotName(){
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
+        if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -1721,7 +1761,10 @@ function applyBotName(){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+      syncTopbar();syncWorkspacePanelState();
+      if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
+      if(typeof startGatewaySSE==='function')startGatewaySSE();
+      await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -1734,7 +1777,7 @@ function applyBotName(){
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
-  await renderSessionList();
+  if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{

@@ -1,5 +1,5 @@
 """
-Tests for profile-switch UX improvements — spinner indicator + parallelized fetches.
+Tests for profile-switch UX improvements — spinner indicator + nonblocking refreshes.
 
 Two changes:
 1. switchToProfile() shows a spinner on the profile chip during the async switch,
@@ -106,8 +106,8 @@ class TestParallelizedFetches:
             "Profile switching still awaits full model/workspace catalog refreshes."
         )
 
-    def test_no_sequential_await_pattern(self):
-        """The old sequential await pattern must be gone."""
+    def test_model_workspace_refresh_is_not_awaited_before_session_handoff(self):
+        """The old blocking await pattern must be gone."""
         fn = self._get_switch_fn()
         sequential = re.search(
             r"await populateModelDropdown\(\)\s*;\s*\n\s*await loadWorkspaceList",
@@ -115,6 +115,9 @@ class TestParallelizedFetches:
         )
         assert not sequential, (
             "Old sequential await pattern still present — both fetches would run twice."
+        )
+        assert "await Promise.all([populateModelDropdown(), loadWorkspaceList()])" not in fn, (
+            "Profile switching should not wait for cold model/workspace hydration."
         )
 
     def test_apply_steps_after_promise_all(self):

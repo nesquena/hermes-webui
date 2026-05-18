@@ -48,3 +48,6 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   WebUI runs.
 - [`turn-journal.md`](turn-journal.md) — Crash-safe WebUI turn journal for
   recovering interrupted chat submissions.
+- [`profile-gateway-tile-runtime-contract.md`](profile-gateway-tile-runtime-contract.md)
+  — profile-scoped Gateway Tile status/control contract, Docker-aware liveness,
+  and copyable failure-detail UX.

@@ -141,12 +141,15 @@ def test_settings_exposes_default_model_provider_for_lazy_boot_catalog():
 
 def test_boot_renders_session_list_before_workspace_and_onboarding_settle():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
-    workspace_start = src.index("const _workspaceListReady=loadWorkspaceList();")
-    onboarding_start = src.index("const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();")
+    # Profile Ops Console PR moved workspace + completed-onboarding loads off the critical
+    # path via _deferBootHydration(), so they no longer block first paint. The invariant
+    # the original test pinned — session list renders before workspace/onboarding settle —
+    # still holds: renderSessionList() is awaited after the deferred hydration is kicked
+    # off, and uncompleted-onboarding is the only branch that still awaits inline.
+    workspace_start = src.index("const _workspaceListReady=_deferBootHydration(()=>loadWorkspaceList());")
+    onboarding_start = src.index("_deferBootHydration(()=>loadOnboardingWizard())")
     render_pos = src.index("await renderSessionList();", onboarding_start)
-    workspace_await = src.index("await _workspaceListReady;", render_pos)
-    onboarding_await = src.index("await _onboardingReady;", render_pos)
 
-    assert workspace_start < render_pos < workspace_await
-    assert onboarding_start < render_pos < onboarding_await
-    assert "_bootSettings.onboarding_completed" in src
+    assert workspace_start < render_pos
+    assert onboarding_start < render_pos
+    assert "_bootSettings.onboarding_completed===false" in src

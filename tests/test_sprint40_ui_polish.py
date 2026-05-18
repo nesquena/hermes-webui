@@ -229,7 +229,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         self.assertGreater(pos_sync_topbar, -1,
                            "syncTopbar() must be called in the sessionInProgress branch")
         self.assertGreater(pos_sync_topbar, pos_new_session,
-                           "syncTopbar() must be called AFTER newSession(false)")
+                           "syncTopbar() must be called AFTER newSession(false, {...})")
 
     def test_profile_default_workspace_applied_to_new_session(self):
         """newSession(false) should apply the pending profile workspace itself."""
@@ -238,6 +238,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         block = PANELS_JS[idx:idx + 1000]
 
         self.assertIn('await newSession(false', block)
+        self.assertIn('profile:targetProfile', block,
+                      "newSession() must receive the target profile explicitly")
+        self.assertIn('S._profileSwitchWorkspace = profileDefaultWorkspace', PANELS_JS,
+                      "the profile switch workspace should be prepared before newSession()")
         self.assertNotIn('/api/session/update', block,
                          "sessionInProgress should not post a duplicate workspace update "
                          "after newSession(false)")
@@ -248,6 +252,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         self.assertGreater(idx, -1)
         block = PANELS_JS[idx:idx + 1000]
 
+        self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
                          "newSession(false) receives S._profileSwitchWorkspace, so "
                          "a second /api/session/update is unnecessary")
@@ -260,7 +265,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         block = PANELS_JS[idx:idx + 1000]
 
         pos_sync = block.find('syncTopbar()')
-        pos_render = block.find('await renderSessionList()')
+        pos_render = block.find('renderSessionList({deferWhileInteracting:true})')
         self.assertGreater(pos_sync, -1, "syncTopbar() must exist in block")
         self.assertGreater(pos_render, -1, "renderSessionList() must exist in block")
         self.assertLess(pos_sync, pos_render,
