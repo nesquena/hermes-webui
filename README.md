@@ -641,6 +641,9 @@ Streaming scroll viewport stability when tool/queue cards insert (#1360), manual
 **[@DavidSchuchert](https://github.com/DavidSchuchert)** — German translation (PR #190)
 Complete German locale (`de`) covering all UI strings, settings labels, commands, and system messages — and stress-tested the i18n system, exposing several elements that weren't yet translatable and getting them fixed as part of the same PR.
 
+**[@byzuzayli](https://github.com/byzuzayli)** — Turkish translation (PR #2537)
+Complete Turkish locale (`tr`) covering all UI strings across chat, settings, onboarding, kanban, workspace, terminal, cron, MCP, logs, profiles, insights, and checkpoints — ~280 translated keys. Automatically surfaced in the Language dropdown.
+
 **[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button (PR #265)
 Added the Profiles entry to the mobile navigation flow, making profile switching reachable on phones.
 
