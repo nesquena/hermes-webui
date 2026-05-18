@@ -10,6 +10,8 @@ import mimetypes
 import os
 import queue
 import re
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -154,6 +156,112 @@ def _webui_ephemeral_system_prompt(personality_prompt: Optional[str]) -> str:
         parts.append(str(personality_prompt).strip())
     parts.append(_WEBUI_VISIBLE_PROGRESS_PROMPT)
     return "\n\n".join(part for part in parts if part)
+
+
+_SECRET_SHAPED_RE = re.compile(
+    r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s]+|"
+    r"[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"
+)
+
+
+def _redact_prefill_status_text(text: str) -> str:
+    """Return a short, non-secret diagnostic string for prefill status."""
+    clean = _SECRET_SHAPED_RE.sub("[REDACTED]", str(text or ""))
+    return " ".join(clean.split())[:240]
+
+
+def _valid_prefill_messages(value) -> list[dict]:
+    """Normalize a prefill payload to role/content messages."""
+    if not isinstance(value, list):
+        return []
+    messages: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in {"system", "user", "assistant"} or not isinstance(content, str) or not content.strip():
+            continue
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def _resolve_prefill_path(raw: str) -> Path:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        try:
+            from api.config import _get_config_path
+            path = _get_config_path().parent / path
+        except Exception:
+            path = Path.cwd() / path
+    return path
+
+
+def _load_webui_prefill_context(
+    config_data: Optional[dict] = None,
+    *,
+    python_exe: Optional[str] = None,
+    env: Optional[dict] = None,
+    timeout: float = 20.0,
+) -> dict:
+    """Load configured WebUI session prefill messages.
+
+    Supports the same JSON-file shape used by Hermes Agent plus a WebUI-friendly
+    ``prefill_messages_script`` hook whose stdout becomes one user-role recall
+    message. Script output is intentionally ephemeral: it is passed to the
+    agent as prefill context and is not written into the session transcript.
+    """
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
+    script_raw = os.getenv("HERMES_PREFILL_MESSAGES_SCRIPT", "") or str(cfg.get("prefill_messages_script") or "")
+    if file_raw:
+        path = _resolve_prefill_path(file_raw)
+        label = path.name or "prefill file"
+        if not path.exists():
+            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
+        try:
+            messages = _valid_prefill_messages(json.loads(path.read_text(encoding="utf-8")))
+            return {"status": "loaded", "source": "file", "label": label, "messages": messages, "message_count": len(messages)}
+        except Exception as exc:
+            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
+    if script_raw:
+        path = _resolve_prefill_path(script_raw)
+        label = path.name or "prefill script"
+        if not path.exists():
+            return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script not found"}
+        exe = python_exe or sys.executable
+        cmd = [exe, str(path)] if path.suffix == ".py" else [str(path)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(path.parent),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception as exc:
+            return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
+        if proc.returncode != 0:
+            err = proc.stderr or proc.stdout or f"script exited with code {proc.returncode}"
+            return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(err)}
+        output = (proc.stdout or "").strip()
+        messages = [{"role": "user", "content": output}] if output else []
+        status = "loaded" if messages else "empty"
+        return {"status": status, "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
+    return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
+
+
+def _public_prefill_context_status(prefill_context: dict) -> dict:
+    """Strip message bodies before sending context status to the browser."""
+    return {
+        "status": prefill_context.get("status", "not_configured"),
+        "source": prefill_context.get("source", "none"),
+        "label": prefill_context.get("label", ""),
+        "message_count": int(prefill_context.get("message_count") or 0),
+        **({"error": prefill_context.get("error", "")} if prefill_context.get("error") else {}),
+    }
 
 
 def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
@@ -3477,6 +3585,12 @@ def _run_agent_streaming(
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
             _cfg = _get_config()
+            _prefill_context = _load_webui_prefill_context(_cfg)
+            _prefill_messages = _prefill_context.get('messages') or []
+            put('context_status', {
+                'session_id': session_id,
+                'prefill': _public_prefill_context_status(_prefill_context),
+            })
 
             # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
             # server toolsets are included, matching native CLI behaviour.
@@ -3599,6 +3713,7 @@ def _run_agent_streaming(
                 fallback_model=_fallback_resolved,
                 session_id=session_id,
                 session_db=_session_db,
+                prefill_messages=_prefill_messages,
                 stream_delta_callback=on_token,
                 reasoning_callback=on_reasoning,
                 tool_progress_callback=on_tool,
@@ -3612,6 +3727,8 @@ def _run_agent_streaming(
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
                 _agent_kwargs['reasoning_config'] = _reasoning_config
+            if 'prefill_messages' not in _agent_params:
+                _agent_kwargs.pop('prefill_messages', None)
             if 'interim_assistant_callback' in _agent_params:
                 _agent_kwargs['interim_assistant_callback'] = on_interim_assistant
             if 'tool_start_callback' in _agent_params:
@@ -3665,6 +3782,7 @@ def _run_agent_streaming(
                     _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                     _reasoning_config or {},
+                    _public_prefill_context_status(_prefill_context),
                     # #1897: profile_home is part of the agent's identity because
                     # AIAgent caches `_cached_system_prompt` from `load_soul_md()`
                     # at construction time, sourced from HERMES_HOME. Same-session
@@ -3724,6 +3842,8 @@ def _run_agent_streaming(
                         agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
                     if hasattr(agent, 'clarify_callback'):
                         agent.clarify_callback = _agent_kwargs.get('clarify_callback')
+                    if hasattr(agent, 'prefill_messages'):
+                        agent.prefill_messages = list(_agent_kwargs.get('prefill_messages') or [])
                     if _session_db is not None:
                         # Close any previously held SessionDB connection before
                         # replacing it. Without this, each streaming request creates

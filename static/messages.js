@@ -1520,6 +1520,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    source.addEventListener('context_status',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      const prefill=d.prefill||{};
+      const status=String(prefill.status||'not_configured');
+      const label=String(prefill.label||'session recall');
+      if(status==='loaded'){
+        setComposerStatus(`Context loaded: ${label}`);
+      }else if(status==='error'){
+        setComposerStatus(`Context unavailable: ${label}`);
+        if(typeof showToast==='function') showToast(`Context unavailable: ${String(prefill.error||label)}`,3600,'warning');
+      }
+    });
+
     function _resolveGoalMessage(d){
       const key=String(d && d.message_key ? d.message_key : '').trim();
       const args=Array.isArray(d && d.message_args) ? d.message_args : [];
@@ -1995,7 +2010,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

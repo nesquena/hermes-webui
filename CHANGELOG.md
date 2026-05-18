@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add WebUI session prefill parity: browser-originated chat turns now load configured prefill context from `prefill_messages_file` or `prefill_messages_script`, pass it to Hermes Agent as ephemeral model context, and surface a compact context status event in the chat UI without exposing prefill message bodies.
+
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed
