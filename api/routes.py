@@ -1486,11 +1486,31 @@ def _resolve_compatible_session_model_state(
     the wrong backend and fail. Normalize only obvious cross-provider mismatches.
     When a model has an explicit provider context, keep the model string itself
     in its picker/API shape and carry the provider as separate state.
+
+    Fast path (#1855): when the caller supplies both a model and an explicit
+    ``model_provider`` AND the model is not itself ``@provider:model``-qualified,
+    we can return the inputs verbatim without calling ``get_available_models()``.
+    The slow path below would arrive at the same answer via
+    ``if requested_provider and not explicit_provider: return model, requested_provider, False``
+    after paying the full catalog-build cost. Avoiding the catalog here keeps
+    ``POST /api/chat/start`` snappy even when the model catalog is cold and the
+    rebuild has to make network calls (custom OpenAI-compat endpoints,
+    OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
+    those used to wedge the handler for >100s and trigger 502s on default-60s
+    reverse proxies, even though the WebUI itself eventually responded.
     """
-    catalog = get_available_models()
-    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
+    if model and requested_provider:
+        # Only safe when the model itself does not carry an ``@provider:model``
+        # qualifier — qualified strings require the catalog to decide whether
+        # the qualifier matches the active provider (see slow path below).
+        bare_model, explicit_provider = _split_provider_qualified_model(model)
+        if not explicit_provider:
+            return model, requested_provider, False
+
+    catalog = get_available_models()
+    default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     if not model:
         return default_model, requested_provider, bool(default_model)
 
