@@ -8085,11 +8085,15 @@ def _handle_process_complete_ack(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     pid = str(body.get("process_id") or "").strip()
+    # Post Option-Z pivot this endpoint owns no state: the server-side drain
+    # thread starts the wakeup turn, the browser never re-POSTs /api/chat/start.
+    # `noop` is returned so the diagnostic shape stays explicit about that and
+    # matches the docstring ("pure no-op for state").
     return j(handler, {
         "ok": True,
         "session_id": s.session_id,
         "process_id": pid,
-        "pending_consumed": False,  # frontend re-POSTs /api/chat/start to actually consume
+        "noop": True,
     })
 
 
