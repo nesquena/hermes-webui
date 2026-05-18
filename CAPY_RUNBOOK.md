@@ -44,12 +44,15 @@ Reason: `127.0.0.1` plus Tailscale Serve limits exposure. Do not bind to `0.0.0.
 
 ## Capy Spaces product architecture
 
-Capy Spaces is evolving toward a generic safe creator loop rather than only a catalog of demos:
+Capy Spaces is evolving toward a generic safe creator loop plus local context/recall operating layer rather than only a catalog of demos:
 
-1. Prompt or tool request produces a bounded, metadata-only Space/widget spec.
-2. The spec is previewed in a sandbox and visually QA'd before any durable write.
-3. Patch/repair flows produce metadata-only receipts and events.
-4. Approved changes are committed through the revision system so rollback/time-travel remains available.
+1. Prompt, source, tool, or progress events become bounded, sanitized memory/source/progress records.
+2. Relevant memory/context feeds a bounded, metadata-only Space/widget spec.
+3. The spec is previewed in a sandbox and visually QA'd before any durable write.
+4. Patch/repair flows produce metadata-only receipts and events.
+5. Approved changes are committed through the revision system so rollback/time-travel remains available.
+
+Product-home observability cards such as Memory freshness, Autonomy policy, and Progress events are metadata-only control-plane surfaces. They may expose bounded counts, allow-listed status labels, and compact recent progress rows, but not raw payloads, prompts, command/tool bodies, generated widget bodies, backend error text, credentials, or unsafe marker fields.
 
 Generated/imported widget bodies, raw HTML, scripts, renderer/source/data payloads, prompt echoes, and credential-looking values stay disabled or quarantined until explicit sandbox tests cover richer execution. Visible demo/smoke surfaces should prove capabilities with bounded checklists and receipts, not by rendering generated widget bodies.
 
