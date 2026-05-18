@@ -444,6 +444,63 @@ def _record_event(
     return safe_event_id
 
 
+def _memory_tree_env_configured() -> bool:
+    return any(os.getenv(name) for name in ("CAPY_MEMORY_TREE_ROOT", "CAPY_MEMORY_TREE_DB", "CAPY_MEMORY_TREE_VAULT"))
+
+
+def _auto_memory_origin_uri(origin_uri: Any) -> str:
+    text = _context_value(origin_uri, 400) or "capy-memory://auto-space-artifact"
+    separator = "&" if "?" in text else "?"
+    return f"{text}{separator}ingest=auto"
+
+
+def _memory_hit_is_auto_ingested(hit: dict[str, Any]) -> bool:
+    return "ingest=auto" in str(hit.get("origin_uri") or "")
+
+
+def _auto_ingest_memory_record(canonicalizer_name: str, payload: dict[str, Any]) -> None:
+    """Best-effort ingest of Spaces artifacts into the local Memory Tree.
+
+    Memory is advisory context only. Ingestion is deliberately non-blocking for
+    Spaces mutations: a Memory Tree storage issue must not turn a safe metadata
+    write into a failed user action.
+    """
+    if not _memory_tree_env_configured():
+        return
+    try:
+        from api import capy_memory
+
+        canonicalizer = getattr(capy_memory, canonicalizer_name)
+        record = dict(canonicalizer(payload))
+        record["origin_uri"] = _auto_memory_origin_uri(record.get("origin_uri"))
+        capy_memory.ingest_source(record)
+    except Exception:
+        return
+
+
+def _event_payload(event_id: str) -> dict[str, Any] | None:
+    if not _event_id_is_safe(event_id):
+        return None
+    try:
+        event = json.loads((events_dir() / f"{event_id}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def _auto_ingest_space_manifest_and_revision(space: dict[str, Any], event_id: str) -> None:
+    _auto_ingest_memory_record("canonicalize_space_manifest", space)
+    event = _event_payload(event_id)
+    if event is not None:
+        _auto_ingest_memory_record("canonicalize_space_revision_event", event)
+
+
+def _auto_ingest_space_widget_event(event_id: str) -> None:
+    event = _event_payload(event_id)
+    if event is not None:
+        _auto_ingest_memory_record("canonicalize_space_widget_event", event)
+
+
 def _write_manifest(
     space: dict[str, Any],
     event_type: str,
@@ -471,6 +528,7 @@ def _write_manifest(
         space["revision_event_id"] = event_id
         _record_event(space["space_id"], event_type, details, event_id=event_id, snapshot=space)
         _atomic_write_json(_manifest_path(space["space_id"]), space)
+        _auto_ingest_space_manifest_and_revision(space, event_id)
         return dict(space)
 
 
@@ -1139,16 +1197,20 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
         sid = validate_space_id(space_id)
     except ValueError:
         return None
+    if not _memory_tree_env_configured():
+        return None
+    bounded_limit = max(1, min(int(limit or 3), 5))
     try:
         from api.capy_memory import relevant_memory_for_space
 
-        raw_hits = relevant_memory_for_space(sid, limit=limit).get("results") or []
+        raw_hits = relevant_memory_for_space(sid, limit=bounded_limit, exclude_auto_ingested=True).get("results") or []
     except Exception:
         raw_hits = []
-    bounded_limit = max(1, min(int(limit or 3), 5))
     results: list[dict[str, str]] = []
-    for hit in raw_hits[:bounded_limit]:
-        if not isinstance(hit, dict):
+    for hit in raw_hits:
+        if len(results) >= bounded_limit:
+            break
+        if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
             continue
         raw_snippet = str(hit.get("snippet") or "")
         heading_index = raw_snippet.find("# ")
@@ -1684,16 +1746,22 @@ def build_agent_context(space_id: str | None) -> str:
             )
         if len(widget_events) > 10:
             lines.append(f"- … {len(widget_events) - 10} more queued widget event(s) omitted")
-    try:
-        from api.capy_memory import relevant_memory_for_space
+    if _memory_tree_env_configured():
+        try:
+            from api.capy_memory import relevant_memory_for_space
 
-        memory_hits = relevant_memory_for_space(sid, limit=3).get("results") or []
-    except Exception:
+            memory_hits = relevant_memory_for_space(sid, limit=3, exclude_auto_ingested=True).get("results") or []
+        except Exception:
+            memory_hits = []
+    else:
         memory_hits = []
     if memory_hits:
-        lines.append("relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):")
-        for hit in memory_hits[:3]:
-            if not isinstance(hit, dict):
+        memory_lines: list[str] = []
+        rendered_memory_hits = 0
+        for hit in memory_hits:
+            if rendered_memory_hits >= 3:
+                break
+            if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
                 continue
             source_id = _active_context_value(hit.get("source_id"), 160)
             source_type = _active_context_value(hit.get("source_type"), 80)
@@ -1705,7 +1773,11 @@ def build_agent_context(space_id: str | None) -> str:
             snippet = _active_context_value(raw_snippet, 700)
             if not (source_id or source_type or snippet):
                 continue
-            lines.append(f"- {source_id}|{source_type}|{redaction_status}|{snippet}")
+            memory_lines.append(f"- {source_id}|{source_type}|{redaction_status}|{snippet}")
+            rendered_memory_hits += 1
+        if memory_lines:
+            lines.append("relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):")
+            lines.extend(memory_lines)
     revision = _public_revision_event_id(space.get("revision_event_id"))
     if revision:
         lines.append(f"revision_event_id: {revision}")
@@ -7161,6 +7233,7 @@ def queue_widget_event(
             "status": "queued",
         },
     )
+    _auto_ingest_space_widget_event(event_id)
     return {
         "queued": True,
         "status": "queued",

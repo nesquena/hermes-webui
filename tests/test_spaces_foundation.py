@@ -2,6 +2,7 @@ import base64
 import importlib
 import io
 import json
+import sqlite3
 import threading
 import zipfile
 from pathlib import Path
@@ -51,6 +52,77 @@ def test_create_read_list_space_with_schema_version_and_revision_event(monkeypat
     event = json.loads(event_path.read_text(encoding="utf-8"))
     assert event["event_type"] == "space.created"
     assert event["space_id"] == "research-harness"
+
+
+def test_space_manifest_and_revision_events_auto_ingest_into_memory_tree(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.capy_memory as capy_memory
+
+    created = spaces.create_space({
+        "space_id": "memory-auto-lab",
+        "name": "Memory Auto Lab",
+        "description": "Safe dashboard context",
+    })
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "safe-widget",
+            "kind": "markdown",
+            "title": "Safe Widget",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    relevant = capy_memory.relevant_memory_for_space(created["space_id"], limit=10)
+    source_types = {row["source_type"] for row in relevant["results"]}
+    serialized = json.dumps(relevant, sort_keys=True).lower()
+
+    assert "space_manifest" in source_types
+    assert "space_revision_event" in source_types
+    assert capy_memory.memory_status()["source_count"] >= 2
+    assert "memory auto lab" in serialized
+    assert "safe-widget" in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_widget_events_auto_ingest_into_memory_tree_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.capy_memory as capy_memory
+
+    created = spaces.create_space({"space_id": "widget-memory-lab", "name": "Widget Memory Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "notes-card", "kind": "notes", "title": "Notes Card"},
+    )
+
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "notes-card",
+        "notes.save",
+        {"summary": "saved safe note", "renderer": "<script>ignore()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="raw prompt: SECRET_VALUE_DO_NOT_LEAK",
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    relevant = capy_memory.relevant_memory_for_space(created["space_id"], limit=10)
+    widget_hits = [row for row in relevant["results"] if row["source_type"] == "space_widget_event"]
+    serialized = json.dumps({"event_id": queued["event_id"], "widget_hits": widget_hits}, sort_keys=True).lower()
+
+    assert queued["queued"] is True
+    assert widget_hits
+    assert "notes.save" in serialized
+    assert "notes-card" in serialized
+    assert queued["event_id"] in serialized
+    assert "saved safe note" not in serialized
+    assert "raw prompt" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch, tmp_path):
@@ -2281,6 +2353,85 @@ def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(m
         assert "api_key" not in serialized_blob
         assert "secret_value_do_not_leak" not in serialized_blob
         assert "renderer" not in serialized_blob
+
+
+def test_creator_memory_assist_preserves_manual_hits_after_auto_ingest_churn(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+
+    from api.capy_memory import canonicalize_space_manifest, ingest_source, init_memory_tree, memory_tree_db_path
+
+    init_memory_tree()
+    manual_record = canonicalize_space_manifest(
+        {
+            "space_id": "memory-churn-lab",
+            "name": "Memory Churn Lab",
+            "description": "Manual advisory note: preserve the alpha checklist.",
+            "widgets": [{"id": "alpha-checklist", "kind": "status", "title": "Alpha Checklist"}],
+        }
+    )
+    ingest_source(manual_record)
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            "UPDATE sources SET updated_at = ? WHERE source_id = ?",
+            ("2000-01-01T00:00:00+00:00", manual_record["source_id"]),
+        )
+        conn.execute(
+            "UPDATE chunks SET updated_at = ? WHERE chunk_id = ?",
+            ("2000-01-01T00:00:00+00:00", manual_record["chunk_id"]),
+        )
+    created = spaces.create_space({"space_id": "memory-churn-lab", "name": "Memory Churn Lab"})
+    for index in range(12):
+        spaces.upsert_widget(
+            created["space_id"],
+            {"id": f"auto-widget-{index}", "kind": "status", "title": f"Auto Widget {index}"},
+        )
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "targetSpaceId": created["space_id"],
+            "spaceName": "Memory Churn Lab Revised",
+            "widgets": [{"id": "alpha-checklist", "kind": "status", "title": "Alpha Checklist"}],
+        },
+    )
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert preview["memory_assist"]["hit_count"] == 1
+    assert preview["memory_assist"]["results"][0]["source_id"] == manual_record["source_id"]
+    assert "Manual advisory note: preserve the alpha checklist" in json.dumps(preview["memory_assist"])
+    assert manual_record["source_id"] in context
+    assert "Manual advisory note: preserve the alpha checklist" in context
+    assert "ingest=auto" not in json.dumps(preview["memory_assist"], sort_keys=True)
+
+
+def test_auto_ingested_space_manifest_redacts_secret_looking_public_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.capy_memory as capy_memory
+
+    created = spaces.create_space(
+        {
+            "space_id": "manifest-redaction-lab",
+            "name": "SECRET_VALUE_DO_NOT_LEAK",
+            "description": "Authorization bearer placeholder and api_key should not persist",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "token", "kind": "api_key", "title": "bearer placeholder"},
+    )
+
+    relevant = capy_memory.relevant_memory_for_space(created["space_id"], limit=10)
+    serialized = json.dumps(relevant, sort_keys=True).lower()
+
+    assert "manifest-redaction-lab" in serialized
+    assert "dropped_fields" in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "token" not in serialized
 
 
 def test_creator_preview_rejects_conflicting_target_space_aliases_before_receipt(monkeypatch, tmp_path):

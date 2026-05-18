@@ -46,6 +46,17 @@ _UNSAFE_PUBLIC_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MANIFEST_PUBLIC_VALUE_RE = re.compile(
+    r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|ignore\s+previous\s+instructions|"
+    r"credential|password|secret(?!ary)|token(?!ization)|authorization|"
+    r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])|"
+    r"(?:^|[._/\s])(?:html|script|body|code)(?:$|[._/\s])|"
+    r"(?:html|script|body|code)(?:panel|widget|module|source|body)",
+    re.IGNORECASE,
+)
+
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._:-]+")
 
 _SCHEMA_SQL = """
@@ -539,28 +550,33 @@ def search_memory(query: str, *, space_id: str | None = None, limit: int = 10) -
     }
 
 
-def relevant_memory_for_space(space_id: str, *, limit: int = 5) -> dict[str, Any]:
+def relevant_memory_for_space(space_id: str, *, limit: int = 5, exclude_auto_ingested: bool = False) -> dict[str, Any]:
     """Return recent sanitized snippets for one Space."""
     safe_space_id = _safe_text(space_id, limit=160)
     if not safe_space_id:
         raise ValueError("space_id is required")
     limit = max(1, min(int(limit or 5), 25))
     init_memory_tree()
-    with _connect() as conn:
-        conn.row_factory = sqlite3.Row
-        conn.executescript(_SCHEMA_SQL)
-        rows = conn.execute(
-            """
+    sql = """
             SELECT s.source_id, c.chunk_id, s.source_type, s.display_name, s.origin_uri,
                    s.space_id, c.summary, c.redaction_status
             FROM chunks c
             JOIN sources s ON s.source_id = c.source_id
             WHERE s.space_id = ?
+    """
+    params: list[Any] = [safe_space_id]
+    if exclude_auto_ingested:
+        sql += " AND s.origin_uri NOT LIKE ?"
+        params.append("%ingest=auto%")
+    sql += """
             ORDER BY s.updated_at DESC, c.updated_at DESC
             LIMIT ?
-            """,
-            (safe_space_id, limit),
-        ).fetchall()
+    """
+    params.append(limit)
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(sql, params).fetchall()
     return {
         "space_id": safe_space_id,
         "limit": limit,
@@ -690,6 +706,26 @@ def _safe_public_id_list(value: Any, *, limit: int = 12) -> tuple[list[str], int
     return safe_items, dropped
 
 
+def _safe_manifest_public_text_with_drop(value: Any, *, limit: int = _MAX_TEXT_LEN, fallback: str = "") -> tuple[str, int]:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return fallback, 1 if _is_present_public_value(value) else 0
+    text = _safe_text(value, limit=limit)
+    if text and not _MANIFEST_PUBLIC_VALUE_RE.search(text):
+        return text, 0
+    return fallback, 1 if _is_present_public_value(value) else 0
+
+
+def _safe_manifest_public_id_with_drop(value: Any, *, fallback: str = "") -> tuple[str, int]:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return fallback, 1 if _is_present_public_value(value) else 0
+    raw_text = _safe_text(value, limit=160)
+    if raw_text and not _MANIFEST_PUBLIC_VALUE_RE.search(raw_text):
+        safe = _safe_id(value, fallback="")
+        if safe and not _MANIFEST_PUBLIC_VALUE_RE.search(safe):
+            return safe, 0
+    return fallback, 1 if _is_present_public_value(value) else 0
+
+
 def _canonical_artifact_record(
     *,
     source_type: str,
@@ -785,15 +821,23 @@ def canonicalize_space_widget_event(event: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("space widget event must be a mapping")
 
     dropped_field_count = _scan_for_unsafe(event)
+    raw_details = event.get("details")
+    details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
     space_id, dropped = _safe_public_id_with_drop(event.get("space_id") or event.get("spaceId"), fallback="space")
     dropped_field_count += dropped
-    widget_id, dropped = _safe_public_id_with_drop(event.get("widget_id") or event.get("widgetId") or event.get("id"))
+    widget_id, dropped = _safe_public_id_with_drop(
+        event.get("widget_id") or event.get("widgetId") or event.get("id") or details.get("widget_id") or details.get("widgetId")
+    )
     dropped_field_count += dropped
     event_id, dropped = _safe_public_id_with_drop(event.get("event_id") or event.get("eventId"))
     dropped_field_count += dropped
-    event_name, dropped = _safe_public_text_with_drop(event.get("event_name") or event.get("eventName") or event.get("name"), limit=120, fallback="widget.event")
+    event_name, dropped = _safe_public_text_with_drop(
+        event.get("event_name") or event.get("eventName") or event.get("name") or details.get("event_name") or details.get("eventName"),
+        limit=120,
+        fallback="widget.event",
+    )
     dropped_field_count += dropped
-    status, dropped = _safe_public_text_with_drop(event.get("status"), limit=80, fallback="queued")
+    status, dropped = _safe_public_text_with_drop(event.get("status") or details.get("status"), limit=80, fallback="queued")
     dropped_field_count += dropped
 
     body_lines: list[str] = ["## Widget event metadata"]
@@ -880,11 +924,16 @@ def canonicalize_space_manifest(space: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("space manifest must be a mapping")
 
     dropped_field_count = _scan_for_unsafe(space)
-    space_id = _safe_id(space.get("space_id") or space.get("id"), fallback="space")
-    name = _safe_text(space.get("name") or space_id, limit=200) or space_id
-    description = _safe_text(space.get("description"), limit=700)
-    template = _safe_text(space.get("template"), limit=160)
-    revision = _safe_text(space.get("revision_event_id"), limit=160)
+    space_id, dropped = _safe_manifest_public_id_with_drop(space.get("space_id") or space.get("id"), fallback="space")
+    dropped_field_count += dropped
+    name, dropped = _safe_manifest_public_text_with_drop(space.get("name") or space_id, limit=200, fallback=space_id)
+    dropped_field_count += dropped
+    description, dropped = _safe_manifest_public_text_with_drop(space.get("description"), limit=700)
+    dropped_field_count += dropped
+    template, dropped = _safe_manifest_public_text_with_drop(space.get("template"), limit=160)
+    dropped_field_count += dropped
+    revision, dropped = _safe_manifest_public_id_with_drop(space.get("revision_event_id"), fallback="")
+    dropped_field_count += dropped
 
     body_lines: list[str] = [f"# {name}", "", "## Space metadata"]
     _append_line(body_lines, "space_id", space_id)
@@ -902,9 +951,12 @@ def canonicalize_space_manifest(space: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(raw_widget, dict):
                 dropped_field_count += 1
                 continue
-            widget_id = _safe_id(raw_widget.get("id"), fallback="widget")
-            title = _safe_text(raw_widget.get("title"), limit=200) or widget_id
-            kind = _safe_text(raw_widget.get("kind"), limit=120)
+            widget_id, dropped = _safe_manifest_public_id_with_drop(raw_widget.get("id"), fallback="widget")
+            dropped_field_count += dropped
+            title, dropped = _safe_manifest_public_text_with_drop(raw_widget.get("title"), limit=200, fallback=widget_id)
+            dropped_field_count += dropped
+            kind, dropped = _safe_manifest_public_text_with_drop(raw_widget.get("kind"), limit=120)
+            dropped_field_count += dropped
             parts = [widget_id, title]
             if kind:
                 parts.append(kind)
