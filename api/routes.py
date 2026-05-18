@@ -1244,7 +1244,12 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {"/api/auth/login", "/api/csp-report"}
+    return path in {
+        "/api/auth/login",
+        "/api/auth/passkey/login/options",
+        "/api/auth/passkey/login/verify",
+        "/api/csp-report",
+    }
 
 
 def _check_csrf(handler) -> bool:
@@ -2562,6 +2567,7 @@ button:hover{background:rgba(124,185,255,.25)}
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
+  <button type="button" id="passkey-login-btn" style="display:none;margin-top:10px">Use passkey / YubiKey</button>
   <div class="err" id="err"></div>
 </div>
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
@@ -3427,12 +3433,19 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.passkeys import credential_count
 
         logged_in = False
         if is_auth_enabled():
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        passkey_count = credential_count()
+        return j(handler, {
+            "auth_enabled": is_auth_enabled(),
+            "logged_in": logged_in,
+            "passkeys_enabled": passkey_count > 0,
+            "passkey_count": passkey_count,
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -5851,6 +5864,80 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
+
+    if parsed.path == "/api/auth/passkey/login/options":
+        from api.auth import is_auth_enabled
+        from api.passkeys import authentication_options
+
+        if not is_auth_enabled():
+            return j(handler, {"ok": True, "message": "Auth not enabled"})
+        try:
+            return j(handler, authentication_options(handler))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=503)
+
+    if parsed.path == "/api/auth/passkey/login/verify":
+        from api.auth import create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _check_login_rate, _record_login_attempt
+        from api.passkeys import verify_authentication
+
+        if not is_auth_enabled():
+            return j(handler, {"ok": True, "message": "Auth not enabled"})
+        client_ip = handler.client_address[0]
+        if not _check_login_rate(client_ip):
+            return j(
+                handler,
+                {"error": "Too many attempts. Try again in a minute."},
+                status=429,
+            )
+        try:
+            verify_authentication(handler, body.get("credential") or {}, body.get("challenge_id", ""))
+        except (ValueError, RuntimeError) as exc:
+            _record_login_attempt(client_ip)
+            return bad(handler, str(exc), 401)
+        cookie_val = create_session()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.end_headers()
+        handler.wfile.write(json.dumps({"ok": True}).encode())
+        return True
+
+    if parsed.path == "/api/auth/passkey/register/options":
+        from api.auth import is_auth_enabled
+        from api.passkeys import registration_options
+
+        if not is_auth_enabled():
+            return bad(handler, "Enable password authentication before registering passkeys.", status=400)
+        try:
+            return j(handler, registration_options(handler))
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=503)
+
+    if parsed.path == "/api/auth/passkey/register/verify":
+        from api.auth import is_auth_enabled
+        from api.passkeys import verify_registration
+
+        if not is_auth_enabled():
+            return bad(handler, "Enable password authentication before registering passkeys.", status=400)
+        try:
+            return j(
+                handler,
+                verify_registration(
+                    handler,
+                    body.get("credential") or {},
+                    body.get("challenge_id", ""),
+                    body.get("nickname", ""),
+                ),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return bad(handler, str(exc), status=503)
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie

@@ -88,6 +88,7 @@ function _clearComposerDraft(sid) {
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
+const PROFILE_ACTIVE_SESSIONS_KEY = 'hermes-profile-active-sessions';
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
@@ -200,6 +201,39 @@ function _saveSessionObservedStreaming() {
   } catch (_){
     // Ignore localStorage write failures.
   }
+}
+
+function _profileKey(name) {
+  return String(name || 'default').trim() || 'default';
+}
+
+function _getProfileActiveSessions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PROFILE_ACTIVE_SESSIONS_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    return {};
+  }
+}
+
+function _saveProfileActiveSessions(map) {
+  try {
+    localStorage.setItem(PROFILE_ACTIVE_SESSIONS_KEY, JSON.stringify(map || {}));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function rememberActiveSessionForProfile(profile, sid) {
+  if (!profile || !sid) return;
+  const map = _getProfileActiveSessions();
+  map[_profileKey(profile)] = sid;
+  _saveProfileActiveSessions(map);
+}
+
+function rememberedSessionForProfile(profile) {
+  const map = _getProfileActiveSessions();
+  return map[_profileKey(profile)] || '';
 }
 
 function _rememberObservedStreamingSession(s) {
@@ -456,6 +490,7 @@ async function newSession(flash, options={}){
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+  rememberActiveSessionForProfile(S.session.profile||S.activeProfile||'default', S.session.session_id);
   _setActiveSessionUrl(S.session.session_id);
   _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
   // Sync chat-header dropdown to the session's model so the UI reflects
@@ -566,6 +601,7 @@ async function loadSession(sid){
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   _clearSessionCompletionUnread(S.session.session_id);
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+  rememberActiveSessionForProfile(S.session.profile||S.activeProfile||'default', S.session.session_id);
   _setActiveSessionUrl(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;

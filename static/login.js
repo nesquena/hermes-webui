@@ -5,6 +5,7 @@
 document.addEventListener('DOMContentLoaded', function () {
   var form = document.getElementById('login-form');
   var input = document.getElementById('pw');
+  var passkeyBtn = document.getElementById('passkey-login-btn');
 
   if (!form || !input) return;
 
@@ -19,6 +20,48 @@ document.addEventListener('DOMContentLoaded', function () {
   function hideErr() {
     var err = document.getElementById('err');
     if (err) { err.style.display = 'none'; }
+  }
+
+  function b64urlToBuf(value) {
+    var base64 = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    base64 += '='.repeat((4 - base64.length % 4) % 4);
+    var bin = atob(base64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function bufToB64url(buf) {
+    var bytes = new Uint8Array(buf || []);
+    var bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function publicKeyForGet(options) {
+    options.challenge = b64urlToBuf(options.challenge);
+    if (Array.isArray(options.allowCredentials)) {
+      options.allowCredentials = options.allowCredentials.map(function (cred) {
+        return Object.assign({}, cred, { id: b64urlToBuf(cred.id) });
+      });
+    }
+    return options;
+  }
+
+  function credentialForServer(cred) {
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || undefined,
+      response: {
+        authenticatorData: bufToB64url(cred.response.authenticatorData),
+        clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        signature: bufToB64url(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+      },
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    };
   }
 
   // Return the ?next= redirect path if present and safe, otherwise './'
@@ -59,6 +102,57 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   form.addEventListener('submit', doLogin);
+
+  async function doPasskeyLogin() {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      showErr('This browser does not support passkeys.');
+      return;
+    }
+    hideErr();
+    if (passkeyBtn) passkeyBtn.disabled = true;
+    try {
+      var optsRes = await fetch('api/auth/passkey/login/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: '{}',
+      });
+      var opts = await optsRes.json();
+      if (!optsRes.ok) throw new Error(opts.error || 'Passkey login is not available');
+      var challengeId = opts.challenge_id;
+      delete opts.challenge_id;
+      var cred = await navigator.credentials.get({ publicKey: publicKeyForGet(opts) });
+      var verifyRes = await fetch('api/auth/passkey/login/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ challenge_id: challengeId, credential: credentialForServer(cred) }),
+      });
+      var data = {};
+      try { data = await verifyRes.json(); } catch (_) {}
+      if (verifyRes.ok && data.ok) {
+        window.location.href = _safeNextPath();
+      } else {
+        showErr(data.error || 'Passkey login failed');
+      }
+    } catch (ex) {
+      showErr(ex && ex.message ? ex.message : connFailed);
+    } finally {
+      if (passkeyBtn) passkeyBtn.disabled = false;
+    }
+  }
+
+  if (passkeyBtn) {
+    passkeyBtn.addEventListener('click', doPasskeyLogin);
+    fetch('api/auth/status', { method: 'GET', credentials: 'include', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) {
+        if (s && s.auth_enabled && s.passkeys_enabled && window.PublicKeyCredential) {
+          passkeyBtn.style.display = 'block';
+        }
+      })
+      .catch(function () {});
+  }
 
   input.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') {

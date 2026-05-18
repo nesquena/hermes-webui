@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add optional WebAuthn passkey / FIDO YubiKey login for the existing WebUI auth gate, with authenticated registration from Settings and passwordless sign-in from `/login`.
+- Preserve one active chat per profile so switching profiles restores that profile's last conversation instead of starting a new blank chat.
+
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed

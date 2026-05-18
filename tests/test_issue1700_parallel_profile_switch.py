@@ -44,6 +44,7 @@ def _prepare_profile_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
     monkeypatch.setattr(profiles, "_active_profile", "default")
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "default"}, {"name": "writer"}])
+    profiles._invalidate_root_profile_cache()
     profiles._tls.profile = None
     return profiles
 
@@ -86,10 +87,10 @@ def test_frontend_profile_switch_no_longer_blocks_on_busy_state():
     assert "Profile switches are per-client cookie/TLS scoped" in fn
 
 
-def test_frontend_treats_active_or_pending_session_as_in_progress():
+def test_frontend_remembers_active_session_before_switching_profiles():
     fn = _extract_switch_to_profile()
-    session_block = fn[fn.find("const sessionInProgress") : fn.find("try {", fn.find("const sessionInProgress"))]
 
-    assert "S.session.active_stream_id" in session_block
-    assert "S.session.pending_user_message" in session_block
-    assert "S.messages.length > 0" in session_block
+    assert "rememberActiveSessionForProfile(S.session.profile || _prevProfileName" in fn
+    assert "rememberedSessionForProfile(S.activeProfile || name)" in fn
+    assert "await loadSession(sidToLoad)" in fn
+    assert "await newSession(false)" not in fn

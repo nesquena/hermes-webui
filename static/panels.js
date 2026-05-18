@@ -4728,14 +4728,10 @@ async function switchToProfile(name) {
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
 
-  // Determine whether the current session has any messages.
-  // A session with messages is "in progress" and belongs to the current profile —
-  // we must not retag it.  We'll start a fresh session for the new profile instead.
-  const sessionInProgress = S.session && (
-    (S.messages && S.messages.length > 0) ||
-    S.session.active_stream_id ||
-    S.session.pending_user_message
-  );
+  // Remember the current profile's active chat before changing the profile cookie.
+  if (S.session && S.session.session_id && typeof rememberActiveSessionForProfile === 'function') {
+    rememberActiveSessionForProfile(S.session.profile || _prevProfileName, S.session.session_id);
+  }
 
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
@@ -4764,8 +4760,7 @@ async function switchToProfile(name) {
         : {model:modelToUse,model_provider:null};
       S._pendingProfileModel = modelToUse;
       S._pendingProfileModelProvider = modelState.model_provider||null;
-      // Only patch the in-memory session model if we're NOT about to replace the session
-      if (S.session && !sessionInProgress) {
+      if (S.session && (S.session.profile || 'default') === (data.active || name)) {
         S.session.model = modelToUse;
         S.session.model_provider = modelState.model_provider||null;
       }
@@ -4780,7 +4775,7 @@ async function switchToProfile(name) {
       // session after a profile switch inherits this workspace (#424).
       S._profileSwitchWorkspace = data.default_workspace;
 
-      if (S.session && !sessionInProgress) {
+      if (S.session && (S.session.profile || 'default') === (data.active || name)) {
         // Empty session (no messages yet) — safe to update it in place
         try {
           await api('/api/session/update', { method: 'POST', body: JSON.stringify({
@@ -4797,37 +4792,29 @@ async function switchToProfile(name) {
     // ── Session ────────────────────────────────────────────────────────────
     _showAllProfiles = false;
 
-    if (sessionInProgress) {
-      // The current session has messages and belongs to the previous profile.
-      // Start a new session for the new profile so nothing gets cross-tagged.
-      await newSession(false);
-      // Apply profile default workspace to the newly created session (fixes #424)
-      if (S._profileDefaultWorkspace && S.session) {
-        try {
-          await api('/api/session/update', { method: 'POST', body: JSON.stringify({
-            session_id: S.session.session_id,
-            workspace: S._profileDefaultWorkspace,
-            model: S.session.model,
-            model_provider: S.session.model_provider||null,
-          })});
-          S.session.workspace = S._profileDefaultWorkspace;
-        } catch (_) {}
-      }
-      // Keep topbar chips (workspace/profile) in sync after creating the
-      // new profile-scoped session.
-      syncTopbar();
+    S.session=null;
+    S.messages=[];
+    S.toolCalls=[];
+    S.busy=false;
+    S.activeStreamId=null;
+    setStatus('');
+    setComposerStatus('');
+    renderMessages();
+    syncTopbar();
+    await renderSessionList();
+    const rememberedSid = (typeof rememberedSessionForProfile === 'function')
+      ? rememberedSessionForProfile(S.activeProfile || name)
+      : '';
+    const rememberedExists = rememberedSid && _allSessions.some(s => s && s.session_id === rememberedSid);
+    const fallbackSession = (_allSessions || []).find(s => s && (s.message_count || s.is_streaming || s.active_stream_id || s.pending_user_message));
+    const sidToLoad = rememberedExists ? rememberedSid : (fallbackSession && fallbackSession.session_id);
+    if (sidToLoad) {
+      await loadSession(sidToLoad);
       await renderSessionList();
-      showToast(t('profile_switched_new_conversation', name));
-    } else {
-      // No messages yet — just refresh the list and topbar in place
-      await renderSessionList();
-      syncTopbar();
-      // Refresh workspace file tree so the right panel shows the new
-      // profile's workspace, not the previous one (#1214).
-      if (S.session && S.session.workspace) loadDir('.');
-      showToast(t('profile_switched', name));
+    } else if (S._profileDefaultWorkspace) {
+      loadDir('.');
     }
-
+    showToast(t('profile_switched', name));
     // ── Sidebar panels ─────────────────────────────────────────────────────
     if (_currentPanel === 'skills') await loadSkills();
     if (_currentPanel === 'memory') await loadMemory();
@@ -5649,6 +5636,11 @@ async function loadSettingsPanel(){
     try{
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
+      const passkeyStatus=$('settingsPasskeyStatus');
+      if(passkeyStatus){
+        const count=Number(authStatus.passkey_count||0);
+        passkeyStatus.textContent=count===0?'No passkeys registered.':(count===1?'1 passkey registered.':(count+' passkeys registered.'));
+      }
     }catch(e){}
     // #1560: env-var-locked password also disables the Disable Auth button —
     // clearing settings.password_hash is silent no-op when the env var is set,
@@ -6277,6 +6269,90 @@ function _setSettingsAuthButtonsVisible(active){
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
   const disableBtn=$('btnDisableAuth');
   if(disableBtn) disableBtn.style.display=active?'':'none';
+  const passkeyBlock=$('settingsPasskeyBlock');
+  if(passkeyBlock) passkeyBlock.style.display=active&&window.PublicKeyCredential?'':'none';
+}
+
+function _passkeyB64urlToBuf(value){
+  let base64=String(value||'').replace(/-/g,'+').replace(/_/g,'/');
+  base64+='='.repeat((4-base64.length%4)%4);
+  const bin=atob(base64);
+  const bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function _passkeyBufToB64url(buf){
+  const bytes=new Uint8Array(buf||[]);
+  let bin='';
+  for(let i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/g,'');
+}
+
+function _passkeyCreateOptions(options){
+  options.challenge=_passkeyB64urlToBuf(options.challenge);
+  options.user=Object.assign({},options.user,{id:_passkeyB64urlToBuf(options.user.id)});
+  if(Array.isArray(options.excludeCredentials)){
+    options.excludeCredentials=options.excludeCredentials.map(cred=>Object.assign({},cred,{id:_passkeyB64urlToBuf(cred.id)}));
+  }
+  return options;
+}
+
+function _passkeyCredentialForServer(cred){
+  const response={
+    clientDataJSON:_passkeyBufToB64url(cred.response.clientDataJSON),
+  };
+  if(cred.response.attestationObject) response.attestationObject=_passkeyBufToB64url(cred.response.attestationObject);
+  if(cred.response.authenticatorData) response.authenticatorData=_passkeyBufToB64url(cred.response.authenticatorData);
+  if(cred.response.signature) response.signature=_passkeyBufToB64url(cred.response.signature);
+  if(cred.response.userHandle) response.userHandle=_passkeyBufToB64url(cred.response.userHandle);
+  if(typeof cred.response.getTransports==='function') response.transports=cred.response.getTransports();
+  return {
+    id:cred.id,
+    rawId:_passkeyBufToB64url(cred.rawId),
+    type:cred.type,
+    authenticatorAttachment:cred.authenticatorAttachment||undefined,
+    response,
+    clientExtensionResults:cred.getClientExtensionResults?cred.getClientExtensionResults():{},
+  };
+}
+
+async function refreshPasskeyStatus(){
+  const status=$('settingsPasskeyStatus');
+  if(!status) return;
+  try{
+    const authStatus=await api('/api/auth/status');
+    const count=Number(authStatus.passkey_count||0);
+    status.textContent=count===1?'1 passkey registered.':(count+' passkeys registered.');
+    if(count===0) status.textContent='No passkeys registered.';
+  }catch(e){
+    status.textContent='Could not load passkey status.';
+  }
+}
+
+async function registerPasskey(){
+  const btn=$('btnRegisterPasskey');
+  if(!window.PublicKeyCredential||!navigator.credentials){
+    showToast('This browser does not support passkeys.');
+    return;
+  }
+  if(btn) btn.disabled=true;
+  try{
+    const opts=await api('/api/auth/passkey/register/options',{method:'POST',body:'{}'});
+    const challengeId=opts.challenge_id;
+    delete opts.challenge_id;
+    const cred=await navigator.credentials.create({publicKey:_passkeyCreateOptions(opts)});
+    const saved=await api('/api/auth/passkey/register/verify',{
+      method:'POST',
+      body:JSON.stringify({challenge_id:challengeId,credential:_passkeyCredentialForServer(cred),nickname:'Passkey'}),
+    });
+    showToast(saved&&saved.credential_count===1?'Passkey registered':'Passkey registered');
+    await refreshPasskeyStatus();
+  }catch(e){
+    showToast('Passkey registration failed: '+(e.message||String(e)));
+  }finally{
+    if(btn) btn.disabled=false;
+  }
 }
 
 function _applySavedSettingsUi(saved, body, opts){

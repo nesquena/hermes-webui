@@ -1553,7 +1553,8 @@ function applyBotName(){
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  const savedProfile=(typeof rememberedSessionForProfile==='function')?rememberedSessionForProfile(S.activeProfile||'default'):'';
+  const saved=urlSession||savedProfile||savedLocal;
   if(saved){
     try{
       if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){

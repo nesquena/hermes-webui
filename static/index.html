@@ -38,7 +38,7 @@
       var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
       var url=new URL(raw,document.baseURI||location.href);
       if(url.origin!==location.origin)return false;
-      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+      return !/\/api\/(auth\/login|csp-report|auth\/passkey\/login\/options|auth\/passkey\/login\/verify)$/.test(url.pathname);
     }catch(_){return false;}
   }
   window.fetch=function(input,init){
@@ -1207,6 +1207,11 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field" id="settingsPasskeyBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Passkeys / YubiKey</label>
+              <div id="settingsPasskeyStatus" style="font-size:11px;color:var(--muted);margin-bottom:8px">No passkeys registered.</div>
+              <button class="sm-btn" id="btnRegisterPasskey" onclick="registerPasskey()" style="width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3)">Add passkey or YubiKey</button>
+            </div>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsDashboardMode">Official Hermes Dashboard</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Overrides are restricted to loopback URLs.</div>

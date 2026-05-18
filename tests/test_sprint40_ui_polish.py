@@ -18,9 +18,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 REPO_ROOT  = _REPO_ROOT
-STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text()
-SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text()
-PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text()
+STYLE_CSS  = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+PANELS_JS   = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
 try:
     from api import config as _api_config
@@ -95,7 +95,7 @@ class TestGatewaySessionNullModel(unittest.TestCase):
         """api/models.py must not use `or 'unknown'` for the model field
         so that a NULL model in state.db is returned as None (falsy) to
         the frontend rather than the truthy string 'unknown'."""
-        models_src = (REPO_ROOT / "api" / "models.py").read_text()
+        models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
         # Ensure the old fallback pattern is gone
         self.assertNotIn(
             "'model': row['model'] or 'unknown'",
@@ -107,7 +107,7 @@ class TestGatewaySessionNullModel(unittest.TestCase):
     def test_gateway_watcher_null_model_returns_none_not_unknown(self):
         """api/gateway_watcher.py must not use `or 'unknown'` for the model
         field so that a NULL model in state.db is returned as None (falsy)."""
-        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
+        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text(encoding="utf-8")
         self.assertNotIn(
             "'model': row['model'] or 'unknown'",
             gw_src,
@@ -118,8 +118,8 @@ class TestGatewaySessionNullModel(unittest.TestCase):
     def test_gateway_session_model_uses_none_fallback(self):
         """Both source files must use `row['model'] or None` (explicit None
         fallback) for the model field assignment."""
-        models_src = (REPO_ROOT / "api" / "models.py").read_text()
-        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
+        models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
+        gw_src = (REPO_ROOT / "api" / "gateway_watcher.py").read_text(encoding="utf-8")
         self.assertIn(
             "'model': row['model'] or None,",
             models_src,
@@ -199,61 +199,44 @@ class TestCustomEndpointModelStripping:
 
 # ── #455 workspace chip ─────────────────────────────────────────────
 class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
-    """Verify that switchToProfile() applies the profile default workspace
-    to the new session when a conversation is in progress (fixes #424)."""
+    """Verify that switchToProfile() preserves per-profile chat state."""
 
-    def test_topbar_synced_after_profile_switch(self):
-        """After await newSession(false) in the sessionInProgress branch,
-        the code must call syncTopbar() so the profile/workspace chips reflect
-        the new profile's default workspace."""
-        # Find the sessionInProgress block
-        idx = PANELS_JS.find('if (sessionInProgress)')
-        self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
-
-        # Slice from that point to cover the relevant block
-        block = PANELS_JS[idx:idx + 1000]
-
-        # newSession(false) must be called first
-        self.assertIn('await newSession(false)', block,
-                      "sessionInProgress branch must call await newSession(false)")
-
-        # The fix: syncTopbar() must be called after newSession(false)
-        pos_new_session = block.find('await newSession(false)')
-        pos_sync_topbar = block.find('syncTopbar()')
-        self.assertGreater(pos_sync_topbar, -1,
-                           "syncTopbar() must be called in the sessionInProgress branch")
-        self.assertGreater(pos_sync_topbar, pos_new_session,
-                           "syncTopbar() must be called AFTER newSession(false)")
-
-    def test_profile_default_workspace_applied_to_new_session(self):
-        """After newSession(false) the code must assign S._profileDefaultWorkspace
-        to S.session.workspace so the session is correctly tagged."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+    def test_active_session_remembered_before_profile_switch(self):
+        idx = PANELS_JS.find('async function switchToProfile')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 1600]
 
-        # The fix block must set S.session.workspace from S._profileDefaultWorkspace
-        self.assertIn('S.session.workspace = S._profileDefaultWorkspace', block,
-                      "S.session.workspace must be set from S._profileDefaultWorkspace "
-                      "in the sessionInProgress branch after newSession(false)")
+        self.assertIn('rememberActiveSessionForProfile(S.session.profile || _prevProfileName', block)
 
-    def test_api_session_update_called_for_new_session_workspace(self):
-        """The fix must call /api/session/update to persist the workspace on the server."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+    def test_profile_switch_restores_target_profile_session(self):
+        idx = PANELS_JS.find('async function switchToProfile')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 5600]
 
-        # Must patch the session on the backend too
-        self.assertIn('/api/session/update', block,
-                      "The sessionInProgress branch must call /api/session/update "
-                      "to persist the new workspace after newSession(false)")
+        self.assertIn('rememberedSessionForProfile(S.activeProfile || name)', block)
+        self.assertIn('await loadSession(sidToLoad)', block)
+
+    def test_profile_switch_does_not_create_new_session_for_existing_chat(self):
+        idx = PANELS_JS.find('async function switchToProfile')
+        self.assertGreater(idx, -1)
+        block = PANELS_JS[idx:idx + 5600]
+
+        self.assertNotIn('await newSession(false)', block)
+
+    def test_boot_prefers_profile_specific_saved_session(self):
+        boot_js = (REPO_ROOT / 'static' / 'boot.js').read_text(encoding='utf-8')
+        self.assertIn('rememberedSessionForProfile(S.activeProfile', boot_js)
+
+    def test_profile_active_session_helpers_exist(self):
+        sessions_js = (REPO_ROOT / 'static' / 'sessions.js').read_text(encoding='utf-8')
+        self.assertIn('PROFILE_ACTIVE_SESSIONS_KEY', sessions_js)
+        self.assertIn('function rememberActiveSessionForProfile', sessions_js)
+        self.assertIn('function rememberedSessionForProfile', sessions_js)
 
     def test_sync_topbar_before_render_session_list(self):
-        """syncTopbar() should be called before renderSessionList()
-        so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        idx = PANELS_JS.find('async function switchToProfile')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        block = PANELS_JS[idx:idx + 5600]
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')
