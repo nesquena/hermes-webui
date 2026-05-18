@@ -238,6 +238,7 @@
     const unavailable = status && status.unavailable === true;
     const activeRuns = safeNonNegativeCount(status && status.active_run_count);
     const recentEvents = safeNonNegativeCount(status && status.recent_event_count);
+    const familyCounts = safeProgressFamilyCounts(status && status.recent_family_counts);
     const supportedTypes = safeProgressEventTypes(status && (status.recent_event_types || status.supported_event_types));
     const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
     const summary = unavailable
@@ -248,6 +249,7 @@
       '<div class="capy-spaces-progress-events-stats">' +
       '<span>'+escapeHtml(String(activeRuns))+' active '+escapeHtml(activeRuns === 1 ? 'run' : 'runs')+'</span>' +
       '<span>'+escapeHtml(String(recentEvents))+' recent '+escapeHtml(recentEvents === 1 ? 'event' : 'events')+'</span>' +
+      familyCounts.map(function(item){ return '<span>'+escapeHtml(item.family)+' '+escapeHtml(String(item.count))+'</span>'; }).join('') +
       supportedTypes.map(function(type){ return '<span>'+escapeHtml(type)+'</span>'; }).join('') +
       '<span>'+escapeHtml(redactionStatus)+'</span>' +
       '</div>' +
@@ -280,6 +282,14 @@
       if (allowed[label] && labels.indexOf(label) === -1) labels.push(label);
     });
     return (labels.length ? labels : ['run.started', 'tool.started', 'tool.completed']).slice(0, 6);
+  }
+
+  function safeProgressFamilyCounts(counts){
+    const allowed = ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
+    const source = counts && typeof counts === 'object' && !Array.isArray(counts) ? counts : {};
+    return allowed.map(function(family){
+      return { family: family, count: safeNonNegativeCount(source[family]) };
+    }).filter(function(item){ return item.count > 0; }).slice(0, 6);
   }
 
   function safeProgressRedactionStatus(value){

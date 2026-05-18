@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-17 05:16 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-18 04:50 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Spaces package import/export Space-tool aliases now reject ambient current-space selectors on non-current package actions before package import/export side effects, while preserving `space.current.*` export behavior and metadata-only package receipts. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy structured progress status now returns metadata-only recent event family counts and the product-home Progress events card renders safe family-count chips (`run`, `tool`, `subagent`, `memory.ingest`, `space.visual_qa`) without exposing hostile progress payload fields. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 

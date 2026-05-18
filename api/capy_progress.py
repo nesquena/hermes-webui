@@ -162,6 +162,16 @@ def _recent_event_types(events: list[dict[str, Any]]) -> list[str]:
     return labels
 
 
+def _recent_family_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        family = event.get("family") or _event_family(str(event.get("event_type") or ""))
+        if family not in _EVENT_FAMILIES:
+            continue
+        counts[family] = counts.get(family, 0) + 1
+    return {family: counts[family] for family in _EVENT_FAMILIES if counts.get(family)}
+
+
 def progress_status() -> dict[str, Any]:
     """Return local-only progress event capability/status metadata."""
     events = _read_events()
@@ -174,6 +184,7 @@ def progress_status() -> dict[str, Any]:
         "active_run_count": _active_run_count(events),
         "recent_event_count": len(events),
         "recent_event_types": _recent_event_types(events),
+        "recent_family_counts": _recent_family_counts(events),
         "last_event_at": last_event_at,
         "event_families": list(_EVENT_FAMILIES),
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),

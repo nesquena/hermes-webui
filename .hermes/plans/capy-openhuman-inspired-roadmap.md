@@ -91,10 +91,13 @@ Make trust decisions product-visible:
 
 ### Phase 6 — Structured progress events
 
+Status: **active / product-home surfacing in progress**.
+
 Expose agent/subagent/tool progress as structured UI events:
 - Bounded event stream for long-running creator/research/development tasks.
 - Progress cards in Spaces and WebUI.
 - Durable enough for post-run reports; redacted enough for browser display.
+- Recent progress family counts are surfaced as metadata-only product-home chips so users can distinguish run/tool/subagent/memory-ingest/visual-QA activity without raw payloads.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
 

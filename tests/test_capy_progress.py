@@ -116,6 +116,7 @@ def test_record_progress_event_updates_status_counts_without_persisting_payload(
     assert status["active_run_count"] == 1
     assert status["recent_event_count"] == 2
     assert status["recent_event_types"] == ["run.started", "tool.completed"]
+    assert status["recent_family_counts"] == {"run": 1, "tool": 1}
     assert status["redaction_status"] == "metadata_only"
     assert "renderer" not in serialized
     assert "<script" not in serialized
@@ -151,11 +152,32 @@ def test_progress_status_resanitizes_persisted_metadata(monkeypatch, tmp_path):
 
     assert status["recent_event_count"] == 1
     assert status["recent_event_types"] == ["tool.failed"]
+    assert status["recent_family_counts"] == {"tool": 1}
     assert status["last_event_at"] == ""
     assert "<script" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "renderer" not in serialized
     assert "raw prompt" not in serialized
+
+
+def test_progress_status_bounds_recent_family_counts_and_omits_empty_families(monkeypatch, tmp_path):
+    log_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+    rows = []
+    rows.extend({"event_type": "tool.completed", "created_at": "2026-05-18T00:00:00Z", "run_id": "sprint-1"} for _ in range(5))
+    rows.extend({"event_type": "memory.ingest.completed", "created_at": "2026-05-18T00:00:01Z", "run_id": "sprint-1"} for _ in range(2))
+    rows.append({"event_type": "space.visual_qa.completed", "created_at": "2026-05-18T00:00:02Z", "run_id": "qa-1"})
+    rows.append({"event_type": "renderer.source", "created_at": "2026-05-18T00:00:03Z", "run_id": "SECRET_VALUE_DO_NOT_LEAK"})
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    status = progress_status()
+    serialized = json.dumps(status, sort_keys=True).lower()
+
+    assert status["recent_family_counts"] == {"tool": 5, "memory.ingest": 2, "space.visual_qa": 1}
+    assert "run" not in status["recent_family_counts"]
+    assert "subagent" not in status["recent_family_counts"]
+    assert "renderer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_capy_progress_event_route_records_camelcase_event_metadata_only(monkeypatch, tmp_path):
