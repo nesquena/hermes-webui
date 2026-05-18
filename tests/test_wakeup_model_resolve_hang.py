@@ -1,7 +1,7 @@
 """Regression tests — wakeup-turn model-resolve hang (t_46fadfbc).
 
-Proven root cause (live thread-stack, /home/islaliu/.hermes/webui/
-bootstrap-8787.log "Slow WebUI request still running"):
+Proven root cause (from a live thread-stack capture of a hung wakeup
+turn, "Slow WebUI request still running"):
 
     _handle_chat_start → _resolve_compatible_session_model_state
       → get_available_models → _build_available_models_uncached
