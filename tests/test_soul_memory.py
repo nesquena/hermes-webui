@@ -97,3 +97,47 @@ def test_memory_write_invalid_section_still_rejected():
     """Invalid sections should still be rejected even with soul added."""
     data, status = post("/api/memory/write", {"section": "invalid", "content": "test"})
     assert status == 400
+
+
+# ── i18n parity ────────────────────────────────────────────────────
+
+REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
+
+
+def test_agent_soul_i18n_key_present_in_all_locales():
+    """`agent_soul` and `no_soul_yet` keys must be defined for every locale block.
+
+    Quoting these correctly across all 11 locales matters: an unescaped
+    apostrophe inside a single-quoted string ('l'agent') breaks JS parsing of
+    the entire module, which silently disables i18n for every language. The
+    PR's initial commit failed CI for exactly this reason (it / fr).
+    """
+    i18n = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    # i18n.js currently exposes 11 locales (en, it, ja, ru, es, de, zh-CN,
+    # zh-TW, pt, ko, fr). Lock that both new keys are present at least 10
+    # times — that's enough to catch a missing locale without coupling the
+    # test to the exact locale count, which shifts as new ones land.
+    assert i18n.count("agent_soul:") >= 10, (
+        "agent_soul i18n key should be defined in all locale blocks; "
+        f"found {i18n.count('agent_soul:')} occurrences."
+    )
+    assert i18n.count("no_soul_yet:") >= 10, (
+        "no_soul_yet i18n key should be defined in all locale blocks; "
+        f"found {i18n.count('no_soul_yet:')} occurrences."
+    )
+
+
+def test_sparkles_icon_is_defined():
+    """The Memory panel's soul section uses iconKey='sparkles'.
+
+    If the icon is missing from `static/icons.js`, `li('sparkles', 16)` emits
+    a console warning and returns an empty string — the section heading then
+    renders without an icon, which looks broken next to the memory/user
+    sections that do show one.
+    """
+    icons = (REPO_ROOT / "static" / "icons.js").read_text(encoding="utf-8")
+    assert "'sparkles':" in icons, (
+        "The Memory panel's soul section references iconKey='sparkles' "
+        "(static/panels.js MEMORY_SECTIONS); the corresponding entry must "
+        "exist in static/icons.js LI_PATHS."
+    )
