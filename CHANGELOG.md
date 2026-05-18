@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add an opt-in gateway-backed WebUI chat mode behind `HERMES_WEBUI_CHAT_BACKEND=gateway`, letting browser chat delegate model/tool execution to the Hermes Gateway/API Server while preserving the existing direct WebUI path as the default.
+
 ## [v0.51.90] — 2026-05-18 — Release BN (stage-383 — 10-PR full sweep batch — empty-gateway messaging history fix + previous-messaging-sessions setting + Kanban board switcher layout + UI/UX demo theme controls + Slice 3c queue/goal RFC gate + keyless custom endpoints + custom-provider remote model catalog parity + auto-compression elapsed timer + new-conversation cold-start guard + Kanban drag-drop detail open fix)
 
 ### Fixed

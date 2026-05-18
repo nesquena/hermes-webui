@@ -122,6 +122,13 @@ Environment variables controlling behavior:
     HERMES_WEBUI_DEFAULT_MODEL     Optional model override; unset means provider default
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)
     HERMES_WEBUI_SKIP_ONBOARDING   Optional: bypass the first-run onboarding wizard
+    HERMES_WEBUI_CHAT_BACKEND      Optional: set to `gateway` to delegate chat execution
+                                   through Hermes Gateway/API Server instead of the
+                                   direct in-process WebUI agent path
+    HERMES_WEBUI_GATEWAY_BASE_URL  Gateway/API Server base URL for gateway chat mode
+                                   (default: http://127.0.0.1:8642)
+    HERMES_WEBUI_GATEWAY_API_KEY   Optional bearer key for gateway chat mode; falls
+                                   back to API_SERVER_KEY when unset
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
 
 Test isolation environment variables (set by conftest.py):

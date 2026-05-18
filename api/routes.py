@@ -20,6 +20,8 @@ import threading
 import time
 import uuid
 import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs
@@ -69,6 +71,26 @@ _CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
 _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
+
+
+def _webui_gateway_chat_enabled() -> bool:
+    """Return true when browser chat should delegate turns to Hermes Gateway.
+
+    This is intentionally opt-in.  The default WebUI path still runs its direct
+    AIAgent worker; operators can set HERMES_WEBUI_CHAT_BACKEND=gateway to
+    exercise gateway-backed parity without changing upstream defaults or the
+    browser bundle.
+    """
+    value = str(os.environ.get("HERMES_WEBUI_CHAT_BACKEND") or "").strip().lower()
+    return value in {"gateway", "api_server", "api-server"}
+
+
+def _webui_gateway_base_url() -> str:
+    return str(os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL") or "http://127.0.0.1:8642").rstrip("/")
+
+
+def _webui_gateway_api_key() -> str:
+    return str(os.environ.get("HERMES_WEBUI_GATEWAY_API_KEY") or os.environ.get("API_SERVER_KEY") or "").strip()
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -908,8 +930,12 @@ from api.config import (
     STREAMS,
     STREAMS_LOCK,
     CANCEL_FLAGS,
+    STREAM_PARTIAL_TEXT,
     STREAM_LAST_EVENT_ID,
     SERVER_START_TIME,
+    register_active_run,
+    update_active_run,
+    unregister_active_run,
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
@@ -7798,6 +7824,257 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _gateway_messages_for_webui_session(s, msg: str, workspace: str) -> list[dict]:
+    """Build an OpenAI-compatible message list for the gateway API server."""
+    system = (
+        "This request originated from Hermes WebUI browser chat but is being "
+        "routed through the Hermes gateway/API server for behavior parity with "
+        "messaging platforms. Treat it as a normal Hermes conversation. "
+        f"Active WebUI workspace: {workspace}."
+    )
+    messages = [{"role": "system", "content": system}]
+    for entry in list(getattr(s, "messages", None) or [])[-40:]:
+        if not isinstance(entry, dict):
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = entry.get("content", "")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text") or part.get("content")
+                    if text:
+                        parts.append(str(text))
+                elif part:
+                    parts.append(str(part))
+            content = "\n".join(parts)
+        else:
+            content = str(content or "")
+        if content.strip():
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": msg})
+    return messages
+
+
+def _run_gateway_chat_streaming(session_id: str, msg: str, model: str, workspace: str, stream_id: str, attachments=None, model_provider=None, goal_related=False):
+    """Proxy a WebUI chat turn through Hermes Gateway API Server."""
+    stream = STREAMS.get(stream_id)
+    if stream is None:
+        return
+    cancel_event = threading.Event()
+    with STREAMS_LOCK:
+        CANCEL_FLAGS[stream_id] = cancel_event
+        STREAM_PARTIAL_TEXT[stream_id] = ""
+
+    def put(event, data):
+        if cancel_event.is_set() and event not in ("cancel", "error"):
+            return
+        try:
+            stream.put_nowait((event, data))
+        except Exception:
+            logger.debug("Failed to put gateway-backed event to queue", exc_info=True)
+
+    def clear_pending_state():
+        try:
+            sess = get_session(session_id)
+            sess.active_stream_id = None
+            sess.pending_user_message = None
+            sess.pending_attachments = []
+            sess.pending_started_at = None
+            sess.save()
+        except Exception:
+            pass
+
+    try:
+        update_active_run(stream_id, phase="gateway_running", session_id=session_id)
+        s = get_session(session_id)
+        started_at = getattr(s, "pending_started_at", None) or time.time()
+        payload = {
+            "model": "hermes-agent",
+            "stream": True,
+            "messages": _gateway_messages_for_webui_session(s, msg, workspace),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "Hermes-WebUI-Gateway-Bridge",
+        }
+        api_key = _webui_gateway_api_key()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["X-Hermes-Session-Id"] = session_id
+            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        url = f"{_webui_gateway_base_url()}/v1/chat/completions"
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        assistant_parts: list[str] = []
+        usage = {"input_tokens": 0, "output_tokens": 0, "gateway_backend": "api_server"}
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            event_name = "message"
+            data_lines: list[str] = []
+
+            def flush_event():
+                nonlocal event_name, data_lines, usage
+                if not data_lines:
+                    event_name = "message"
+                    return
+                raw = "\n".join(data_lines).strip()
+                data_lines = []
+                current_event = event_name
+                event_name = "message"
+                if not raw or raw == "[DONE]":
+                    return
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    return
+                if current_event == "hermes.tool.progress":
+                    status = str(data.get("status") or "").lower()
+                    tool_name = str(data.get("tool") or "")
+                    if status == "running":
+                        put("tool", {
+                            "name": tool_name,
+                            "label": data.get("label") or tool_name,
+                            "emoji": data.get("emoji") or "🔧",
+                            "args": {},
+                            "done": False,
+                        })
+                    elif status == "completed":
+                        put("tool", {"name": tool_name, "done": True})
+                    return
+                choices = data.get("choices") or []
+                if choices:
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content")
+                    if text:
+                        text = str(text)
+                        assistant_parts.append(text)
+                        STREAM_PARTIAL_TEXT[stream_id] = STREAM_PARTIAL_TEXT.get(stream_id, "") + text
+                        put("token", {"text": text})
+                raw_usage = data.get("usage")
+                if isinstance(raw_usage, dict):
+                    usage["input_tokens"] = int(raw_usage.get("prompt_tokens") or raw_usage.get("input_tokens") or 0)
+                    usage["output_tokens"] = int(raw_usage.get("completion_tokens") or raw_usage.get("output_tokens") or 0)
+
+            for raw_line in resp:
+                if cancel_event.is_set():
+                    put("cancel", {"message": "Cancelled by user"})
+                    return
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line == "":
+                    flush_event()
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line.split(":", 1)[1].strip() or "message"
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].lstrip())
+            flush_event()
+        assistant_text = "".join(assistant_parts).strip()
+        with _get_session_agent_lock(session_id):
+            s = get_session(session_id)
+            existing = list(getattr(s, "messages", None) or [])
+            if not existing or not (isinstance(existing[-1], dict) and existing[-1].get("role") == "user" and str(existing[-1].get("content") or "").strip() == msg.strip()):
+                user_msg = {"role": "user", "content": msg, "timestamp": int(started_at)}
+                if attachments:
+                    user_msg["attachments"] = list(attachments)
+                s.messages.append(user_msg)
+            if assistant_text:
+                s.messages.append({"role": "assistant", "content": assistant_text, "timestamp": int(time.time())})
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.gateway_routing = {"backend": "hermes_gateway_api_server", "base_url": _webui_gateway_base_url()}
+            try:
+                if usage.get("input_tokens"):
+                    s.input_tokens = int(usage.get("input_tokens") or 0)
+                if usage.get("output_tokens"):
+                    s.output_tokens = int(usage.get("output_tokens") or 0)
+            except Exception:
+                pass
+            s.save()
+            raw_session = s.compact() | {"messages": s.messages, "tool_calls": getattr(s, "tool_calls", [])}
+        put("done", {"session": redact_session_data(raw_session), "usage": usage})
+        put("stream_end", {"session_id": session_id})
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        except Exception:
+            detail = str(exc)
+        put("error", {"error": f"Gateway API returned HTTP {exc.code}: {detail}", "session_id": session_id})
+        clear_pending_state()
+    except Exception as exc:
+        put("error", {"error": f"Gateway-backed chat failed: {_sanitize_error(exc)}", "session_id": session_id})
+        clear_pending_state()
+    finally:
+        unregister_active_run(stream_id)
+        with STREAMS_LOCK:
+            CANCEL_FLAGS.pop(stream_id, None)
+
+
+def _start_gateway_chat_stream_for_session(
+    s,
+    *,
+    msg: str,
+    attachments=None,
+    workspace: str,
+    model: str,
+    model_provider=None,
+    normalized_model: bool = False,
+    diag=None,
+    goal_related: bool = False,
+):
+    """Register a WebUI stream and run the turn via Hermes Gateway API."""
+    attachments = attachments or []
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            return {"error": "session already has an active stream", "active_stream_id": current_stream_id, "_status": 409}
+        _clear_stale_stream_state(s)
+    stream_id = uuid.uuid4().hex
+    with _get_session_agent_lock(s.session_id):
+        _prepare_chat_start_session_for_stream(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            stream_id=stream_id,
+        )
+    set_last_workspace(workspace)
+    stream = create_stream_channel()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+    register_active_run(stream_id, session_id=s.session_id, phase="gateway_queued", backend="gateway")
+    thr = threading.Thread(
+        target=_run_gateway_chat_streaming,
+        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        kwargs={"model_provider": model_provider, "goal_related": goal_related},
+        daemon=True,
+    )
+    thr.start()
+    response = {
+        "stream_id": stream_id,
+        "session_id": s.session_id,
+        "pending_started_at": s.pending_started_at,
+        "title": s.title,
+        "chat_backend": "gateway",
+    }
+    if normalized_model:
+        response["effective_model"] = model
+    if model_provider:
+        response["effective_model_provider"] = model_provider
+    return response
+
+
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
     try:
@@ -8010,6 +8287,17 @@ def _handle_chat_start(handler, body, diag=None):
             response = dict(result.payload)
             response.setdefault("stream_id", result.stream_id)
             response.setdefault("session_id", result.session_id)
+        elif _webui_gateway_chat_enabled():
+            response = _start_gateway_chat_stream_for_session(
+                s,
+                msg=msg,
+                attachments=attachments,
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                diag=diag,
+            )
         else:
             response = _start_chat_stream_for_session(
                 s,
