@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2534** by @Michaelyklam (closes #2508) — Add per-message pinning inside WebUI conversations. Message footers now include a pin toggle and transcript rows expose a right-click pin/unpin action; up to three pinned message previews persist on the session and render in the workspace side panel with click-to-jump and inline unpin controls.
 
 ## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
 

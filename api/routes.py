@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import hashlib
 import io
 import json
 import logging
@@ -1949,6 +1950,43 @@ def _messages_include_tool_metadata(messages) -> bool:
         ):
             return True
     return False
+
+
+def _message_pin_text(message: dict) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"text", "thinking", "reasoning"}:
+                parts.append(str(part.get("text") or part.get("content") or part.get("thinking") or part.get("reasoning") or ""))
+        content = "\n".join(parts)
+    elif not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    return " ".join(str(content or "").split())
+
+
+def _message_pin_key(message: dict, index: int) -> str:
+    role = str(message.get("role") or "") if isinstance(message, dict) else ""
+    ts = str(message.get("timestamp") or message.get("_ts") or "") if isinstance(message, dict) else ""
+    text = _message_pin_text(message)
+    digest = hashlib.sha256(f"{role}\0{ts}\0{text}".encode("utf-8")).hexdigest()[:16]
+    return f"msg:{index}:{role}:{digest}"
+
+
+def _build_message_pin(message: dict, index: int, *, pinned_at=None) -> dict:
+    text = _message_pin_text(message)
+    role = str(message.get("role") or "message") if isinstance(message, dict) else "message"
+    return {
+        "message_index": int(index),
+        "message_key": _message_pin_key(message, index),
+        "role": role,
+        "preview": text[:220],
+        "pinned_at": pinned_at or time.time(),
+    }
 
 
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
@@ -5503,6 +5541,38 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, probe_provider_endpoint(provider, base_url, api_key))
         except Exception as e:
             return bad(handler, f"probe failed: {e}", 500)
+
+    # ── Message pin (POST) ──
+    if parsed.path == "/api/session/message-pin":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        try:
+            s = get_session(sid)
+            s = _ensure_full_session_before_mutation(sid, s)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        try:
+            message_index = int(body.get("message_index"))
+        except (TypeError, ValueError):
+            return bad(handler, "message_index is required", 400)
+        with _get_session_agent_lock(sid):
+            messages = list(getattr(s, "messages", []) or [])
+            if message_index < 0 or message_index >= len(messages):
+                return bad(handler, "Message not found", 404)
+            current_pin = _build_message_pin(messages[message_index], message_index)
+            message_key = str(body.get("message_key") or current_pin["message_key"])
+            existing = [p for p in (getattr(s, "pinned_messages", []) or []) if isinstance(p, dict)]
+            existing = [p for p in existing if str(p.get("message_key") or "") != message_key and int(p.get("message_index") or -1) != message_index]
+            if bool(body.get("pinned", True)):
+                if len(existing) >= 3:
+                    return bad(handler, "Up to 3 messages can be pinned", 400)
+                existing.append(current_pin)
+            s.pinned_messages = existing[-3:]
+            s.save(touch_updated_at=False)
+        return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":

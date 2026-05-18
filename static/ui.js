@@ -3784,6 +3784,92 @@ function copyMsg(btn){
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
+function _messagePins(){
+  return (S.session&&Array.isArray(S.session.pinned_messages))?S.session.pinned_messages:[];
+}
+function _messagePinKeyFor(rawIdx,m){
+  const absIdx=(typeof _oldestIdx==='number'?_oldestIdx:0)+Number(rawIdx||0);
+  const role=String((m&&m.role)||'');
+  const ts=String((m&&(m.timestamp||m._ts))||'');
+  const text=String(msgContent(m)||'').trim().replace(/\s+/g,' ');
+  let hash=0;
+  const seed=role+'\u0000'+ts+'\u0000'+text;
+  for(let i=0;i<seed.length;i++){hash=((hash<<5)-hash+seed.charCodeAt(i))|0;}
+  return {message_index:absIdx,message_key:'msg:'+absIdx+':'+role+':'+Math.abs(hash).toString(16)};
+}
+function _isMessagePinned(rawIdx,m){
+  const key=_messagePinKeyFor(rawIdx,m);
+  return _messagePins().some(p=>String(p.message_key||'')===key.message_key||Number(p.message_index)===key.message_index);
+}
+function _pinnedMessageButtonHtml(rawIdx,m){
+  const key=_messagePinKeyFor(rawIdx,m);
+  const pinned=_isMessagePinned(rawIdx,m);
+  return `<button class="msg-action-btn msg-pin-btn${pinned?' active':''}" data-message-index="${key.message_index}" data-message-key="${esc(key.message_key)}" title="${pinned?'Unpin message':'Pin message'}" aria-pressed="${pinned?'true':'false'}" onclick="toggleMessagePin(this);event.stopPropagation()">${li('pin',13)}</button>`;
+}
+async function toggleMessagePin(btn, forcePinned){
+  if(!S.session||!btn)return;
+  const idx=Number(btn.getAttribute('data-message-index'));
+  const key=btn.getAttribute('data-message-key')||'';
+  const pinnedNow=btn.classList.contains('active');
+  const next=(forcePinned===undefined)?!pinnedNow:!!forcePinned;
+  try{
+    const data=await api('/api/session/message-pin',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,message_index:idx,message_key:key,pinned:next})});
+    if(data&&data.session){
+      S.session={...S.session,...data.session};
+      clearMessageRenderCache();
+      renderPinnedMessages();
+      renderMessages({preserveScroll:true});
+      showToast(next?'Message pinned':'Message unpinned',1800);
+    }
+  }catch(e){showToast((e&&e.message)||'Message pin failed',3000,'error');}
+}
+function _pinPreviewHtml(pin){
+  const preview=String(pin&&pin.preview||'').trim()||'(empty message)';
+  const role=String(pin&&pin.role||'message');
+  return `<button class="pinned-message-card" type="button" data-message-index="${Number(pin.message_index)}" onclick="jumpToPinnedMessage(this)"><span class="pinned-message-role">${esc(role)}</span><span class="pinned-message-preview">${esc(preview)}</span><span class="pinned-message-unpin" onclick="unpinPinnedMessage(event,this)">${li('x',12)}</span></button>`;
+}
+function renderPinnedMessages(){
+  const box=$('pinnedMessagesPanel');
+  if(!box)return;
+  const pins=_messagePins();
+  if(!S.session||!pins.length){box.hidden=true;box.innerHTML='';return;}
+  box.hidden=false;
+  box.innerHTML=`<div class="pinned-messages-head"><span>${li('pin',12)} Pinned messages</span><span>${pins.length}/3</span></div><div class="pinned-messages-list">${pins.map(_pinPreviewHtml).join('')}</div>`;
+}
+function jumpToPinnedMessage(btn){
+  const idx=Number(btn&&btn.getAttribute('data-message-index'));
+  const target=document.querySelector(`[data-full-msg-idx="${idx}"]`);
+  if(target){target.scrollIntoView({block:'center',behavior:'smooth'});target.classList.add('pin-jump-highlight');setTimeout(()=>target.classList.remove('pin-jump-highlight'),1400);return;}
+  showToast('Pinned message is outside the loaded transcript window. Load earlier messages to jump to it.',3000);
+}
+function unpinPinnedMessage(event,el){
+  if(event)event.stopPropagation();
+  const card=el&&el.closest('.pinned-message-card');
+  if(!card||!S.session)return;
+  const idx=Number(card.getAttribute('data-message-index'));
+  api('/api/session/message-pin',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,message_index:idx,pinned:false})}).then(data=>{
+    if(data&&data.session){S.session={...S.session,...data.session};clearMessageRenderCache();renderPinnedMessages();renderMessages({preserveScroll:true});}
+  }).catch(e=>showToast((e&&e.message)||'Unpin failed',3000,'error'));
+}
+let _messagePinMenu=null;
+function openMessagePinMenu(ev,btn){
+  if(!ev||!btn)return;
+  ev.preventDefault();ev.stopPropagation();
+  closeMessagePinMenu();
+  const pinned=btn.classList.contains('active');
+  const menu=document.createElement('div');
+  menu.className='message-pin-menu session-action-menu open';
+  menu.innerHTML=`<button class="session-action-opt" type="button"><span class="ws-opt-action"><span class="ws-opt-icon">${li('pin',14)}</span><span><span class="ws-opt-title">${pinned?'Unpin message':'Pin message'}</span><span class="ws-opt-desc">Show up to 3 pinned messages in the right panel</span></span></span></button>`;
+  menu.querySelector('button').onclick=()=>{closeMessagePinMenu();toggleMessagePin(btn);};
+  document.body.appendChild(menu);
+  const menuW=Math.min(280,Math.max(220,menu.scrollWidth||220));
+  let left=Math.min(ev.clientX,window.innerWidth-menuW-8);if(left<8)left=8;
+  let top=Math.min(ev.clientY,window.innerHeight-(menu.offsetHeight||80)-8);if(top<8)top=8;
+  menu.style.left=left+'px';menu.style.top=top+'px';
+  _messagePinMenu=menu;
+  setTimeout(()=>document.addEventListener('click',closeMessagePinMenu,{once:true}),0);
+}
+function closeMessagePinMenu(){if(_messagePinMenu){_messagePinMenu.remove();_messagePinMenu=null;}}
 function _copyThinkingText(btn){
   const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
   if(!card)return;
@@ -5622,6 +5708,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      renderPinnedMessages();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -5817,6 +5904,7 @@ function renderMessages(options){
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
+    const pinBtn   = _pinnedMessageButtonHtml(rawIdx,m);
     const forkBtn  = `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
@@ -5829,7 +5917,7 @@ function renderMessages(options){
     const questionJumpBtn = (!isUser&&!m._live&&isTurnFinalAssistant)
       ? _questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${pinBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
@@ -5851,8 +5939,10 @@ function renderMessages(options){
       row.className='msg-row';
       row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
+      row.dataset.fullMsgIdx=(typeof _oldestIdx==='number'?_oldestIdx:0)+rawIdx;
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
+      row.oncontextmenu=(ev)=>openMessagePinMenu(ev,row.querySelector('.msg-pin-btn'));
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
@@ -5866,7 +5956,9 @@ function renderMessages(options){
     const seg=document.createElement('div');
     seg.className='assistant-segment';
     seg.dataset.msgIdx=rawIdx;
+    seg.dataset.fullMsgIdx=(typeof _oldestIdx==='number'?_oldestIdx:0)+rawIdx;
     seg.dataset.rawText=String(content).trim();
+    seg.oncontextmenu=(ev)=>openMessagePinMenu(ev,seg.querySelector('.msg-pin-btn'));
     if(m._live){
       currentAssistantTurn.id='liveAssistantTurn';
       // Stamp the session id on the live turn so finalizeThinkingCard()
@@ -6225,6 +6317,7 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
+  renderPinnedMessages();
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   if(sid&&!hasTransientTranscriptUi){
