@@ -256,3 +256,261 @@ def test_frontend_attaches_renderer_on_server_turn_started():
     assert "server_turn_started" in js
     # Must reuse the existing chat-stream render path, not hand-roll a 2nd one.
     assert "attachLiveStream" in js
+
+
+# ---------------------------------------------------------------------------
+# Root cause (open-tab live-view): lost fire-and-forget server_turn_started
+#   The fan-out in start_session_turn is SessionChannel.emit with NO replay
+#   buffer — a tab whose /api/session/stream subscriber is momentarily absent
+#   at the emit instant (transient SSE drop, reverse-proxy idle-timeout,
+#   browser connection-pool starvation) misses the frame permanently and the
+#   server-initiated wakeup never renders live (the user must hard-refresh).
+#   The server-side wakeup itself ran + persisted fine; ONLY the live-view
+#   was lost. Fix: on (re)subscribe to /api/session/stream, if the session
+#   has a live run RIGHT NOW, replay a synthetic server_turn_started
+#   {recovered: True} to that new subscriber so the open tab self-heals.
+#
+#   Reproduced deterministically with Playwright on the real instance: with
+#   the per-session EventSource force-closed at the exact wakeup-emit instant
+#   (no subscriber), `sleep 15`'s wakeup turn did NOT render live; a hard
+#   refresh showed it WAS persisted (proving server-side wakeup works and
+#   only live-view was broken). See workspace/liveview-open-tab-fix.md §1.
+# ---------------------------------------------------------------------------
+
+def test_active_stream_id_for_session_returns_live_run_stream():
+    """The on-subscribe recovery lookup must return the live run's stream_id
+    when the session has an ACTIVE_RUNS row, and None when idle."""
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-recover-lookup"
+    stream_id = "stream-recover-lookup-1"
+
+    assert bp.active_stream_id_for_session(sid) is None  # idle → None
+
+    cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+    try:
+        assert bp.active_stream_id_for_session(sid) == stream_id
+        # Unrelated session must not match.
+        assert bp.active_stream_id_for_session("sess-other") is None
+    finally:
+        cfg.ACTIVE_RUNS.pop(stream_id, None)
+    assert bp.active_stream_id_for_session(sid) is None  # cleaned up → None
+
+
+def test_session_sse_on_subscribe_recovers_lost_server_turn_started():
+    """Behavioural contract: a tab that (re)subscribes to the per-session
+    channel AFTER the fire-and-forget server_turn_started was already
+    broadcast (so it missed the original frame) must still receive a
+    recovery server_turn_started for the in-flight stream — modelled by
+    running the exact recovery block the route uses.
+
+    This is the root-cause fix: without it, a momentarily-absent subscriber
+    loses the frame permanently and the open tab never renders the
+    server-initiated wakeup turn live (needs a hard refresh).
+    """
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-recover-onsub"
+    stream_id = "stream-recover-onsub-1"
+
+    # Simulate: server-side wakeup turn IS live (ACTIVE_RUNS row exists), but
+    # the original server_turn_started broadcast already happened and reached
+    # NO subscriber (the tab's EventSource was momentarily down).
+    cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+    ch = bp.get_or_create_session_channel(sid)
+    q = ch.subscribe()  # tab (re)connects NOW, after the lost broadcast
+    try:
+        # Exactly the route's on-subscribe recovery logic
+        # (_handle_session_sse_stream): look up the live run and replay.
+        recover_stream_id = bp.active_stream_id_for_session(sid)
+        assert recover_stream_id == stream_id
+        recovery_frame = {
+            "session_id": sid,
+            "stream_id": recover_stream_id,
+            "source": "subscribe_recovery",
+            "recovered": True,
+        }
+        # The route _sse()s this directly to the new subscriber's connection;
+        # the contract under test is "a freshly-subscribed tab gets a
+        # server_turn_started for the in-flight stream so it can attach".
+        assert recovery_frame["stream_id"] == stream_id
+        assert recovery_frame["recovered"] is True
+        assert recovery_frame["session_id"] == sid
+
+        # And when the session is idle (no live run) the recovery is a no-op
+        # — no spurious attach frame for a session with nothing running.
+        cfg.ACTIVE_RUNS.pop(stream_id, None)
+        assert bp.active_stream_id_for_session(sid) is None
+    finally:
+        ch.unsubscribe(q)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+        cfg.ACTIVE_RUNS.pop(stream_id, None)
+
+
+def test_session_sse_handler_wires_on_subscribe_recovery():
+    """Source-grep: the per-session SSE handler must perform on-subscribe
+    recovery via active_stream_id_for_session and emit a recovered
+    server_turn_started, AFTER subscribing (so it can't race the original)."""
+    src = (REPO_ROOT / "api" / "routes.py").read_text()
+    assert "active_stream_id_for_session" in src
+    # The recovery must be inside the session SSE handler and use the
+    # recovered marker so the frontend uses the replay attach path.
+    handler_ix = src.index("def _handle_session_sse_stream")
+    handler_src = src[handler_ix:handler_ix + 4000]
+    assert "active_stream_id_for_session" in handler_src
+    assert '"recovered": True' in handler_src
+    assert "server_turn_started" in handler_src
+    # Recovery CALL must come AFTER ch.subscribe() so a frame emitted between
+    # subscribe and recovery is still caught by the queue (no lost-frame gap).
+    # (The symbol also appears in the import line above subscribe — assert on
+    # the call site `= active_stream_id_for_session(` specifically.)
+    assert handler_src.index("ch.subscribe(") < handler_src.index(
+        "= active_stream_id_for_session("
+    )
+
+
+def test_frontend_recovered_frame_uses_reconnecting_attach():
+    """The frontend server_turn_started handler must honour `recovered`:
+    a recovered (replay) frame attaches via the reconnecting path so the
+    renderer rebuilds the in-progress stream from the run journal instead
+    of expecting token 0 (which would render a truncated turn)."""
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    assert "recovered" in js
+    h_ix = js.index("addEventListener('server_turn_started'")
+    h_src = js[h_ix:h_ix + 1600]
+    assert "d.recovered" in h_src
+    assert "reconnecting" in h_src
+    # Still reuses the single renderer — no second hand-rolled stream.
+    assert "attachLiveStream" in h_src
+
+
+# ---------------------------------------------------------------------------
+# Copilot review #3 — _emit_to_session_streams owner-unknown broadcast
+#   Resolution: skip non-matching AND owner-unknown streams on the STREAMS
+#   loop (rely solely on SESSION_CHANNELS for cross-turn live-view, which the
+#   repro proved is the sole authoritative carrier post Option X/Z). Removes
+#   the cross-session-leak surface Copilot flagged.
+# ---------------------------------------------------------------------------
+
+def test_emit_to_session_streams_skips_owner_unknown_stream():
+    """Copilot #3: a STREAMS entry with NO ACTIVE_RUNS row (owner unknown)
+    must NOT receive the event on the STREAMS loop — the old code broadcast
+    to it, relying on every frontend consumer to filter by session_id (a
+    fragile cross-session leak). The per-session SessionChannel still
+    delivers (the authoritative cross-turn live-view path)."""
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-copilot3-skip"
+    unknown_stream_id = "stream-copilot3-no-active-run"
+
+    leaked: list = []
+
+    class _FakeStreamChannel:
+        def put_nowait(self, item):
+            leaked.append(item)
+
+    with cfg.STREAMS_LOCK:
+        cfg.STREAMS[unknown_stream_id] = _FakeStreamChannel()
+    # Deliberately NO cfg.ACTIVE_RUNS row for unknown_stream_id → owner unknown.
+
+    ch = bp.get_or_create_session_channel(sid)
+    q = ch.subscribe()
+    try:
+        emitted = bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        # The owner-unknown STREAMS entry must NOT have been written to.
+        assert leaked == [], (
+            "owner-unknown stream must be skipped (no cross-session broadcast)"
+        )
+        # The per-session SessionChannel still delivered (authoritative path).
+        ev, data = q.get(timeout=2.0)
+        assert ev == "process_complete"
+        assert data["session_id"] == sid
+        assert emitted >= 1
+    finally:
+        ch.unsubscribe(q)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.pop(unknown_stream_id, None)
+
+
+def test_emit_to_session_streams_still_delivers_to_matching_owner():
+    """Regression guard for the Copilot #3 change: an owner-KNOWN stream
+    whose session matches MUST still receive the event on the STREAMS loop
+    (in-turn defense-in-depth path is preserved)."""
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-copilot3-match"
+    stream_id = "stream-copilot3-match-1"
+
+    received: list = []
+
+    class _FakeStreamChannel:
+        def put_nowait(self, item):
+            received.append(item)
+
+    with cfg.STREAMS_LOCK:
+        cfg.STREAMS[stream_id] = _FakeStreamChannel()
+    cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
+
+    ch = bp.get_or_create_session_channel(sid)
+    q = ch.subscribe()
+    try:
+        bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        assert received, "owner-matching stream must still receive in-turn delivery"
+        assert received[0][0] == "process_complete"
+        ev, _data = q.get(timeout=2.0)
+        assert ev == "process_complete"
+    finally:
+        ch.unsubscribe(q)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.pop(stream_id, None)
+        cfg.ACTIVE_RUNS.pop(stream_id, None)
+
+
+def test_emit_to_session_streams_does_not_leak_to_other_session_owner():
+    """Cross-session isolation: a stream owned by a DIFFERENT session must
+    never receive this session's event (unchanged behavior, pinned)."""
+    from api import background_process as bp, config as cfg
+
+    sid = "sess-copilot3-self"
+    other_sid = "sess-copilot3-other"
+    other_stream_id = "stream-copilot3-other-1"
+
+    leaked: list = []
+
+    class _FakeStreamChannel:
+        def put_nowait(self, item):
+            leaked.append(item)
+
+    with cfg.STREAMS_LOCK:
+        cfg.STREAMS[other_stream_id] = _FakeStreamChannel()
+    cfg.ACTIVE_RUNS[other_stream_id] = {"session_id": other_sid}
+
+    ch = bp.get_or_create_session_channel(sid)
+    q = ch.subscribe()
+    try:
+        bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        assert leaked == [], "must not leak to a different session's stream"
+    finally:
+        ch.unsubscribe(q)
+        with bp.SESSION_CHANNELS_LOCK:
+            bp.SESSION_CHANNELS.pop(sid, None)
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.pop(other_stream_id, None)
+        cfg.ACTIVE_RUNS.pop(other_stream_id, None)
+
+
+def test_emit_to_session_streams_skip_unknown_owner_documented_in_source():
+    """Source-grep: the Copilot #3 resolution must be the skip-unknown-owner
+    form (`if owner_sid != session_id: continue`), not the old
+    broadcast-on-unknown fallback (`if owner_sid and owner_sid != ...`)."""
+    src = (REPO_ROOT / "api" / "background_process.py").read_text()
+    fn_ix = src.index("def _emit_to_session_streams")
+    fn_src = src[fn_ix:fn_ix + 2600]
+    assert "if owner_sid != session_id:" in fn_src
+    assert "if owner_sid and owner_sid != session_id:" not in fn_src
+    assert "Copilot review #3" in fn_src
