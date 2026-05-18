@@ -3,7 +3,7 @@ import io
 import json
 from urllib.parse import urlparse
 
-from api.capy_policy import policy_status, prompt_preflight
+from api.capy_policy import model_routing_status, policy_status, prompt_preflight
 
 
 def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
@@ -35,6 +35,52 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
             "status": "configured_by_hermes",
             "default_hint": "hint:reasoning",
             "safe_fallback": "current Hermes provider",
+            "supported_hints": [
+                "hint:reasoning",
+                "hint:fast",
+                "hint:summarize",
+                "hint:code",
+                "hint:vision",
+                "hint:local",
+            ],
+            "route_previews": [
+                {
+                    "hint": "hint:reasoning",
+                    "label": "Reasoning",
+                    "resolved_provider": "current Hermes provider",
+                    "resolved_model": "configured reasoning model",
+                },
+                {
+                    "hint": "hint:fast",
+                    "label": "Fast",
+                    "resolved_provider": "current Hermes provider",
+                    "resolved_model": "configured fast model",
+                },
+                {
+                    "hint": "hint:summarize",
+                    "label": "Summarize",
+                    "resolved_provider": "current Hermes provider",
+                    "resolved_model": "configured summarize model",
+                },
+                {
+                    "hint": "hint:code",
+                    "label": "Code",
+                    "resolved_provider": "current Hermes provider",
+                    "resolved_model": "configured code model",
+                },
+                {
+                    "hint": "hint:vision",
+                    "label": "Vision",
+                    "resolved_provider": "vision tool path",
+                    "resolved_model": "configured vision model",
+                },
+                {
+                    "hint": "hint:local",
+                    "label": "Local",
+                    "resolved_provider": "LM Studio when configured",
+                    "resolved_model": "configured local model",
+                },
+            ],
         },
         "local_only": True,
     }
@@ -54,6 +100,50 @@ def test_policy_status_accepts_semiautonomous_env_without_echoing_hostile_values
     assert "<script" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
+
+
+def test_model_routing_status_uses_configured_hints_without_exposing_secrets(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:reasoning": {
+            "provider": "OpenAI",
+            "model": "GPT-5.5",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        "hint:local": {
+            "provider": "LM Studio",
+            "model": "Local summarizer",
+            "authorization": "bearer placeholder",
+        },
+        "hint:evil": {"provider": "renderer <script>bad()</script>"},
+        "hint:code": {"provider": "Source Code", "model": "tokenization-dashboard"},
+    }))
+
+    routing = model_routing_status()
+
+    assert routing["default_hint"] == "hint:reasoning"
+    assert routing["supported_hints"] == [
+        "hint:reasoning",
+        "hint:fast",
+        "hint:summarize",
+        "hint:code",
+        "hint:vision",
+        "hint:local",
+    ]
+    previews = {item["hint"]: item for item in routing["route_previews"]}
+    assert previews["hint:reasoning"]["resolved_provider"] == "OpenAI"
+    assert previews["hint:reasoning"]["resolved_model"] == "GPT-5.5"
+    assert previews["hint:local"]["resolved_provider"] == "LM Studio"
+    assert previews["hint:local"]["resolved_model"] == "Local summarizer"
+    assert previews["hint:code"]["resolved_provider"] == "current Hermes provider"
+    assert previews["hint:code"]["resolved_model"] == "tokenization-dashboard"
+    assert "hint:evil" not in previews
+    serialized = json.dumps(routing, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer placeholder" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
 
 
 class _RouteHandler:

@@ -217,6 +217,8 @@
     const gateLabels = safePolicyGateLabels(status && status.approval_gates);
     const promptStatus = safeDisplayMetadataText(status && status.prompt_preflight && status.prompt_preflight.status, 'required') || 'required';
     const routeHint = safeModelRouteHint(status && status.model_routing && status.model_routing.default_hint);
+    const routeHints = safeModelRouteHints(status && status.model_routing && status.model_routing.supported_hints).slice(0, 3);
+    const routePreviews = safeModelRoutePreviewLabels(status && status.model_routing && status.model_routing.route_previews).slice(0, 2);
     return '<section class="capy-spaces-autonomy-policy" aria-label="Autonomy policy">' +
       '<div><div class="capy-spaces-product-eyebrow">POLICY</div><h3>Autonomy policy</h3><p>'+escapeHtml(summary)+'</p></div>' +
       '<div class="capy-spaces-autonomy-policy-stats">' +
@@ -224,6 +226,8 @@
       gateLabels.map(function(gate){ return '<span>'+escapeHtml(gate)+'</span>'; }).join('') +
       '<span>Prompt preflight '+escapeHtml(promptStatus)+'</span>' +
       (routeHint ? '<span>Model route hint: '+escapeHtml(routeHint)+'</span>' : '') +
+      (routeHints.length ? '<span>Routing hints: '+routeHints.map(escapeHtml).join(' · ')+'</span>' : '') +
+      routePreviews.map(function(preview){ return '<span>'+escapeHtml(preview)+'</span>'; }).join('') +
       '</div>' +
       '</section>';
   }
@@ -307,6 +311,36 @@
   function safeModelRouteHint(value){
     const hint = String(value == null ? '' : value).trim().toLowerCase();
     return /^hint:(fast|reasoning|vision|summarize|code|local)$/.test(hint) ? hint : '';
+  }
+
+  function safeModelRouteHints(values){
+    const seen = {};
+    const list = Array.isArray(values) ? values : [];
+    return list.map(safeModelRouteHint).filter(function(hint){
+      if (!hint || seen[hint]) return false;
+      seen[hint] = true;
+      return true;
+    });
+  }
+
+  function safeModelRoutePreviewLabels(values){
+    const labelByHint = {
+      'hint:reasoning': 'Reasoning',
+      'hint:fast': 'Fast',
+      'hint:summarize': 'Summarize',
+      'hint:code': 'Code',
+      'hint:vision': 'Vision',
+      'hint:local': 'Local'
+    };
+    const list = Array.isArray(values) ? values : [];
+    return list.map(function(item){
+      const hint = safeModelRouteHint(item && item.hint);
+      if (!hint) return '';
+      const provider = safeDisplayMetadataText(item && item.resolved_provider, '');
+      const model = safeDisplayMetadataText(item && item.resolved_model, '');
+      if (!provider || !model || provider === '[REDACTED]' || model === '[REDACTED]') return '';
+      return labelByHint[hint] + ' route: ' + provider + ' / ' + model;
+    }).filter(Boolean);
   }
 
   function safeNonNegativeCount(value){
