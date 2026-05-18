@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-18 04:50 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-18 09:41 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy structured progress status now returns metadata-only recent event family counts and the product-home Progress events card renders safe family-count chips (`run`, `tool`, `subagent`, `memory.ingest`, `space.visual_qa`) without exposing hostile progress payload fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction, source registry/freshness, product-home autonomy policy, Space detail/creator memory assist, and structured progress cards are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining integration gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -26,13 +26,13 @@ Decision summary:
 
 Roadmap priority for upcoming autonomous sprints:
 
-1. Phase 0 plan-doc alignment and architecture inventory.
-2. Phase 1 clean-room Capy Memory Tree design/MVP.
-3. Phase 2 TokenJuice-style output compaction.
-4. Phase 3 auto-fetch source registry and memory freshness UI.
-5. Phase 4 Spaces-aware relevant-memory panel and creator-loop context.
-6. Phase 5 autonomy policy, prompt-injection preflight, and model routing visibility.
-7. Phase 6 structured progress-event stream.
+1. Automated Memory Tree artifact ingestion at live Space manifest/revision/widget-event/repair/rollback/visual-QA boundaries.
+2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
+3. Safe source refresh worker for queued `source.refresh` records and local knowledge bridge.
+4. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
+5. Progress producer expansion across real long-running creator/research/development tasks.
+6. Model-routing hint execution path and per-action policy receipts.
+7. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 

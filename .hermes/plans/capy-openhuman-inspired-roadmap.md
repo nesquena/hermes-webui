@@ -27,102 +27,119 @@
 
 ### Phase 0 — Plan hygiene and architecture spec
 
-Status: **in progress / first autonomous slice**.
+Status: **complete**.
 
-Deliverables:
-- This canonical roadmap file.
-- `capy-spaces-space-agent-parity.md` updated with the OpenHuman-inspired expansion track.
-- `capy-spaces-video-demo-parity-checklist.md` updated with visible context-layer demo criteria.
-- Appendix below listing reusable current components and gaps.
+Delivered:
+- This canonical roadmap file exists and is referenced by scheduled Capy Spaces sprints.
+- `capy-spaces-space-agent-parity.md` includes the OpenHuman-inspired expansion track.
+- `capy-spaces-video-demo-parity-checklist.md` includes visible context-layer demo criteria.
+- The appendix below inventories reusable components and current gaps.
 
 ### Phase 1 — Capy Memory Tree design/MVP
 
-Build a clean-room local memory tree backbone:
-- Source registry with freshness/provenance.
-- Deterministic chunk/source canonicalization.
-- Redacted Markdown/vault summaries.
-- SQLite metadata/index tables.
-- Local search/read APIs usable by Spaces and Hermes.
+Status: **implemented as a local-first MVP; continue hardening ingestion automation**.
 
-Likely first files:
-- `docs/capy-memory-tree.md` — design doc.
-- `api/capy_memory.py` — backend module, after design/test plan is accepted.
-- `tests/test_capy_memory_tree.py` — RED/GREEN storage and sanitization tests.
+Delivered:
+- `docs/capy-memory-tree.md` defines the clean-room schema, storage, provenance, redaction, and TDD plan.
+- `api/capy_memory.py` implements deterministic source/chunk canonicalization, SQLite tables, redacted Markdown vault writes, status/search APIs, relevant-memory lookup, and metadata-only source refresh-job registration.
+- `tests/test_capy_memory_tree.py` covers hostile Space manifests, revision events, widget events, visual-QA reports, storage/search/status routes, source refresh registration, deterministic IDs, bounded traversal, and leak prevention.
+
+Remaining:
+- Wire more live Spaces artifacts and local-knowledge sources into automatic `canonicalize_*` + `ingest_source(...)` flows instead of relying on direct helper/API calls.
+- Keep all memory as advisory untrusted context that cannot bypass creator, approval, recovery, or prompt-injection gates.
 
 ### Phase 2 — TokenJuice-style output compaction
 
-Add a local compaction layer for long tool/subagent/browser outputs:
-- Preserve citations/provenance and exact artifact handles.
-- Drop or summarize noisy output before model context.
-- Never hide safety-relevant errors, prompts, credentials, or generated-code markers without explicit redaction labels.
+Status: **backend helper implemented; product-visible and execution-path integration remain**.
 
-Likely first files:
-- `docs/capy-output-compaction.md`
-- `api/capy_compaction.py`
-- `tests/test_capy_output_compaction.py`
+Delivered:
+- `api/capy_compaction.py` implements `compact_output(...)` with bounded receipts, unsafe-marker redaction, path collapsing, repeated-line dedupe, approval-prompt preservation, error-block preservation, invalid-cap rejection, and `rules_applied` metadata.
+- `tests/test_capy_output_compaction.py` verifies size accounting, error/approval preservation, redaction status, cap enforcement, and unsafe-marker omission.
+
+Remaining:
+- Surface compaction evidence in Spaces/demo receipts: original/compacted character counts, redaction status, retained artifact handles/citations, and allow-listed rules only.
+- Apply compaction at long tool/subagent/browser-output boundaries without hiding safety-relevant prompts, failures, approval prompts, or artifact handles.
 
 ### Phase 3 — Auto-fetch source registry and freshness
 
-Add safe source refresh jobs:
-- Track local knowledge, Spaces artifacts, GitHub/project metadata, and selected URLs/RSS as source records.
-- Expose stale/source/error counts.
-- Make refresh status visible in WebUI/Spaces without leaking raw fetched content.
+Status: **source registry/status UI implemented; actual refresh workers remain**.
 
-Likely first files:
-- `api/capy_memory.py` source/job tables or a focused helper module.
-- `static/spaces.js` memory freshness card.
-- `tests/test_spaces_ui_js_behaviour.py` UI card coverage.
+Delivered:
+- `api/capy_memory.py` registers source references idempotently, queues metadata-only `source.refresh` jobs, strips credential/query/fragment markers from public `origin_uri`, requeues terminal jobs, and preserves active leased payloads.
+- `GET /api/capy-memory/status` returns local-only source/chunk/stale/error/refresh-job counts.
+- `static/spaces.js` renders the product-home Memory freshness card from `api/capy-memory/status` with hostile fields ignored/redacted.
+
+Remaining:
+- Implement a safe refresh worker that consumes queued jobs, fetches selected sources under allow-listed policy, writes only sanitized summaries, and updates freshness/error metadata.
+- Bridge existing local knowledge sources into Memory Tree source records with provenance and freshness metadata.
 
 ### Phase 4 — Spaces-aware memory integration
 
-Connect Spaces to the memory layer:
-- Space detail shows bounded relevant memory slices.
-- Creator preview includes cited, redacted relevant context.
-- Revision/rollback/repair events can be summarized into memory records.
-- Visual QA reports become searchable local artifacts.
+Status: **Space detail and creator preview surfaces implemented; deeper automatic context wiring remains**.
+
+Delivered:
+- `GET /api/spaces/memory?space_id=...` returns bounded relevant Memory Tree slices with metadata-only snippets.
+- `static/spaces.js` renders a Space detail `Memory Tree context` card and creator-preview `Memory assist` evidence without leaking renderer/source/API-auth/raw-prompt markers.
+- New artifact canonicalizers cover Space manifests, revision events, widget events, and visual/UI QA reports as searchable local artifacts.
+
+Remaining:
+- Automatically ingest revision/rollback/repair/widget-event/visual-QA artifacts at their production boundaries.
+- Inject cited relevant memory into active-space/creator context only after prompt-injection preflight and with explicit redaction/provenance labels.
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Make trust decisions product-visible:
-- `Supervised`, `Semi-autonomous`, and `Autonomous` policy labels.
-- Prompt-injection preflight status for high-risk source/tool boundaries.
-- Model routing hints compatible with Brendan's OpenAI/xAI/LM Studio setup.
-- No hidden one-subscription model backend pivot.
+Status: **metadata-only status surface implemented; per-action enforcement remains**.
+
+Delivered:
+- `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, and model-routing hints without echoing raw env/provider/model secrets.
+- `static/spaces.js` renders the product-home Autonomy policy card from `api/capy-policy/status`.
+
+Remaining:
+- Surface pass/warn/block preflight receipts on high-risk creator/source/tool boundaries.
+- Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events
 
-Status: **active / product-home surfacing in progress**.
+Status: **recorder/status/product-home card implemented; broader producer coverage remains**.
 
-Expose agent/subagent/tool progress as structured UI events:
-- Bounded event stream for long-running creator/research/development tasks.
-- Progress cards in Spaces and WebUI.
-- Durable enough for post-run reports; redacted enough for browser display.
-- Recent progress family counts are surfaced as metadata-only product-home chips so users can distinguish run/tool/subagent/memory-ingest/visual-QA activity without raw payloads.
+Delivered:
+- `api/capy_progress.py` records and summarizes bounded metadata-only progress events.
+- `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, and recent stream rows without raw payload/prompt leakage.
+- Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
+
+Remaining:
+- Emit progress events from more real long-running creator, research, browser, development, and visual-QA workflows.
+- Consider Space/detail-level progress panels where aggregate product-home status is too coarse.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
 
-Only after Phases 1-6 are working:
+Status: **not started; hold until remaining Phase 1-6 integration work is proven end-to-end**.
+
+Only after the remaining Phase 1-6 integration items are working:
 - Evaluate connector catalog UX.
 - Explore sidecar/native app integration only if it clearly improves Capy's existing self-hosted server product.
 
 ---
 
-## First three implementation slices for autonomous sprints
+## Next implementation slices for autonomous sprints
 
-1. **Phase 0 plan-doc alignment**
-   - Create this file and patch the two existing Space Agent parity/checklist plans.
-   - Validate with search/read/diff checks.
-   - Commit plan docs only.
+1. **Automated Memory Tree artifact ingestion**
+   - Wire live Space manifest/revision/widget-event/repair/rollback/visual-QA artifacts into `canonicalize_*` + `ingest_source(...)`.
+   - Tests must inspect persisted Markdown/SQLite records and public search/relevant-memory responses for metadata-only redaction.
 
-2. **Phase 1 design doc: `docs/capy-memory-tree.md`**
-   - Write the clean-room schema/storage/provenance/redaction design.
-   - Include TDD task breakdown before code.
-   - Validate with doc lint/read checks; no production code yet unless the plan explicitly escalates.
+2. **Product-visible compaction evidence**
+   - Render demo/smoke or creator/tool receipts with original size, compacted size, redaction status, retained artifact handles/citations, and allow-listed `rules_applied` labels only.
+   - Use real-`static/spaces.js` UI tests plus browser QA leak checks.
 
-3. **Phase 1 first RED test: sanitized Space artifact canonicalizer**
-   - Add tests for converting a Space manifest/revision/widget event/visual-QA report into bounded safe Markdown/source metadata.
-   - Prove raw `renderer`, `html`, `script`, `source`, `data`, API-auth fields, raw prompts, and secret-looking sentinels are omitted/redacted.
-   - Implement the smallest canonicalizer to pass.
+3. **Safe source refresh worker**
+   - Consume queued `source.refresh` jobs, fetch only allowed sources, store sanitized summaries, update freshness/error counts, and never expose raw fetched bodies.
+
+4. **Prompt-preflight + memory/context enforcement**
+   - Add per-action pass/warn/block receipts for creator/source boundaries before memory can influence agent actions.
+   - Treat Memory Tree content as untrusted advisory context.
+
+5. **Progress producer expansion**
+   - Record structured events from creator/research/development runs and visual-QA gates so the product-home stream reflects real autonomous work.
 
 ---
 
@@ -174,16 +191,17 @@ Only after Phases 1-6 are working:
 - `/Users/bschmidy10/hermes-webui/tests/test_spaces_ui_js_behaviour.py`
   - Main real-`static/spaces.js` fake-DOM regression surface for UI safety and behavior.
 
-### Gaps to close
+### Gaps to close / next integration targets
 
-- No canonical Capy Memory Tree schema/storage module exists yet.
-- Local knowledge is file-index/search oriented; it is not yet tied to Spaces revision/widget/visual-QA artifacts as first-class source records.
-- Active-Space context is compact but not yet citation-backed by a memory tree.
-- No dedicated output-compaction module for long tool/subagent/browser outputs.
-- No product-visible memory freshness card in Spaces.
-- No product-visible relevant-memory panel on Space detail.
-- Autonomy mode/prompt-injection preflight/model-routing hints are not yet exposed as a cohesive Spaces policy surface.
-- Structured progress events exist in narrow demo/research paths but not as a general long-running task event stream.
+The first roadmap pass has now delivered the Memory Tree module, source/job schema, compaction helper, memory freshness card, relevant-memory UI, policy card, and progress card. Current remaining work is narrower:
+
+- **Automated artifact ingestion:** Space manifests, revision/rollback/repair events, widget events, and visual-QA reports have canonicalizers, but more production boundaries still need to call `canonicalize_*` + `ingest_source(...)` automatically.
+- **Local knowledge bridge:** Local knowledge remains file-index/search oriented and should be registered as Memory Tree source records with freshness/provenance rather than being copied wholesale into prompts.
+- **Advisory active context:** Active-Space context has display-side relevant memory and compact summaries, but agent/creator context injection should add cited Memory Tree snippets only after prompt-injection preflight.
+- **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
+- **Source refresh worker:** Metadata-only `source.refresh` jobs are queued and counted, but an allow-listed refresh worker still needs to consume them safely.
+- **Per-action policy/preflight:** Product-home policy visibility exists; creator/source/runtime boundaries still need explicit pass/warn/block receipts where high-risk context can influence actions.
+- **Progress producers:** Structured progress recording/status/card exist; more real long-running creator/research/development workflows should emit events.
 
 ---
 

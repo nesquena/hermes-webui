@@ -3,7 +3,7 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-05-07
+Last implementation-status update: 2026-05-18
 
 ## Current parity implementation notes
 
@@ -20,6 +20,7 @@ Recent safe adapter progress:
 
 Recently landed:
 
+- OpenHuman-inspired context-layer MVPs now exist as metadata-only Capy Spaces surfaces: local Memory Tree canonicalization/search/status, output compaction helper, source registry/freshness counts, Space detail/creator memory assist, product-home autonomy policy, and product-home progress events. Remaining parity work should focus on automatic artifact ingestion, product-visible compaction evidence, safe source refresh workers, prompt-preflight enforcement, and broader progress producers.
 - Recovery/safe-mode tool actions are exposed through safe metadata-only aliases.
 - Demo smoke routes exist and the Spaces UI uses direct `/api/spaces/demo/*` routes instead of generic demo tool actions.
 - Metadata shared data slots exist, show safe details, and can be deleted safely.
@@ -84,24 +85,26 @@ Recently landed:
 
 Next checkpoint emphasis:
 
-1. OpenHuman-inspired context layer foundations: Memory Tree, source freshness, output compaction, autonomy indicators, model-routing hints, and structured progress events.
-2. Safe admin/recovery and rollback/time-travel before richer generated widgets or local-service dashboards.
-3. Research Harness as the preferred vertical demo: widget event → Capy run → live progress widgets → markdown artifact → PDF/export patch → rollback.
-4. Explicit sandbox/postMessage/event contract before trusted generated UI expands.
-5. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
+1. Automated Memory Tree artifact ingestion at live Space manifest/revision/widget-event/repair/rollback/visual-QA boundaries.
+2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
+3. Safe source refresh worker plus local-knowledge source registration.
+4. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
+5. Broader structured progress producers for real long-running creator/research/development tasks.
+6. Safe admin/recovery, rollback/time-travel, and sandbox/postMessage contracts remain blockers before richer generated widgets expand.
+7. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
 
 ## OpenHuman-Inspired Context Layer Demo Criteria
 
 These are additive demo criteria for the new roadmap track. They do not replace the Space Agent video parity criteria below; they raise the bar for saying Capy has become a context-aware autonomous workspace.
 
-- **Memory freshness card visible:** Spaces/WebUI shows local-only source counts, stale counts, last refresh status, and clear empty/error states without exposing raw fetched content.
-- **Relevant memory slices visible:** Space detail and/or creator preview shows bounded cited memory snippets tied to the current Space, with provenance and redaction status.
-- **Compaction evidence visible:** Long tool/subagent/browser output receipts show original size, compacted size, retained artifact handles/citations, and redaction status where applicable.
-- **Progress panel visible:** Long-running creator/research/development flows expose structured tool/subagent/progress events with bounded metadata and no raw prompt/API-auth/generated-code leakage.
-- **Autonomy mode visible:** Actions show `Supervised`, `Semi-autonomous`, or `Autonomous` mode with a short explanation of what approvals/gates are still required.
-- **Prompt-injection preflight visible:** High-risk ingested source/context boundaries show pass/warn/block status before context can influence creator-loop or agent actions.
-- **Model routing hints visible:** Provider/model routing choices remain compatible with Brendan's OpenAI/xAI/LM Studio setup and are explained without pivoting to OpenHuman's subscription/backend model.
-- **Run-all smokes include context status:** Demo smoke receipts include memory/ingestion/compaction/progress status only as metadata; hostile source/renderer/script/API-auth fixtures remain absent from the DOM.
+- **Memory freshness card visible:** **MVP implemented.** Spaces/WebUI shows local-only source counts, stale counts, refresh-job counts, and clear empty/error states without exposing raw fetched content.
+- **Relevant memory slices visible:** **MVP implemented.** Space detail and creator preview show bounded cited memory snippets tied to the current Space, with provenance and redaction status.
+- **Compaction evidence visible:** **Not yet product-visible.** Long tool/subagent/browser output receipts should show original size, compacted size, retained artifact handles/citations, and redaction status where applicable.
+- **Progress panel visible:** **MVP implemented at product-home aggregate level.** Long-running creator/research/development flows still need broader producer coverage for structured tool/subagent/progress events.
+- **Autonomy mode visible:** **MVP implemented at product-home aggregate level.** Per-action receipts still need to show `Supervised`, `Semi-autonomous`, or `Autonomous` mode with a short explanation of required approvals/gates.
+- **Prompt-injection preflight visible:** **Backend status/preflight exists; per-action UI remains.** High-risk ingested source/context boundaries should show pass/warn/block status before context can influence creator-loop or agent actions.
+- **Model routing hints visible:** **MVP implemented in policy status.** Provider/model routing choices remain compatible with Brendan's OpenAI/xAI/LM Studio setup and are explained without pivoting to OpenHuman's subscription/backend model.
+- **Run-all smokes include context status:** **Remaining.** Demo smoke receipts should include memory/ingestion/compaction/progress status only as metadata; hostile source/renderer/script/API-auth fixtures remain absent from the DOM.
 
 ## Bottom line
 

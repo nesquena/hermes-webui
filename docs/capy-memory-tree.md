@@ -249,181 +249,96 @@ Benign false positives to preserve where safe:
 - `tokenization-dashboard`
 - `metadata_only`
 
-## Public API draft
+## Public API status
 
-Initial backend module: `api/capy_memory.py`.
+Initial backend module: `api/capy_memory.py` is now implemented and covered by `tests/test_capy_memory_tree.py`.
 
-Suggested pure functions before routes:
+Implemented helpers:
 
 - `memory_tree_root() -> Path`
 - `memory_tree_db_path() -> Path`
-- `init_memory_tree(db_path: Path | None = None) -> dict`
+- `init_memory_tree() -> dict`
+- `memory_status() -> dict`
 - `canonicalize_space_manifest(space: dict) -> dict`
-- `canonicalize_revision_event(event: dict) -> dict`
-- `canonicalize_widget_event(event: dict) -> dict`
+- `canonicalize_space_revision_event(event: dict) -> dict`
+- `canonicalize_space_widget_event(event: dict) -> dict`
+- `canonicalize_visual_qa_report(report: dict) -> dict`
 - `ingest_source(record: dict) -> dict`
 - `search_memory(query: str, *, space_id: str | None = None, limit: int = 10) -> dict`
 - `relevant_memory_for_space(space_id: str, *, limit: int = 5) -> dict`
-- `memory_status() -> dict`
+- `register_source_reference(payload: dict) -> dict`
+- `list_source_refresh_jobs(limit: int = 20) -> dict`
 
-Future routes, after backend tests:
+Implemented routes:
 
 - `GET /api/capy-memory/status`
 - `GET /api/capy-memory/search?q=...&space_id=...`
 - `GET /api/spaces/memory?space_id=...`
-- `POST /api/capy-memory/ingest-space`
+- `POST /api/capy-memory/source/register`
 
-All route responses must be metadata-only, bounded, and redacted.
+All public responses must remain metadata-only, bounded, and redacted.
 
-## Spaces UI draft
+Still future / not complete:
 
-Future UI surfaces in `static/spaces.js`:
+- A production refresh worker that consumes queued `source.refresh` jobs.
+- Direct route(s) for controlled artifact ingestion only if they preserve the same metadata-only canonicalization boundary.
+- Automatic ingestion hooks at live Spaces revision/widget/repair/visual-QA boundaries.
 
-- Product home / side panel: `Memory freshness` card.
-- Space detail: `Relevant memory` panel with cited snippets.
-- Creator preview card: optional `Context used` section listing source IDs/citations, not raw source bodies.
-- Run-all smoke receipt: compact `Memory/context` status checklist.
+## Spaces UI status
 
-UI requirements:
+Implemented UI surfaces in `static/spaces.js`:
+
+- Product home: `Memory freshness` card sourced from `api/capy-memory/status`.
+- Space detail: `Memory Tree context` panel with bounded cited snippets from `api/spaces/memory`.
+- Creator preview/commit receipts: `Memory assist` section listing source IDs/types/redaction status and snippets, not raw source bodies.
+
+Still future / not complete:
+
+- Run-all smoke receipt: compact `Memory/context` or compaction status checklist.
+- Per-action prompt-preflight status around high-risk memory/source boundaries.
+- Product-visible automated source refresh results after a refresh worker exists.
+
+UI requirements remain:
 
 - Load actual checked-out `static/spaces.js` in tests.
 - Use fixed safe labels for blocked/error states.
 - Never render raw backend error text from ingestion/canonicalization failures.
 - Omit action attributes when source IDs or Space IDs fail strict path/action-id checks.
 
-## TDD implementation plan
+## Implementation checkpoint status
 
-### Task 1: Create failing sanitizer/canonicalizer tests
+Completed TDD checkpoints:
 
-**Objective:** Specify safe canonicalization before production code exists.
+1. **Sanitizer/canonicalizer tests and implementation**
+   - Tests cover hostile Space manifests, benign false-positive preservation, deterministic IDs, and fail-closed traversal.
+   - `api/capy_memory.py` canonicalizers omit generated/executable/body/auth/raw-prompt fields before Markdown/hash/storage.
 
-**Files:**
+2. **SQLite init/status**
+   - `init_memory_tree()` creates local-only SQLite tables and vault directories under the configured Memory Tree root.
+   - `memory_status()` returns bounded source/chunk/stale/error/refresh-job counts without ingesting private content during init.
 
-- Create: `tests/test_capy_memory_tree.py`
-- Later create: `api/capy_memory.py`
+3. **Source ingest/search**
+   - `ingest_source(...)` writes sanitized Markdown to the vault and metadata to SQLite idempotently.
+   - `search_memory(...)` and `relevant_memory_for_space(...)` return bounded redacted snippets.
 
-**Step 1: Write failing tests**
+4. **Routes**
+   - Memory status, search, Space relevant-memory, and source-register routes are covered by focused tests.
+   - GET responses stay bounded/redacted; POST source registration queues metadata-only refresh jobs without fetching remote content.
 
-Required RED tests:
+5. **Spaces UI freshness/relevant-memory panel**
+   - Real-`static/spaces.js` tests cover product-home Memory freshness and Space detail/creator memory snippets.
+   - Browser/visual QA remains required for future UI-visible changes.
 
-- `test_canonicalize_space_manifest_omits_generated_body_fields`
-- `test_canonicalize_space_manifest_preserves_benign_metadata_labels`
-- `test_canonical_chunk_ids_are_deterministic`
-- `test_canonicalizer_fails_closed_on_over_deep_metadata`
+Next TDD checkpoints:
 
-**Step 2: Run test to verify failure**
+1. **Automated artifact ingestion hooks**
+   - Add RED tests proving a live Space revision/widget event/visual-QA boundary creates a sanitized Memory Tree source record and never persists raw renderer/source/API-auth/raw-prompt fields.
 
-```bash
-/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_capy_memory_tree.py -q -o 'addopts='
-```
+2. **Safe source refresh worker**
+   - Add RED tests for consuming queued `source.refresh` jobs, updating freshness/error metadata, preserving leased jobs, and storing only sanitized summaries.
 
-Expected: FAIL because `api.capy_memory` or canonicalizer functions are missing.
-
-**Step 3: Implement minimal canonicalizer**
-
-Create `api/capy_memory.py` with enough code to pass Task 1 only.
-
-**Step 4: Verify pass**
-
-```bash
-/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_capy_memory_tree.py -q -o 'addopts='
-/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m py_compile api/capy_memory.py tests/test_capy_memory_tree.py
-git diff --check
-```
-
-**Step 5: Commit**
-
-```bash
-git add api/capy_memory.py tests/test_capy_memory_tree.py
-git commit -m "feat: add Capy memory tree canonicalizer"
-```
-
-### Task 2: SQLite init/status
-
-**Objective:** Create the local database schema and status payload without ingesting content.
-
-**Files:**
-
-- Modify: `api/capy_memory.py`
-- Modify: `tests/test_capy_memory_tree.py`
-
-RED tests:
-
-- `test_init_memory_tree_creates_expected_tables`
-- `test_memory_status_returns_local_only_counts`
-
-GREEN requirements:
-
-- Create DB under configured path.
-- Return `local_only: true`, `source_count`, `chunk_count`, and `stale_source_count`.
-- Do not ingest private content during init.
-
-### Task 3: Source ingest/search
-
-**Objective:** Store sanitized Markdown and provide bounded search results.
-
-**Files:**
-
-- Modify: `api/capy_memory.py`
-- Modify: `tests/test_capy_memory_tree.py`
-
-RED tests:
-
-- `test_ingest_source_is_idempotent_by_source_id_and_hash`
-- `test_search_memory_returns_bounded_redacted_snippets`
-- `test_relevant_memory_for_space_filters_by_space_id`
-
-GREEN requirements:
-
-- Store sanitized Markdown under the configured vault.
-- Store metadata in SQLite.
-- Use SQLite FTS or simple LIKE search as the smallest first version.
-- Keep response shape ready for UI cards.
-
-### Task 4: Routes
-
-**Objective:** Expose metadata-only Memory Tree API responses.
-
-**Files:**
-
-- Modify: `api/routes.py`
-- Modify: route tests currently covering local knowledge or Spaces routes.
-
-Routes:
-
-- `GET /api/capy-memory/status`
-- `GET /api/capy-memory/search?q=...&space_id=...`
-- `GET /api/spaces/memory?space_id=...`
-
-Validation:
-
-- CSRF remains unchanged for POST routes.
-- GET responses are bounded and redacted.
-- Empty/unavailable state is explicit and safe.
-
-### Task 5: Spaces UI freshness/relevant-memory panel
-
-**Objective:** Make memory status visible in the product.
-
-**Files:**
-
-- Modify: `static/spaces.js`
-- Modify: `tests/test_spaces_ui_js_behaviour.py`
-
-Required tests:
-
-- Freshness card renders local-only counts and stale/error states.
-- Relevant memory panel renders citations/snippets and omits unsafe raw fields.
-- Failed memory fetch renders a fixed safe unavailable label, not raw error text.
-
-Validation:
-
-```bash
-node --check static/spaces.js
-/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_spaces_ui_js_behaviour.py -q -o 'addopts='
-```
-
-Then run browser/visual QA before claiming product-visible completion.
+3. **Compaction evidence UI**
+   - Add real-`static/spaces.js` RED tests for metadata-only compaction receipts and hostile fixture omission before rendering product-visible compaction evidence.
 
 ## Security invariants
 
@@ -436,25 +351,24 @@ Then run browser/visual QA before claiming product-visible completion.
 
 ## Validation checklist
 
-For this design/doc-only change:
+For roadmap/status doc updates:
 
 ```bash
-git diff --check -- docs/capy-memory-tree.md
+git diff --check -- docs/capy-memory-tree.md .hermes/plans/capy-openhuman-inspired-roadmap.md .hermes/plans/capy-spaces-space-agent-parity.md .hermes/plans/capy-spaces-video-demo-parity-checklist.md
 ```
 
-For first backend implementation:
+For Memory Tree backend regressions:
 
 ```bash
 /Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_capy_memory_tree.py -q -o 'addopts='
 /Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m py_compile api/capy_memory.py tests/test_capy_memory_tree.py
-git diff --check
 ```
 
-For first UI implementation:
+For Memory Tree UI regressions:
 
 ```bash
 node --check static/spaces.js
 /Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_spaces_ui_js_behaviour.py -q -o 'addopts='
 ```
 
-Add browser console/leak checks, screenshot evidence, and Visual/UI QA before marking UI-visible work complete.
+Add browser console/leak checks, screenshot evidence, and Visual/UI QA before marking future UI-visible work complete.
