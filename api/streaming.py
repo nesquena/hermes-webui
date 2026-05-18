@@ -675,6 +675,12 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_SESSION_KEY': session_id,
         'HERMES_SESSION_ID': session_id,
         'HERMES_SESSION_PLATFORM': 'webui',
+        # process_complete agent-wakeup wiring (ours-original, Option B): the
+        # terminal_tool watcher routing gate (terminal_tool.py:~1940) reads
+        # HERMES_SESSION_CHAT_ID to populate pending_watchers for WebUI
+        # sessions so notify_on_complete completions enqueue and the agent
+        # can be woken. HERMES_SESSION_ID/PLATFORM come from upstream #2279.
+        'HERMES_SESSION_CHAT_ID': str(session_id),
         'HERMES_HOME': profile_home,
     })
     return env
@@ -2597,6 +2603,49 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+# ── SSE write deadline (Defect A: per-connection thread exhaustion) ─────────
+# server.py runs QuietHTTPServer(ThreadingHTTPServer): one OS thread per
+# connection, no pool cap (request_queue_size=64). Every SSE endpoint holds
+# its thread for the connection's whole lifetime. If a tab is slow or
+# backgrounded its TCP receive window fills; the next handler.wfile.write()/
+# flush() then blocks *indefinitely* (sockets have no write timeout by
+# default). That thread is pinned forever — it never reaches its
+# `finally: unsubscribe`, so the SessionChannel reaper can never reclaim the
+# channel either. N such tabs * M sessions pile threads up until new
+# requests queue past request_queue_size and the UI shows "streaming
+# pending".
+#
+# Fix: arm a socket-level timeout on the connection. A genuinely healthy
+# keepalive/event write completes in well under a millisecond, so a
+# multi-second deadline never trips for a live tab; only a backpressured
+# (stuck) socket blocks past it. When it trips, the write raises
+# socket.timeout — which on Python 3.10+ *is* TimeoutError, already a member
+# of api.routes._CLIENT_DISCONNECT_ERRORS — so each SSE handler's existing
+# `except _CLIENT_DISCONNECT_ERRORS:` breaks the loop, `finally` drops the
+# subscriber, the browser's EventSource auto-reconnects, and the OS thread
+# is released. SessionChannel already supports reconnect + offline buffer,
+# so no events are lost for a tab that comes back.
+SSE_WRITE_DEADLINE_SECONDS = 20.0
+
+
+def _sse_set_write_deadline(handler, seconds=None):
+    """Best-effort: arm a socket write deadline on an SSE handler.
+
+    Call once, right after end_headers(), in every long-lived SSE endpoint.
+    Never raises — an unusual/missing transport just keeps the pre-fix
+    (no-deadline) behaviour for that single connection rather than breaking
+    the stream setup.
+    """
+    if seconds is None:
+        seconds = SSE_WRITE_DEADLINE_SECONDS
+    try:
+        conn = getattr(handler, "connection", None)
+        if conn is not None and hasattr(conn, "settimeout"):
+            conn.settimeout(seconds)
+    except Exception:
+        logger.debug("Failed to arm SSE write deadline", exc_info=True)
+
+
 def _materialize_pending_user_turn_before_error(session) -> bool:
     """Persist the pending user prompt before clearing runtime stream state.
 
@@ -3183,7 +3232,15 @@ def _run_agent_streaming(
             _profile_home,
         )
         _set_thread_env(**_thread_env)
-        # Prewarm skill-tool imports *before* acquiring the lock so that
+        # process_complete agent-wakeup wiring (ours-original, Option B): bind
+        # this session's HERMES_SESSION_KEY to its WebUI session_id so the
+        # drain thread can route notify_on_complete events back to the right
+        # SSE channel / server-side wakeup.
+        try:
+            from api.background_process import register_process_session
+            register_process_session(session_id, session_id)
+        except Exception:
+            logger.debug("register_process_session failed", exc_info=True)
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
@@ -3198,6 +3255,7 @@ def _run_agent_streaming(
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_session_id = os.environ.get('HERMES_SESSION_ID')
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
+            old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
             os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
@@ -3205,6 +3263,9 @@ def _run_agent_streaming(
             os.environ['HERMES_SESSION_KEY'] = session_id
             os.environ['HERMES_SESSION_ID'] = session_id
             os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
+            # process_complete wiring (ours-original, Option B): see
+            # _build_agent_thread_env above.
+            os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Patch module-level caches to match the active profile.
@@ -4938,6 +4999,8 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_ID'] = old_session_id
                 if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
+                if old_session_chat_id is None: os.environ.pop('HERMES_SESSION_CHAT_ID', None)
+                else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
 
@@ -5177,6 +5240,36 @@ def _run_agent_streaming(
             # POST /api/chat/start round-trip and erase the marker before
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
+
+        # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
+        # The session has just transitioned active→idle: unregister_active_run
+        # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
+        # independent of STREAMS_LOCK), so _session_has_active_turn() is now
+        # False for this session unless a *different* stream is still active
+        # (cancel/reconnect — drain_deferred_wakeups_for_session guards on
+        # that and leaves the marker for the later teardown). A FAST
+        # background task that completed while this turn was tearing down was
+        # deferred by api/background_process._process_one (it could not start
+        # a turn → would 409) and its wakeup_prompt persisted in
+        # DEFERRED_PROCESS_WAKEUPS. For an autonomous agent there is no next
+        # user turn, so the PR #2279 next-turn drain never runs; without this
+        # hook the deferred wakeup is lost forever (the Test B failure). This
+        # makes the busy-at-completion case symmetric with the idle case:
+        # idle now → fire now (Option Z idle branch); busy now → fire here at
+        # turn-end. claim_deferred_wakeups pops atomically, so this is
+        # idempotent with the next-turn drain (no double-fire) and the wakeup
+        # turn's own teardown finds nothing claimed (no wakeup loop). The
+        # drain spawns its own daemon thread, so teardown never blocks.
+        try:
+            from api.background_process import drain_deferred_wakeups_for_session
+
+            drain_deferred_wakeups_for_session(session_id)
+        except Exception:
+            logger.debug(
+                "turn-teardown deferred-wakeup drain failed for session %s",
+                session_id,
+                exc_info=True,
+            )
 
 # ============================================================
 # SECTION: HTTP Request Handler

@@ -933,6 +933,7 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    PENDING_PROCESS_COMPLETIONS,
 )
 from api.helpers import (
     require,
@@ -1477,6 +1478,8 @@ def _should_attach_codex_provider_context(model: str, raw_active_provider: str, 
 def _resolve_compatible_session_model_state(
     model_id: str | None,
     model_provider: str | None = None,
+    *,
+    prefer_cached_catalog: bool = False,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -1498,6 +1501,16 @@ def _resolve_compatible_session_model_state(
     OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
     those used to wedge the handler for >100s and trigger 502s on default-60s
     reverse proxies, even though the WebUI itself eventually responded.
+
+    ``prefer_cached_catalog=True`` (ours-original) makes the catalog lookup
+    non-blocking: it resolves from the warm/disk cache or a network-free
+    minimal catalog and NEVER triggers a live per-provider rebuild (the
+    Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
+    turn — see rebase report §1/§3/model-resolve-hang). Human-initiated
+    chat/start leaves this False to keep full live discovery; a session that
+    already has a persisted model still resolves correctly because the
+    persisted model wins over the catalog and the catalog is only consulted
+    for the default-model backstop.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
@@ -1509,7 +1522,14 @@ def _resolve_compatible_session_model_state(
         if not explicit_provider:
             return model, requested_provider, False
 
-    catalog = get_available_models()
+    # Default (human chat/start) path calls get_available_models() with NO
+    # kwargs so it stays signature-compatible with the many tests that stub
+    # get_available_models as a zero-arg callable. Only the server-side wakeup
+    # path (prefer_cached_catalog=True) opts into the cache-only mode.
+    if prefer_cached_catalog:
+        catalog = get_available_models(prefer_cache=True)
+    else:
+        catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     if not model:
         return default_model, requested_provider, bool(default_model)
@@ -2241,6 +2261,7 @@ from api.workspace import (
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import (
     _sse,
+    _sse_set_write_deadline,
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
@@ -4171,6 +4192,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/session/stream":
+        return _handle_session_sse_stream(handler, parsed)
+
     if parsed.path == "/api/clarify/inject_test":
         # Loopback-only: used by automated tests; blocked from any remote client
         if handler.client_address[0] != "127.0.0.1":
@@ -5133,6 +5157,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
+
+    if parsed.path == "/api/process-complete-ack":
+        return _handle_process_complete_ack(handler, body)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
@@ -6152,6 +6179,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "keep-alive")
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
             try:
@@ -6283,6 +6311,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "keep-alive")
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
             try:
@@ -6361,6 +6390,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
     try:
@@ -6739,6 +6769,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
 
@@ -6840,6 +6871,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
 
@@ -6861,6 +6893,62 @@ def _handle_clarify_sse_stream(handler, parsed):
         pass
     finally:
         clarify_sse_unsubscribe(sid, q)
+
+
+def _handle_session_sse_stream(handler, parsed):
+    """SSE endpoint for the persistent per-session channel (Option X).
+
+    Subscribes to ``api.background_process.SESSION_CHANNELS[sid]`` — a channel
+    that lives across agent turns (unlike STREAMS, which is torn down at
+    end-of-turn). Used to deliver ``process_complete`` events that fire while
+    no agent turn is active.
+
+    Lifecycle: opened by the frontend at session mount, closed at unmount or
+    on tab close. Multiple tabs share one SessionChannel (refcounted via
+    subscribe/unsubscribe). 30s SSE keepalive comments keep the proxy alive.
+    Reaper-driven idle TTL (default 4h) prevents zombie channels.
+    """
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    from api.background_process import get_or_create_session_channel
+
+    ch = get_or_create_session_channel(sid)
+    q = ch.subscribe(maxsize=64)
+
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+
+    from api.streaming import _sse
+
+    # Push an initial frame so the client has confirmation the channel is
+    # live (mirrors approval/clarify which send an 'initial' frame). No
+    # snapshot data is needed — this channel only carries forward-looking
+    # events, not pending state.
+    _sse(handler, 'initial', {"session_id": sid})
+
+    try:
+        while True:
+            try:
+                payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+            except queue.Empty:
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            if payload is None:
+                break
+            event_name, data = payload
+            _sse(handler, event_name, data)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass  # client went away — normal for long-lived connections
+    finally:
+        ch.unsubscribe(q)
 
 
 def _handle_clarify_inject(handler, parsed):
@@ -7733,6 +7821,16 @@ def _start_chat_stream_for_session(
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
+    # process_complete wakeup (ours-original, Option B): if this session has a
+    # pending process_complete marker (set by api/background_process.py drain),
+    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
+    # The marker is server-internal telemetry; the actual wakeup is delivered
+    # either server-side (Option Z) or via the PR #2279 next-turn drain.
+    process_completion_related = False
+    if s.session_id in PENDING_PROCESS_COMPLETIONS:
+        PENDING_PROCESS_COMPLETIONS.discard(s.session_id)
+        process_completion_related = True
+
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -7808,6 +7906,155 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     if action in ("clear", "stop", "done"):
         return "clear"
     return "set"
+
+
+def start_session_turn(
+    session_id: str,
+    message: str,
+    *,
+    source: str = "process_wakeup",
+):
+    """Start a server-side agent turn for ``session_id`` with ``message``.
+
+    Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
+    core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
+    ``_start_chat_stream_for_session``. The drain thread
+    (``api/background_process._process_one``) calls this directly with a
+    synthetic ``[IMPORTANT: …]`` wakeup_prompt so a background process can wake
+    the agent server-side with NO browser round-trip — exactly how CLI /
+    gateway self-wake from a ``notify_on_complete`` completion.
+
+    Contract:
+      - Resolves the session record (profile/workspace/model/model_provider are
+        already persisted on it; no user auth needed — same trust level as
+        gateway/cron starting a turn).
+      - Resolves workspace + model/provider through the SAME helpers
+        ``_handle_chat_start`` uses, so a process-wakeup turn is constructed
+        identically to a human-typed turn. If the session record has no model
+        persisted, ``_resolve_compatible_session_model_state`` falls back to the
+        configured default model/provider (documented in the impl report §1).
+      - Delegates to ``_start_chat_stream_for_session`` which spawns the agent
+        on a daemon worker thread (the drain thread NEVER blocks) and serializes
+        on the per-session agent lock + active-stream guard, so a concurrent
+        human ``/api/chat/start`` cannot double-start (one wins, the other gets
+        the existing 409 "session already has an active stream").
+
+    Returns the same dict ``_start_chat_stream_for_session`` returns, including
+    ``_status`` (200 on start, 409 when a turn is already active). On 409 the
+    caller must leave the ``PENDING_PROCESS_COMPLETIONS`` marker in place so the
+    PR #2279 next-turn drain delivers the wakeup when the active turn ends.
+    """
+    msg = str(message or "").strip()
+    if not msg:
+        return {"error": "message is required", "_status": 400}
+    try:
+        s = get_session(session_id)
+    except KeyError:
+        return {"error": "Session not found", "_status": 404}
+
+    try:
+        workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except ValueError as e:
+        return {"error": str(e), "_status": 400}
+
+    requested_model = s.model
+    requested_provider = getattr(s, "model_provider", None)
+    # Server-initiated wakeup (Option Z): the session record ALREADY has a
+    # persisted model/provider (set by _prepare_chat_start_session_for_stream
+    # on a prior turn). Resolve it WITHOUT a live provider-catalog rebuild —
+    # the drain thread fires while idle so the catalog is cold, and the live
+    # rebuild does a Copilot token-exchange HTTPS call that hangs the wakeup
+    # chat/start on this WSL/corp network (proven thread-stack, impl report
+    # §1). prefer_cached_catalog serves the warm/disk cache or a network-free
+    # minimal catalog; the persisted session model still wins, so the wakeup
+    # turn always gets a valid model (persisted → static/default), never a
+    # blocking network probe.
+    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+        prefer_cached_catalog=True,
+    )
+    resp = _start_chat_stream_for_session(
+        s,
+        msg=msg,
+        attachments=[],
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        normalized_model=normalized_model,
+    )
+
+    # ── Defect B: live-view of server-initiated turns ──────────────────────
+    # Option Z starts this turn server-side, so NO browser EventSource is
+    # attached to the new STREAMS[stream_id] (the browser only opens
+    # /api/chat/stream when IT POSTs /api/chat/start). An already-open tab
+    # would therefore see nothing until a manual refresh re-reads persisted
+    # state. Fix: fan a lightweight `server_turn_started` {stream_id} frame
+    # onto the persistent per-session live-view channel. messages.js handles
+    # it by attaching its EXISTING chat-stream renderer (attachLiveStream) to
+    # that stream_id — no second renderer, no chat/start POST.
+    #
+    # Idempotent with the closed-tab path: get_session_channel() is the
+    # NON-creating accessor, so when no tab is open this is a pure no-op and
+    # the server-side wakeup (the Option Z headline) is completely unaffected.
+    # If the user also has the per-turn chat-stream open, the frontend dedupes
+    # by stream_id so there is no double-render.
+    try:
+        status = int((resp or {}).get("_status", 200) or 200)
+        stream_id = (resp or {}).get("stream_id")
+        if status < 400 and stream_id:
+            from api.background_process import get_session_channel
+
+            ch = get_session_channel(session_id)
+            if ch is not None:
+                ch.emit(
+                    "server_turn_started",
+                    {
+                        "session_id": str(session_id),
+                        "stream_id": str(stream_id),
+                        "source": source,
+                    },
+                )
+    except Exception:
+        logger.debug(
+            "server_turn_started fan-out failed for session %s", session_id, exc_info=True
+        )
+    return resp
+
+
+def _handle_process_complete_ack(handler, body):
+    """Acknowledge a process_complete SSE event (diagnostic only).
+
+    Option Z PIVOT: the agent wakeup is now started SERVER-SIDE by the drain
+    thread (``api/background_process._process_one`` → ``start_session_turn``)
+    with NO browser round-trip — the closed-tab case works (parity with
+    CLI/Telegram). The frontend no longer re-POSTs ``wakeup_prompt`` to
+    /api/chat/start; the per-session SSE channel is demoted to pure live-view.
+
+    This endpoint is therefore a pure no-op for state — it exists so an open
+    tab can confirm receipt of the live-view event and so a future follow-up
+    (analytics, telemetry) has a stable hook. ``PENDING_PROCESS_COMPLETIONS``
+    is consumed by ``_start_chat_stream_for_session`` when the server-side
+    wakeup turn (or the next human turn / PR #2279 next-turn drain) runs.
+    """
+    from api.helpers import j
+
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    sid = str(body.get("session_id") or "").strip()
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    pid = str(body.get("process_id") or "").strip()
+    return j(handler, {
+        "ok": True,
+        "session_id": s.session_id,
+        "process_id": pid,
+        "pending_consumed": False,  # frontend re-POSTs /api/chat/start to actually consume
+    })
 
 
 def _handle_goal_command(handler, body):

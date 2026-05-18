@@ -4,6 +4,13 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
+// Module-scope dedupe set for process_complete events. Shared between the
+// in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
+// and the persistent session-scoped path (/api/session/stream), so the
+// frontend never re-POSTs a wakeup for the same (session_id, process_id)
+// regardless of which channel delivered it first. (Option X)
+var _seenProcessCompleteIds = new Set();
+
 function _isDocumentVisibleAndFocused() {
   if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return false;
   if(typeof document!=='undefined' && typeof document.hasFocus==='function' && !document.hasFocus()) return false;
@@ -1570,6 +1577,30 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
+    // process_complete: terminal(notify_on_complete=true) background process
+    // exited. Option Z PIVOT: the agent wakeup is now started SERVER-SIDE by
+    // the drain thread (api/background_process._process_one →
+    // routes.start_session_turn) with NO browser round-trip — so the
+    // closed-tab case works (parity with CLI/Telegram). The browser does NOT
+    // re-POST /api/chat/start anymore. This SSE event is now pure LIVE-VIEW:
+    // if a tab is open the server-initiated turn streams live via the normal
+    // /api/chat/stream EventSource; if the tab is closed the turn still runs
+    // server-side and persists to the session store.
+    //
+    // Idempotency: dedupe by (session_id, process_id). The server-side
+    // process_registry already guards against double-_move_to_finished, so a
+    // second event is almost always a stale buffered replay after reconnect.
+    //
+    // Option X: this handler is the in-turn (STREAMS-bound) path. The
+    // server dual-emits to the persistent session-scoped channel too —
+    // the `_handleProcessCompleteEvent` function below is shared between
+    // both paths (toast + dedupe only; the wakeup itself is server-side).
+    source.addEventListener('process_complete',e=>{
+      if(typeof _handleProcessCompleteEvent==='function'){
+        _handleProcessCompleteEvent(e, activeSid, {source:'stream'});
+      }
+    });
+
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -2397,6 +2428,167 @@ function stopApprovalPolling() {
   if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
   _approvalPollingSessionId = null;
+}
+
+// ── Session-scoped SSE stream (Option X) ──────────────────────────────────
+// Long-lived EventSource bound to /api/session/stream?session_id=<sid>.
+// Lives across agent turns (unlike the per-turn /api/chat/stream which is
+// torn down at end-of-turn). Carries process_complete events fired while no
+// turn is active — the architectural fix for the notify_on_complete wakeup
+// gap that #2242 + #2279 papered over.
+//
+// Lifecycle: opened on session mount (loadSession / newSession), closed on
+// session switch / unmount. The browser closes it implicitly on tab close
+// (server detects disconnect via the SSE read-loop and unsubscribes).
+let _sessionEventSource = null;
+let _sessionStreamSessionId = null;
+let _sessionStreamReconnectTimer = null;
+
+function startSessionStream(sid) {
+  if (!sid) return;
+  // Already on this session? No-op (loadSession is a no-op when re-selecting
+  // the same session; this defends against external re-callers).
+  if (_sessionStreamSessionId === sid && _sessionEventSource) return;
+  stopSessionStream();
+  _sessionStreamSessionId = sid;
+  try {
+    const es = new EventSource(new URL('api/session/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
+    _sessionEventSource = es;
+    es.addEventListener('initial', () => { /* connection confirmed */ });
+    es.addEventListener('process_complete', e => {
+      // Shared handler — same dedupe set as the in-turn STREAMS path.
+      if (typeof _handleProcessCompleteEvent === 'function') {
+        _handleProcessCompleteEvent(e, sid, {source: 'session'});
+      }
+    });
+    // ── Defect B: live-view of server-initiated (Option Z) turns ──────────
+    // The drain thread starts the wakeup turn server-side and the server
+    // fans a `server_turn_started` {stream_id} frame onto this per-session
+    // channel. No browser POSTed /api/chat/start, so nothing is attached to
+    // that STREAMS[stream_id] yet. Attach the EXISTING chat-stream renderer
+    // (attachLiveStream — the exact path /api/chat/start uses) to the
+    // server-created stream so the open tab renders the turn live. Reuses
+    // the one renderer; does NOT hand-roll a second one.
+    es.addEventListener('server_turn_started', e => {
+      try {
+        const d = JSON.parse(e.data || '{}');
+        const evSid = d.session_id || sid;
+        const streamId = String(d.stream_id || '');
+        if (!streamId || evSid !== sid) return;
+        // Only drive the renderer when this session is the one on screen.
+        const isCurrent = (typeof _isSessionCurrentPane === 'function')
+          ? _isSessionCurrentPane(sid)
+          : (S.session && S.session.session_id === sid);
+        if (!isCurrent) return;
+        // A turn is already rendering in this tab (user-initiated, or we
+        // already attached to this very stream). attachLiveStream is
+        // idempotent per (sid, streamId); bail if we're already on it.
+        if (S.activeStreamId === streamId) return;
+        const existingLive = (typeof LIVE_STREAMS !== 'undefined') ? LIVE_STREAMS[sid] : null;
+        if (existingLive && existingLive.streamId === streamId) return;
+        // Mirror the loadSession reattach setup, but NOT reconnecting so the
+        // turn renders from its first token.
+        S.busy = true;
+        S.activeStreamId = streamId;
+        if (S.session && S.session.session_id === sid) S.session.active_stream_id = streamId;
+        if (typeof updateSendBtn === 'function') updateSendBtn();
+        if (typeof setComposerStatus === 'function') setComposerStatus('');
+        if (typeof syncTopbar === 'function') syncTopbar();
+        if (typeof appendThinking === 'function') appendThinking();
+        if (typeof startApprovalPolling === 'function') startApprovalPolling(sid);
+        if (typeof startClarifyPolling === 'function') startClarifyPolling(sid);
+        if (typeof attachLiveStream === 'function') {
+          attachLiveStream(sid, streamId, (S.session && S.session.pending_attachments) || []);
+        }
+        if (typeof renderSessionList === 'function') void renderSessionList();
+      } catch (_) {}
+    });
+    es.onerror = () => {
+      // Browser already auto-reconnects EventSource on most transient
+      // failures. We only intervene if the connection has been closed for
+      // good (readyState === 2) — schedule a one-shot re-open after 5s.
+      if (es.readyState === 2 && _sessionStreamSessionId === sid) {
+        if (_sessionStreamReconnectTimer) clearTimeout(_sessionStreamReconnectTimer);
+        _sessionStreamReconnectTimer = setTimeout(() => {
+          _sessionStreamReconnectTimer = null;
+          if (_sessionStreamSessionId === sid) startSessionStream(sid);
+        }, 5000);
+      }
+    };
+  } catch(_) {
+    // EventSource ctor threw — silently disabled; the in-turn STREAMS path
+    // still works for events that fire during an active turn.
+    _sessionEventSource = null;
+  }
+}
+
+function stopSessionStream() {
+  if (_sessionStreamReconnectTimer) { clearTimeout(_sessionStreamReconnectTimer); _sessionStreamReconnectTimer = null; }
+  if (_sessionEventSource) {
+    try { _sessionEventSource.close(); } catch(_){}
+    _sessionEventSource = null;
+  }
+  _sessionStreamSessionId = null;
+}
+
+// Shared process_complete handler — invoked from BOTH the in-turn STREAMS
+// channel (legacy path, still kept as defense-in-depth) AND the session-
+// scoped channel (Option X primary path). Dedupes by (session_id, pid).
+function _handleProcessCompleteEvent(e, expectedSid, opts) {
+  try {
+    const d = JSON.parse(e.data || '{}');
+    const sid = d.session_id || expectedSid;
+    if (sid !== expectedSid) return;
+    const pid = String(d.process_id || '');
+    const dedupeKey = sid + '|' + pid;
+    if (pid && _seenProcessCompleteIds.has(dedupeKey)) return;
+    if (pid) _seenProcessCompleteIds.add(dedupeKey);
+    const wakeup = String(d.wakeup_prompt || '').trim();
+    if (!wakeup) return;
+
+    // RACE GATE (per agents-manager design §3): if a turn is already
+    // in progress, skip the wakeup. PR #2279's PENDING_PROCESS_COMPLETIONS
+    // + next-turn drain on the server side will catch this event when the
+    // active turn ends — re-POSTing on top of a live turn would race the
+    // ACTIVE_RUNS lock and get rejected with 409 anyway.
+    if (S.busy) {
+      try { console.debug('[process_complete] skipped — turn busy, server-side drain will catch', {sid, pid, source: opts && opts.source}); } catch(_) {}
+      return;
+    }
+
+    // Optional toast — short, non-blocking
+    try {
+      const cmd = String(d.command || '').slice(0, 80);
+      const exit = (d.exit_code === undefined || d.exit_code === null) ? '?' : String(d.exit_code);
+      showToast(`Background process exited (exit_code=${exit}): ${cmd}`, 2600);
+    } catch(_) {}
+
+    // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for
+    // state. The agent wakeup is now started SERVER-SIDE by the drain thread
+    // in api/background_process._process_one → start_session_turn; the browser
+    // is no longer in the wakeup path at all.)
+    try {
+      fetch(new URL('api/process-complete-ack', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'include',
+        body: JSON.stringify({session_id: sid, process_id: pid}),
+      }).catch(() => {});
+    } catch(_) {}
+
+    // Option Z PIVOT: the browser NO LONGER re-POSTs the chat-start endpoint
+    // to wake the agent. Server-side wakeup is now the PRIMARY mechanism — the
+    // drain thread starts the turn directly (no tab required), so the
+    // closed-tab case works (parity with CLI/Telegram). The per-session SSE
+    // channel this handler is wired into is DEMOTED to a pure live-view layer:
+    // if a tab is open the server-initiated turn streams live on the existing
+    // chat-stream EventSource opened by the normal SSE wiring; if the tab is
+    // closed the turn still runs server-side and the result is persisted to
+    // the session store. Nothing to do here beyond the optional toast above.
+    // The H1/H2/H3 hypotheses from the superseded card (S.busy race-gate,
+    // startSessionStream not called, browser re-POST dropped) are all N/A now
+    // because the wakeup trigger is no longer in the browser.
+  } catch(_) {}
 }
 
 // ── Clarify polling ──
