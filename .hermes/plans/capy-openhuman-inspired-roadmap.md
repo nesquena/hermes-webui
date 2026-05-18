@@ -50,15 +50,16 @@ Remaining:
 
 ### Phase 2 — TokenJuice-style output compaction
 
-Status: **backend helper implemented; product-visible and execution-path integration remain**.
+Status: **backend helper and run-all demo receipt implemented; broader execution-path integration remains**.
 
 Delivered:
 - `api/capy_compaction.py` implements `compact_output(...)` with bounded receipts, unsafe-marker redaction, path collapsing, repeated-line dedupe, approval-prompt preservation, error-block preservation, invalid-cap rejection, and `rules_applied` metadata.
 - `tests/test_capy_output_compaction.py` verifies size accounting, error/approval preservation, redaction status, cap enforcement, and unsafe-marker omission.
+- `space_demo_run_all()` now emits a metadata-only `output_compaction` receipt built from allow-listed demo-suite summary lines, so the existing Spaces UI can show original/compacted character counts, redaction status, and allow-listed rules without rendering raw output, prompts, widget bodies, or credentials.
 
 Remaining:
-- Surface compaction evidence in Spaces/demo receipts: original/compacted character counts, redaction status, retained artifact handles/citations, and allow-listed rules only.
-- Apply compaction at long tool/subagent/browser-output boundaries without hiding safety-relevant prompts, failures, approval prompts, or artifact handles.
+- Extend compaction receipts beyond the run-all demo suite to individual long creator/tool/subagent/browser-output boundaries where they add product value.
+- Preserve safety-relevant prompts, failures, approval prompts, and artifact handles/citations when broader execution paths adopt compaction.
 
 ### Phase 3 — Auto-fetch source registry and freshness
 
@@ -123,23 +124,23 @@ Only after the remaining Phase 1-6 integration items are working:
 
 ## Next implementation slices for autonomous sprints
 
-1. **Automated Memory Tree artifact ingestion**
-   - Wire live Space manifest/revision/widget-event/repair/rollback/visual-QA artifacts into `canonicalize_*` + `ingest_source(...)`.
-   - Tests must inspect persisted Markdown/SQLite records and public search/relevant-memory responses for metadata-only redaction.
+1. **Local knowledge bridge into Memory Tree**
+   - Register existing local knowledge sources as Memory Tree source records with provenance/freshness metadata rather than copying raw files into prompts.
+   - Keep source status metadata-only and local-first.
 
-2. **Product-visible compaction evidence**
-   - Render demo/smoke or creator/tool receipts with original size, compacted size, redaction status, retained artifact handles/citations, and allow-listed `rules_applied` labels only.
-   - Use real-`static/spaces.js` UI tests plus browser QA leak checks.
-
-3. **Safe source refresh worker**
-   - Consume queued `source.refresh` jobs, fetch only allowed sources, store sanitized summaries, update freshness/error counts, and never expose raw fetched bodies.
-
-4. **Prompt-preflight + memory/context enforcement**
+2. **Prompt-preflight + memory/context enforcement**
    - Add per-action pass/warn/block receipts for creator/source boundaries before memory can influence agent actions.
    - Treat Memory Tree content as untrusted advisory context.
 
-5. **Progress producer expansion**
+3. **Broader compaction producers**
+   - Extend the run-all `output_compaction` receipt pattern to individual long creator/tool/subagent/browser-output boundaries where it adds product value.
+   - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
+
+4. **Progress producer expansion**
    - Record structured events from creator/research/development runs and visual-QA gates so the product-home stream reflects real autonomous work.
+
+5. **Space/detail-level progress panels**
+   - Consider per-Space progress views if aggregate product-home events are too coarse for debugging autonomous creator loops.
 
 ---
 

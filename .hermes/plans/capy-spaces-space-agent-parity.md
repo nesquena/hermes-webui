@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-18 09:41 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-18 17:08 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction, source registry/freshness, product-home autonomy policy, Space detail/creator memory assist, and structured progress cards are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining integration gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, product-home autonomy policy, Space detail/creator memory assist, and structured progress cards are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining integration gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 

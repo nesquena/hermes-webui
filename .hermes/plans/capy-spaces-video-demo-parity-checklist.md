@@ -85,13 +85,12 @@ Recently landed:
 
 Next checkpoint emphasis:
 
-1. Automated Memory Tree artifact ingestion at live Space manifest/revision/widget-event/repair/rollback/visual-QA boundaries.
-2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
-3. Safe source refresh worker plus local-knowledge source registration.
-4. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
-5. Broader structured progress producers for real long-running creator/research/development tasks.
-6. Safe admin/recovery, rollback/time-travel, and sandbox/postMessage contracts remain blockers before richer generated widgets expand.
-7. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
+1. Local knowledge bridge into Memory Tree with provenance/freshness metadata.
+2. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
+3. Broader compaction producers beyond the run-all demo receipt for long creator/tool/subagent/browser outputs.
+4. Broader structured progress producers for real long-running creator/research/development tasks.
+5. Safe admin/recovery, rollback/time-travel, and sandbox/postMessage contracts remain blockers before richer generated widgets expand.
+6. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
 
 ## OpenHuman-Inspired Context Layer Demo Criteria
 

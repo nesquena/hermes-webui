@@ -2625,11 +2625,49 @@ def space_demo_run(name: str) -> dict[str, Any]:
     return summary
 
 
+def _space_demo_suite_summary_lines(results: list[dict[str, Any]], *, passed: int, total: int) -> list[str]:
+    """Build safe text-only demo-suite lines for compaction receipts.
+
+    Do not stringify full result objects here: demo results can contain nested
+    Spaces metadata and future fields. Keep this allow-listed so compaction
+    evidence never becomes a raw widget/source/prompt leak path.
+    """
+    lines = [
+        "Capy Spaces demo suite metadata-only smoke summary",
+        f"total: {int(total)}",
+        f"passed: {int(passed)}",
+        f"failure_count: {int(total) - int(passed)}",
+    ]
+    for item in results:
+        lines.append(
+            " | ".join(
+                (
+                    f"demo={str(item.get('demo') or '')[:80]}",
+                    f"template={str(item.get('template') or '')[:80]}",
+                    f"ok={bool(item.get('ok') is True)}",
+                    f"widgets={int(item.get('widget_count') or 0)}",
+                    f"persisted={bool(item.get('persistence_checked') is True)}",
+                    f"rollback={bool(item.get('rollback_point') is True)}",
+                )
+            )
+        )
+    return lines
+
+
 def space_demo_run_all() -> dict[str, Any]:
     """Run every metadata-only Space Agent video parity smoke fixture."""
     results = [space_demo_run(item["demo"]) for item in _SPACE_DEMO_RUNS]
     passed = sum(1 for item in results if item.get("ok") is True)
     total = len(results)
+    from api.capy_compaction import compact_output
+
+    output_compaction = compact_output(
+        "\n".join(_space_demo_suite_summary_lines(results, passed=passed, total=total)),
+        tool="capy-spaces-demo-suite",
+        command="space.demo.run_all",
+        exit_status=0 if passed == total else 1,
+        max_chars=600,
+    )
     return {
         "ok": passed == total,
         "action": "space.demo.run_all",
@@ -2637,6 +2675,7 @@ def space_demo_run_all() -> dict[str, Any]:
         "total": total,
         "passed": passed,
         "failed": total - passed,
+        "output_compaction": output_compaction,
         "results": results,
     }
 
