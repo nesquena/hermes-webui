@@ -7322,11 +7322,14 @@ def _handle_memory_read(handler):
     try:
         from api.profiles import get_active_hermes_home
 
-        mem_dir = get_active_hermes_home() / "memories"
+        home = get_active_hermes_home()
+        mem_dir = home / "memories"
     except ImportError:
-        mem_dir = Path.home() / ".hermes" / "memories"
+        home = Path.home() / ".hermes"
+        mem_dir = home / "memories"
     mem_file = mem_dir / "MEMORY.md"
     user_file = mem_dir / "USER.md"
+    soul_file = home / "SOUL.md"
     memory = (
         mem_file.read_text(encoding="utf-8", errors="replace")
         if mem_file.exists()
@@ -7337,15 +7340,23 @@ def _handle_memory_read(handler):
         if user_file.exists()
         else ""
     )
+    soul = (
+        soul_file.read_text(encoding="utf-8", errors="replace")
+        if soul_file.exists()
+        else ""
+    )
     return j(
         handler,
         {
             "memory": _redact_text(memory),
             "user": _redact_text(user),
+            "soul": _redact_text(soul),
             "memory_path": str(mem_file),
             "user_path": str(user_file),
+            "soul_path": str(soul_file),
             "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
+            "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
         },
     )
 
@@ -9822,17 +9833,21 @@ def _handle_memory_write(handler, body):
     try:
         from api.profiles import get_active_hermes_home
 
-        mem_dir = get_active_hermes_home() / "memories"
+        home = get_active_hermes_home()
+        mem_dir = home / "memories"
     except ImportError:
-        mem_dir = Path.home() / ".hermes" / "memories"
+        home = Path.home() / ".hermes"
+        mem_dir = home / "memories"
     mem_dir.mkdir(parents=True, exist_ok=True)
     section = body["section"]
     if section == "memory":
         target = mem_dir / "MEMORY.md"
     elif section == "user":
         target = mem_dir / "USER.md"
+    elif section == "soul":
+        target = home / "SOUL.md"
     else:
-        return bad(handler, 'section must be "memory" or "user"')
+        return bad(handler, 'section must be "memory", "user", or "soul"')
     target.write_text(body["content"], encoding="utf-8")
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 

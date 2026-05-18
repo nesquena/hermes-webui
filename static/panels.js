@@ -3563,12 +3563,13 @@ async function deleteCurrentSkill() {
 
 // ── Memory (main view) ──
 let _memoryData = null;
-let _currentMemorySection = null; // 'memory' | 'user'
+let _currentMemorySection = null; // 'memory' | 'user' | 'soul'
 let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
 const MEMORY_SECTIONS = [
-  { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
-  { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
+ { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
+ { key: 'user', labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
+ { key: 'soul', labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
 ];
 
 function _memorySectionMeta(key) {
@@ -3576,13 +3577,17 @@ function _memorySectionMeta(key) {
 }
 
 function _memorySectionContent(key) {
-  if (!_memoryData) return '';
-  return key === 'user' ? (_memoryData.user || '') : (_memoryData.memory || '');
+ if (!_memoryData) return '';
+ if (key === 'user') return _memoryData.user || '';
+ if (key === 'soul') return _memoryData.soul || '';
+ return _memoryData.memory || '';
 }
 
 function _memorySectionMtime(key) {
-  if (!_memoryData) return 0;
-  return key === 'user' ? (_memoryData.user_mtime || 0) : (_memoryData.memory_mtime || 0);
+ if (!_memoryData) return 0;
+ if (key === 'user') return _memoryData.user_mtime || 0;
+ if (key === 'soul') return _memoryData.soul_mtime || 0;
+ return _memoryData.memory_mtime || 0;
 }
 
 function _setMemoryHeaderButtons(mode) {
