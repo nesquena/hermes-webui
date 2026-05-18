@@ -1271,6 +1271,155 @@ def test_capy_memory_search_route_filters_and_redacts(tmp_path, monkeypatch):
     assert "api_key" not in serialized
 
 
+def test_register_local_knowledge_sources_tracks_each_source_without_copying_content(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = capy_memory.register_local_knowledge_sources(
+        {
+            "available": True,
+            "local_only": True,
+            "config_ok": True,
+            "db_exists": True,
+            "source_count": 2,
+            "chunk_count": 42,
+            "stale_source_count": 1,
+            "last_error_count": 0,
+            "last_successful_run": "/private/tmp/knowledge.sqlite3 token=SECRET_VALUE_DO_NOT_LEAK",
+            "last_run_status": "ok /private/tmp/Vault/Cappy Roadmap.md",
+            "embedding_enabled": False,
+            "db_path": "/private/tmp/knowledge.sqlite3",
+            "raw_content": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        source_rows=[
+            {
+                "path": "/private/tmp/Vault/Cappy Roadmap.md",
+                "source_type": "obsidian",
+                "title": "Cappy Roadmap",
+                "exists_now": True,
+                "indexed_at": "2026-05-18T12:00:00+00:00",
+                "last_error": "",
+            },
+            {
+                "path": "/private/tmp/Vault/Deleted Secret.md",
+                "source_type": "markdown",
+                "title": "/private/tmp/Vault/Deleted Secret.md",
+                "exists_now": False,
+                "indexed_at": "not a timestamp /private/tmp/Vault/Deleted Secret.md",
+                "last_error": "not indexed: /private/tmp/Vault/Deleted Secret.md SECRET_VALUE_DO_NOT_LEAK",
+            },
+        ],
+    )
+
+    assert receipt["ok"] is True
+    assert receipt["local_only"] is True
+    assert receipt["metadata_only"] is True
+    assert receipt["registered_source_count"] == 3
+    assert "local-knowledge-index" in {item["source_id"] for item in receipt["sources"]}
+    assert [item["source_type"] for item in receipt["sources"]].count("local_knowledge_source") == 2
+    assert memory_status()["source_count"] == 3
+    assert memory_status()["chunk_count"] == 0
+    assert memory_status()["refresh_job_count"] == 0
+    assert memory_status()["stale_source_count"] == 1
+    assert memory_status()["last_error_count"] == 1
+    assert not list((root / "vault").glob("*.md")), "local knowledge bridge must not copy source bodies to the vault"
+
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        rows = conn.execute(
+            "SELECT source_id, source_type, origin_kind, origin_uri, freshness_status, last_ingested_at, last_error, artifact_ref, content_sha256, display_name "
+            "FROM sources ORDER BY source_id"
+        ).fetchall()
+
+    assert len(rows) == 3
+    assert all(row[2] == "local_knowledge" for row in rows)
+    assert all(row[3].startswith("capy-knowledge://") for row in rows)
+    assert all(row[7] is None and row[8] is None for row in rows)
+    assert any(row[4] == "stale" and row[6] == "local knowledge source unavailable" for row in rows)
+    serialized = json.dumps({"receipt": receipt, "rows": rows}, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "/private/tmp" not in serialized
+    assert "knowledge.sqlite3" not in serialized
+    assert "db_path" not in serialized
+    assert "raw_content" not in serialized
+
+
+def test_capy_memory_local_knowledge_register_route_uses_safe_status_metadata(tmp_path, monkeypatch):
+    memory_root = tmp_path / "capy-memory"
+    knowledge_root = tmp_path / "local-knowledge"
+    knowledge_root.mkdir(parents=True)
+    (knowledge_root / "knowledge_index.py").write_text(
+        """
+from pathlib import Path
+
+
+def load_config(path=None):
+    return {'database_path': str(Path(__file__).with_name('knowledge.sqlite3'))}
+
+
+def status(cfg=None, config_path=None):
+    return {
+        'db_path': str(Path(__file__).with_name('knowledge.sqlite3')),
+        'db_exists': True,
+        'config_ok': True,
+        'source_count': 2,
+        'chunk_count': 9,
+        'last_error_count': 0,
+        'stale_source_count': 0,
+        'last_run_status': 'ok',
+        'last_successful_run': '2026-05-18T12:00:00+00:00',
+        'embedding_enabled': False,
+    }
+
+
+def sources(cfg=None, config_path=None, source_type='', stale_only=False, limit=100):
+    return {'sources': [
+        {
+            'path': str(Path(__file__).with_name('Roadmap.md')),
+            'source_type': 'obsidian',
+            'title': 'Roadmap note',
+            'exists_now': True,
+            'indexed_at': '2026-05-18T12:00:00+00:00',
+            'last_error': '',
+        },
+        {
+            'path': str(Path(__file__).with_name('Ops.md')),
+            'source_type': 'markdown',
+            'title': 'Ops note',
+            'exists_now': True,
+            'indexed_at': '2026-05-18T12:00:00+00:00',
+            'last_error': '',
+        },
+    ][:limit]}
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(memory_root))
+    monkeypatch.setenv("HERMES_LOCAL_KNOWLEDGE_DIR", str(knowledge_root))
+    monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(tmp_path / "Vault"))
+    init_memory_tree()
+
+    handled, status, body = _route_post("/api/capy-memory/local-knowledge/register", {
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        "raw_content": "<script>bad()</script>",
+    })
+
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["metadata_only"] is True
+    assert body["registered_source_count"] == 3
+    assert memory_status()["source_count"] == 3
+    assert memory_status()["chunk_count"] == 0
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "raw_content" not in serialized
+    assert "knowledge.sqlite3" not in serialized
+
+
 def test_spaces_memory_route_requires_space_id_and_returns_relevant_memory(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

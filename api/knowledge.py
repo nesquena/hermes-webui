@@ -136,6 +136,35 @@ def status_payload() -> dict[str, Any]:
     }
 
 
+def sources_payload(*, limit: int = 100, source_type: str = "", stale_only: bool = False) -> dict[str, Any]:
+    """Return sanitized local knowledge source metadata without file bodies."""
+    limit = max(1, min(int(limit or 100), 100))
+    safe_source_type = _safe_text(source_type, max_len=80)
+    module = _load_knowledge_index()
+    raw = module.sources(
+        _cfg(module),
+        source_type=safe_source_type,
+        stale_only=bool(stale_only),
+        limit=limit,
+    )
+    rows = []
+    for item in raw.get("sources", []) if isinstance(raw, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        source_type_value = _safe_text(item.get("source_type"), max_len=80)
+        rows.append({
+            "path": str(item.get("path") or ""),
+            "source_type": source_type_value,
+            "title": _safe_text(item.get("title"), max_len=200),
+            "exists_now": bool(item.get("exists_now", True)),
+            "indexed_at": _safe_text(item.get("indexed_at"), max_len=80),
+            "has_error": bool(item.get("last_error")),
+            "last_error": "local knowledge source unavailable" if item.get("last_error") else "",
+            "obsidian_url": obsidian_url_for_path(str(item.get("path") or ""), source_type=source_type_value),
+        })
+    return {"local_only": True, "metadata_only": True, "limit": limit, "sources": rows}
+
+
 def search_payload(query: str, *, limit: int = 10, source_types: list[str] | None = None) -> dict[str, Any]:
     query = str(query or "").strip()
     if not query:

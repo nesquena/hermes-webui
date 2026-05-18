@@ -4233,6 +4233,17 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("Capy memory source registration failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/local-knowledge/register":
+        try:
+            from api.capy_memory import register_local_knowledge_sources
+
+            return j(handler, register_local_knowledge_sources())
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Capy local knowledge registration failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/capy-progress/event":
         try:
             from api.capy_progress import record_progress_event

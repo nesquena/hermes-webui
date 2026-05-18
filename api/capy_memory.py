@@ -373,6 +373,236 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_iso_timestamp(value: Any) -> str:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return ""
+    raw = str(value).strip()
+    if not raw or _UNSAFE_VALUE_RE.search(raw) or _UNSAFE_PUBLIC_VALUE_RE.search(raw):
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.replace(microsecond=0).isoformat()
+
+
+_LOCAL_KNOWLEDGE_PATH_RE = re.compile(r"(^~?[/\\])|([A-Za-z]:[/\\])|([/\\][^\s]+)")
+_LOCAL_KNOWLEDGE_RUN_STATUSES = {"ok", "success", "stale", "error", "failed", "failure", "unknown"}
+
+
+def _safe_local_knowledge_text(value: Any, *, limit: int, fallback: str = "") -> str:
+    text = _safe_public_text(value, limit=limit)
+    if not text or _LOCAL_KNOWLEDGE_PATH_RE.search(text):
+        return fallback
+    return text
+
+
+def _safe_local_knowledge_run_status(value: Any) -> str:
+    text = _safe_public_text(value, limit=80).lower()
+    if not text:
+        return "unknown"
+    first_token = re.split(r"\s+", text, maxsplit=1)[0]
+    if first_token in _LOCAL_KNOWLEDGE_RUN_STATUSES:
+        return first_token
+    if _LOCAL_KNOWLEDGE_PATH_RE.search(text):
+        return "unknown"
+    return text if text in _LOCAL_KNOWLEDGE_RUN_STATUSES else "unknown"
+
+
+def _local_knowledge_freshness(status: dict[str, Any]) -> str:
+    run_status = _safe_local_knowledge_run_status(status.get("last_run_status"))
+    if (
+        status.get("available") is False
+        or status.get("config_ok") is False
+        or status.get("db_exists") is False
+        or _safe_nonnegative_int(status.get("last_error_count")) > 0
+        or run_status in {"error", "failed", "failure"}
+    ):
+        return "error"
+    if _safe_nonnegative_int(status.get("stale_source_count")) > 0 or run_status == "stale":
+        return "stale"
+    if _safe_nonnegative_int(status.get("source_count")) > 0 or _safe_nonnegative_int(status.get("chunk_count")) > 0:
+        return "ok"
+    return "unknown"
+
+
+def _upsert_local_knowledge_source(
+    *,
+    source_id: str,
+    source_type: str,
+    display_name: str,
+    origin_uri: str,
+    freshness_status: str,
+    checked_at: str,
+    last_error: str = "",
+) -> dict[str, Any]:
+    safe_source_id = _safe_public_id(source_id, fallback="local-knowledge-source")
+    safe_source_type = _safe_public_text(source_type, limit=80) or "local_knowledge_source"
+    safe_display_name = _safe_public_text(display_name, limit=200) or safe_source_id
+    safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
+    safe_freshness = freshness_status if freshness_status in {"ok", "stale", "error", "unknown"} else "unknown"
+    safe_checked_at = _safe_iso_timestamp(checked_at) or _now_iso()
+    safe_last_error = _safe_text(last_error, limit=120) if last_error in {
+        "local knowledge unavailable",
+        "local knowledge source unavailable",
+    } else ""
+    safe_last_error = safe_last_error or None
+    now = _now_iso()
+    with _connect() as conn:
+        conn.executescript(_SCHEMA_SQL)
+        conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, source_type, display_name, origin_uri, origin_kind, space_id,
+                artifact_ref, content_sha256, freshness_status, last_ingested_at,
+                last_checked_at, last_error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'local_knowledge', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                source_type=excluded.source_type,
+                display_name=excluded.display_name,
+                origin_uri=excluded.origin_uri,
+                origin_kind='local_knowledge',
+                freshness_status=excluded.freshness_status,
+                last_ingested_at=excluded.last_ingested_at,
+                last_checked_at=excluded.last_checked_at,
+                last_error=excluded.last_error,
+                updated_at=excluded.updated_at
+            """,
+            (
+                safe_source_id,
+                safe_source_type,
+                safe_display_name,
+                safe_origin_uri,
+                safe_freshness,
+                safe_checked_at,
+                safe_checked_at,
+                safe_last_error,
+                now,
+                now,
+            ),
+        )
+    result = {
+        "source_id": safe_source_id,
+        "source_type": safe_source_type,
+        "origin_kind": "local_knowledge",
+        "origin_uri": safe_origin_uri,
+        "freshness_status": safe_freshness,
+        "metadata_only": True,
+    }
+    if safe_last_error:
+        result["last_error"] = safe_last_error
+    return result
+
+
+def _local_knowledge_source_rows(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows[:100] if isinstance(row, dict)]
+
+
+def _local_knowledge_row_record(row: dict[str, Any], *, fallback_checked_at: str) -> dict[str, Any]:
+    raw_path = str(row.get("path") or "")
+    source_type_seed = _safe_local_knowledge_text(row.get("source_type"), limit=80, fallback="local")
+    title_seed = _safe_local_knowledge_text(row.get("title"), limit=180)
+    indexed_seed = _safe_iso_timestamp(row.get("indexed_at"))
+    source_hash_seed = raw_path or json.dumps(
+        {
+            "source_type": source_type_seed,
+            "title": title_seed,
+            "indexed_at": indexed_seed,
+            "exists_now": row.get("exists_now") is not False,
+            "has_error": _is_present_public_value(row.get("last_error")),
+        },
+        sort_keys=True,
+    )
+    source_hash = _sha256(source_hash_seed)[:16]
+    exists_now = row.get("exists_now") is not False
+    has_error = _is_present_public_value(row.get("last_error"))
+    freshness = "stale" if not exists_now else "error" if has_error else "ok"
+    safe_type = source_type_seed or "local"
+    safe_title = title_seed or f"Local knowledge {safe_type} source"
+    indexed_at = indexed_seed or fallback_checked_at
+    return _upsert_local_knowledge_source(
+        source_id=f"local-knowledge-source-{source_hash}",
+        source_type="local_knowledge_source",
+        display_name=safe_title,
+        origin_uri=f"capy-knowledge://item/{source_hash}",
+        freshness_status=freshness,
+        checked_at=indexed_at,
+        last_error="local knowledge source unavailable" if freshness in {"stale", "error"} and has_error else "",
+    )
+
+
+def register_local_knowledge_sources(
+    status: dict[str, Any] | None = None,
+    *,
+    source_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Bridge the existing local knowledge index into Memory Tree source metadata.
+
+    This deliberately registers provenance/freshness records only. It does not
+    read, copy, chunk, or persist local knowledge file bodies into the Memory
+    Tree vault; content remains behind the existing local knowledge APIs.
+    """
+    init_memory_tree()
+    if status is None:
+        try:
+            from api.knowledge import sources_payload, status_payload
+
+            status = status_payload()
+            if source_rows is None:
+                source_rows = sources_payload(limit=100).get("sources", [])
+        except Exception:  # noqa: BLE001 - route/status must fail closed without leaking paths/errors.
+            status = {"available": False, "local_only": True, "config_ok": False, "db_exists": False}
+            source_rows = []
+    if not isinstance(status, dict):
+        raise ValueError("local knowledge status must be a mapping")
+
+    freshness = _local_knowledge_freshness(status)
+    checked_at = _safe_iso_timestamp(status.get("last_successful_run")) or _now_iso()
+    local_rows = _local_knowledge_source_rows(source_rows or [])
+    index_freshness = "error" if freshness == "error" else "ok" if local_rows else freshness
+    sources = [
+        _upsert_local_knowledge_source(
+            source_id="local-knowledge-index",
+            source_type="local_knowledge_index",
+            display_name="Local knowledge index",
+            origin_uri="capy-knowledge://local-index",
+            freshness_status=index_freshness,
+            checked_at=checked_at,
+            last_error="local knowledge unavailable" if index_freshness == "error" else "",
+        )
+    ]
+    sources.extend(
+        _local_knowledge_row_record(row, fallback_checked_at=checked_at)
+        for row in local_rows
+    )
+    return {
+        "ok": True,
+        "local_only": True,
+        "metadata_only": True,
+        "registered_source_count": len(sources),
+        "sources": sources,
+        "knowledge_summary": {
+            "available": bool(status.get("available", True)),
+            "source_count": _safe_nonnegative_int(status.get("source_count")),
+            "chunk_count": _safe_nonnegative_int(status.get("chunk_count")),
+            "stale_source_count": _safe_nonnegative_int(status.get("stale_source_count")),
+            "last_error_count": _safe_nonnegative_int(status.get("last_error_count")),
+            "last_run_status": _safe_local_knowledge_run_status(status.get("last_run_status")),
+        },
+    }
+
+
 def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
     """Return bounded metadata-only pending source refresh jobs."""
     limit = max(1, min(int(limit or 10), 25))
@@ -1316,6 +1546,7 @@ __all__ = [
     "memory_tree_db_path",
     "memory_tree_root",
     "memory_tree_vault_path",
+    "register_local_knowledge_sources",
     "register_source_reference",
     "relevant_memory_for_space",
     "run_source_refresh_jobs",
