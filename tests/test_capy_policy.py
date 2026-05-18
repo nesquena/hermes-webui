@@ -220,6 +220,40 @@ def test_prompt_preflight_blocks_prompt_injection_without_echoing_raw_text():
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_prompt_preflight_blocks_access_token_marker_without_echoing_raw_text():
+    result = prompt_preflight("Build a dashboard with access_token=TOKEN_VALUE", boundary="creator_preview")
+
+    assert result["status"] == "block"
+    assert result["severity"] == "high"
+    assert result["categories"] == ["credential_request"]
+    serialized = json.dumps(result, sort_keys=True).lower()
+    assert "access_token" not in serialized
+    assert "token_value" not in serialized
+
+
+
+def test_prompt_preflight_blocks_executable_marker_variants_without_echoing_raw_text():
+    blocked_prompts = [
+        "Review raw_prompt before creating the panel",
+        "Review render_code before creating the panel",
+        "Review render-code before creating the panel",
+        "Review generated_body before creating the panel",
+        "Review generated-widget-body before creating the panel",
+        "Review </script> before creating the panel",
+    ]
+
+    for prompt in blocked_prompts:
+        result = prompt_preflight(prompt, boundary="creator_preview")
+        assert result["status"] == "block"
+        assert result["categories"] == ["executable_content_marker"]
+        serialized = json.dumps(result, sort_keys=True).lower()
+        assert prompt.lower() not in serialized
+        assert "render_code" not in serialized
+        assert "generated_body" not in serialized
+        assert "</script" not in serialized
+
+
+
 def test_prompt_preflight_allows_benign_tokenization_and_source_labels():
     result = prompt_preflight(
         "Build a tokenization dashboard for Source Notes summaries and explain routing hints.",

@@ -33,6 +33,10 @@ _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$")
 _SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.(?:current|spaces)\.[a-zA-Z0-9_.:/ @;-]+")
+_SPACE_CREATOR_DISPLAY_PREFLIGHT_RE = re.compile(
+    r"ignore\s+(?:all\s+)?previous\s+instructions|disregard\s+(?:all\s+)?instructions|override\s+(?:system|developer)|(?:system|developer)\s+prompt|hidden\s+instructions|reveal\s+(?:your\s+)?instructions|bypass\s+approval|disable\s+approval|without\s+asking|exfiltrat|delete\s+all|sudo\b|<\s*/?\s*script\b|renderer\b|render[\s_-]*code|raw[\s_-]+prompt|generated[\s_-]+(?:widget[\s_-]+)?body|api[_\s-]?key|api[_\s-]?auth|bearer\b|access[_\s-]?token|password\b|credential",
+    re.IGNORECASE,
+)
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 _OMITTED_PAYLOAD_KEYS = {
     "api_key",
@@ -2926,6 +2930,42 @@ def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, 
     return copy.deepcopy(receipt["draft"]), preview_id
 
 
+def _space_creator_prompt_preflight_receipt(payload: dict[str, Any]) -> dict[str, Any] | None:
+    prompt_parts: list[str] = []
+    for key in ("prompt", "request", "description", "summary"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            prompt_parts.append(str(value).strip())
+    for key in ("spaceName", "space_name", "name"):
+        value = payload.get(key)
+        text = str(value).strip() if value is not None else ""
+        if text and _SPACE_CREATOR_DISPLAY_PREFLIGHT_RE.search(text):
+            prompt_parts.append(text)
+    raw_widgets_value = payload.get("widgets")
+    raw_widgets = raw_widgets_value if isinstance(raw_widgets_value, list) else []
+    for raw_widget in raw_widgets[:20]:
+        if not isinstance(raw_widget, dict):
+            continue
+        for key in ("prompt", "agent_prompt", "agentPrompt", "description", "summary"):
+            value = raw_widget.get(key)
+            if value is not None and str(value).strip():
+                prompt_parts.append(str(value).strip())
+        for key in ("title", "name"):
+            value = raw_widget.get(key)
+            text = str(value).strip() if value is not None else ""
+            if text and _SPACE_CREATOR_DISPLAY_PREFLIGHT_RE.search(text):
+                prompt_parts.append(text)
+    if not prompt_parts:
+        return None
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight("\n".join(prompt_parts), boundary="creator_preview")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    if receipt.get("status") != "pass":
+        raise ValueError("Creator prompt preflight blocked")
+    return receipt
+
+
 def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Return a bounded, non-persisted creator-loop preview spec.
 
@@ -2934,6 +2974,7 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     sandbox preview / visual QA without creating a Space, executing generated
     bodies, or echoing raw prompt/source/auth material.
     """
+    preflight_receipt = _space_creator_prompt_preflight_receipt(payload)
     draft = _space_creator_sanitized_draft(payload)
     widgets = draft["widget_details"]
     preview_id = _space_creator_store_preview_receipt(draft)
@@ -2960,6 +3001,8 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
         "widget_count": len(widgets),
         "safety": draft["safety"],
     }
+    if preflight_receipt:
+        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
     memory_assist = draft.get("memory_assist") if isinstance(draft.get("memory_assist"), dict) else None
     if memory_assist:
         response["memory_assist"] = copy.deepcopy(memory_assist)

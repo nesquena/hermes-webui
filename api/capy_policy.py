@@ -106,7 +106,7 @@ _PREFLIGHT_RULES = [
     ),
     (
         "credential_request",
-        re.compile(r"api[_\s-]?key|api[_\s-]?auth|bearer\b|access\s+token|password\b|credential", re.I),
+        re.compile(r"api[_\s-]?key|api[_\s-]?auth|bearer\b|access[_\s-]?token|password\b|credential", re.I),
     ),
     (
         "tool_coercion",
@@ -114,7 +114,7 @@ _PREFLIGHT_RULES = [
     ),
     (
         "executable_content_marker",
-        re.compile(r"<\s*script\b|renderer\b|render\s*code|generated\s+(?:widget\s+)?body|raw\s+prompt", re.I),
+        re.compile(r"<\s*/?\s*script\b|renderer\b|render[\s_-]*code|generated[\s_-]+(?:widget[\s_-]+)?body|raw[\s_-]+prompt", re.I),
     ),
 ]
 
