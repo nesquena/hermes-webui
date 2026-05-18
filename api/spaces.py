@@ -1127,6 +1127,47 @@ def _widget_event_label_summary(value: Any, limit: int = 120) -> str:
     return text
 
 
+def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) -> dict[str, Any] | None:
+    """Return bounded, metadata-only relevant-memory hints for creator previews.
+
+    Memory Tree hits are advisory context only; they must never become persisted
+    Space manifest state or bypass creator-loop preview/visual-QA/commit gates.
+    """
+    if not space_id:
+        return None
+    try:
+        sid = validate_space_id(space_id)
+    except ValueError:
+        return None
+    try:
+        from api.capy_memory import relevant_memory_for_space
+
+        raw_hits = relevant_memory_for_space(sid, limit=limit).get("results") or []
+    except Exception:
+        raw_hits = []
+    bounded_limit = max(1, min(int(limit or 3), 5))
+    results: list[dict[str, str]] = []
+    for hit in raw_hits[:bounded_limit]:
+        if not isinstance(hit, dict):
+            continue
+        raw_snippet = str(hit.get("snippet") or "")
+        heading_index = raw_snippet.find("# ")
+        if heading_index >= 0:
+            raw_snippet = raw_snippet[heading_index:]
+        safe_hit = {
+            "source_id": _active_context_value(hit.get("source_id"), 160),
+            "source_type": _active_context_value(hit.get("source_type"), 80),
+            "redaction_status": _active_context_value(hit.get("redaction_status"), 80),
+            "snippet": _active_context_value(raw_snippet, 700),
+        }
+        if not any(safe_hit.values()) or any(value == "[REDACTED]" for value in safe_hit.values()):
+            continue
+        results.append(safe_hit)
+    if not results:
+        return None
+    return {"space_id": sid, "local_only": True, "hit_count": len(results), "results": results}
+
+
 def _payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
     if not lowered:
@@ -2709,6 +2750,8 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
         widget_details.append(_space_tool_preview_widget_detail(widget_payload))
         omitted_field_count += omitted_count + creator_omitted
 
+    memory_assist = _space_memory_assist_for_creator(space_id, limit=3)
+
     return {
         "space": space,
         "widget_payloads": widget_payloads,
@@ -2724,6 +2767,7 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
             "generated_bodies_rendered": False,
             "omitted_field_count": omitted_field_count,
         },
+        "memory_assist": memory_assist,
     }
 
 
@@ -2844,6 +2888,9 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
         "widget_count": len(widgets),
         "safety": draft["safety"],
     }
+    memory_assist = draft.get("memory_assist") if isinstance(draft.get("memory_assist"), dict) else None
+    if memory_assist:
+        response["memory_assist"] = copy.deepcopy(memory_assist)
     commit_base = draft.get("commit_base") if isinstance(draft.get("commit_base"), dict) else {}
     if commit_base.get("exists") and _manifest_path(draft["space"]["space_id"]).exists():
         current_space = read_space(draft["space"]["space_id"])
@@ -2973,6 +3020,9 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         "revision_event_id": created.get("revision_event_id"),
         "safety": draft["safety"],
     }
+    memory_assist = draft.get("memory_assist") if isinstance(draft.get("memory_assist"), dict) else None
+    if memory_assist:
+        response["memory_assist"] = copy.deepcopy(memory_assist)
     if revision_preview is not None:
         response["revision_preview"] = revision_preview
     if revision_diff is not None:

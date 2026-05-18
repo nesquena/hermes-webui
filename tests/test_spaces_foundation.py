@@ -2199,6 +2199,90 @@ def test_creator_preview_targets_existing_space_with_revision_diff_without_persi
     assert "secret_source" not in serialized
 
 
+def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    created = spaces.create_space(
+        {
+            "space_id": "creator-memory-lab",
+            "name": "Creator Memory Lab",
+            "description": "Existing safe workspace",
+        }
+    )
+
+    from api.capy_memory import canonicalize_space_manifest, ingest_source, init_memory_tree
+
+    init_memory_tree()
+    memory_record = canonicalize_space_manifest(
+        {
+            "space_id": created["space_id"],
+            "name": "Creator Memory Lab",
+            "description": "Prior acceptance note: preserve the visual QA checklist.",
+            "widgets": [
+                {
+                    "id": "qa-checklist",
+                    "kind": "status",
+                    "title": "QA Checklist",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        }
+    )
+    ingest_source(memory_record)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "targetSpaceId": created["space_id"],
+            "spaceName": "Creator Memory Lab Revised",
+            "description": "Refresh the metadata-only creator workspace.",
+            "widgets": [{"id": "qa-checklist", "kind": "status", "title": "QA Checklist Updated"}],
+            "prompt": "Use memory but do not echo renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert preview["ok"] is True
+    assert preview["stored"] is False
+    assert preview["memory_assist"]["space_id"] == created["space_id"]
+    assert preview["memory_assist"]["local_only"] is True
+    assert preview["memory_assist"]["hit_count"] == 1
+    assert preview["memory_assist"]["results"] == [
+        {
+            "source_id": memory_record["source_id"],
+            "source_type": "space_manifest",
+            "redaction_status": "dropped_fields",
+            "snippet": "# Creator Memory Lab ## Space metadata - space_id: creator-memory-lab - name: Creator Memory Lab - description: Prior acceptance note: preserve the visual QA checklist. ## Widgets - qa-checklist | QA Checklist | status",
+        }
+    ]
+    assert "memory_assist" not in spaces.read_space(created["space_id"])
+
+    commit = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+
+    assert commit["ok"] is True
+    assert commit["memory_assist"] == preview["memory_assist"]
+    manifest = json.loads((spaces.manifests_dir() / created["space_id"] / "space.json").read_text(encoding="utf-8"))
+    assert "memory_assist" not in manifest
+    event_path = spaces.events_dir() / f"{manifest['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    serialized_public = json.dumps({"preview": preview, "commit": commit}, sort_keys=True).lower()
+    serialized_persisted = json.dumps({"manifest": manifest, "event": event}, sort_keys=True).lower()
+    for serialized_blob in (serialized_public, serialized_persisted):
+        assert "<script" not in serialized_blob
+        assert "bad()" not in serialized_blob
+        assert "api_key" not in serialized_blob
+        assert "secret_value_do_not_leak" not in serialized_blob
+        assert "renderer" not in serialized_blob
+
+
 def test_creator_preview_rejects_conflicting_target_space_aliases_before_receipt(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.create_space({"space_id": "creator-target-one", "name": "Creator Target One"})

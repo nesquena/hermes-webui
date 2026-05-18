@@ -867,6 +867,26 @@
       '</div></div></div>';
   }
 
+  function renderCreatorMemoryAssist(data){
+    const assist = data && data.memory_assist && typeof data.memory_assist === 'object' && !Array.isArray(data.memory_assist) ? data.memory_assist : null;
+    if (!assist || !Array.isArray(assist.results)) return '';
+    const rows = assist.results.slice(0, 5).map(function(hit){
+      if (!hit || typeof hit !== 'object' || Array.isArray(hit)) return '';
+      const sourceId = safeCreatorIdText(hit.source_id || '');
+      const sourceType = safeCreatorSummaryText(hit.source_type || 'memory') || '';
+      const redactionStatus = safeCreatorSummaryText(hit.redaction_status || 'metadata-only') || 'metadata-only';
+      const snippet = safeCreatorSummaryText(hit.snippet || '') || '';
+      if (!sourceId && !sourceType && !snippet) return '';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(snippet || sourceId || sourceType || 'Memory slice')+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml([sourceType, redactionStatus, sourceId].filter(Boolean).join(' · '))+'</div></div></div>';
+    }).filter(Boolean).join('');
+    if (!rows) return '';
+    const count = Math.max(0, Number(assist.hit_count || assist.results.length || 0));
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Memory assist</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(String(count || assist.results.length))+' relevant metadata slice(s) · advisory context only</div>' +
+      '</div></div>'+rows+'</div>';
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -885,7 +905,7 @@
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + gateChecklist + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + gateChecklist + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){
@@ -903,7 +923,7 @@
       '</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator commit saved</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(rev ? ' · Revision: '+escapeHtml(rev) : '')+'</div>' +
-      revisionReceipt +
+      revisionReceipt + renderCreatorMemoryAssist(data || {}) +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
       '</div>'+actions+'</div></div></div>';

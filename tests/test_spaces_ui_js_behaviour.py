@@ -506,6 +506,40 @@ global.fetch = async function(path, opts = {}) {
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         });
       }
+      if (scenario === 'creatorPreviewMemoryAssist') {
+        return response({
+          ok: true,
+          action: 'space.creator.preview',
+          stored: false,
+          executed: false,
+          stage: 'sandbox-preview-required',
+          preview_id: 'preview-memory-safe-1',
+          gates: {
+            sandbox_preview_required: true,
+            visual_qa_required: true,
+            approve_commit_required: true,
+          },
+          spec: {
+            space: { space_id: 'creator-memory-lab', name: 'Creator Memory Lab', description: 'Metadata-only preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            widgets: [
+              { id: 'qa-checklist', kind: 'status', title: 'QA Checklist', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+          },
+          memory_assist: {
+            space_id: 'creator-memory-lab',
+            local_only: true,
+            hit_count: 2,
+            results: [
+              { source_id: 'cmt-src-safe-1', source_type: 'space_manifest', redaction_status: 'dropped_fields', snippet: 'Prior acceptance note: preserve the visual QA checklist.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+              { source_id: 'api_key', source_type: 'source', redaction_status: 'SECRET_VALUE_DO_NOT_LEAK', snippet: 'renderer <script>bad()</script> raw prompt', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+            ],
+          },
+          prompt: body.prompt,
+          raw_prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        });
+      }
       if (scenario === 'creatorPreviewExistingSpace' || scenario === 'creatorCommitExistingSpaceReceipt') {
         return response({
           ok: true,
@@ -2764,7 +2798,7 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
-  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure') {
+  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure' || scenario === 'creatorPreviewMemoryAssist') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
@@ -6114,6 +6148,22 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "api_key" not in out["rootHtml"].lower()
     assert "raw_prompt" not in out["rootHtml"]
     assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_renders_relevant_memory_assist_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewMemoryAssist")
+
+    assert "Creator preview ready" in out["rootHtml"]
+    assert "Memory assist" in out["rootHtml"]
+    assert "Prior acceptance note: preserve the visual QA checklist." in out["rootHtml"]
+    assert "space_manifest" in out["rootHtml"]
+    assert "dropped_fields" in out["rootHtml"]
+    assert "cmt-src-safe-1" in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "<script" not in out["rootHtml"].lower()
+    assert "raw prompt" not in out["rootHtml"].lower()
 
 
 def test_creator_preview_omits_unsafe_ids_and_commit_action(driver_path):
