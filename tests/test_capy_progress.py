@@ -180,6 +180,72 @@ def test_progress_status_bounds_recent_family_counts_and_omits_empty_families(mo
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_progress_status_returns_bounded_recent_event_stream_metadata_only(monkeypatch, tmp_path):
+    log_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+    rows = [
+        {"event_id": "evt-001", "event_type": "run.started", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:00Z"},
+        {"event_id": "evt-002", "event_type": "tool.started", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:01Z"},
+        {"event_id": "evt-003", "event_type": "tool.completed", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:02Z"},
+        {"event_id": "evt-004", "event_type": "subagent.started", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:03Z"},
+        {"event_id": "evt-005", "event_type": "subagent.completed", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:04Z"},
+        {"event_id": "evt-006", "event_type": "memory.ingest.completed", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:05Z"},
+        {"event_id": "evt-007", "event_type": "space.visual_qa.completed", "run_id": "sprint-1", "created_at": "2026-05-18T00:00:06Z"},
+        {"event_id": "renderer/../event", "event_type": "renderer.source", "run_id": "SECRET_VALUE_DO_NOT_LEAK", "created_at": "2026-05-18T00:00:07Z"},
+    ]
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    status = progress_status()
+    serialized = json.dumps(status, sort_keys=True).lower()
+
+    assert status["recent_events"] == [
+        {
+            "event_id": "evt-007",
+            "event_type": "space.visual_qa.completed",
+            "family": "space.visual_qa",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:06Z",
+        },
+        {
+            "event_id": "evt-006",
+            "event_type": "memory.ingest.completed",
+            "family": "memory.ingest",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:05Z",
+        },
+        {
+            "event_id": "evt-005",
+            "event_type": "subagent.completed",
+            "family": "subagent",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:04Z",
+        },
+        {
+            "event_id": "evt-004",
+            "event_type": "subagent.started",
+            "family": "subagent",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:03Z",
+        },
+        {
+            "event_id": "evt-003",
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:02Z",
+        },
+        {
+            "event_id": "evt-002",
+            "event_type": "tool.started",
+            "family": "tool",
+            "run_id": "sprint-1",
+            "created_at": "2026-05-18T00:00:01Z",
+        },
+    ]
+    assert "renderer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_capy_progress_event_route_records_camelcase_event_metadata_only(monkeypatch, tmp_path):
     import api.routes as routes
 

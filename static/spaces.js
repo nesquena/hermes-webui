@@ -240,6 +240,7 @@
     const recentEvents = safeNonNegativeCount(status && status.recent_event_count);
     const familyCounts = safeProgressFamilyCounts(status && status.recent_family_counts);
     const supportedTypes = safeProgressEventTypes(status && (status.recent_event_types || status.supported_event_types));
+    const recentStream = safeProgressRecentEvents(status && status.recent_events);
     const lastEventAt = safeProgressTimestamp(status && status.last_event_at);
     const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
     const summary = unavailable
@@ -255,10 +256,13 @@
       (lastEventAt ? '<span>Last event '+escapeHtml(lastEventAt)+'</span>' : '') +
       '<span>'+escapeHtml(redactionStatus)+'</span>' +
       '</div>' +
+      (recentStream.length ? '<div class="capy-spaces-progress-stream"><h4>Recent progress stream</h4><ul>' +
+        recentStream.map(function(event){ return '<li>'+escapeHtml(event.event_type)+' · '+escapeHtml(event.run_id || 'local-run')+' · '+escapeHtml(event.created_at)+'</li>'; }).join('') +
+        '</ul></div>' : '') +
       '</section>';
   }
 
-  function safeProgressEventTypes(types){
+  function safeProgressEventType(value){
     const allowed = {
       'run.started': true,
       'run.completed': true,
@@ -277,11 +281,16 @@
       'space.visual_qa.completed': true,
       'space.visual_qa.failed': true
     };
+    const label = String(value == null ? '' : value).trim().toLowerCase();
+    return allowed[label] ? label : '';
+  }
+
+  function safeProgressEventTypes(types){
     const values = Array.isArray(types) ? types : [];
     const labels = [];
     values.forEach(function(type){
-      const label = String(type == null ? '' : type).trim().toLowerCase();
-      if (allowed[label] && labels.indexOf(label) === -1) labels.push(label);
+      const label = safeProgressEventType(type);
+      if (label && labels.indexOf(label) === -1) labels.push(label);
     });
     return (labels.length ? labels : ['run.started', 'tool.started', 'tool.completed']).slice(0, 6);
   }
@@ -292,6 +301,33 @@
     return allowed.map(function(family){
       return { family: family, count: safeNonNegativeCount(source[family]) };
     }).filter(function(item){ return item.count > 0; }).slice(0, 6);
+  }
+
+  function safeProgressPublicId(value){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
+    const unsafePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw[_-]?prompt|generated[_-]?code)/i;
+    return /^[a-z0-9][a-z0-9_.:-]{0,120}$/i.test(text) && !unsafePattern.test(text) ? text : '';
+  }
+
+  function safeProgressFamily(value){
+    const label = String(value == null ? '' : value).trim().toLowerCase();
+    return ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'].indexOf(label) >= 0 ? label : '';
+  }
+
+  function safeProgressRecentEvents(events){
+    const values = Array.isArray(events) ? events : [];
+    const safeEvents = [];
+    values.forEach(function(event){
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return;
+      const eventId = safeProgressPublicId(event.event_id);
+      const eventType = safeProgressEventType(event.event_type);
+      const family = safeProgressFamily(event.family);
+      const runId = safeProgressPublicId(event.run_id);
+      const createdAt = safeProgressTimestamp(event.created_at);
+      if (!eventId || !eventType || !family || !createdAt) return;
+      safeEvents.push({ event_id: eventId, event_type: eventType, family: family, run_id: runId, created_at: createdAt });
+    });
+    return safeEvents.slice(0, 6);
   }
 
   function safeProgressRedactionStatus(value){

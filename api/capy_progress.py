@@ -172,6 +172,30 @@ def _recent_family_counts(events: list[dict[str, Any]]) -> dict[str, int]:
     return {family: counts[family] for family in _EVENT_FAMILIES if counts.get(family)}
 
 
+def _recent_events(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    recent: list[dict[str, str]] = []
+    for event in reversed(events):
+        event_id = _safe_public_id(event.get("event_id"))
+        event_type = str(event.get("event_type") or "")
+        family = str(event.get("family") or _event_family(event_type))
+        run_id = _safe_public_id(event.get("run_id"))
+        created_at = _safe_created_at(event.get("created_at"))
+        if not event_id or event_type not in _SUPPORTED_EVENT_SET or family not in _EVENT_FAMILIES or not created_at:
+            continue
+        recent.append(
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "family": family,
+                "run_id": run_id,
+                "created_at": created_at,
+            }
+        )
+        if len(recent) >= 6:
+            break
+    return recent
+
+
 def progress_status() -> dict[str, Any]:
     """Return local-only progress event capability/status metadata."""
     events = _read_events()
@@ -185,6 +209,7 @@ def progress_status() -> dict[str, Any]:
         "recent_event_count": len(events),
         "recent_event_types": _recent_event_types(events),
         "recent_family_counts": _recent_family_counts(events),
+        "recent_events": _recent_events(events),
         "last_event_at": last_event_at,
         "event_families": list(_EVENT_FAMILIES),
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
