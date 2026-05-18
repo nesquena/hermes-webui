@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **PR #2496** by @Michaelyklam (refs #1925) — Route approval and clarify responses through the default-off `RuntimeAdapter.respond_approval(...)` / `respond_clarify(...)` seam when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled. The default `legacy-direct` path still uses the existing callback helpers directly, legacy no-id responses keep their historical `ok: true` shape, and stale explicit approval ids are now bounded as not-active instead of falling back to the oldest queued command. No approval queue, clarify queue, callback registry, runner, sidecar, queue/goal migration, or cached-agent state is introduced.
+
 ### Documentation
 
 - **PR #2483** by @franksong2702 (refs #2364) — Add a narrow README note for the community ARM64 Android AVF field report: Hermes Agent + WebUI running inside a Debian 12 VM on a mid-range Android phone with cloud-hosted inference. The note frames the report as a compatibility signal rather than an official support baseline or provider/model benchmark, and records practical mobile caveats around first-install compile time, Android tab reloads, and battery optimization.

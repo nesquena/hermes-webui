@@ -8551,18 +8551,16 @@ def _handle_workspace_reorder(handler, body):
     return j(handler, {"ok": True, "workspaces": reordered})
 
 
-def _handle_approval_respond(handler, body):
-    sid = body.get("session_id", "")
-    if not sid:
-        return bad(handler, "session_id is required")
-    choice = body.get("choice", "deny")
-    if choice not in ("once", "session", "always", "deny"):
-        return bad(handler, f"Invalid choice: {choice}")
-    approval_id = body.get("approval_id", "")
+def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
+    """Resolve an approval through the existing callback path.
 
-    # Pop the targeted entry from the pending queue by approval_id.
-    # Falls back to popping the first entry for backward-compat with old clients.
+    Slice 3b keeps the RuntimeAdapter as a protocol translator: it delegates to
+    this legacy helper rather than owning approval queues or callback state.
+    """
+    # Pop the targeted entry from the pending queue by approval_id. Old clients
+    # that omit approval_id still resolve the oldest entry for compatibility.
     pending = None
+    found_target = False
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
@@ -8571,17 +8569,23 @@ def _handle_approval_respond(handler, body):
                 for i, entry in enumerate(queue):
                     if entry.get("approval_id") == approval_id:
                         pending = queue.pop(i)
+                        found_target = True
                         break
                 else:
-                    # approval_id not found -- fall back to oldest entry.
-                    pending = queue.pop(0) if queue else None
+                    # A stale explicit id must not accidentally approve the
+                    # oldest queued command; duplicate/stale responses are
+                    # bounded as not-active by the adapter route.
+                    pending = None
             else:
                 pending = queue.pop(0) if queue else None
+                found_target = pending is not None
             if not queue:
                 _pending.pop(sid, None)
         elif queue:
             # Legacy single-dict value.
-            pending = _pending.pop(sid, None)
+            if not approval_id or queue.get("approval_id") == approval_id:
+                pending = _pending.pop(sid, None)
+                found_target = pending is not None
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -8606,8 +8610,43 @@ def _handle_approval_respond(handler, body):
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
-    resolve_gateway_approval(sid, choice, resolve_all=False)
-    return j(handler, {"ok": True, "choice": choice})
+    gateway_resolved = 0
+    if found_target or not approval_id:
+        gateway_resolved = resolve_gateway_approval(sid, choice, resolve_all=False) or 0
+    # Keep the historical no-id response path truthy for old clients/tests while
+    # making stale explicit ids bounded as not-active for Slice 3b.
+    return bool(pending) or bool(gateway_resolved) or not bool(approval_id)
+
+
+def _handle_approval_respond(handler, body):
+    sid = body.get("session_id", "")
+    if not sid:
+        return bad(handler, "session_id is required")
+    choice = body.get("choice", "deny")
+    if choice not in ("once", "session", "always", "deny"):
+        return bad(handler, f"Invalid choice: {choice}")
+    approval_id = body.get("approval_id", "")
+
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(approval_delegate=_resolve_approval_legacy)
+        ok = adapter.respond_approval(sid, approval_id, choice).accepted
+    else:
+        ok = _resolve_approval_legacy(sid, approval_id, choice)
+    return j(handler, {"ok": ok, "choice": choice})
+
+
+def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
+    """Resolve clarify through the existing callback path without new state."""
+    # The legacy clarify queue is FIFO and does not yet expose stable ids to the
+    # browser, so clarify_id is accepted by the adapter contract but not used to
+    # create a parallel callback registry in the WebUI process.
+    resolved = resolve_clarify(sid, response, resolve_all=False)
+    # Preserve the historical no-id response shape for old clients/tests: a
+    # plain /api/clarify/respond call returns ok even when no pending prompt is
+    # active. Explicit stale ids remain bounded as not-active under the adapter.
+    return bool(resolved) or not bool(clarify_id)
 
 
 def _handle_clarify_respond(handler, body):
@@ -8622,8 +8661,16 @@ def _handle_clarify_respond(handler, body):
     response = str(response or "").strip()
     if not response:
         return bad(handler, "response is required")
-    resolve_clarify(sid, response, resolve_all=False)
-    return j(handler, {"ok": True, "response": response})
+    clarify_id = body.get("clarify_id", "")
+
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)
+        ok = adapter.respond_clarify(sid, clarify_id, response).accepted
+    else:
+        ok = _resolve_clarify_legacy(sid, clarify_id, response)
+    return j(handler, {"ok": ok, "response": response})
 
 
 class _ManualCompressionMemoryHandler:

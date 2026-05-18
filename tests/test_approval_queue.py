@@ -186,3 +186,26 @@ def test_respond_by_approval_id_pops_correct_entry():
     # Cleanup
     with r._lock:
         r._pending.pop(sid, None)
+
+
+def test_stale_explicit_approval_id_does_not_pop_oldest_entry():
+    """Duplicate/stale approval responses must not resolve a different command."""
+    from api import routes as r
+
+    sid = "test-stale-approval-id-sid"
+    with r._lock:
+        r._pending.pop(sid, None)
+
+    r.submit_pending(sid, {"command": "cmd1", "pattern_key": "p1", "pattern_keys": ["p1"], "description": "d1"})
+    r.submit_pending(sid, {"command": "cmd2", "pattern_key": "p2", "pattern_keys": ["p2"], "description": "d2"})
+
+    accepted = r._resolve_approval_legacy(sid, "missing-approval-id", "deny")
+
+    assert accepted is False
+    with r._lock:
+        queue = r._pending.get(sid, [])
+        commands = [entry["command"] for entry in queue]
+    assert commands == ["cmd1", "cmd2"]
+
+    with r._lock:
+        r._pending.pop(sid, None)

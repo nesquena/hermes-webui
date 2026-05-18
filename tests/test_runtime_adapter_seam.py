@@ -124,6 +124,27 @@ def test_legacy_journal_adapter_cancel_returns_bounded_not_active_status():
     assert result.safe_message == "Legacy control did not accept the request."
 
 
+def test_legacy_journal_adapter_approval_and_clarify_return_bounded_not_active_status():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+    adapter = runtime.LegacyJournalRuntimeAdapter(
+        approval_delegate=lambda run_id, approval_id, choice: calls.append(("approval", run_id, approval_id, choice)) or False,
+        clarify_delegate=lambda run_id, clarify_id, response: calls.append(("clarify", run_id, clarify_id, response)) or False,
+    )
+
+    approval = adapter.respond_approval("already-finished-run", "stale-approval", "deny")
+    clarify = adapter.respond_clarify("already-finished-run", "stale-clarify", "answer")
+
+    assert calls == [
+        ("approval", "already-finished-run", "stale-approval", "deny"),
+        ("clarify", "already-finished-run", "stale-clarify", "answer"),
+    ]
+    assert approval.accepted is False
+    assert approval.status == "not-active"
+    assert clarify.accepted is False
+    assert clarify.status == "not-active"
+
+
 def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
@@ -135,6 +156,41 @@ def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
     assert "adapter.cancel_run(stream_id).accepted" in cancel_body
     assert "else:\n            cancelled = cancel_stream(stream_id)" in cancel_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in cancel_body, "route should use runtime_adapter_enabled(), not inline env checks"
+
+
+def test_approval_and_clarify_routes_use_adapter_only_when_flag_enabled():
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+
+    approval_idx = src.index("def _handle_approval_respond")
+    approval_body = src[approval_idx:src.index("def _resolve_clarify_legacy", approval_idx)]
+    clarify_idx = src.index("def _handle_clarify_respond")
+    clarify_body = src[clarify_idx:src.index("class _ManualCompressionMemoryHandler", clarify_idx)]
+
+    assert "runtime_adapter_enabled()" in approval_body
+    assert "LegacyJournalRuntimeAdapter(approval_delegate=_resolve_approval_legacy)" in approval_body
+    assert "adapter.respond_approval(sid, approval_id, choice).accepted" in approval_body
+    assert "else:\n        ok = _resolve_approval_legacy(sid, approval_id, choice)" in approval_body
+    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in approval_body
+
+    assert "runtime_adapter_enabled()" in clarify_body
+    assert "LegacyJournalRuntimeAdapter(clarify_delegate=_resolve_clarify_legacy)" in clarify_body
+    assert "adapter.respond_clarify(sid, clarify_id, response).accepted" in clarify_body
+    assert "else:\n        ok = _resolve_clarify_legacy(sid, clarify_id, response)" in clarify_body
+    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in clarify_body
+
+
+def test_approval_respond_does_not_fallback_to_oldest_when_explicit_id_is_stale():
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    helper_idx = src.index("def _resolve_approval_legacy")
+    helper_body = src[helper_idx:src.index("def _handle_approval_respond", helper_idx)]
+
+    assert "A stale explicit id must not accidentally approve" in helper_body
+    assert "if found_target or not approval_id:" in helper_body
+    stale_branch = helper_body[helper_body.index("else:", helper_body.index("for i, entry")):helper_body.index("else:\n                pending = queue.pop(0)")]
+    assert "pending = None" in stale_branch
+    assert "queue.pop(0)" not in stale_branch
 
 
 def test_chat_start_route_selects_adapter_only_when_flag_enabled():
