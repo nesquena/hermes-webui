@@ -188,6 +188,8 @@ global.fetch = async function(path, opts = {}) {
         recent_event_count: 7,
         recent_event_types: ['run.completed', 'tool.failed', 'subagent.completed', 'space.visual_qa.completed'],
         recent_family_counts: { run: 2, tool: 3, subagent: 1, 'space.visual_qa': 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        last_event_at: '2026-05-18T07:12:30Z',
+        unsafe_last_event_at: 'renderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK',
         event_families: ['run', 'tool', 'subagent', 'memory.ingest', 'space.visual_qa'],
         supported_event_types: ['run.started', 'tool.started', 'tool.completed', 'subagent.completed', 'memory.ingest.completed', 'space.visual_qa.completed'],
         redaction_status: 'metadata_only',
@@ -3537,6 +3539,7 @@ def test_spaces_ui_product_home_progress_events_card_is_visible_bounded_and_safe
     assert "tool 3" in html
     assert "subagent 1" in html
     assert "space.visual_qa 1" in html
+    assert "Last event 2026-05-18T07:12:30Z" in html
     assert "metadata-only" in html
     assert {"path": "api/capy-progress/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html

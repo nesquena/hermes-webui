@@ -240,6 +240,7 @@
     const recentEvents = safeNonNegativeCount(status && status.recent_event_count);
     const familyCounts = safeProgressFamilyCounts(status && status.recent_family_counts);
     const supportedTypes = safeProgressEventTypes(status && (status.recent_event_types || status.supported_event_types));
+    const lastEventAt = safeProgressTimestamp(status && status.last_event_at);
     const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
     const summary = unavailable
       ? 'Structured progress events will appear when the local status route is available.'
@@ -251,6 +252,7 @@
       '<span>'+escapeHtml(String(recentEvents))+' recent '+escapeHtml(recentEvents === 1 ? 'event' : 'events')+'</span>' +
       familyCounts.map(function(item){ return '<span>'+escapeHtml(item.family)+' '+escapeHtml(String(item.count))+'</span>'; }).join('') +
       supportedTypes.map(function(type){ return '<span>'+escapeHtml(type)+'</span>'; }).join('') +
+      (lastEventAt ? '<span>Last event '+escapeHtml(lastEventAt)+'</span>' : '') +
       '<span>'+escapeHtml(redactionStatus)+'</span>' +
       '</div>' +
       '</section>';
@@ -295,6 +297,11 @@
   function safeProgressRedactionStatus(value){
     const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s_]+/g, '-');
     return normalized === 'metadata-only' ? 'metadata-only' : 'metadata-only';
+  }
+
+  function safeProgressTimestamp(value){
+    const text = String(value == null ? '' : value).trim();
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(text) ? text : '';
   }
 
   function safePolicyMode(value){
