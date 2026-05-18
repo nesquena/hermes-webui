@@ -336,17 +336,22 @@ async function cmdModel(args){
       const aliases=data.aliases||{};
       for(const [alias,modelId] of Object.entries(aliases)){
         if(alias.toLowerCase()===q){
-          q=modelId; // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
+          q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
           break;
         }
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
-  // Fuzzy match: find first option whose label or value contains the query
-  let match=null;
-  for(const opt of sel.options){
-    if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
-      match=opt.value;break;
+  // First: try exact match within active provider's optgroup.
+  // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
+  const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
+  let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
+  // Fallback: fuzzy match across all options
+  if(!match){
+    for(const opt of sel.options){
+      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
+        match=opt.value;break;
+      }
     }
   }
   // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
