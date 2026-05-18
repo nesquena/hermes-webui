@@ -43,6 +43,12 @@
       } catch (policyErr) {
         policyStatus = {unavailable: true, local_only: true};
       }
+      let progressStatus = {unavailable: true, local_only: true};
+      try {
+        progressStatus = await fetchSpacesJson('api/capy-progress/status');
+      } catch (progressErr) {
+        progressStatus = {unavailable: true, local_only: true};
+      }
       const data = await fetchSpacesJson('api/spaces');
       if (!data.enabled) {
         root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces disabled</h3><div class="capy-spaces-muted">Set HERMES_WEBUI_SPACES_ENABLED=1 to enable the foundation shell.</div></div>';
@@ -50,7 +56,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, policyStatus);
+      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, policyStatus, progressStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -120,14 +126,14 @@
       '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div></div>';
   }
 
-  function renderSpacesList(spaces, demos, memoryStatus, policyStatus){
+  function renderSpacesList(spaces, demos, memoryStatus, policyStatus, progressStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
-    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, policyStatus || {}) +
+    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, policyStatus || {}, progressStatus || {}) +
       renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
   }
 
-  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, policyStatus){
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, policyStatus, progressStatus){
     return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
       '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
       '<div class="capy-spaces-product-topbar">' +
@@ -165,6 +171,7 @@
       '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
       renderMemoryFreshnessCard(memoryStatus || {}) +
       renderAutonomyPolicyCard(policyStatus || {}) +
+      renderProgressEventsCard(progressStatus || {}) +
       '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
       '<div class="capy-spaces-product-panels">' + renderSpaceAgentPanelPills(activeSpaceId) + '</div>' +
       '</section>';
@@ -219,6 +226,59 @@
       (routeHint ? '<span>Model route hint: '+escapeHtml(routeHint)+'</span>' : '') +
       '</div>' +
       '</section>';
+  }
+
+  function renderProgressEventsCard(status){
+    const unavailable = status && status.unavailable === true;
+    const activeRuns = safeNonNegativeCount(status && status.active_run_count);
+    const recentEvents = safeNonNegativeCount(status && status.recent_event_count);
+    const supportedTypes = safeProgressEventTypes(status && status.supported_event_types);
+    const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
+    const summary = unavailable
+      ? 'Structured progress events will appear when the local status route is available.'
+      : 'Structured event stream for runs, tools, subagents, memory ingestion, and visual QA.';
+    return '<section class="capy-spaces-progress-events" aria-label="Progress events">' +
+      '<div><div class="capy-spaces-product-eyebrow">PROGRESS</div><h3>Progress events</h3><p>'+escapeHtml(summary)+'</p></div>' +
+      '<div class="capy-spaces-progress-events-stats">' +
+      '<span>'+escapeHtml(String(activeRuns))+' active '+escapeHtml(activeRuns === 1 ? 'run' : 'runs')+'</span>' +
+      '<span>'+escapeHtml(String(recentEvents))+' recent '+escapeHtml(recentEvents === 1 ? 'event' : 'events')+'</span>' +
+      supportedTypes.map(function(type){ return '<span>'+escapeHtml(type)+'</span>'; }).join('') +
+      '<span>'+escapeHtml(redactionStatus)+'</span>' +
+      '</div>' +
+      '</section>';
+  }
+
+  function safeProgressEventTypes(types){
+    const allowed = {
+      'run.started': true,
+      'run.completed': true,
+      'run.failed': true,
+      'tool.started': true,
+      'tool.completed': true,
+      'tool.failed': true,
+      'subagent.started': true,
+      'subagent.completed': true,
+      'subagent.failed': true,
+      'taskboard.updated': true,
+      'memory.ingest.started': true,
+      'memory.ingest.completed': true,
+      'memory.ingest.failed': true,
+      'space.visual_qa.started': true,
+      'space.visual_qa.completed': true,
+      'space.visual_qa.failed': true
+    };
+    const values = Array.isArray(types) ? types : [];
+    const labels = [];
+    values.forEach(function(type){
+      const label = String(type == null ? '' : type).trim().toLowerCase();
+      if (allowed[label] && labels.indexOf(label) === -1) labels.push(label);
+    });
+    return (labels.length ? labels : ['run.started', 'tool.started', 'tool.completed']).slice(0, 6);
+  }
+
+  function safeProgressRedactionStatus(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s_]+/g, '-');
+    return normalized === 'metadata-only' ? 'metadata-only' : 'metadata-only';
   }
 
   function safePolicyMode(value){

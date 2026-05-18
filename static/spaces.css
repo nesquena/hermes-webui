@@ -596,7 +596,8 @@
 }
 
 .capy-spaces-memory-freshness,
-.capy-spaces-autonomy-policy {
+.capy-spaces-autonomy-policy,
+.capy-spaces-progress-events {
   align-items: center;
   background: rgba(11, 22, 42, 0.72);
   border: 1px solid rgba(125, 211, 252, 0.24);
@@ -615,19 +616,26 @@
   border-color: rgba(196, 181, 253, 0.26);
 }
 
+.capy-spaces-progress-events {
+  border-color: rgba(74, 222, 128, 0.24);
+}
+
 .capy-spaces-memory-freshness h3,
-.capy-spaces-autonomy-policy h3 {
+.capy-spaces-autonomy-policy h3,
+.capy-spaces-progress-events h3 {
   margin: 4px 0 6px;
 }
 
 .capy-spaces-memory-freshness p,
-.capy-spaces-autonomy-policy p {
+.capy-spaces-autonomy-policy p,
+.capy-spaces-progress-events p {
   color: rgba(226,232,240,0.76);
   margin: 0;
 }
 
 .capy-spaces-memory-freshness-stats,
-.capy-spaces-autonomy-policy-stats {
+.capy-spaces-autonomy-policy-stats,
+.capy-spaces-progress-events-stats {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -635,6 +643,7 @@
 
 .capy-spaces-memory-freshness-stats span,
 .capy-spaces-autonomy-policy-stats span,
+.capy-spaces-progress-events-stats span,
 .capy-spaces-memory-freshness-state {
   background: rgba(15, 23, 42, 0.68);
   border: 1px solid rgba(148, 163, 184, 0.22);
@@ -644,7 +653,8 @@
 }
 
 .capy-spaces-memory-freshness-stats strong,
-.capy-spaces-autonomy-policy-stats strong {
+.capy-spaces-autonomy-policy-stats strong,
+.capy-spaces-progress-events-stats strong {
   color: #bfdbfe;
 }
 

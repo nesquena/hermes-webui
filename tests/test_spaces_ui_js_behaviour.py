@@ -167,6 +167,24 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({ available: true, mode: 'supervised', label: 'Supervised', summary: 'Approval required for side effects.', approval_gates: ['creator_commit'], prompt_preflight: { status: 'required' }, model_routing: { status: 'default' } });
   }
+  if (path === 'api/capy-progress/status') {
+    if (scenario === 'productHomeProgressStatus') {
+      return response({
+        available: true,
+        local_only: true,
+        status: 'ready',
+        active_run_count: 2,
+        recent_event_count: 7,
+        event_families: ['run', 'tool', 'subagent', 'memory.ingest', 'space.visual_qa'],
+        supported_event_types: ['run.started', 'tool.started', 'tool.completed', 'subagent.completed', 'memory.ingest.completed', 'space.visual_qa.completed'],
+        redaction_status: 'metadata_only',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      });
+    }
+    return response({ available: true, local_only: true, status: 'ready', active_run_count: 0, recent_event_count: 0, event_families: ['run', 'tool'], supported_event_types: ['run.started', 'tool.started', 'tool.completed'], redaction_status: 'metadata_only' });
+  }
   if (path === 'api/spaces/demo/run') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     const demo = body.demo || 'demo_weather_widget';
@@ -1443,7 +1461,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomeProgressStatus') {
     await window.loadCapySpaces();
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -3444,6 +3462,27 @@ def test_spaces_ui_product_home_policy_card_is_visible_bounded_and_safe(driver_p
     assert "Prompt preflight required" in html
     assert "Model route hint: hint:reasoning" in html
     assert {"path": "api/capy-policy/status", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_progress_events_card_is_visible_bounded_and_safe(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeProgressStatus")
+    html = out["rootHtml"]
+
+    assert "Progress events" in html
+    assert "Structured event stream" in html
+    assert "2 active runs" in html
+    assert "7 recent events" in html
+    assert "tool.started" in html
+    assert "subagent.completed" in html
+    assert "space.visual_qa.completed" in html
+    assert "metadata-only" in html
+    assert {"path": "api/capy-progress/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
