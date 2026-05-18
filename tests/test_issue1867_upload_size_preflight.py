@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_JS = ROOT / "static" / "ui.js"
 I18N_JS = ROOT / "static" / "i18n.js"
 CONFIG_PY = ROOT / "api" / "config.py"
+UPLOAD_PY = ROOT / "api" / "upload.py"
 
 
 def _function_body(src: str, name: str) -> str:
@@ -23,12 +24,12 @@ def _function_body(src: str, name: str) -> str:
 
 
 def test_upload_limit_constant_matches_server_limit():
-    """The browser preflight limit must match api.config.MAX_UPLOAD_BYTES."""
+    """The browser preflight should read the runtime upload limit."""
     ui = UI_JS.read_text(encoding="utf-8")
     config = CONFIG_PY.read_text(encoding="utf-8")
 
-    assert "const MAX_UPLOAD_BYTES=20*1024*1024;" in ui
-    assert "MAX_UPLOAD_BYTES = 20 * 1024 * 1024" in config
+    assert "window.__HERMES_CONFIG__.maxUploadBytes" in ui
+    assert 'MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)' in config
 
 
 def test_file_picker_rejects_oversize_files_before_queueing():
@@ -58,10 +59,17 @@ def test_pending_uploads_skip_fetch_for_oversize_files():
 
 
 def test_upload_too_large_has_user_facing_message():
-    """The status toast should explain the 20 MB limit instead of a network reset."""
+    """The status toast should explain the upload limit instead of a network reset."""
     i18n = I18N_JS.read_text(encoding="utf-8")
     ui = UI_JS.read_text(encoding="utf-8")
 
     assert "upload_too_large" in i18n
     assert "Maximum upload size is" in i18n
     assert "_uploadTooLargeMessage(file)" in ui
+
+
+def test_archive_extraction_limit_tracks_upload_limit():
+    """Archive extraction guard should scale with the configured upload limit."""
+    upload = UPLOAD_PY.read_text(encoding="utf-8")
+
+    assert "_MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES" in upload

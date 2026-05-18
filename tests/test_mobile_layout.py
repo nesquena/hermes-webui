@@ -196,9 +196,17 @@ def test_rightpanel_mobile_slide_over_css():
     assert re.search(r'\.rightpanel\{[^}]*box-shadow:\s*none\s*!important',
                      rightpanel_block, re.DOTALL), \
         "closed mobile rightpanel should have no shadow to avoid right-edge bleed"
+    assert re.search(r'\.rightpanel\{[^}]*padding-top:\s*var\(--app-titlebar-safe-top\)',
+                     rightpanel_block, re.DOTALL), \
+        "mobile rightpanel should reserve the same PWA top inset as the titlebar"
+    assert re.search(r'\.rightpanel\{[^}]*box-sizing:\s*border-box',
+                     rightpanel_block, re.DOTALL), \
+        "mobile rightpanel safe-area padding must stay inside its fixed height"
     assert re.search(r'\.rightpanel\.mobile-open\{[^}]*box-shadow:\s*-4px 0 24px rgba\(0,\s*0,\s*0,\s*\.?4\)',
                      rightpanel_block, re.DOTALL), \
         "open mobile rightpanel should keep the edge shadow"
+    assert re.search(r'\.rightpanel\s+\.panel-header\{[^}]*row-gap:\s*8px', rightpanel_block), \
+        "mobile workspace header should keep comfortable row spacing"
 
 
 def test_workspace_panel_inline_width_is_desktop_only():
@@ -212,6 +220,14 @@ def test_workspace_panel_inline_width_is_desktop_only():
         "Panel width helper must source hermes-panel-w from localStorage"
     assert "_workspacePanelEls();" in boot_js and "style.removeProperty('width')" in boot_js, \
         "Panel helper must clear inline width while in compact/mobile viewport"
+
+
+def test_workspace_panel_boot_restore_is_desktop_only():
+    """Persisted workspace panels should not auto-cover compact/mobile launch."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';" in boot_js
+    assert "if(S.session&&S.session.workspace&&panelPref&&!_isCompactWorkspaceViewport()){" in boot_js
+    assert "if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';" in boot_js
 
 
 def _container_query_block(css: str, container_query: str):
@@ -434,17 +450,20 @@ def test_mobile_keeps_hamburger_drawer_with_vertical_44px_panel_targets():
     assert re.search(r'\.sidebar\s+\.panel-view\{[^}]*margin-left:\s*52px', mobile_css), (
         "Phone drawer panel content should start beside the vertical icon strip"
     )
-    assert re.search(r'\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
-        ".panel-icon-btn must min-width:44px on phone"
+    assert re.search(r'\.sidebar\s+\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
+        "Sidebar panel buttons must min-width:44px on phone"
     )
-    assert re.search(r'\.panel-icon-btn\{[^}]*min-height:\s*44px', mobile_css), (
-        ".panel-icon-btn must min-height:44px on phone"
+    assert re.search(r'\.sidebar\s+\.panel-icon-btn\{[^}]*min-height:\s*44px', mobile_css), (
+        "Sidebar panel buttons must min-height:44px on phone"
     )
-    assert re.search(r'\.panel-icon-btn\{[^}]*width:\s*auto', mobile_css), (
-        ".panel-icon-btn must override its base 24px width on phone"
+    assert re.search(r'\.sidebar\s+\.panel-icon-btn\{[^}]*width:\s*auto', mobile_css), (
+        "Sidebar panel buttons must override their base 24px width on phone"
     )
-    assert re.search(r'\.panel-icon-btn\{[^}]*height:\s*auto', mobile_css), (
-        ".panel-icon-btn must override its base 24px height on phone"
+    assert re.search(r'\.sidebar\s+\.panel-icon-btn\{[^}]*height:\s*auto', mobile_css), (
+        "Sidebar panel buttons must override their base 24px height on phone"
+    )
+    assert not re.search(r'(?<!sidebar\s)\.panel-icon-btn\{[^}]*min-width:\s*44px', mobile_css), (
+        "Workspace-panel header buttons must not inherit sidebar-only 44px sizing"
     )
 
 
@@ -552,6 +571,8 @@ def test_toggle_mobile_files_js_defined():
         "toggleMobileFiles() missing from static/boot.js"
     assert "mobile-open" in boot_js, \
         "toggleMobileFiles() must toggle mobile-open class on the right panel"
+    assert "function closeMobileWorkspacePanelFromChat(e)" in boot_js
+    assert "$('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);" in boot_js
 
 
 def test_new_conversation_closes_mobile_sidebar():
@@ -644,27 +665,13 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
-def test_pwa_viewport_fit_cover_couples_unconditional_safe_area_env_values():
-    """Safe-area env variables must stay coupled to viewport-fit=cover.
-
-    PR #1381 scoped the top inset because normal browser/webview chrome can
-    already reserve status-bar space. This PR applies the safe-area env()
-    values through variables unconditionally, which is safe only while the
-    page opts into cover-mode viewport geometry.
-    """
-    assert 'viewport-fit=cover' in HTML, (
-        "index.html viewport meta must include viewport-fit=cover so iOS PWA "
-        "safe-area-inset values are available"
-    )
-    assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
-        "CSS uses the top safe-area env() value unconditionally through "
-        "--app-titlebar-safe-top, so the viewport-fit=cover contract must "
-        "be regression-tested beside it"
-    )
-    assert "--app-safe-bottom:env(safe-area-inset-bottom" in CSS, (
-        "CSS uses the bottom safe-area env() value unconditionally through "
-        "--app-safe-bottom, so the viewport-fit=cover contract must stay coupled"
-    )
+def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
+    """The PWA shell should not opt into cover-mode geometry for every browser surface."""
+    assert 'viewport-fit=cover' not in HTML
+    assert 'apple-mobile-web-app-status-bar-style" content="black-translucent"' in HTML
+    assert "@media (display-mode: standalone), (display-mode: fullscreen)" in CSS
+    assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS
+    assert "--app-safe-bottom:" not in CSS
 
 
 def test_titlebar_safe_area_top_uses_scoped_variable():
@@ -682,21 +689,15 @@ def test_titlebar_safe_area_top_uses_scoped_variable():
 
 
 def test_safe_area_variables_available_for_pwa_shell():
-    """Top and bottom safe-area variables should be available to PWA shell CSS."""
+    """Top safe-area variable should be available to installed PWA shell CSS."""
     assert "--app-titlebar-safe-top:0px" in CSS, (
         "titlebar top safe-area variable must default to 0px"
-    )
-    assert "--app-safe-bottom:0px" in CSS, (
-        "bottom safe-area variable must default to 0px"
     )
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS, (
         "CSS must expose env(safe-area-inset-top) through --app-titlebar-safe-top"
     )
-    assert "--app-safe-bottom:env(safe-area-inset-bottom" in CSS, (
-        "CSS must expose env(safe-area-inset-bottom) through --app-safe-bottom"
-    )
-    assert "calc(28px + var(--app-safe-bottom))" in CSS, (
-        "Phone composer must reserve bottom space for home indicator / rounded corners"
+    assert "padding:8px 10px 12px!important" in CSS, (
+        "Phone composer should keep the proven pre-cover-mode padding contract"
     )
 
 

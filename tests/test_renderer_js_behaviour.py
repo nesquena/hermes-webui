@@ -187,6 +187,37 @@ class TestRendererSanitization:
 
 class TestCommonLLMShapes:
 
+    def test_commonmark_table_is_not_wrapped_in_paragraph(self, driver_path):
+        src = (
+            "| 升级时段 | 人数 |\n"
+            "|---------|------|\n"
+            "| 5/15（发布当天） | ~30 人 |\n"
+            "| 5/16（今天） | ~10 人 |"
+        )
+        out = _render(driver_path, src)
+        assert "<table><thead>" in out
+        assert "<th>升级时段</th>" in out
+        assert "<td>5/15（发布当天）</td>" in out
+        assert "<td>~10 人</td>" in out
+        assert "<p><table" not in out, (
+            f"Markdown tables are block elements and must not be paragraph-wrapped: {out!r}"
+        )
+
+    def test_table_between_paragraphs_stays_block_level(self, driver_path):
+        src = (
+            "Before the table.\n\n"
+            "| Key | Value |\n"
+            "| --- | --- |\n"
+            "| A | B |\n\n"
+            "After the table."
+        )
+        out = _render(driver_path, src)
+        assert "<p>Before the table.</p>" in out
+        assert "<table><thead>" in out
+        assert "<p>After the table.</p>" in out
+        assert "<p><table" not in out
+        assert "</table></p>" not in out
+
     def test_strikethrough_outside_quote(self, driver_path):
         out = _render(driver_path, "This was ~~outdated~~ but is now fine.")
         assert "<del>outdated</del>" in out

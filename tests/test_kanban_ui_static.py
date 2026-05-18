@@ -692,6 +692,65 @@ def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes(
     assert "javascript:" not in PANELS.lower()
 
 
+def test_kanban_dragging_card_does_not_open_detail_on_drop_click():
+    """Regression: drag/drop should move a card without opening task detail."""
+    assert "function _kanbanSuppressNextCardClick" in PANELS
+    assert "let _kanbanSuppressCardClickUntil" in PANELS
+    assert "function openKanbanCard" in PANELS
+    assert "function finishKanbanDrag" in PANELS
+
+    drag_fn = re.search(r"function dragKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert drag_fn, "dragKanbanTask() not found"
+    assert "_kanbanSuppressNextCardClick" in drag_fn.group(1), (
+        "drag start must arm the click suppressor so the trailing click after "
+        "drop cannot open the task detail pane"
+    )
+
+    finish_fn = re.search(r"function finishKanbanDrag\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert finish_fn, "finishKanbanDrag() not found"
+    assert "_kanbanSuppressNextCardClick" in finish_fn.group(1), (
+        "drag end must refresh the suppressor window before browsers emit a "
+        "trailing synthetic click"
+    )
+
+    drop_fn = re.search(r"async function dropKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert drop_fn, "dropKanbanTask() not found"
+    drop_body = drop_fn.group(1)
+    assert "_kanbanSuppressNextCardClick" in drop_body
+    assert "event.stopPropagation()" in drop_body
+    assert "updateKanbanTask(taskId, {status}, {openDetail: false})" in drop_body, (
+        "drag/drop status updates must refresh the board without opening the task detail"
+    )
+
+    update_fn = re.search(r"async function updateKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert update_fn, "updateKanbanTask() not found"
+    update_body = update_fn.group(1)
+    assert "const openDetail = !opts || opts.openDetail !== false;" in update_body
+    assert "if (openDetail) await loadKanbanTask" in update_body
+
+    card_template = re.search(r"return `<article class=\"kanban-card.*?</article>`;", PANELS, re.DOTALL)
+    assert card_template, "Kanban card template not found"
+    card_html = card_template.group(0)
+    assert "ondragend=\"finishKanbanDrag(event)\"" in card_html
+    assert "onclick=\"return openKanbanCard(event," in card_html
+    assert "onclick=\"loadKanbanTask" not in card_html, (
+        "Kanban cards must not call loadKanbanTask directly from onclick; "
+        "drag/drop needs a guarded click path"
+    )
+
+    open_fn = re.search(r"function openKanbanCard\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert open_fn, "openKanbanCard() not found"
+    open_body = open_fn.group(1)
+    for token in (
+        "Date.now()",
+        "_kanbanSuppressCardClickUntil",
+        "preventDefault",
+        "stopPropagation",
+        "loadKanbanTask",
+    ):
+        assert token in open_body
+
+
 def test_kanban_lifecycle_controls_do_not_offer_manual_running_start():
     assert "quickKanbanCardAction(event,'${id}','running')" not in PANELS
     assert "kanban_card_start" not in PANELS
@@ -872,6 +931,28 @@ def test_kanban_board_switcher_handlers_in_panels():
         "async function archiveKanbanBoard",
     ):
         assert fn in PANELS, f"Missing handler: {fn}"
+
+
+def test_kanban_board_switcher_icon_column_clamps_long_labels():
+    """Regression for #2458: board metadata may use a short text label in the
+    icon/color slot. The menu must keep that label inside its own column instead
+    of letting it overlap the board title and count badge.
+    """
+    rule = re.search(
+        r"\.kanban-board-switcher-item-icon\{(?P<body>.*?)\}",
+        STYLE,
+        flags=re.S,
+    )
+    assert rule, "missing .kanban-board-switcher-item-icon CSS rule"
+    compact = re.sub(r"\s+", "", rule.group("body"))
+    for required in (
+        "overflow:hidden",
+        "text-overflow:ellipsis",
+        "white-space:nowrap",
+        "max-width:7.5rem",
+        "min-width:18px",
+    ):
+        assert required in compact
 
 
 def test_kanban_board_switcher_calls_correct_endpoints():

@@ -11,7 +11,8 @@ Before making changes, read:
 
 1. `README.md`
 2. `CONTRIBUTING.md`
-3. `CHANGELOG.md`
+3. `docs/CONTRACTS.md`
+4. `CHANGELOG.md`
 
 For architecture, testing, or setup work, also read the matching reference:
 
@@ -19,6 +20,10 @@ For architecture, testing, or setup work, also read the matching reference:
 - `TESTING.md` for local verification commands and manual test guidance
 - `docs/onboarding.md` for first-run onboarding behavior
 - `docs/troubleshooting.md` for diagnostic flows
+- `docs/rfcs/README.md` for larger RFCs and state/durability contracts
+
+For UI or UX work, read `docs/UIUX-GUIDE.md` and `DESIGN.md` before
+changing layout, interaction flow, themes, chat rendering, or composer chrome.
 
 ## Onboarding and reinstall support
 
@@ -39,15 +44,22 @@ Follow that checklist's safety rules:
 
 ## Contribution style
 
-- Keep changes focused on one logical problem.
-- Prefer the existing Python + vanilla JavaScript structure over new
-  dependencies or build steps.
+- Keep one logical change per PR; split unrelated refactors or cleanup.
+- Read `docs/CONTRACTS.md` and the linked contract/RFC for the touched
+  subsystem before editing.
+- Prefer the existing Python + vanilla JavaScript structure. Do not add
+  dependencies, build tools, frameworks, or long-lived processes without clear
+  justification and a rollback story.
 - Update docs when changing setup, onboarding, runtime behavior, architecture,
-  or testing guidance.
+  testing guidance, or user-facing workflows.
 - Update `CHANGELOG.md` for user-visible behavior, setup, workflow, or
   documentation changes that should be release-note ready.
-- For UI or UX changes, follow `CONTRIBUTING.md`: include before/after evidence
-  and test relevant responsive states.
+- For UI or UX changes, include before/after evidence and test relevant
+  desktop, narrow, and mobile states.
+- For behavior changes, add or update automated tests where practical and list
+  the manual verification performed.
+- For runtime, streaming, recovery, replay, compression, or sidebar metadata
+  changes, name the state layer being mutated and prove the relevant invariant.
 
 ## Local state and secrets
 

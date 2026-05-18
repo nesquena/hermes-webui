@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="slate">
+<html lang="en" class="dark" data-skin="slate">
 <head>
   <meta charset="utf-8">
   <title>Hermes WebUI — Two-Stage Chat Proposal (Issue #536)</title>
@@ -167,13 +167,21 @@
   </div>
   <div class="doc-toggles">
     <strong style="font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;align-self:center;margin-right:4px;">Theme</strong>
-    <button data-theme-btn="default">Default</button>
-    <button data-theme-btn="slate" class="on">Slate</button>
-    <button data-theme-btn="light">Light</button>
-    <button data-theme-btn="solarized">Solarized</button>
-    <button data-theme-btn="monokai">Monokai</button>
-    <button data-theme-btn="nord">Nord</button>
-    <button data-theme-btn="oled">OLED</button>
+    <button data-mode-btn="system">System</button>
+    <button data-mode-btn="dark" class="on">Dark</button>
+    <button data-mode-btn="light">Light</button>
+    <span style="width:1px;height:18px;background:var(--border);margin:0 4px;align-self:center;"></span>
+    <strong style="font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;align-self:center;margin-right:4px;">Skin</strong>
+    <button data-skin-btn="default">Default</button>
+    <button data-skin-btn="ares">Ares</button>
+    <button data-skin-btn="mono">Mono</button>
+    <button data-skin-btn="slate" class="on">Slate</button>
+    <button data-skin-btn="poseidon">Poseidon</button>
+    <button data-skin-btn="sisyphus">Sisyphus</button>
+    <button data-skin-btn="charizard">Charizard</button>
+    <button data-skin-btn="sienna">Sienna</button>
+    <button data-skin-btn="catppuccin">Catppuccin</button>
+    <button data-skin-btn="nous">Nous</button>
   </div>
 </header>
 
@@ -698,15 +706,33 @@ tool_calls get attached before save.</pre></div>
 </main>
 
 <script>
-  // Theme picker (matches index.html)
-  document.querySelectorAll('[data-theme-btn]').forEach(btn => {
+  // Appearance picker (matches the real app contract: theme class + skin data attribute)
+  let docTheme = 'dark';
+  let docSkin = 'slate';
+  const docThemeMq = window.matchMedia('(prefers-color-scheme: dark)');
+  function applyDocAppearance() {
+    const resolvedTheme = docTheme === 'system' ? (docThemeMq.matches ? 'dark' : 'light') : docTheme;
+    document.documentElement.classList.toggle('dark', resolvedTheme === 'dark');
+    if (docSkin === 'default') document.documentElement.removeAttribute('data-skin');
+    else document.documentElement.dataset.skin = docSkin;
+  }
+  document.querySelectorAll('[data-mode-btn]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const t = btn.dataset.themeBtn;
-      if (t === 'default') document.documentElement.removeAttribute('data-theme');
-      else document.documentElement.setAttribute('data-theme', t);
-      document.querySelectorAll('[data-theme-btn]').forEach(b => b.classList.toggle('on', b === btn));
+      docTheme = btn.dataset.modeBtn;
+      applyDocAppearance();
+      document.querySelectorAll('[data-mode-btn]').forEach(b => b.classList.toggle('on', b === btn));
     });
   });
+  document.querySelectorAll('[data-skin-btn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      docSkin = btn.dataset.skinBtn;
+      applyDocAppearance();
+      document.querySelectorAll('[data-skin-btn]').forEach(b => b.classList.toggle('on', b === btn));
+    });
+  });
+  if (docThemeMq.addEventListener) {
+    docThemeMq.addEventListener('change', () => { if (docTheme === 'system') applyDocAppearance(); });
+  }
 
   // Existing thinking/tool cards click-to-toggle.
   document.querySelectorAll('.thinking-card-header, .tool-card-header').forEach(h => {

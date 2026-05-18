@@ -42,6 +42,21 @@ def test_session_switch_defers_model_resolution_without_blocking():
     assert "if(fallback&&!deferModelCorrection)" in ui
 
 
+def test_deferred_model_resolution_refreshes_context_metadata():
+    src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("function _resolveSessionModelForDisplaySoon")
+    end = src.index("const _INITIAL_MSG_LIMIT", start)
+    block = src[start:end]
+
+    assert "S.session.context_length" in block, (
+        "deferred model resolution must also hydrate context_length so a "
+        "resumed high-context session does not keep the old model's limit"
+    )
+    assert "S.session.threshold_tokens" in block
+    assert "_syncCtxIndicator" in block
+    assert "context_length:data.session.context_length||0" in block.replace(" ", "")
+
+
 def test_boot_does_not_block_session_restore_on_model_catalog():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 

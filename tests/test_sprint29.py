@@ -18,6 +18,7 @@ Covers:
 import importlib
 import json
 import pathlib
+import pytest
 import sys
 import time
 import urllib.error
@@ -62,6 +63,21 @@ def get_raw_with_headers(path):
 
 
 class TestCSRF:
+    @pytest.fixture(autouse=True)
+    def _disable_auth_for_origin_unit_checks(self, monkeypatch):
+        """Keep origin/port CSRF checks isolated from auth stateful tests.
+
+        These Sprint 29 cases predate session-bound CSRF tokens and exercise
+        only Origin/Referer/Host allow/deny behavior. If an earlier test leaves
+        password auth enabled in the shared pytest process, _check_csrf also
+        requires a valid session CSRF token and these origin-only assertions
+        become order-dependent. Auth-enabled token coverage lives in
+        test_issue1909_csrf_token.py.
+        """
+        import api.auth as auth
+
+        monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+
     @staticmethod
     def _csrf_allowed(headers):
         from types import SimpleNamespace
@@ -712,11 +728,31 @@ class TestSSRFCheck:
 
 class TestENVLock:
     def test_env_lock_importable_from_streaming(self):
-        """_ENV_LOCK must be importable from api.streaming."""
+        """_ENV_LOCK must be an importable threading-style lock.
+
+        Stage-360 maintainer fix: _ENV_LOCK MUST be non-reentrant
+        (threading.Lock, not RLock) — see QA test_env_lock_is_non_reentrant.
+        RLock would mask the deadlock pattern that the lock is designed to
+        catch. Background workers that need profile env should use the
+        narrow-lock pattern in profile_env_for_background_worker() rather
+        than relying on reentrance.
+        """
         from api.streaming import _ENV_LOCK
-        import threading
-        assert isinstance(_ENV_LOCK, type(threading.Lock())), \
-            "_ENV_LOCK must be a threading.Lock"
+
+        assert hasattr(_ENV_LOCK, "acquire"), "_ENV_LOCK must expose acquire()"
+        assert hasattr(_ENV_LOCK, "release"), "_ENV_LOCK must expose release()"
+        assert hasattr(_ENV_LOCK, "__enter__"), "_ENV_LOCK must support context manager use"
+        assert hasattr(_ENV_LOCK, "__exit__"), "_ENV_LOCK must support context manager use"
+
+        # Verify non-reentrance: a same-thread second acquire(blocking=False)
+        # while the lock is held must fail. This invariant matters because
+        # it catches a class of deadlock bugs early.
+        with _ENV_LOCK:
+            acquired_again = _ENV_LOCK.acquire(False)
+            assert not acquired_again, (
+                "_ENV_LOCK must be non-reentrant (threading.Lock, not RLock). "
+                "See QA test_env_lock_is_non_reentrant for the architectural reason."
+            )
 
     def test_env_lock_importable_in_routes(self):
         """api.routes must be able to import _ENV_LOCK from api.streaming."""
@@ -727,8 +763,6 @@ class TestENVLock:
 
 
 # ── Fixture ────────────────────────────────────────────────────────────────
-
-import pytest
 
 
 @pytest.fixture(scope="module")

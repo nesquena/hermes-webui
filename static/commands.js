@@ -326,12 +326,65 @@ async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
-  const q=args.toLowerCase();
-  // Fuzzy match: find first option whose label or value contains the query
-  let match=null;
-  for(const opt of sel.options){
-    if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
-      match=opt.value;break;
+  let q=args.toLowerCase();
+  // Resolve alias before fuzzy matching the dropdown.
+  // Fetch /api/models which now includes an "aliases" key.
+  try {
+    const resp=await fetch('/api/models');
+    if(resp.ok){
+      const data=await resp.json();
+      const aliases=data.aliases||{};
+      for(const [alias,modelId] of Object.entries(aliases)){
+        if(alias.toLowerCase()===q){
+          q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
+          break;
+        }
+      }
+    }
+  } catch(_){/* non-critical, fall through to fuzzy match */}
+  // First: try exact match within active provider's optgroup.
+  // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
+  const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
+  let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
+  // Fallback: fuzzy match across all options
+  if(!match){
+    for(const opt of sel.options){
+      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
+        match=opt.value;break;
+      }
+    }
+  }
+  // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
+  // try the bare model name (which is how options appear for the active provider)
+  if(!match && q.includes('/')){
+    const bare=q.slice(q.lastIndexOf('/')+1);
+    for(const opt of sel.options){
+      if(opt.value.toLowerCase().includes(bare)||opt.textContent.toLowerCase().includes(bare)){
+        match=opt.value;break;
+      }
+    }
+    // Cross-provider fallback: if still no match, the model is from a
+    // different provider not in the dropdown. Call /api/session/update directly.
+    if(!match && S&&S.session&&S.session.session_id){
+      const provider=q.slice(0,q.indexOf('/'));
+      try{
+        const resp=await fetch('/api/session/update',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            session_id:S.session.session_id,
+            model:q,
+            model_provider:provider,
+          }),
+        });
+        if(resp.ok){
+          S.session.model=q;
+          S.session.model_provider=provider;
+          if(typeof syncTopbar==='function') syncTopbar();
+          showToast(t('switched_to')+q);
+          return;
+        }
+      }catch(_){/* fall through to "no model match" */}
     }
   }
   if(!match){showToast(t('no_model_match')+`"${args}"`);return;}
@@ -424,7 +477,7 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       S.messages=data.session.messages||[];
       S.toolCalls=data.session.tool_calls||[];
       clearLiveToolCards();
-      localStorage.setItem('hermes-webui-session',S.session.session_id);
+      try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
       syncTopbar();
       renderMessages();
@@ -1188,6 +1241,7 @@ async function cmdBranch(args){
 // which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
 async function forkFromMessage(msgIdx){
   if(!S.session||S.busy)return;
+  const initialSid = S.session.session_id;
   // Capture the absolute keep_count before any async work that may
   // reset _oldestIdx.  _oldestIdx is 0 when the full transcript is
   // already loaded, so short/already-full sessions send msgIdx unchanged.
@@ -1197,16 +1251,18 @@ async function forkFromMessage(msgIdx){
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
+  if(!S.session || S.session.session_id !== initialSid) return;
   try{
     const data=await api('/api/session/branch',{
       method:'POST',
       body:JSON.stringify({
-        session_id:S.session.session_id,
+        session_id:initialSid,
         keep_count:absoluteKeepCount,
       }),
     });
     if(data&&data.session_id){
       await loadSession(data.session_id);
+      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
       if(typeof renderSessionList==='function') await renderSessionList();
       showToast(t('branch_forked'));
     }

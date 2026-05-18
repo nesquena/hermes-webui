@@ -325,6 +325,88 @@ def test_metadata_only_get_session_does_not_poison_full_session_cache():
     assert models.SESSIONS["sess_cache"] is full
 
 
+def test_pre_compression_snapshot_marker_is_persisted_and_compact():
+    """Pre-compression snapshots keep a distinct marker from manual archived state."""
+    s = Session(
+        session_id="sess_snapshot",
+        title="Before Compression",
+        messages=[{"role": "user", "content": "hi"}],
+        pre_compression_snapshot=True,
+    )
+
+    s.save()
+
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    assert payload["pre_compression_snapshot"] is True
+    compact = s.compact()
+    assert compact["pre_compression_snapshot"] is True
+    assert compact["archived"] is False
+
+
+def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(monkeypatch):
+    """Preserved compression snapshots should not appear as active sidebar rows."""
+    snapshot = Session(
+        session_id="old_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "pre-compression history"}],
+        pre_compression_snapshot=True,
+        updated_at=100.0,
+    )
+    continuation = Session(
+        session_id="new_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "compressed continuation"}],
+        parent_session_id="old_sid",
+        updated_at=200.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert snapshot.path.exists(), "snapshot JSON must stay available for lineage traversal"
+    assert [row["session_id"] for row in rows] == ["new_sid"]
+
+
+def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkeypatch):
+    """If the hidden snapshot has the fuller transcript, keep it reachable.
+
+    Auto-compression can leave a visible continuation segment in the sidebar
+    while the fuller transcript remains on disk marked as a pre-compression
+    snapshot. In that case the default session list should prefer the fuller
+    transcript so the conversation does not look like recent messages vanished.
+    """
+    snapshot = Session(
+        session_id="full_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "latest user"},
+            {"role": "assistant", "content": "latest answer"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+    )
+    continuation = Session(
+        session_id="short_child",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "first"}],
+        parent_session_id="full_parent",
+        updated_at=400.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["full_parent"]
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["pre_compression_snapshot"] is True
+
+
 def test_session_save_does_not_persist_metadata_message_count_hint():
     s = Session(
         session_id="sess_private_hint",

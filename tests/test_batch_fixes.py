@@ -236,6 +236,13 @@ class TestSystemTheme:
             "_applyTheme must remove the previous OS-theme listener before adding a new one"
         )
 
+    def test_boot_reconcile_treats_light_dark_as_explicit_theme_choices(self):
+        src = read("static/boot.js")
+        assert "['system','light','dark'].includes(lsTheme)" in src, (
+            "boot appearance reconciliation must preserve explicit light/dark/system "
+            "localStorage selections when a prior autosave failed"
+        )
+
     def test_panels_hydrates_appearance_before_models_fetch(self):
         src = read("static/panels.js")
         skin_idx = src.index("const skinVal=(settings.skin||'default').toLowerCase();")

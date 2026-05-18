@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 import api.profiles as profiles
@@ -72,3 +73,100 @@ def test_profile_model_config_writer_preserves_existing_model_settings(tmp_path)
     assert saved["model"]["base_url"] == "https://gateway.example/v1"
     assert saved["model"]["default"] == "gpt-5.5"
     assert saved["model"]["provider"] == "openai-codex"
+
+
+def test_profile_model_selection_accepts_catalog_model_with_provider():
+    catalog = {
+        "groups": [
+            {
+                "provider": "OpenAI Codex",
+                "provider_id": "openai-codex",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ]
+    }
+
+    profiles._validate_profile_model_selection(
+        "gpt-5.5",
+        "openai-codex",
+        available_models=catalog,
+    )
+
+
+def test_profile_model_selection_accepts_provider_qualified_picker_value():
+    catalog = {
+        "groups": [
+            {
+                "provider": "Research Gateway",
+                "provider_id": "custom:research-gateway",
+                "models": [
+                    {
+                        "id": "@custom:research-gateway:claude-opus-4.6",
+                        "label": "claude-opus-4.6",
+                    }
+                ],
+            }
+        ]
+    }
+
+    default_model, model_provider = profiles._split_webui_provider_model_value(
+        "@custom:research-gateway:claude-opus-4.6",
+        "custom:research-gateway",
+    )
+
+    profiles._validate_profile_model_selection(
+        default_model,
+        model_provider,
+        available_models=catalog,
+    )
+
+
+def test_profile_model_selection_rejects_unknown_model_provider_pair():
+    catalog = {
+        "groups": [
+            {
+                "provider": "OpenAI Codex",
+                "provider_id": "openai-codex",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="not available for provider"):
+        profiles._validate_profile_model_selection(
+            "missing-model",
+            "openai-codex",
+            available_models=catalog,
+        )
+
+
+def test_profile_create_rejects_unknown_model_before_creating_profile(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        profiles,
+        "_get_available_models_for_profile_validation",
+        lambda: {
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        profiles,
+        "_create_profile_fallback",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="Selected model 'missing-model'"):
+        profiles.create_profile_api(
+            "research",
+            default_model="missing-model",
+            model_provider="openai-codex",
+        )
+
+    assert calls == []

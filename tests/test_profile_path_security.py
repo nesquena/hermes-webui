@@ -27,8 +27,13 @@ def _reload_profiles_module(base_home: Path):
 
     profiles = importlib.import_module("api.profiles")
 
-    # Restore original modules so the cache stays consistent for the rest of the suite.
+    # Restore original modules and package attributes so the cache stays
+    # consistent for the rest of the suite.
     sys.modules.update(_saved)
+    api_pkg = sys.modules.get("api")
+    if api_pkg is not None:
+        for name, module in _saved.items():
+            setattr(api_pkg, name.rsplit(".", 1)[-1], module)
 
     return profiles
 

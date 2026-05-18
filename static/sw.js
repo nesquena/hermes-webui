@@ -39,28 +39,35 @@ const SHELL_ASSETS = [
   './manifest.json',
 ];
 
-// Install: pre-cache the app shell
+function deleteOldShellCaches() {
+  return caches.keys().then((keys) =>
+    Promise.all(
+      keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
+    )
+  );
+}
+
+// Install: prune old shell caches first, then pre-cache the app shell. Doing
+// this before caches.open(CACHE_NAME) avoids a temporary double-cache window on
+// quota-sensitive browsers during frequent version bumps.
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(SHELL_ASSETS).catch((err) => {
-        // Non-fatal: if any asset fails, still activate
-        console.warn('[sw] Shell pre-cache partial failure:', err);
-      });
-    })
+    deleteOldShellCaches().then(() =>
+      caches.open(CACHE_NAME).then((cache) => {
+        return cache.addAll(SHELL_ASSETS).catch((err) => {
+          // Non-fatal: if any asset fails, still activate
+          console.warn('[sw] Shell pre-cache partial failure:', err);
+        });
+      })
+    )
   );
   self.skipWaiting();
 });
 
-// Activate: clean up old caches
+// Activate: keep the old-cache cleanup as a safety net in case install was
+// interrupted or an older worker was already waiting.
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
-      )
-    )
-  );
+  event.waitUntil(deleteOldShellCaches());
   self.clients.claim();
 });
 

@@ -2,15 +2,18 @@
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
 import mimetypes
+import os
 import re as _re
 import email.parser
 import tempfile
 from pathlib import Path
 
-from api.config import MAX_UPLOAD_BYTES
+from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
 from api.workspace import safe_resolve_ws
+
+_MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
@@ -59,6 +62,36 @@ def _sanitize_upload_name(filename: str) -> str:
     return safe_name
 
 
+def _attachment_root() -> Path:
+    """Return the configured upload inbox root.
+
+    Plain chat attachments are transient context for the agent, not project
+    source files.  Keep them out of the active workspace by default while still
+    allowing operators to move the inbox with HERMES_WEBUI_ATTACHMENT_DIR.
+    """
+    override = os.getenv('HERMES_WEBUI_ATTACHMENT_DIR', '').strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (STATE_DIR / 'attachments').resolve()
+
+
+def _upload_destination(session_id: str, safe_name: str) -> Path:
+    dest_dir = _session_attachment_dir(session_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = (dest_dir / safe_name).resolve()
+    if not dest.is_relative_to(dest_dir):
+        raise ValueError('Invalid upload destination')
+    return dest
+
+
+def _session_attachment_dir(session_id: str, *, root: Path | None = None) -> Path:
+    root = (root or _attachment_root()).resolve()
+    dest_dir = (root / _re.sub(r'[^\w.\-]', '_', str(session_id or 'session'))[:120]).resolve()
+    if not dest_dir.is_relative_to(root):
+        raise ValueError('Invalid attachment directory')
+    return dest_dir
+
+
 def handle_upload(handler):
     import traceback as _tb
     try:
@@ -77,9 +110,8 @@ def handle_upload(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
-        workspace = Path(s.workspace)
         safe_name = _sanitize_upload_name(filename)
-        dest = safe_resolve_ws(workspace, safe_name)
+        dest = _upload_destination(session_id, safe_name)
         dest.write_bytes(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
@@ -94,11 +126,6 @@ def handle_upload(handler):
     except Exception:
         print('[webui] upload error: ' + _tb.format_exc(), flush=True)
         return j(handler, {'error': 'Upload failed'}, status=500)
-
-
-# Maximum total extracted bytes — guards against zip/tar bombs.
-# Set to 10x the upload limit; a legitimate archive rarely exceeds 3-4x.
-_MAX_EXTRACTED_BYTES = 10 * 20 * 1024 * 1024  # 200 MB
 
 
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):

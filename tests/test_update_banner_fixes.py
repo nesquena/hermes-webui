@@ -18,6 +18,9 @@ import threading
 import time
 import sys
 import os
+import io
+import json
+import types
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -178,6 +181,61 @@ class TestUpdateChecker:
         result = upd._check_repo(tmp_path, 'webui')
 
         assert result['repo_url'] == 'https://github.com/nesquena/hermes-webui'
+
+    def test_release_check_ignores_post_release_branch_commits(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v2026.5.7\nv2026.4.30', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v2026.5.7', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/NousResearch/hermes-agent.git', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/main', True
+            if args[:2] == ['rev-list', '--count']:
+                return '16', True
+            if args[0] == 'merge-base':
+                return '3800972dd', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'agent')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v2026.5.7'
+        assert result['latest_version'] == 'v2026.5.7'
+        assert result['behind'] == 0
+
+    def test_release_check_counts_release_gap(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v0.51.35\nv0.51.34\nv0.51.33', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v0.51.34', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v0.51.34'
+        assert result['latest_version'] == 'v0.51.35'
+        assert result['behind'] == 1
+        assert result['branch'] == 'v0.51.35'
 
 
 class TestConflictError:
@@ -431,6 +489,159 @@ class TestUpdateSummaryRouteModelSelection:
         assert 'update summary auxiliary model failed; falling back to main model' in src
         assert 'from run_agent import AIAgent' in src
 
+    def test_summary_route_auxiliary_model_uses_active_profile_env(self, monkeypatch, tmp_path):
+        import api.config as cfg
+        import api.profiles as profiles
+        import api.routes as routes
+        import api.updates as updates
+
+        class FakeHandler:
+            def __init__(self, payload):
+                raw = json.dumps(payload).encode('utf-8')
+                self.headers = {'Content-Length': str(len(raw))}
+                self.rfile = io.BytesIO(raw)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _key, _value):
+                pass
+
+            def end_headers(self):
+                pass
+
+            def response_payload(self):
+                return json.loads(self.wfile.getvalue().decode('utf-8'))
+
+        captured = {}
+        profile_home = tmp_path / 'profiles' / 'work'
+        fake_skill_module = types.ModuleType('tools.skills_tool')
+        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
+        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skill_module)
+
+        monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: profile_home)
+        monkeypatch.setattr(
+            profiles,
+            'get_profile_runtime_env',
+            lambda home: {'HERMES_TEST_PROFILE_ENV': 'work-runtime'},
+        )
+        monkeypatch.setattr(cfg, 'get_effective_default_model', lambda: 'openai/test-main')
+
+        def fake_resolve_model_provider(model):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
+            captured['model_resolution_env'] = {
+                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
+            }
+            return model, 'openai', 'https://example.test/v1'
+
+        monkeypatch.setattr(cfg, 'resolve_model_provider', fake_resolve_model_provider)
+        monkeypatch.setattr(cfg, 'resolve_custom_provider_connection', lambda provider: (None, None))
+
+        fake_runtime_provider = types.ModuleType('hermes_cli.runtime_provider')
+        fake_runtime_provider.resolve_runtime_provider = lambda requested=None: {
+            'api_key': 'fake-key',
+            'provider': requested or 'openai',
+            'base_url': 'https://example.test/v1',
+        }
+        fake_hermes_cli = types.ModuleType('hermes_cli')
+        fake_hermes_cli.__path__ = []
+        fake_hermes_cli.runtime_provider = fake_runtime_provider
+        monkeypatch.setitem(sys.modules, 'hermes_cli', fake_hermes_cli)
+        monkeypatch.setitem(sys.modules, 'hermes_cli.runtime_provider', fake_runtime_provider)
+
+        class FakeAuxClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(model, messages):
+                        captured['aux_create'] = {'model': model, 'messages': messages}
+                        return types.SimpleNamespace(
+                            choices=[
+                                types.SimpleNamespace(
+                                    message=types.SimpleNamespace(
+                                        content='Notice: Profile-routed update summaries work.'
+                                    )
+                                )
+                            ]
+                        )
+
+        def fake_get_text_auxiliary_client(task, main_runtime=None):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
+            captured['aux_env'] = {
+                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
+                'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
+                'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
+            }
+            captured['aux_task'] = task
+            captured['main_runtime'] = dict(main_runtime or {})
+            return FakeAuxClient(), 'profile-compression-model'
+
+        fake_auxiliary_client = types.ModuleType('agent.auxiliary_client')
+        fake_auxiliary_client.get_text_auxiliary_client = fake_get_text_auxiliary_client
+        fake_agent = types.ModuleType('agent')
+        fake_agent.__path__ = []
+        fake_agent.auxiliary_client = fake_auxiliary_client
+        monkeypatch.setitem(sys.modules, 'agent', fake_agent)
+        monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', fake_auxiliary_client)
+
+        with updates._cache_lock:
+            updates._summary_cache.clear()
+
+        monkeypatch.setenv('HERMES_HOME', 'default-home')
+        monkeypatch.setenv('HERMES_TEST_PROFILE_ENV', 'default-runtime')
+
+        body = {
+            'target': 'webui',
+            'updates': {
+                'webui': {
+                    'behind': 1,
+                    'current_sha': 'profile-env-before',
+                    'latest_sha': f'profile-env-after-{time.time_ns()}',
+                    'compare_url': 'https://example.test/compare',
+                },
+            },
+        }
+        handler = FakeHandler(body)
+
+        profiles.set_request_profile('work')
+        try:
+            routes.handle_post(handler, types.SimpleNamespace(path='/api/updates/summary'))
+        finally:
+            profiles.clear_request_profile()
+
+        assert handler.status == 200
+        payload = handler.response_payload()
+        assert payload['generated_by'] == 'llm'
+        assert captured['aux_task'] == 'compression'
+        assert captured['model_resolution_env'] == {
+            'HERMES_HOME': str(profile_home),
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+        }
+        assert captured['aux_env'] == {
+            'HERMES_HOME': str(profile_home),
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'SKILL_MODULE_HOME': profile_home,
+            'SKILL_MODULE_DIR': profile_home / 'skills',
+        }
+        assert captured['aux_create']['model'] == 'profile-compression-model'
+        assert getattr(fake_skill_module, 'HERMES_HOME') == 'default-home'
+        assert getattr(fake_skill_module, 'SKILLS_DIR') == 'default-home/skills'
+        assert os.environ.get('HERMES_HOME') == 'default-home'
+        assert os.environ.get('HERMES_TEST_PROFILE_ENV') == 'default-runtime'
+
 
 class TestUiJsUpdateBanner:
     """#813 + #814 — UI must show persistent error, force button, and correct toast."""
@@ -562,10 +773,12 @@ class TestUiJsUpdateBanner:
 
 
 class TestUpdateBannerUx:
-    def test_update_banner_includes_repo_branch_labels(self):
+    def test_update_banner_includes_release_labels(self):
         src = read('static/ui.js')
         assert 'function _formatUpdateTargetStatus' in src
-        assert 'info.branch' in src
+        assert 'info.release_based' in src
+        assert 'info.current_version' in src
+        assert 'info.latest_version' in src
         assert "_formatUpdateTargetStatus('WebUI',data.webui)" in src
         assert "_formatUpdateTargetStatus('Agent',data.agent)" in src
 
@@ -916,6 +1129,32 @@ class TestWhatsNewSummaryToggle:
         ]
         assert sections['Worth knowing'] == [
             'Some labels were renamed to match the new flow.',
+            'The full diff is still available from the update banner.',
+        ]
+
+    def test_update_summary_keeps_unknown_prefixed_bullets_as_notice(self):
+        from api.updates import summarize_update_payload
+
+        result = summarize_update_payload(
+            {'webui': {'behind': 3, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'}},
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Notice: The settings panel loads faster.',
+                    'Caveat: Restart once after applying the update.',
+                    'Action required: Reopen the update banner if the summary was already cached.',
+                    'Worth knowing: The full diff is still available from the update banner.',
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert sections["What you'll notice"] == [
+            'The settings panel loads faster.',
+            'Caveat: Restart once after applying the update.',
+            'Action required: Reopen the update banner if the summary was already cached.',
+        ]
+        assert sections['Worth knowing'] == [
             'The full diff is still available from the update banner.',
         ]
 

@@ -67,6 +67,85 @@ def test_auto_compression_completion_transition_is_preserved_after_running_liste
     assert "phase:'done'" in _compressed_listener_block()
 
 
+def test_auto_compression_running_sse_stamps_elapsed_timer_start():
+    block = _compressing_listener_block()
+
+    assert "startedAt:Date.now()/1000" in block
+    assert block.index("startedAt:Date.now()/1000") < block.index("setCompressionUi(state)")
+
+
+def test_auto_compression_running_card_renders_elapsed_timer_and_caps_updates():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionPreviewText")
+    assert start != -1, "auto compression preview helper not found"
+    end = src.find("function _compressionCardsNode", start)
+    assert end != -1, "compression cards node helper not found after auto helper"
+    helper = src[start:end]
+
+    assert "const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;" in src
+    assert "function _compressionElapsedLabel(state)" in src
+    assert "_formatActiveElapsedTimer" in src
+    assert "_compressionElapsedLabel(state)" in helper
+    assert "elapsedLabel" in helper
+    assert "_autoCompressionPreviewText(state)" in helper
+    assert "_autoCompressionDetailText(state)" in helper
+    assert "function _startCompressionElapsedTimer()" in src
+    assert "function _clearCompressionElapsedTimer()" in src
+    assert "function _updateCompressionElapsedCards(state)" in src
+    assert "_startCompressionElapsedTimer();" in src
+    assert "_clearCompressionElapsedTimer();" in src
+
+
+def test_auto_compression_elapsed_cap_uses_non_frozen_label():
+    src = _read("static/ui.js")
+    start = src.find("function _compressionElapsedLabel")
+    assert start != -1, "elapsed label helper not found"
+    end = src.find("function _compressionElapsedExpired", start)
+    assert end != -1, "elapsed expiry helper not found after label helper"
+    helper = src[start:end]
+
+    assert "'5+ min'" in helper
+    assert "elapsed>=_COMPRESSION_ELAPSED_MAX_SECONDS" in helper
+    assert "return '05:00'" not in helper
+
+
+def test_auto_compression_running_detail_avoids_duplicate_message_text():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionDetailText")
+    assert start != -1, "auto compression detail helper not found"
+    end = src.find("function _autoCompressionCardsHtml", start)
+    assert end != -1, "auto compression card helper not found after detail helper"
+    helper = src[start:end]
+
+    assert "return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;" in helper
+    assert "${base}\\nElapsed:" not in helper
+
+
+def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
+    src = _read("static/ui.js")
+    start = src.find("function appendLiveCompressionCard")
+    assert start != -1, "live compression card append helper not found"
+    end = src.find("function _isHandoffSummaryToolPayload", start)
+    assert end != -1, "handoff helper not found after live compression helper"
+    helper = src[start:end]
+
+    assert "data-compression-started-at" in helper
+    assert "data-compression-message" in helper
+    assert "_compressionLiveCardState" in src
+
+
+def test_auto_compression_does_not_rerender_over_live_answer_text():
+    block = _compressing_listener_block()
+    src = _read("static/ui.js")
+
+    assert "const liveAnswerStarted=" in block
+    assert "appendLiveCompressionCard(state)" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("renderMessages({preserveScroll:true})")
+    assert "window._compressionUi=null;" in block
+    assert "function appendLiveCompressionCard(state)" in src
+    assert 'data-live-compression-card' in src
+
+
 def test_auto_compression_sse_uses_transient_card_not_fake_message():
     """Auto compression must not inject display-only text into S.messages."""
     src = _read("static/messages.js")
@@ -78,6 +157,9 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
     assert "phase:'done'" in block
     assert "automatic:true" in block
     assert "_setCompressionSessionLock" in block
+    assert "const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);" in block
+    assert "window._compressionUi=null;" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("window._compressionUi=null;")
 
 
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
@@ -272,6 +354,19 @@ def test_reference_message_uses_raw_transcript_position_before_anchor_fallback()
     assert "const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(" in src
     assert "if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);" in src
     assert "else _insertCompressionLikeNode(referenceNode);" in src
+
+
+def test_reference_message_inserted_before_future_assistant_anchor():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode", start)
+    assert end != -1, "raw-index insertion helper end marker not found"
+    helper = src[start:end]
+
+    assert "const anchorSeg=assistantSegments.get(anchorRawIdx);" in helper
+    assert "blocks.insertBefore(node, anchorSeg);" in helper
+    assert helper.index("blocks.insertBefore(node, anchorSeg);") < helper.index("const userRow=userRows.get(anchorRawIdx);")
 
 
 def test_reference_message_selection_prefers_latest_matching_marker():

@@ -142,3 +142,39 @@ def test_disk_models_cache_still_loads_when_auth_and_config_sources_are_unchange
     result = config.get_available_models()
 
     assert result == fresh_opencode
+
+
+def test_memory_models_cache_invalidates_when_static_catalog_changes(tmp_path, monkeypatch):
+    _configure_isolated_sources(tmp_path, monkeypatch, "opencode-go")
+    stale_opencode = _valid_models_cache("opencode-go", "glm-5.1")
+    with config._available_models_cache_lock:
+        config._available_models_cache = stale_opencode
+        config._available_models_cache_ts = time.monotonic()
+        config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+
+    updated_models = list(config._PROVIDER_MODELS["opencode-go"])
+    updated_models.append({"id": "new-catalog-model", "label": "New Catalog Model"})
+    monkeypatch.setitem(config._PROVIDER_MODELS, "opencode-go", updated_models)
+
+    result = config.get_available_models()
+
+    opencode_group = next(g for g in result["groups"] if g.get("provider_id") == "opencode-go")
+    assert any(m.get("id") == "new-catalog-model" for m in opencode_group["models"])
+
+
+def test_disk_models_cache_invalidates_when_static_catalog_changes(tmp_path, monkeypatch):
+    _configure_isolated_sources(tmp_path, monkeypatch, "opencode-go")
+    stale_opencode = _valid_models_cache("opencode-go", "glm-5.1")
+    config._save_models_cache_to_disk(stale_opencode)
+    assert config._models_cache_path.exists()
+
+    updated_models = list(config._PROVIDER_MODELS["opencode-go"])
+    updated_models.append({"id": "new-disk-catalog-model", "label": "New Disk Catalog Model"})
+    monkeypatch.setitem(config._PROVIDER_MODELS, "opencode-go", updated_models)
+    _reset_memory_cache()
+
+    result = config.get_available_models()
+
+    assert result != stale_opencode
+    opencode_group = next(g for g in result["groups"] if g.get("provider_id") == "opencode-go")
+    assert any(m.get("id") == "new-disk-catalog-model" for m in opencode_group["models"])

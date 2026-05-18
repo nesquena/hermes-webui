@@ -52,6 +52,137 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+let _selectedTextReplyBtn=null;
+let _selectedTextReplyText='';
+let _selectedTextReplyRaf=0;
+
+function _selectedTextReplyT(key, fallback){
+  try{
+    const val=(typeof t==='function')?t(key):'';
+    return val&&val!==key?val:fallback;
+  }catch(_err){
+    return fallback;
+  }
+}
+
+function _selectedTextReplyRoot(){
+  if(typeof $==='function') return $('messages')||$('msgInner');
+  return document.getElementById('messages')||document.getElementById('msgInner');
+}
+
+function _selectedTextReplyNodeInChat(node, root){
+  if(!node||!root)return false;
+  const el=node.nodeType===Node.ELEMENT_NODE?node:node.parentElement;
+  return !!(el&&root.contains(el));
+}
+
+function _selectedTextReplySelection(){
+  if(!window.getSelection)return null;
+  const selection=window.getSelection();
+  if(!selection||selection.isCollapsed||!selection.rangeCount)return null;
+  const root=_selectedTextReplyRoot();
+  if(!root)return null;
+  const range=selection.getRangeAt(0);
+  if(!_selectedTextReplyNodeInChat(range.startContainer, root)||!_selectedTextReplyNodeInChat(range.endContainer, root))return null;
+  const text=selection.toString().replace(/\u00a0/g,' ').trim();
+  if(!text)return null;
+  const rect=range.getBoundingClientRect();
+  if(!rect||(!rect.width&&!rect.height))return null;
+  return {text, rect};
+}
+
+function _formatSelectedTextReplyQuote(text){
+  const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  if(!normalized)return '';
+  return normalized.split('\n').map(line=>`> ${line}`).join('\n');
+}
+
+function _appendSelectedTextReplyToComposer(text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return false;
+  const quote=_formatSelectedTextReplyQuote(text);
+  if(!quote)return false;
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${quote}\n\n`:`${quote}\n\n`;
+  composer.focus();
+  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_err){}
+  composer.dispatchEvent(new Event('input', {bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+  if(typeof showToast==='function') showToast(_selectedTextReplyT('selected_text_reply_appended', 'Selected text added to composer'), 1600);
+  return true;
+}
+
+function _selectedTextReplyButton(){
+  if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='selectedTextReplyBtn';
+  btn.className='selected-text-reply-btn';
+  btn.setAttribute('data-i18n', 'selected_text_reply');
+  btn.setAttribute('data-i18n-title', 'selected_text_reply_title');
+  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply_title');
+  btn.textContent=_selectedTextReplyT('selected_text_reply', 'Reply with selection');
+  btn.title=_selectedTextReplyT('selected_text_reply_title', 'Append selected chat text as quoted context');
+  btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('mousedown', e=>e.preventDefault());
+  btn.addEventListener('click', e=>{
+    e.preventDefault();
+    if(_appendSelectedTextReplyToComposer(_selectedTextReplyText)){
+      _hideSelectedTextReplyButton();
+      const selection=window.getSelection&&window.getSelection();
+      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+    }
+  });
+  document.body.appendChild(btn);
+  if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  _selectedTextReplyBtn=btn;
+  return btn;
+}
+
+function _hideSelectedTextReplyButton(){
+  _selectedTextReplyText='';
+  if(_selectedTextReplyBtn)_selectedTextReplyBtn.classList.remove('visible');
+}
+
+function _positionSelectedTextReplyButton(info){
+  const btn=_selectedTextReplyButton();
+  _selectedTextReplyText=info.text;
+  btn.classList.add('visible');
+  const gap=8;
+  const btnRect=btn.getBoundingClientRect();
+  const width=btnRect.width||150;
+  const height=btnRect.height||32;
+  const left=Math.min(Math.max(gap, info.rect.left+(info.rect.width/2)-(width/2)), Math.max(gap, window.innerWidth-width-gap));
+  const top=Math.max(gap, info.rect.top-height-gap);
+  btn.style.left=`${left}px`;
+  btn.style.top=`${top}px`;
+}
+
+function _updateSelectedTextReplyButton(){
+  if(_selectedTextReplyRaf)return;
+  _selectedTextReplyRaf=window.requestAnimationFrame(()=>{
+    _selectedTextReplyRaf=0;
+    const info=_selectedTextReplySelection();
+    if(!info){
+      _hideSelectedTextReplyButton();
+      return;
+    }
+    _positionSelectedTextReplyButton(info);
+  });
+}
+
+if(typeof document!=='undefined'){
+  document.addEventListener('selectionchange', _updateSelectedTextReplyButton);
+  document.addEventListener('mouseup', e=>{
+    if(e.target&&e.target.closest&&e.target.closest('.selected-text-reply-btn'))return;
+    _updateSelectedTextReplyButton();
+  });
+  document.addEventListener('keyup', e=>{
+    if(e.key&&/Arrow|Shift|Control|Meta|Alt/.test(e.key))_updateSelectedTextReplyButton();
+  });
+  window.addEventListener('resize', _hideSelectedTextReplyButton);
+}
+
 // Guard against concurrent send() calls.  Without this, two rapid sends
 // (e.g. queue drain + user click) can both pass the S.busy check because
 // setBusy(true) is only called after the first await inside send().
@@ -273,7 +404,7 @@ async function send(){
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
+  S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
   // First optimistic pass: make the local user turn visible before /api/chat/start
   // can save pending state on the server.
   if(typeof upsertActiveSessionForLocalTurn==='function'){
@@ -410,6 +541,16 @@ function closeLiveStream(sessionId, streamId){
   delete LIVE_STREAMS[sessionId];
 }
 
+function closeOtherLiveStreams(activeSid){
+  // Keep the live token SSE connection scoped to the conversation pane the user
+  // is actually viewing. Background sessions still show running/finished state
+  // through the session list and can reattach when selected, but they should not
+  // keep one EventSource each and exhaust the browser connection pool (#2313).
+  for(const sid of Object.keys(LIVE_STREAMS)){
+    if(sid!==activeSid) closeLiveStream(sid);
+  }
+}
+
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
@@ -427,11 +568,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   ){
     return;
   }
+  closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
 
   let assistantText='';
   let reasoningText='';
   let liveReasoningText='';
+  let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
   let assistantRow=null;
@@ -481,6 +624,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
   }
+  function _isMarkerOnlyAssistantMessage(m){
+    if(!m||m.role!=='assistant') return false;
+    const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
+    return typeof _isPreservedCompressionTaskListMarkerOnlyText==='function'
+      && _isPreservedCompressionTaskListMarkerOnlyText(text);
+  }
+  function _replaceMarkerOnlyAssistantWithStreamError(messages){
+    if(!Array.isArray(messages)) return false;
+    const msg=[...messages].reverse().find(m=>m&&m.role==='assistant');
+    if(!_isMarkerOnlyAssistantMessage(msg)) return false;
+    msg.content='**Error:** No response received after context compression. Please retry.';
+    msg.provider_details='The only assistant text returned for this turn was the internal preserved-task-list compression marker, so the WebUI replaced it with an explicit error instead of rendering the marker as a model response.';
+    return true;
+  }
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
       setBusy(false);
@@ -498,6 +655,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
     });
   }
+  function snapshotLiveTurn(){
+    if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(activeSid);
+  }
   // Throttled variant for token-by-token updates. persistInflightState()
   // calls saveInflightState() which does JSON.parse + JSON.stringify + write
   // on the entire inflight map every call. On a fast model at 60 tok/s with
@@ -512,6 +672,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
+  }
+  function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
+    let out=String(text||'');
+    (Array.isArray(snippets)?snippets:[]).forEach(snippet=>{
+      const visible=String(snippet||'').trim();
+      if(visible.length<20) return;
+      out=out.split(visible).join('');
+    });
+    return out.trim();
+  }
+  function _liveThinkingText(){
+    const clean=_stripLiveVisibleAssistantEchoFromThinking(liveReasoningText, visibleInterimSnippets);
+    return clean || 'Thinking…';
   }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
@@ -578,6 +751,55 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
+  let _deferredStreamRecoveryBound=false;
+
+  function _pageHiddenForStreamError(){
+    return (typeof document!=='undefined'&&document.visibilityState==='hidden')||
+      (typeof document!=='undefined'&&document.wasDiscarded===true);
+  }
+
+  function _reattachOrRestoreAfterDeferredStreamError(){
+    if(_terminalStateReached||_streamFinalized) return;
+    if((S.session&&S.session.session_id)!==activeSid) return;
+    (async()=>{
+      try{
+        if(streamId){
+          const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(st.active){
+            setComposerStatus('Reconnected');
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+            return;
+          }
+        }
+      }catch(_){
+        if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      }
+      if(await _restoreSettledSession()) return;
+      if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
+      _handleStreamError();
+    })();
+  }
+
+  function _deferStreamErrorIfPageHidden(){
+    if(!_pageHiddenForStreamError()) return false;
+    setComposerStatus('Connection paused. Reconnecting when this tab returns…');
+    if(S.session&&S.session.session_id===activeSid&&streamId) S.activeStreamId=streamId;
+    if(!_deferredStreamRecoveryBound){
+      _deferredStreamRecoveryBound=true;
+      const resume=()=>{
+        if(_pageHiddenForStreamError()) return;
+        window.removeEventListener('focus',resume);
+        window.removeEventListener('pageshow',resume);
+        document.removeEventListener('visibilitychange',resume);
+        _deferredStreamRecoveryBound=false;
+        _reattachOrRestoreAfterDeferredStreamError();
+      };
+      document.addEventListener('visibilitychange',resume);
+      window.addEventListener('focus',resume);
+      window.addEventListener('pageshow',resume);
+    }
+    return true;
+  }
 
   // Bug A fix (#631): track whether the stream has been finalized so any rAF
   // scheduled by a trailing 'token'/'reasoning' event that arrives in the same
@@ -601,10 +823,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
+  let _lastRunJournalSeq=0;
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
+  const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
   const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
@@ -994,6 +1218,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
   }
   function _drainStreamFadeBeforeDone(onDone){
+    const drainStartedAt=performance.now();
+    let forcedDone=false;
     const step=()=>{
       if(!assistantBody){onDone();return;}
       const target=_streamFadeCurrentDisplayText();
@@ -1009,17 +1235,53 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
         return;
       }
+      // Final SSE `done` means the canonical completed session is available.
+      // The optional word-fade playout must not keep that completed answer
+      // hidden behind the live Thinking state for large/bursty responses.
+      if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
+        forcedDone=true;
+        if(_smdParser) _smdEndParser();
+        onDone();
+        return;
+      }
       setTimeout(()=>requestAnimationFrame(step), 33);
     };
     step();
   }
+  function _closeCurrentLiveActivityGroup(){
+    const turn=$('liveAssistantTurn');
+    if(turn){
+      turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+        group.removeAttribute('data-live-activity-current');
+      });
+    }
+  }
   function _resetAssistantSegment(){
+    const options=arguments[0]||{};
+    const closeActivity=!!(options&&options.closeActivity);
+    if(closeActivity) _closeCurrentLiveActivityGroup();
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
     _freshSegment=true;
     _smdEndParser();
     _resetStreamFadeState();
+  }
+  function _rememberRunJournalCursor(e){
+    const raw=String(e&&e.lastEventId||'').trim();
+    if(!raw) return;
+    const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
+    const seq=Number.parseInt(tail,10);
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+  }
+  function _runJournalReplayAfterSeq(){
+    return Math.max(0,_lastRunJournalSeq||0);
+  }
+  function _runJournalReplayParams(){
+    // `replay=1` documents frontend intent. The server selects replay when the
+    // stream id no longer has a live worker; `after_seq` prevents duplicated
+    // journal events after this EventSource has already rendered part of a run.
+    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
   }
 
   let _lastRenderMs=0;
@@ -1076,6 +1338,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       scrollIfPinned();
+      snapshotLiveTurn();
     };
     const frameIntervalMs=_shouldUseStreamFade()?33:66;
     if(sinceLastMs>=frameIntervalMs){
@@ -1103,19 +1366,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       const parsed=_parseStreamState();
+      if(_freshSegment&&window._showThinking!==false) appendThinking(_liveThinkingText());
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
 
     source.addEventListener('interim_assistant',e=>{
       if(_terminalStateReached||_streamFinalized) return;
-      if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       const visible=String(d&&d.text?d.text:'').trim();
       const alreadyStreamed=!!(d&&d.already_streamed);
@@ -1123,14 +1385,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       if(alreadyStreamed){
-        _resetAssistantSegment();
+        if(!S.session||S.session.session_id!==activeSid) return;
+        _resetAssistantSegment({closeActivity:true});
         return;
       }
-      assistantText+=visible;
+      assistantText += assistantText ? `\n\n${visible}` : visible;
+      visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
-      const parsed=_parseStreamState();
-      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
+      if(window._showThinking!==false){
+        if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
+        else appendThinking(_liveThinkingText());
+      }
+      ensureAssistantRow(true);
+      _resetAssistantSegment({closeActivity:true});
       _scheduleRender();
     });
 
@@ -1146,8 +1414,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // finalizeThinkingCard(). The old rAF-only path caused a race where
       // the thinking row was still a spinner when finalized.
       if(window._showThinking!==false){
-        if(typeof updateThinking==='function') updateThinking(liveReasoningText||'Thinking…');
-        else appendThinking(liveReasoningText);
+        if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
+        else appendThinking(_liveThinkingText());
       }
       _scheduleRender();
     });
@@ -1175,6 +1443,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
+      snapshotLiveTurn();
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
@@ -1211,6 +1480,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
+      snapshotLiveTurn();
       scrollIfPinned();
     });
 
@@ -1353,11 +1623,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevIn=(S.session&&S.session.input_tokens)||0;
           const _prevOut=(S.session&&S.session.output_tokens)||0;
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
+          const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
+          const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(S.session&&S.session.session_id){
-            localStorage.setItem('hermes-webui-session',S.session.session_id);
+            try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
           }
+          const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
           if(
             window._compressionUi&&window._compressionUi.automatic&&
             window._compressionUi.sessionId===activeSid&&
@@ -1381,12 +1654,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               const curIn=d.usage.input_tokens||0;
               const curOut=d.usage.output_tokens||0;
               const curCost=d.usage.estimated_cost||0;
+              const curCacheRead=d.usage.cache_read_tokens||0;
+              const curCacheWrite=d.usage.cache_write_tokens||0;
               // Only set delta if values actually increased (skip no-op turns)
-              if(curIn>prevIn||curOut>prevOut){
+              if(curIn>prevIn||curOut>prevOut||curCacheRead>_prevCacheRead||curCacheWrite>_prevCacheWrite){
                 lastAsst._turnUsage={
                   input_tokens:Math.max(0,curIn-prevIn),
                   output_tokens:Math.max(0,curOut-prevOut),
                   estimated_cost:Math.max(0,curCost-prevCost),
+                  cache_read_tokens:Math.max(0,curCacheRead-_prevCacheRead),
+                  cache_write_tokens:Math.max(0,curCacheWrite-_prevCacheWrite),
                 };
               }
               if(typeof d.usage.duration_seconds==='number'){
@@ -1429,6 +1706,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.busy=false;
           // No-reply guard (#373): if agent returned nothing, show inline error
           if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+          if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
           if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
           syncTopbar();renderMessages({preserveScroll:true});
           if(shouldFollowOnDone&&typeof scrollToBottom==='function') scrollToBottom();
@@ -1502,14 +1780,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
       if(typeof setCompressionUi==='function'){
-        setCompressionUi({
+        const state={
           sessionId:activeSid,
           phase:'running',
           automatic:true,
           message:d.message||'Auto-compressing context...',
-        });
+          startedAt:Date.now()/1000,
+        };
+        setCompressionUi(state);
+        const liveAnswerStarted=!!(assistantRow||String(((_parseStreamState&&_parseStreamState())||{}).displayText||'').trim());
+        if(liveAnswerStarted&&typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state)){
+          // The live card is now anchored in the turn. Keeping the same running
+          // state in global transient UI makes later renderMessages() calls insert
+          // a duplicate Automatic Compression card.
+          window._compressionUi=null;
+          snapshotLiveTurn();
+          return;
+        }
       }
       if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+      snapshotLiveTurn();
     });
 
     source.addEventListener('compressed',e=>{
@@ -1526,13 +1816,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _syncCtxIndicator(S.lastUsage);
       }
       if(typeof setCompressionUi==='function'){
-        setCompressionUi({
+        const state={
           sessionId:activeSid,
           phase:'done',
           automatic:true,
           message,
           summary:{headline:message},
-        });
+        };
+        setCompressionUi(state);
+        const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);
+        if(appended){
+          // The live card is now anchored in the turn. Do not keep the automatic
+          // completion state as global transient UI, otherwise every subsequent
+          // render projects the same Auto Compression card again.
+          window._compressionUi=null;
+          snapshotLiveTurn();
+        }
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
@@ -1617,6 +1916,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('error',async e=>{
       source.close();
       if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden()) return;
       if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
@@ -1633,17 +1933,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
+            if(st.replay_available){
+              setComposerStatus('Restoring stream…');
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
+              return;
+            }
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
           if(await _restoreSettledSession()) return;
           if(_deferStreamErrorIfOffline()) return;
+          if(_deferStreamErrorIfPageHidden()) return;
           _handleStreamError();
         },1500);
         return;
       }
       if(await _restoreSettledSession()) return;
       if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden()) return;
       _handleStreamError();
     });
 
@@ -1679,7 +1986,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            S.messages.push({role:'assistant',content:'**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before Skyly finished. No provider failure occurred.*',provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
+            const cancelAgentName=((window._botName||'Hermes')+'').trim()||'Hermes';
+            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
         }
@@ -1687,6 +1995,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList();
       _setActivePaneIdleIfOwner();
     });
+
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+      source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+    }
   }
 
   async function _restoreSettledSession(){
@@ -1710,9 +2022,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
         if(S.session&&S.session.session_id){
-          localStorage.setItem('hermes-webui-session',S.session.session_id);
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
         }
+        const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
+        if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
         const hasMessageToolMetadata=S.messages.some(m=>{
           if(!m||m.role!=='assistant') return false;
           // Recognize both the standard `tool_calls` (used by completed assistant
@@ -1770,10 +2084,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   (async()=>{
     // Reattach path can carry stale stream ids after server restart; preflight
     // status avoids opening a dead SSE URL that will 404 in the console.
+    let replayOnly=false;
     if(reconnecting){
       try{
         const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
-        if(!st.active){
+        if(!st.active&&st.replay_available){
+          replayOnly=true;
+        }else if(!st.active){
           _clearOwnerInflightState();
           _clearApprovalForOwner();
           _clearClarifyForOwner('terminal');
@@ -1790,7 +2107,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+    const replayParams=replayOnly?_runJournalReplayParams():'';
+    _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
 }

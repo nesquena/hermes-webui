@@ -4,6 +4,22 @@ Thanks for contributing.
 
 Hermes WebUI is intentionally simple to work on: Python on the server, vanilla JS in the browser, no build step, no bundler, no frontend framework. The best pull requests preserve that simplicity while solving a real problem cleanly.
 
+## Before You Start
+
+- Read [`AGENTS.md`](AGENTS.md) if an AI assistant is doing or helping with the
+  change.
+- Read [`docs/CONTRACTS.md`](docs/CONTRACTS.md) and any linked contract/RFC for
+  the subsystem you will touch.
+- For UI or UX work, read [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md)
+  and [`DESIGN.md`](DESIGN.md).
+- For runtime, streaming, recovery, replay, compression, context reconstruction,
+  or session metadata work, start with [`docs/rfcs/README.md`](docs/rfcs/README.md)
+  and the relevant RFC listed there.
+
+Use those documents as review guardrails: keep the change scoped, preserve the
+no-build-step architecture, update docs/changelog when behavior changes, include
+UI evidence for UI changes, and add tests for behavior changes where practical.
+
 ## Two Paths to a Strong Pull Request
 
 ### Path 1: Small, Focused Changes
@@ -60,7 +76,7 @@ There is currently no PR template in this repo, so include the important section
 
 If the change is user-visible, include screenshots or a short video.
 
-For UI or UX changes, before/after images are required. PRs that change the interface or interaction flow without before/after images will likely be ignored, or closed in a regular maintainer sweep without review.
+For UI or UX changes, before/after images are required. PRs that change the interface or interaction flow without before/after images may not receive meaningful review until that evidence is added.
 
 ### 4. AI Usage Disclosure
 

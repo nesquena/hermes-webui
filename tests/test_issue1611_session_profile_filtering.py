@@ -164,7 +164,11 @@ def test_keep_latest_messaging_runs_after_profile_filter():
     block = src[handler_idx:next_handler]
 
     filter_idx = block.find('_profiles_match(s.get("profile"), active_profile)')
-    dedupe_idx = block.find('_keep_latest_messaging_session_per_source(scoped)')
+    # The dedupe call can be either single-line `(scoped)` or multi-line
+    # `(\n    scoped,\n    show_previous_messaging_sessions=…,\n)`; match the
+    # function name + the first arg position rather than coupling to the call
+    # shape. (#2294 added the keyword-arg form.)
+    dedupe_idx = block.find('_keep_latest_messaging_session_per_source(')
     assert filter_idx > 0, "Profile filter not found in /api/sessions handler"
     assert dedupe_idx > 0, "Messaging dedupe must run on the scoped list"
     assert filter_idx < dedupe_idx, (

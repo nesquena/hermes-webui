@@ -261,6 +261,8 @@ class TestPasswordCacheInvalidation(unittest.TestCase):
     def tearDown(self):
         if self._backup is not None:
             self._sf.write_text(self._backup, encoding='utf-8')
+        elif self._sf.exists():
+            self._sf.unlink()
         auth._invalidate_password_hash_cache()
         os.environ.pop('HERMES_WEBUI_PASSWORD', None)
 

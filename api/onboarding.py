@@ -312,6 +312,44 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 _PROBE_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+_DNS_ONLY_TEST_TLDS = frozenset({"invalid", "test", "example"})
+
+
+def _hostname_uses_reserved_dns_tld(hostname: str | None) -> bool:
+    host = str(hostname or "").strip().rstrip(".").lower()
+    if not host or "." not in host:
+        return False
+    return host.rsplit(".", 1)[-1] in _DNS_ONLY_TEST_TLDS
+
+
+def _exception_chain_text(exc) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(str(cur))
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return " ".join(parts).lower()
+
+
+def _probe_failure_is_dns(exc, hostname: str | None) -> bool:
+    if isinstance(exc, socket.gaierror):
+        return True
+    text = _exception_chain_text(exc)
+    if any(
+        marker in text
+        for marker in (
+            "getaddrinfo",
+            "gaierror",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "no address associated with hostname",
+        )
+    ):
+        return True
+    return _hostname_uses_reserved_dns_tld(hostname)
 
 
 def probe_provider_endpoint(
@@ -416,7 +454,7 @@ def probe_provider_endpoint(
         reason = exc.reason
         if isinstance(reason, socket.timeout) or "timed out" in str(reason).lower():
             return {"ok": False, "error": "timeout", "detail": f"connection timed out after {timeout:g}s"}
-        if isinstance(reason, socket.gaierror):
+        if _probe_failure_is_dns(reason, parsed.hostname):
             return {
                 "ok": False,
                 "error": "dns",
@@ -433,6 +471,12 @@ def probe_provider_endpoint(
     except (TimeoutError, socket.timeout):
         return {"ok": False, "error": "timeout", "detail": f"connection timed out after {timeout:g}s"}
     except Exception as exc:  # pragma: no cover — defensive net
+        if _probe_failure_is_dns(exc, parsed.hostname):
+            return {
+                "ok": False,
+                "error": "dns",
+                "detail": f"could not resolve host '{parsed.hostname}'",
+            }
         logger.debug("probe_provider_endpoint unexpected error", exc_info=True)
         return {"ok": False, "error": "unreachable", "detail": str(exc)[:200]}
 

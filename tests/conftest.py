@@ -171,6 +171,36 @@ def pytest_configure(config):
 # imports trigger botocore initialisation.
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
+# ── Permanent os.execv guard for the pytest session ────────────────────────
+# Several tests in tests/test_update_banner_fixes.py exercise
+# api.updates._schedule_restart(), which spawns a DAEMON thread that sleeps
+# for a short delay and then calls ``os.execv(sys.executable, sys.argv)``.
+# Those tests monkeypatch ``os.execv`` to a no-op for the test scope, but
+# monkeypatch teardown happens at test exit — if the daemon thread has not
+# yet woken up by then (system load, GC pause, _apply_lock contention), the
+# real ``os.execv`` is restored before the thread fires it. The daemon then
+# REPLACES the pytest process image with a fresh ``pytest tests/ -q ...``
+# invocation, looking from the outside like pytest "hangs at 99%" and then
+# restarts the entire suite from 0% — a self-perpetuating loop.
+#
+# Daemon threads cannot be reliably joined from a test fixture (they live in
+# ``api.updates`` module scope), so the only safe answer is to render
+# ``os.execv`` permanently inert for the pytest session. Production code is
+# unaffected because production never imports this conftest.
+#
+# Tests that need to verify execv WAS called still monkeypatch it themselves
+# — their patched version takes precedence over this no-op wrapper for the
+# test's lifetime, and the no-op only kicks in after teardown for daemon
+# threads that wake up late.
+_real_execv = os.execv
+
+def _pytest_session_safe_execv(_exe, _args):  # pragma: no cover — never called in prod
+    # Drop the call on the floor. A late-firing daemon thread from
+    # _schedule_restart() must not be able to re-exec the pytest process.
+    return None
+
+os.execv = _pytest_session_safe_execv
+
 # ── Hermetic network isolation ─────────────────────────────────────────────
 # Tests must not reach the public internet. Outbound to Anthropic / OpenAI /
 # Amazon / OpenRouter / etc. is forbidden by default. The test suite already
