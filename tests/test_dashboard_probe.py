@@ -108,6 +108,51 @@ def test_dashboard_target_validation_allows_only_loopback_base_urls():
             raise AssertionError(f"unsafe dashboard override accepted: {bad}")
 
 
+def test_dashboard_link_validation_accepts_external_browser_links():
+    from api.dashboard_probe import normalize_dashboard_link_url, normalize_dashboard_url
+
+    assert normalize_dashboard_link_url("https://dashboard.example.com") == (
+        "dashboard.example.com",
+        443,
+        "https",
+        "https://dashboard.example.com",
+        False,
+    )
+    assert normalize_dashboard_link_url("http://ai.lan:9119") == (
+        "ai.lan",
+        9119,
+        "http",
+        "http://ai.lan:9119",
+        False,
+    )
+    assert normalize_dashboard_link_url("http://127.0.0.1:9119") == (
+        "127.0.0.1",
+        9119,
+        "http",
+        "http://127.0.0.1:9119",
+        True,
+    )
+
+    try:
+        normalize_dashboard_url("https://dashboard.example.com")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("external browser link URL must not become a probe URL")
+
+    for bad in (
+        "https://dashboard.example.com/path",
+        "https://user:pass@dashboard.example.com",
+        "file:///etc/passwd",
+    ):
+        try:
+            normalize_dashboard_link_url(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe dashboard browser link accepted: {bad}")
+
+
 def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch):
     from api import dashboard_probe
 
@@ -144,9 +189,46 @@ def test_status_honors_never_and_strict_override(monkeypatch):
         "enabled": "never",
     }
 
-    result = dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"url": "http://example.com:9119"}}})
-    assert result["running"] is False
-    assert "invalid" in result["error"]
+    result = dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"enabled": "always", "url": "https://dashboard.example.com"}}}
+    )
+    assert result == {
+        "running": True,
+        "enabled": "always",
+        "host": "dashboard.example.com",
+        "port": 443,
+        "url": "https://dashboard.example.com",
+        "external": True,
+    }
+
+
+def test_status_external_link_still_probes_loopback_in_auto_mode(monkeypatch):
+    from api import dashboard_probe
+
+    monkeypatch.delenv("HERMES_WEBUI_HOST", raising=False)
+    attempts = []
+
+    def fake_probe(host, port, timeout=0.5, scheme="http"):
+        attempts.append((host, port, timeout, scheme))
+        if host == "127.0.0.1":
+            return {"running": True, "host": host, "port": port, "url": "http://127.0.0.1:9119", "version": "0.12.0"}
+        return {"running": False}
+
+    monkeypatch.setattr(dashboard_probe, "probe_official_dashboard", fake_probe)
+    result = dashboard_probe.get_dashboard_status(
+        config_data={"webui": {"dashboard": {"enabled": "auto", "url": "https://dashboard.example.com"}}}
+    )
+
+    assert result == {
+        "running": True,
+        "enabled": "auto",
+        "host": "dashboard.example.com",
+        "port": 443,
+        "url": "https://dashboard.example.com",
+        "external": True,
+        "version": "0.12.0",
+    }
+    assert attempts == [("127.0.0.1", 9119, 0.5, "http")]
 
 
 
@@ -203,9 +285,5 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
     assert saved == {"enabled": "auto", "url": "http://127.0.0.1:19119"}
     assert "dashboard:" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
 
-    try:
-        save_dashboard_config({"enabled": "auto", "url": "http://example.com:9119"})
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("external dashboard URL override must be rejected")
+    saved = save_dashboard_config({"enabled": "always", "url": "https://dashboard.example.com"})
+    assert saved == {"enabled": "always", "url": "https://dashboard.example.com"}

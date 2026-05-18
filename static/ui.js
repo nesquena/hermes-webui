@@ -396,10 +396,14 @@ function _dashboardIsBrowserLoopback(){
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
 function _dashboardBrowserUrl(status){
-  if(!status||!status.running||!status.port) return '';
+  if(!status||!status.running) return '';
+  if(status.external&&status.url) return status.url;
+  if(!status.port) return status.url||'';
   let source;
   try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
   catch(_){source=new URL('http://127.0.0.1:'+status.port);}
+  const sourceHost=(source.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+  if(status.url&&sourceHost&&sourceHost!=='127.0.0.1'&&sourceHost!=='localhost'&&sourceHost!=='::1') return status.url;
   const browserHost=window.location.hostname||source.hostname;
   const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
   return source.protocol+'//'+displayHost+':'+status.port;
@@ -407,7 +411,7 @@ function _dashboardBrowserUrl(status){
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  const warning=running&&!status.external&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.style.display=running?'':'none';

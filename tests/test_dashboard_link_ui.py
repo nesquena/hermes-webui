@@ -43,6 +43,7 @@ def test_dashboard_frontend_opens_external_tab_safely_and_derives_browser_host_u
     assert "noopener,noreferrer" in UI_JS
     assert "window.location.hostname" in UI_JS
     assert "_dashboardBrowserUrl" in UI_JS
+    assert "status.external&&status.url" in UI_JS
     assert 'id="dashboardRailBtn"' in INDEX_HTML
     assert re.search(r'id="dashboardRailBtn"[^>]*onclick="openHermesDashboard\(event\)"', INDEX_HTML)
 

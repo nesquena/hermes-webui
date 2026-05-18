@@ -2,8 +2,9 @@
 
 The official `hermes dashboard` binds to 127.0.0.1:9119 by default and exposes
 GET /api/status as a public, read-only identity/status endpoint.  Keep all
-probing server-side to avoid browser CORS/mixed-content failures, and only allow
+probing server-side to avoid browser CORS/mixed-content failures, and only probe
 loopback targets so a user-controlled setting cannot become an SSRF primitive.
+External dashboard URLs are allowed only as browser-facing links.
 """
 
 from __future__ import annotations
@@ -59,6 +60,43 @@ def normalize_dashboard_url(raw_url: str | None) -> tuple[str, int, str, str] | 
         raise ValueError("invalid dashboard URL path")
     base = _base_url(normalized_host, port, parsed.scheme)
     return normalized_host, port, parsed.scheme, base
+
+
+def normalize_dashboard_link_url(raw_url: str | None) -> tuple[str, int, str, str, bool] | None:
+    """Return a normalized dashboard browser link URL.
+
+    Unlike normalize_dashboard_url(), this accepts non-loopback hosts because
+    the returned URL is only opened by the user's browser. Server-side probes
+    still call probe_official_dashboard(), which rejects non-loopback hosts.
+    """
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("invalid dashboard URL scheme")
+    if parsed.username or parsed.password:
+        raise ValueError("invalid dashboard URL credentials")
+    host = parsed.hostname or ""
+    normalized_host = host.strip().lower()
+    if not normalized_host:
+        raise ValueError("invalid dashboard URL host")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid dashboard URL port") from exc
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    if not (1 <= int(port) <= 65535):
+        raise ValueError("invalid dashboard URL port")
+    path = parsed.path or ""
+    if path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("invalid dashboard URL path")
+    display_host = f"[{normalized_host}]" if ":" in normalized_host and not normalized_host.startswith("[") else normalized_host
+    default_port = 443 if parsed.scheme == "https" else 80
+    port_part = "" if port == default_port and parsed.port is None else f":{port}"
+    base = f"{parsed.scheme}://{display_host}{port_part}"
+    return normalized_host, int(port), parsed.scheme, base, normalized_host in _LOOPBACK_HOSTS
 
 
 def _looks_like_official_dashboard(payload: object) -> bool:
@@ -133,7 +171,7 @@ def get_dashboard_config(config_data: dict | None = None) -> dict:
     raw_url = str(dashboard_cfg.get("url") or "").strip()
     if raw_url:
         # Normalize before echoing so the UI never displays unsafe/stale values.
-        _host, _port, _scheme, raw_url = normalize_dashboard_url(raw_url)
+        _host, _port, _scheme, raw_url, _is_loopback = normalize_dashboard_link_url(raw_url)
     return {"enabled": enabled, "url": raw_url}
 
 
@@ -145,7 +183,7 @@ def save_dashboard_config(payload: dict) -> dict:
     raw_url = str((payload or {}).get("url", "") or "").strip()
     normalized_url = ""
     if raw_url:
-        _host, _port, _scheme, normalized_url = normalize_dashboard_url(raw_url)
+        _host, _port, _scheme, normalized_url, _is_loopback = normalize_dashboard_link_url(raw_url)
 
     from api import config as webui_config
 
@@ -186,9 +224,28 @@ def get_dashboard_status(config_data: dict | None = None) -> dict:
 
     raw_url = dashboard_cfg.get("url") or dashboard_cfg.get("target") or ""
     try:
-        override = normalize_dashboard_url(raw_url)
+        link_override = normalize_dashboard_link_url(raw_url)
     except ValueError:
         return {"running": False, "enabled": enabled, "error": "invalid dashboard url"}
+
+    if link_override:
+        host, port, scheme, base, is_loopback = link_override
+        if not is_loopback:
+            if enabled == "always":
+                return {"running": True, "enabled": enabled, "host": host, "port": port, "url": base, "external": True}
+            if not _webui_bind_host_allows_auto_probe():
+                return {"running": False, "enabled": enabled}
+            for probe_host, probe_port in DEFAULT_DASHBOARD_TARGETS:
+                result = probe_official_dashboard(probe_host, probe_port, timeout=DEFAULT_DASHBOARD_TIMEOUT, scheme="http")
+                if result.get("running"):
+                    response = {"running": True, "enabled": enabled, "host": host, "port": port, "url": base, "external": True}
+                    if result.get("version"):
+                        response["version"] = result["version"]
+                    return response
+            return {"running": False, "enabled": enabled}
+        override = (host, port, scheme, base)
+    else:
+        override = None
 
     targets: list[tuple[str, int, str, str]]
     if override:
