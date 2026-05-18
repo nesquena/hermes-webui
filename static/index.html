@@ -26,7 +26,46 @@
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>(function(){
+  var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
+  if(!token||!window.fetch)return;
+  var originalFetch=window.fetch.bind(window);
+  function sameOriginUnsafe(input,init){
+    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
+    try{
+      var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
+      var url=new URL(raw,document.baseURI||location.href);
+      if(url.origin!==location.origin)return false;
+      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+    }catch(_){return false;}
+  }
+  window.fetch=function(input,init){
+    if(sameOriginUnsafe(input,init)){
+      var opts=init?Object.assign({},init):{};
+      var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
+      if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      opts.headers=headers;
+      return originalFetch(input,opts);
+    }
+    return originalFetch(input,init);
+  };
+  if(navigator.sendBeacon){
+    var originalBeacon=navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon=function(url,data){
+      try{
+        if(sameOriginUnsafe(url,{method:'POST'})){
+          var headers={'X-Hermes-CSRF-Token':token};
+          if(data&&data.type)headers['Content-Type']=data.type;
+          originalFetch(url,{method:'POST',credentials:'include',headers:headers,body:data,keepalive:true});
+          return true;
+        }
+      }catch(_){}
+      return originalBeacon(url,data);
+    };
+  }
+})()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->

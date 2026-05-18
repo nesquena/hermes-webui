@@ -54,6 +54,7 @@ PUBLIC_PATHS = frozenset({
 })
 
 COOKIE_NAME = 'hermes_session'
+CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
 
@@ -364,6 +365,37 @@ def verify_session(cookie_value: str) -> bool:
         _sessions.pop(token, None)
         return False
     return True
+
+
+def _session_token_from_cookie_value(cookie_value: str) -> str | None:
+    """Return the raw server-side session token from a signed cookie value."""
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    token, _sig = cookie_value.rsplit('.', 1)
+    return token or None
+
+
+def csrf_token_for_session(cookie_value: str) -> str | None:
+    """Return the CSRF token bound to an authenticated WebUI session.
+
+    The browser can read this token from the authenticated shell and echoes it
+    in ``X-Hermes-CSRF-Token`` on unsafe API requests. The token is derived
+    from the HttpOnly session cookie's server-side token, so it automatically
+    rotates on login and is invalidated when the auth session expires or logs
+    out. Callers must still verify the auth session before trusting it.
+    """
+    token = _session_token_from_cookie_value(cookie_value)
+    if not token:
+        return None
+    return hmac.new(_signing_key(), f"csrf:{token}".encode(), hashlib.sha256).hexdigest()
+
+
+def verify_csrf_token(cookie_value: str, csrf_token: str) -> bool:
+    """Verify a submitted CSRF token against the authenticated session."""
+    if not cookie_value or not csrf_token or not verify_session(cookie_value):
+        return False
+    expected = csrf_token_for_session(cookie_value)
+    return bool(expected and hmac.compare_digest(str(csrf_token), expected))
 
 
 def invalidate_session(cookie_value) -> None:

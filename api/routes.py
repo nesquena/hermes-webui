@@ -1231,13 +1231,29 @@ def _allowed_public_origins() -> set[str]:
     return result
 
 
+def _is_browser_unsafe_request(handler) -> bool:
+    """Return True when request headers identify a browser unsafe request.
+
+    Non-browser API clients, including the MCP bridge and curl-style scripts,
+    normally send no Origin/Referer and remain compatible with the existing
+    same-machine API contract. Browsers send Origin for unsafe fetch/form POSTs;
+    Referer is retained for older paths and proxies.
+    """
+    return bool(handler.headers.get("Origin") or handler.headers.get("Referer"))
+
+
+def _csrf_exempt_path(path: str) -> bool:
+    """Paths that cannot or must not carry a session CSRF token."""
+    return path in {"/api/auth/login", "/api/csp-report"}
+
+
 def _check_csrf(handler) -> bool:
-    """Reject cross-origin POST requests. Returns True if OK."""
+    """Reject cross-origin or tokenless authenticated browser unsafe requests."""
     origin = handler.headers.get("Origin", "")
     referer = handler.headers.get("Referer", "")
     host = handler.headers.get("Host", "")
-    if not origin and not referer:
-        return True  # non-browser clients (curl, agent) have no Origin
+    if not _is_browser_unsafe_request(handler):
+        return True  # non-browser clients (curl, MCP, agent) have no Origin
     target = origin or referer
     # Extract host:port from origin/referer
     m = _re.match(r"^https?://([^/]+)", target)
@@ -1246,27 +1262,39 @@ def _check_csrf(handler) -> bool:
     origin_host = m.group(1)
     origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
     origin_name, origin_port = _normalize_host_port(origin_host)
+    origin_allowed = False
     # Check against explicitly allowed public origins (env var)
     origin_value = m.group(0).rstrip('/').lower()
     if origin_value in _allowed_public_origins():
-        return True
-    # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
-    # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
-    # X-Forwarded-Host to the client's original Host header.
-    allowed_hosts = [
-        h.strip()
-        for h in [
-            host,
-            handler.headers.get("X-Forwarded-Host", ""),
-            handler.headers.get("X-Real-Host", ""),
+        origin_allowed = True
+    if not origin_allowed:
+        # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
+        # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
+        # X-Forwarded-Host to the client's original Host header.
+        allowed_hosts = [
+            h.strip()
+            for h in [
+                host,
+                handler.headers.get("X-Forwarded-Host", ""),
+                handler.headers.get("X-Real-Host", ""),
+            ]
+            if h.strip()
         ]
-        if h.strip()
-    ]
-    for allowed in allowed_hosts:
-        allowed_name, allowed_port = _normalize_host_port(allowed)
-        if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
-            return True
-    return False
+        for allowed in allowed_hosts:
+            allowed_name, allowed_port = _normalize_host_port(allowed)
+            if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
+                origin_allowed = True
+                break
+    if not origin_allowed:
+        return False
+
+    from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
+
+    if not is_auth_enabled():
+        return True
+    cookie_val = parse_cookie(handler)
+    submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
+    return verify_csrf_token(cookie_val or "", submitted or "")
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -3324,10 +3352,22 @@ def handle_get(handler, parsed) -> bool:
             version_token = quote(WEBUI_VERSION, safe="")
             from api.extensions import inject_extension_tags
 
+            csrf_token = ""
+            try:
+                from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+                if is_auth_enabled():
+                    cookie_val = parse_cookie(handler)
+                    if cookie_val and verify_session(cookie_val):
+                        csrf_token = csrf_token_for_session(cookie_val) or ""
+            except Exception:
+                csrf_token = ""
+
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
                 .replace("__WEBUI_VERSION__", version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
+                .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
             )
             return t(
                 handler,
@@ -4337,10 +4377,12 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
-    # CSRF: reject cross-origin browser requests
+    # CSRF: reject cross-origin or tokenless authenticated browser requests.
+    # /api/auth/login has no authenticated session token yet, and /api/csp-report
+    # is intentionally unauthenticated for browser-generated violation reports.
     if diag:
         diag.stage("csrf")
-    if not _check_csrf(handler):
+    if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
             return j(handler, {"error": "Cross-origin request rejected"}, status=403)
         finally:

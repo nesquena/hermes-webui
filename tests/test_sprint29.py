@@ -18,6 +18,7 @@ Covers:
 import importlib
 import json
 import pathlib
+import pytest
 import sys
 import time
 import urllib.error
@@ -62,6 +63,21 @@ def get_raw_with_headers(path):
 
 
 class TestCSRF:
+    @pytest.fixture(autouse=True)
+    def _disable_auth_for_origin_unit_checks(self, monkeypatch):
+        """Keep origin/port CSRF checks isolated from auth stateful tests.
+
+        These Sprint 29 cases predate session-bound CSRF tokens and exercise
+        only Origin/Referer/Host allow/deny behavior. If an earlier test leaves
+        password auth enabled in the shared pytest process, _check_csrf also
+        requires a valid session CSRF token and these origin-only assertions
+        become order-dependent. Auth-enabled token coverage lives in
+        test_issue1909_csrf_token.py.
+        """
+        import api.auth as auth
+
+        monkeypatch.setattr(auth, "is_auth_enabled", lambda: False)
+
     @staticmethod
     def _csrf_allowed(headers):
         from types import SimpleNamespace
@@ -747,8 +763,6 @@ class TestENVLock:
 
 
 # ── Fixture ────────────────────────────────────────────────────────────────
-
-import pytest
 
 
 @pytest.fixture(scope="module")

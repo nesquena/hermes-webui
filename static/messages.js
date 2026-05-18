@@ -52,6 +52,137 @@ const _msgEl=document.getElementById('msg');
 if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
 if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
+let _selectedTextReplyBtn=null;
+let _selectedTextReplyText='';
+let _selectedTextReplyRaf=0;
+
+function _selectedTextReplyT(key, fallback){
+  try{
+    const val=(typeof t==='function')?t(key):'';
+    return val&&val!==key?val:fallback;
+  }catch(_err){
+    return fallback;
+  }
+}
+
+function _selectedTextReplyRoot(){
+  if(typeof $==='function') return $('messages')||$('msgInner');
+  return document.getElementById('messages')||document.getElementById('msgInner');
+}
+
+function _selectedTextReplyNodeInChat(node, root){
+  if(!node||!root)return false;
+  const el=node.nodeType===Node.ELEMENT_NODE?node:node.parentElement;
+  return !!(el&&root.contains(el));
+}
+
+function _selectedTextReplySelection(){
+  if(!window.getSelection)return null;
+  const selection=window.getSelection();
+  if(!selection||selection.isCollapsed||!selection.rangeCount)return null;
+  const root=_selectedTextReplyRoot();
+  if(!root)return null;
+  const range=selection.getRangeAt(0);
+  if(!_selectedTextReplyNodeInChat(range.startContainer, root)||!_selectedTextReplyNodeInChat(range.endContainer, root))return null;
+  const text=selection.toString().replace(/\u00a0/g,' ').trim();
+  if(!text)return null;
+  const rect=range.getBoundingClientRect();
+  if(!rect||(!rect.width&&!rect.height))return null;
+  return {text, rect};
+}
+
+function _formatSelectedTextReplyQuote(text){
+  const normalized=String(text||'').replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  if(!normalized)return '';
+  return normalized.split('\n').map(line=>`> ${line}`).join('\n');
+}
+
+function _appendSelectedTextReplyToComposer(text){
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return false;
+  const quote=_formatSelectedTextReplyQuote(text);
+  if(!quote)return false;
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${quote}\n\n`:`${quote}\n\n`;
+  composer.focus();
+  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_err){}
+  composer.dispatchEvent(new Event('input', {bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+  if(typeof showToast==='function') showToast(_selectedTextReplyT('selected_text_reply_appended', 'Selected text added to composer'), 1600);
+  return true;
+}
+
+function _selectedTextReplyButton(){
+  if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='selectedTextReplyBtn';
+  btn.className='selected-text-reply-btn';
+  btn.setAttribute('data-i18n', 'selected_text_reply');
+  btn.setAttribute('data-i18n-title', 'selected_text_reply_title');
+  btn.setAttribute('data-i18n-aria-label', 'selected_text_reply_title');
+  btn.textContent=_selectedTextReplyT('selected_text_reply', 'Reply with selection');
+  btn.title=_selectedTextReplyT('selected_text_reply_title', 'Append selected chat text as quoted context');
+  btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('mousedown', e=>e.preventDefault());
+  btn.addEventListener('click', e=>{
+    e.preventDefault();
+    if(_appendSelectedTextReplyToComposer(_selectedTextReplyText)){
+      _hideSelectedTextReplyButton();
+      const selection=window.getSelection&&window.getSelection();
+      if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+    }
+  });
+  document.body.appendChild(btn);
+  if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  _selectedTextReplyBtn=btn;
+  return btn;
+}
+
+function _hideSelectedTextReplyButton(){
+  _selectedTextReplyText='';
+  if(_selectedTextReplyBtn)_selectedTextReplyBtn.classList.remove('visible');
+}
+
+function _positionSelectedTextReplyButton(info){
+  const btn=_selectedTextReplyButton();
+  _selectedTextReplyText=info.text;
+  btn.classList.add('visible');
+  const gap=8;
+  const btnRect=btn.getBoundingClientRect();
+  const width=btnRect.width||150;
+  const height=btnRect.height||32;
+  const left=Math.min(Math.max(gap, info.rect.left+(info.rect.width/2)-(width/2)), Math.max(gap, window.innerWidth-width-gap));
+  const top=Math.max(gap, info.rect.top-height-gap);
+  btn.style.left=`${left}px`;
+  btn.style.top=`${top}px`;
+}
+
+function _updateSelectedTextReplyButton(){
+  if(_selectedTextReplyRaf)return;
+  _selectedTextReplyRaf=window.requestAnimationFrame(()=>{
+    _selectedTextReplyRaf=0;
+    const info=_selectedTextReplySelection();
+    if(!info){
+      _hideSelectedTextReplyButton();
+      return;
+    }
+    _positionSelectedTextReplyButton(info);
+  });
+}
+
+if(typeof document!=='undefined'){
+  document.addEventListener('selectionchange', _updateSelectedTextReplyButton);
+  document.addEventListener('mouseup', e=>{
+    if(e.target&&e.target.closest&&e.target.closest('.selected-text-reply-btn'))return;
+    _updateSelectedTextReplyButton();
+  });
+  document.addEventListener('keyup', e=>{
+    if(e.key&&/Arrow|Shift|Control|Meta|Alt/.test(e.key))_updateSelectedTextReplyButton();
+  });
+  window.addEventListener('resize', _hideSelectedTextReplyButton);
+}
+
 // Guard against concurrent send() calls.  Without this, two rapid sends
 // (e.g. queue drain + user click) can both pass the S.busy check because
 // setBusy(true) is only called after the first await inside send().

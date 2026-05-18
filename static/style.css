@@ -1847,6 +1847,10 @@
 .msg-row:hover .msg-actions{opacity:1;}
 .msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
 .msg-action-btn:hover{color:var(--accent-text);background:var(--accent-bg);}
+.selected-text-reply-btn{position:fixed;z-index:1200;display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border:2px solid var(--accent);border-radius:999px;background:var(--bg);color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.26),0 0 0 1px var(--surface);font-size:12px;font-weight:700;line-height:1;cursor:pointer;opacity:0;pointer-events:none;transform:translateY(4px);transition:opacity .12s ease,transform .12s ease,background .12s ease,border-color .12s ease;}
+.selected-text-reply-btn.visible{opacity:1;pointer-events:auto;transform:translateY(0);}
+.selected-text-reply-btn:hover{background:var(--accent-bg);border-color:var(--accent-hover);}
+.selected-text-reply-btn:focus-visible{background:var(--accent-bg);border-color:var(--accent-hover);outline:2px solid var(--focus-ring);outline-offset:2px;}
 /* TTS speaker button: hidden by default, shown when TTS is enabled.
  * Use body-class selector instead of JS inline-style so the rule survives
  * subsequent renderMd() passes and is not subject to inline-style cascade
