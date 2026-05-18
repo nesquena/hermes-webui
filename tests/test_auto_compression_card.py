@@ -36,6 +36,7 @@ def test_auto_compression_running_sse_uses_active_session_running_card():
     assert "phase:'running'" in block
     assert "automatic:true" in block
     assert "message:d.message||'Auto-compressing context...'" in block
+    assert "startedAt:Date.now()" in block
 
 
 def test_auto_compression_running_sse_is_emitted_from_agent_lifecycle_status():
@@ -136,7 +137,11 @@ def test_auto_compression_card_reuses_compression_card_renderer():
 
     assert "if(state.automatic) return _autoCompressionCardsHtml(state);" in src
     assert "tool-card-row compression-card-row" in helper
+    assert "running ? t('compress_running_label') : t('auto_compress_label')" in helper
+    assert "tool-card-compress-running tool-card-compress-auto" in helper
     assert "tool-card-compress-complete tool-card-compress-auto" in helper
+    assert "Elapsed ${_formatTurnDuration" in helper
+    assert "detail: [detail, elapsed].filter(Boolean).join('\\n')" in helper
     assert "auto_compress_label" in helper
 
 

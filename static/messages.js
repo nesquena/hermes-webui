@@ -1785,6 +1785,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           phase:'running',
           automatic:true,
           message:d.message||'Auto-compressing context...',
+          startedAt:Date.now(),
         };
         setCompressionUi(state);
         const liveAnswerStarted=!!(assistantRow||String(((_parseStreamState&&_parseStreamState())||{}).displayText||'').trim());

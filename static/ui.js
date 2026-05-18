@@ -4956,15 +4956,19 @@ function _autoCompressionCardsHtml(state){
   const detail=running
     ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
     : (String(state.message||fallback).trim()||fallback);
+  const startedAt=Number(state&&state.startedAt||0);
+  const elapsed=(running&&startedAt>0)
+    ? `Elapsed ${_formatTurnDuration(Math.max(0,(Date.now()-startedAt)/1000))}`
+    : '';
   const preview=running
     ? detail
     : (String(state.summary?.headline||detail).trim()||detail);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
-        statusLabel: t('auto_compress_label'),
+        statusLabel: running ? t('compress_running_label') : t('auto_compress_label'),
         previewText: preview,
-        detail,
+        detail: [detail, elapsed].filter(Boolean).join('\n'),
         icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
         open: running,
         variantClass: running
