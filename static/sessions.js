@@ -2246,17 +2246,31 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
-function _sessionLineageKey(s, sessionIdsInList){
+function _sessionLineageKey(s, sessionIdsInList, sessionsById){
   if(!s||!s.session_id) return null;
   if(_isChildSession(s)) return null;
   if(s.session_source==='fork') return null;
   const lineageKey=s._lineage_root_id||s.lineage_root_id||null;
   if(lineageKey) return lineageKey;
+  // WebUI-native context compression may only persist parent_session_id:
+  // the preserved parent snapshot is marked pre_compression_snapshot while
+  // the new continuation points at it.  When both rows are in the sidebar
+  // payload, still collapse them into one conversation (#2489).
+  const parent=s.parent_session_id&&sessionsById?sessionsById.get(s.parent_session_id):null;
+  if(s.pre_compression_snapshot||parent&&parent.pre_compression_snapshot){
+    let root=s;
+    const seen=new Set();
+    while(root&&root.parent_session_id&&sessionsById&&sessionsById.has(root.parent_session_id)&&!seen.has(root.parent_session_id)){
+      const next=sessionsById.get(root.parent_session_id);
+      if(!next||_isChildSession(next)||next.session_source==='fork'||!(root.pre_compression_snapshot||next.pre_compression_snapshot)) break;
+      seen.add(root.session_id);
+      root=next;
+    }
+    return root&&root.session_id||s.parent_session_id||s.session_id;
+  }
   // If parent_session_id points to another session in the current list,
   // this is a subagent/fork child without compression metadata — don't
-  // collapse it into lineage (#494). Compression continuations carry an
-  // explicit lineage root, even when stale optimistic rows leave parent
-  // segments in the browser cache during active compression.
+  // collapse it into lineage (#494).
   if(s.parent_session_id && sessionIdsInList && sessionIdsInList.has(s.parent_session_id)){
     return null;
   }
@@ -2432,9 +2446,10 @@ function _syncSidebarExpansionForActiveSession(rows, activeSid){
 function _collapseSessionLineageForSidebar(sessions){
   const result=[];
   const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
+  const sessionsById=new Map((sessions||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
   const groups=new Map();
   for(const s of sessions||[]){
-    const key=_sessionLineageKey(s, sessionIdsInList);
+    const key=_sessionLineageKey(s, sessionIdsInList, sessionsById);
     if(!key){result.push(s);continue;}
     if(!groups.has(key)) groups.set(key,[]);
     groups.get(key).push(s);

@@ -126,6 +126,47 @@ console.log(JSON.stringify({{sid: collapsed[0].session_id, containsRoot: _sessio
     assert '"containsRoot":true' in result
 
 
+def test_parent_present_webui_compression_child_without_lineage_metadata_collapses():
+    """WebUI-native compression continuations may only carry parent_session_id.
+
+    When both the preserved parent snapshot and the new continuation are present
+    in the sidebar payload, the continuation should still collapse with its
+    parent instead of appearing as a separate branch-like conversation (#2489).
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'parent', title:'Long WebUI conversation', message_count:50, updated_at:10, last_message_at:10, pre_compression_snapshot:true}},
+  {{session_id:'child', title:'Long WebUI conversation', parent_session_id:'parent', message_count:12, updated_at:20, last_message_at:20}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["child"]
+    assert collapsed[0]["_lineage_key"] == "parent"
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["child", "parent"]
+
+
 def test_stale_optimistic_compression_tips_collapse_even_when_parents_are_visible():
     """Active compression can leave old streaming tips in browser memory.
 
