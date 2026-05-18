@@ -186,6 +186,7 @@ global.fetch = async function(path, opts = {}) {
         status: 'ready',
         active_run_count: 2,
         recent_event_count: 7,
+        recent_event_types: ['run.completed', 'tool.failed', 'subagent.completed', 'space.visual_qa.completed'],
         event_families: ['run', 'tool', 'subagent', 'memory.ingest', 'space.visual_qa'],
         supported_event_types: ['run.started', 'tool.started', 'tool.completed', 'subagent.completed', 'memory.ingest.completed', 'space.visual_qa.completed'],
         redaction_status: 'metadata_only',
@@ -3527,7 +3528,8 @@ def test_spaces_ui_product_home_progress_events_card_is_visible_bounded_and_safe
     assert "Structured event stream" in html
     assert "2 active runs" in html
     assert "7 recent events" in html
-    assert "tool.started" in html
+    assert "run.completed" in html
+    assert "tool.failed" in html
     assert "subagent.completed" in html
     assert "space.visual_qa.completed" in html
     assert "metadata-only" in html

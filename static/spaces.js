@@ -238,7 +238,7 @@
     const unavailable = status && status.unavailable === true;
     const activeRuns = safeNonNegativeCount(status && status.active_run_count);
     const recentEvents = safeNonNegativeCount(status && status.recent_event_count);
-    const supportedTypes = safeProgressEventTypes(status && status.supported_event_types);
+    const supportedTypes = safeProgressEventTypes(status && (status.recent_event_types || status.supported_event_types));
     const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
     const summary = unavailable
       ? 'Structured progress events will appear when the local status route is available.'

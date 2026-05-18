@@ -4233,6 +4233,20 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("Capy memory source registration failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-progress/event":
+        try:
+            from api.capy_progress import record_progress_event
+
+            j(handler, record_progress_event(body))
+            return True
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
+            return True
+        except Exception as exc:
+            logger.exception("Capy progress event recording failed")
+            bad(handler, _sanitize_error(exc), status=500)
+            return True
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
