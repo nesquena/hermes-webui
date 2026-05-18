@@ -2487,7 +2487,8 @@ function _renderKanbanBoardMenu(boards, current){
     const colorStyle = safeColor ? `color:${safeColor}` : '';
     return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
-      <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
+      <span class="kanban-board-switcher-item-slug" title="${esc(b.slug || '')}">${esc(b.slug || '')}</span>
+      <span class="kanban-board-switcher-item-name" title="${esc(b.name || b.slug)}">${esc(b.name || b.slug)}</span>
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');

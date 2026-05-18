@@ -3793,7 +3793,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-board-switcher-name{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .kanban-board-switcher-menu{
   position:absolute;top:calc(100% + 4px);left:0;
-  min-width:240px;max-width:320px;
+  min-width:300px;max-width:420px;
   background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));
   border:1px solid var(--accent-bg-strong, var(--border));
   border-radius:10px;
@@ -3809,7 +3809,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 }
 .kanban-board-switcher-menu[hidden]{display:none;}
 .kanban-board-switcher-item{
-  display:flex;align-items:center;gap:10px;width:100%;
+  display:grid;grid-template-columns:18px minmax(72px,96px) minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;
   padding:8px 10px;border:0;background:transparent;color:var(--text);
   border-radius:6px;cursor:pointer;text-align:left;font:inherit;font-size:12px;
   transition:background .15s;
@@ -3818,6 +3818,13 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-board-switcher-item:focus{background:var(--accent-bg);outline:none;}
 .kanban-board-switcher-item.is-current{font-weight:650;}
 .kanban-board-switcher-item-icon{font-size:14px;line-height:1;flex-shrink:0;width:18px;text-align:center;}
+.kanban-board-switcher-item-slug{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:10px;font-weight:600;
+  color:var(--accent-text);background:var(--accent-bg);
+  border:1px solid var(--accent-bg-strong);border-radius:999px;
+  padding:1px 6px;text-align:center;
+}
 .kanban-board-switcher-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .kanban-board-switcher-item-count{
   flex-shrink:0;font-size:10px;color:var(--muted);
