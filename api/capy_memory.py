@@ -7,12 +7,15 @@ injection checks, approval gates, or rollback/recovery controls.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import ntpath
 import os
 import re
+import socket
 import sqlite3
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -58,6 +61,16 @@ _MANIFEST_PUBLIC_VALUE_RE = re.compile(
 )
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._:-]+")
+
+_REFRESH_BLOCKED_VALUE_RE = re.compile(
+    r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|raw\s+fetched\s+body|"
+    r"ignore\s+previous\s+instructions|credential|password|secret(?!ary)|token(?!ization)|"
+    r"authorization|cookie|"
+    r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])",
+    re.IGNORECASE,
+)
 
 _SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -228,13 +241,18 @@ def memory_status() -> dict[str, Any]:
             "last_error_count": _count(conn, "SELECT COUNT(*) FROM sources WHERE last_error IS NOT NULL AND last_error != ''"),
             "refresh_job_count": _count(
                 conn,
-                "SELECT COUNT(*) FROM jobs WHERE kind = 'source.refresh' AND status IN ('pending', 'leased')",
+                "SELECT COUNT(*) FROM jobs WHERE kind = 'source.refresh' AND status IN ('pending', 'leased', 'completing')",
             ),
         }
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _lease_until_marker(seconds: int = 300) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return f"{expires_at.isoformat()}|{uuid.uuid4().hex}"
 
 
 def _safe_origin_uri(value: Any, *, source_id: str) -> str:
@@ -318,7 +336,7 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             (job_id,),
         ).fetchone()
         existing_status = str(existing_row[0]) if existing_row else ""
-        existing_active = existing_status in {"pending", "leased"}
+        existing_active = existing_status in {"pending", "leased", "completing"}
         if existing_row is None:
             conn.execute(
                 """
@@ -332,7 +350,7 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
                 "UPDATE jobs SET payload_json = ?, updated_at = ? WHERE job_id = ?",
                 (json.dumps(payload, sort_keys=True, separators=(",", ":")), now, job_id),
             )
-        elif existing_status == "leased":
+        elif existing_status in {"leased", "completing"}:
             pass
         else:
             conn.execute(
@@ -366,7 +384,7 @@ def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
             """
             SELECT job_id, kind, payload_json, status, attempts, created_at, updated_at
             FROM jobs
-            WHERE kind = 'source.refresh' AND status IN ('pending', 'leased')
+            WHERE kind = 'source.refresh' AND status IN ('pending', 'leased', 'completing')
             ORDER BY created_at ASC, updated_at ASC
             LIMIT ?
             """,
@@ -391,6 +409,299 @@ def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
             "updated_at": _safe_text(row["updated_at"], limit=80),
         })
     return {"local_only": True, "limit": limit, "jobs": jobs}
+
+
+def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
+    raise RuntimeError("refresh fetcher disabled")
+
+
+def _refresh_allowed_hosts() -> set[str]:
+    return {
+        host.strip().strip("[]").rstrip(".").lower()
+        for host in (os.getenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS") or "").split(",")
+        if host.strip()
+    }
+
+
+def _source_refresh_ip_blocked(address: Any) -> bool:
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def _source_refresh_allowed(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if parts.scheme not in {"http", "https"}:
+        return False
+    hostname = (parts.hostname or "").strip().rstrip(".").lower()
+    if not hostname:
+        return False
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return False
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            socket.inet_aton(hostname)
+        except OSError:
+            address = None
+        else:
+            # inet_aton accepts legacy IPv4 spellings such as 2130706433,
+            # 0x7f000001, 017700000001, and 127.1. Reject them rather than
+            # treating non-canonical numeric hosts as arbitrary DNS names.
+            return False
+    else:
+        if _source_refresh_ip_blocked(address):
+            return False
+
+    allowed_hosts = _refresh_allowed_hosts()
+    if not allowed_hosts:
+        return False
+    if hostname in allowed_hosts:
+        return True
+    if address is not None and str(address).lower() in allowed_hosts:
+        return True
+    return False
+
+
+def _safe_refresh_summary_with_drop(value: Any, *, limit: int = 1_200) -> tuple[str, int]:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return "", 1 if _is_present_public_value(value) else 0
+    text = _safe_text(value, limit=limit)
+    if not text:
+        return "", 1 if _is_present_public_value(value) else 0
+    if _REFRESH_BLOCKED_VALUE_RE.search(text):
+        return "", 1
+    return text, 0
+
+
+def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dict[str, Any]:
+    if not isinstance(fetched, dict):
+        raise ValueError("refresh result must be a mapping")
+    if fetched.get("metadata_only") is not True:
+        raise ValueError("refresh result must be metadata-only")
+    dropped_field_count = _scan_for_unsafe(fetched)
+    title, dropped = _safe_public_text_with_drop(
+        fetched.get("title") or fetched.get("name") or fetched.get("display_name"),
+        limit=200,
+        fallback=source_id,
+    )
+    dropped_field_count += dropped
+    summary, dropped = _safe_refresh_summary_with_drop(
+        fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
+        limit=1_200,
+    )
+    dropped_field_count += dropped
+    if not summary:
+        raise ValueError("refresh result did not include a safe summary")
+    safe_origin_uri = _safe_origin_uri(origin_uri, source_id=source_id)
+    body = "\n".join([
+        f"# {title}",
+        "",
+        "## Refresh summary",
+        f"- source_id: {source_id}",
+        f"- origin_uri: {safe_origin_uri}",
+        "- metadata_only: True",
+        "- advisory_context: True",
+        "",
+        summary,
+    ]).strip() + "\n"
+    content_sha256 = _sha256(body)
+    redaction_status = "dropped_fields" if dropped_field_count else "none"
+    frontmatter = _frontmatter({
+        "source_id": source_id,
+        "source_type": "source_refresh_summary",
+        "origin_uri": safe_origin_uri,
+        "content_sha256": content_sha256,
+        "redaction_status": redaction_status,
+        "metadata_only": True,
+    })
+    return {
+        "source_id": source_id,
+        "chunk_id": "cmt-chunk-" + _sha256(f"source_refresh_summary:{source_id}:{content_sha256}")[:24],
+        "source_type": "source_refresh_summary",
+        "origin_uri": safe_origin_uri,
+        "space_id": "",
+        "content_sha256": content_sha256,
+        "redaction_status": redaction_status,
+        "dropped_field_count": dropped_field_count,
+        "markdown": frontmatter + "\n\n" + body,
+    }
+
+
+def _safe_refresh_error(_exc: BaseException) -> str:
+    return "refresh failed"
+
+
+def _refresh_lease_owned(job_id: str, lease_marker: str) -> bool:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            SELECT 1
+            FROM jobs
+            WHERE job_id = ? AND kind = 'source.refresh' AND status = 'leased' AND leased_until = ?
+            """,
+            (job_id, lease_marker),
+        ).fetchone() is not None
+
+
+def _refresh_mark_completing_if_owned(job_id: str, lease_marker: str) -> bool:
+    completing_at = _now_iso()
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'completing', updated_at = ?
+            WHERE job_id = ? AND kind = 'source.refresh' AND status = 'leased' AND leased_until = ?
+            """,
+            (completing_at, job_id, lease_marker),
+        )
+        return cursor.rowcount == 1
+
+
+def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> dict[str, Any]:
+    """Lease queued source.refresh jobs and store sanitized advisory summaries only."""
+    limit = max(1, min(int(limit or 5), 25))
+    init_memory_tree()
+    fetch = fetcher or _default_source_refresh_fetcher
+    now = _now_iso()
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            """
+            SELECT job_id, payload_json, attempts
+            FROM jobs
+            WHERE kind = 'source.refresh'
+              AND (
+                status = 'pending'
+                OR (status IN ('leased', 'completing') AND (leased_until IS NULL OR leased_until < ?))
+              )
+            ORDER BY created_at ASC, updated_at ASC
+            LIMIT ?
+            """,
+            (now, limit),
+        ).fetchall()
+        lease_rows: list[dict[str, Any]] = []
+        for row in rows:
+            lease_marker = _lease_until_marker(300)
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'leased', attempts = attempts + 1, leased_until = ?, last_error = NULL, updated_at = ?
+                WHERE job_id = ?
+                  AND kind = 'source.refresh'
+                  AND (
+                status = 'pending'
+                OR (status IN ('leased', 'completing') AND (leased_until IS NULL OR leased_until < ?))
+              )
+                """,
+                (lease_marker, now, row["job_id"], now),
+            )
+            if cursor.rowcount != 1:
+                continue
+            leased_row = dict(row)
+            leased_row["lease_marker"] = lease_marker
+            leased_row["lease_attempts"] = max(1, int(row["attempts"] or 0) + 1)
+            lease_rows.append(leased_row)
+
+    results: list[dict[str, Any]] = []
+    for row in lease_rows:
+        job_id = _safe_public_id(row.get("job_id"), fallback="")
+        lease_marker = str(row.get("lease_marker") or "")
+        try:
+            payload = json.loads(str(row.get("payload_json") or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        source_id = _safe_public_id(payload.get("source_id"), fallback="source")
+        origin_uri = _safe_origin_uri(payload.get("origin_uri"), source_id=source_id)
+        try:
+            if not _source_refresh_allowed(origin_uri):
+                raise ValueError("refresh failed")
+            fetched = fetch(source_id=source_id, origin_uri=origin_uri)
+            record = _source_refresh_record(source_id, origin_uri, fetched)
+            if not _refresh_lease_owned(job_id, lease_marker):
+                continue
+            if not _refresh_mark_completing_if_owned(job_id, lease_marker):
+                continue
+            receipt = ingest_source(record)
+            completed_at = _now_iso()
+            with _connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'completed', leased_until = NULL, last_error = NULL, updated_at = ?
+                    WHERE job_id = ? AND kind = 'source.refresh' AND status = 'completing' AND leased_until = ?
+                    """,
+                    (completed_at, job_id, lease_marker),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE sources
+                    SET origin_kind = 'metadata_only', freshness_status = 'ok', last_checked_at = ?, last_error = NULL, updated_at = ?
+                    WHERE source_id = ?
+                    """,
+                    (completed_at, completed_at, source_id),
+                )
+            results.append({
+                "job_id": job_id,
+                "source_id": source_id,
+                "status": "completed",
+                "chunk_id": receipt["chunk_id"],
+                "metadata_only": True,
+            })
+        except Exception as exc:  # noqa: BLE001 - failures are captured as safe metadata for retry/status.
+            error = _safe_refresh_error(exc)
+            failed_at = _now_iso()
+            attempts = max(1, int(row.get("lease_attempts") or 1))
+            next_status = "failed" if attempts >= 3 else "pending"
+            with _connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, leased_until = NULL, last_error = ?, updated_at = ?
+                    WHERE job_id = ?
+                      AND kind = 'source.refresh'
+                      AND status IN ('leased', 'completing')
+                      AND leased_until = ?
+                    """,
+                    (next_status, error, failed_at, job_id, lease_marker),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE sources
+                    SET freshness_status = 'error', last_checked_at = ?, last_error = ?, updated_at = ?
+                    WHERE source_id = ?
+                    """,
+                    (failed_at, error, failed_at, source_id),
+                )
+            results.append({
+                "job_id": job_id,
+                "source_id": source_id,
+                "status": next_status,
+                "error": error,
+                "metadata_only": True,
+            })
+    return {
+        "local_only": True,
+        "metadata_only": True,
+        "limit": limit,
+        "processed": len(results),
+        "jobs": results,
+    }
 
 
 def _safe_vault_file(source_id: str) -> Path:
@@ -1007,5 +1318,6 @@ __all__ = [
     "memory_tree_vault_path",
     "register_source_reference",
     "relevant_memory_for_space",
+    "run_source_refresh_jobs",
     "search_memory",
 ]
