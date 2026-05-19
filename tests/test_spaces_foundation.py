@@ -2269,6 +2269,19 @@ def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(
     assert [widget["id"] for widget in preview["spec"]["widgets"]] == ["safe-summary"]
     assert preview["spec"]["widgets"][0]["title"] == "Safe Summary"
     assert preview["spec"]["widgets"][0]["kind"] == "markdown"
+    compaction = preview["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-creator-loop"
+    assert compaction["command"] == "space.creator.preview"
+    assert compaction["exit_status"] == 0
+    assert compaction["original_chars"] > 0
+    assert 0 < compaction["compacted_chars"] < compaction["original_chars"]
+    assert compaction["redaction_status"] == "redacted"
+    assert "redact_unsafe_markers" in compaction["rules_applied"]
+    assert "safe-summary" in compaction["text"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in compaction["text"]
+    assert "<script" not in compaction["text"]
+    assert "renderer" not in compaction["text"].lower()
+    assert "api_key" not in compaction["text"].lower()
     assert spaces.list_spaces() == []
     assert "queue depth" not in serialized
     assert "incident status" not in serialized

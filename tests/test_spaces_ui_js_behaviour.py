@@ -622,6 +622,16 @@ global.fetch = async function(path, opts = {}) {
             { id: 'safe-summary', kind: 'markdown', title: 'Summary <Widget>', metadata: { checklist: { items: ['sandbox preview', 'visual QA', 'revision commit'], renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, prompt: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
           ],
         },
+        output_compaction: {
+          tool: 'capy-spaces-creator-loop',
+          command: 'space.creator.preview',
+          exit_status: 0,
+          original_chars: 2048,
+          compacted_chars: 512,
+          redaction_status: 'redacted',
+          rules_applied: ['cap_section_chars', 'redact_unsafe_markers'],
+          text: 'safe-summary\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK',
+        },
         prompt: body.prompt,
         raw_prompt: body.prompt,
         generated_code: '<script>bad()</script>',
@@ -6173,6 +6183,10 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Approve revisioned commit" in out["rootHtml"]
     assert "Creator Lab &lt;Safe&gt;" in out["rootHtml"]
     assert "Summary &lt;Widget&gt;" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 2048 chars" in out["rootHtml"]
+    assert "Compacted output: 512 chars" in out["rootHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
