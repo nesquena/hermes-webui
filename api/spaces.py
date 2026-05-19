@@ -387,6 +387,99 @@ def _local_runtime_message_type(event_name: str, payload: dict[str, Any]) -> str
     return ""
 
 
+def _is_widget_runtime_prompt_boundary(event_name: str, payload: dict[str, Any]) -> bool:
+    name = str(event_name or "").strip().lower()
+    if name == "agent.prompt":
+        return True
+    message_types = [
+        _runtime_message_type_value(event_name),
+        _payload_runtime_message_type(payload),
+        *_nested_payload_runtime_message_types(payload),
+    ]
+    return any(str(message_type or "").strip().lower() == "capy:agent:prompt" for message_type in message_types)
+
+
+def _widget_runtime_prompt_text_parts(prompt: str, payload: dict[str, Any]) -> list[str]:
+    carrier_keys = {
+        "agentprompt",
+        "agent_prompt",
+        "content",
+        "description",
+        "input",
+        "instruction",
+        "instructions",
+        "message",
+        "messages",
+        "prompt",
+        "query",
+        "request",
+        "summary",
+        "text",
+    }
+    skipped_keys = {"type", "message_type", "messagetype"}
+    parts: list[str] = []
+    inspected = 0
+
+    def normalized_key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9_]+", "", str(value or "").strip().lower())
+
+    def visit(value: Any, *, in_carrier: bool, depth: int = 0) -> None:
+        nonlocal inspected
+        inspected += 1
+        if inspected > 120 or depth > 6:
+            raise ValueError("Widget runtime prompt preflight required")
+        if isinstance(value, str):
+            text = value.strip()
+            if in_carrier and text:
+                parts.append(text)
+            return
+        if isinstance(value, (int, float, bool)) or value is None:
+            if in_carrier and value is not None:
+                parts.append(str(value))
+            return
+        if isinstance(value, dict):
+            for index, (raw_key, child) in enumerate(value.items()):
+                if index >= 80:
+                    break
+                key = normalized_key(raw_key)
+                if key in skipped_keys:
+                    continue
+                is_prompt_carrier = key in carrier_keys or _payload_key_is_prompt_bearing(str(raw_key))
+                visit(child, in_carrier=in_carrier or is_prompt_carrier, depth=depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                if index >= 80:
+                    break
+                visit(child, in_carrier=in_carrier, depth=depth + 1)
+
+    prompt_text = str(prompt or "").strip()
+    if prompt_text:
+        parts.append(prompt_text)
+    visit(payload, in_carrier=False)
+    return parts
+
+
+def _widget_runtime_prompt_preflight_receipt(
+    event_name: str,
+    payload: dict[str, Any],
+    *,
+    prompt: str = "",
+) -> dict[str, Any] | None:
+    if not _is_widget_runtime_prompt_boundary(event_name, payload):
+        return None
+    prompt_parts = _widget_runtime_prompt_text_parts(prompt, payload)
+    if not prompt_parts:
+        raise ValueError("Widget runtime prompt preflight required")
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight("\n".join(prompt_parts), boundary="widget_runtime_prompt")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    if receipt.get("status") != "pass":
+        raise ValueError("Widget runtime prompt preflight blocked")
+    return receipt
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -1234,9 +1327,18 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
     return {"space_id": sid, "local_only": True, "hit_count": len(results), "results": results}
 
 
+def _payload_key_is_prompt_bearing(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", str(key or "").strip().lower())
+    if not normalized:
+        return False
+    return normalized == "prompt" or normalized.endswith("prompt") or "prompt" in normalized
+
+
 def _payload_key_is_safe(key: str) -> bool:
     lowered = str(key or "").strip().lower()
     if not lowered:
+        return False
+    if _payload_key_is_prompt_bearing(lowered):
         return False
     return not any(part in lowered for part in _OMITTED_PAYLOAD_KEYS)
 
@@ -7149,30 +7251,60 @@ def queue_recovery_module_repair_event(
     }
 
 
+def _prompt_preflight_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Return a typed, metadata-only prompt-preflight receipt summary."""
+    raw_categories_value = receipt.get("categories")
+    categories: list[Any] = raw_categories_value if isinstance(raw_categories_value, list) else []
+    raw_checks_value = receipt.get("checks")
+    checks: list[Any] = raw_checks_value if isinstance(raw_checks_value, list) else categories
+    prompt_hash = _context_value(receipt.get("prompt_hash"), 80)
+    summary = {
+        "available": bool(receipt.get("available")),
+        "action": _widget_event_label_summary(receipt.get("action"), 120),
+        "boundary": _widget_event_label_summary(receipt.get("boundary"), 120),
+        "status": _widget_event_label_summary(receipt.get("status"), 80),
+        "severity": _widget_event_label_summary(receipt.get("severity"), 80),
+        "categories": [_widget_event_label_summary(item, 120) for item in categories[:20]],
+        "checks": [_widget_event_label_summary(item, 120) for item in checks[:20]],
+        "metadata_only": bool(receipt.get("metadata_only")),
+        "raw_prompt_stored": bool(receipt.get("raw_prompt_stored")),
+        "local_only": bool(receipt.get("local_only")),
+    }
+    if re.fullmatch(r"[a-f0-9]{64}", prompt_hash):
+        summary["prompt_hash"] = prompt_hash
+    return summary
+
+
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
         return None
     if _context_value(event.get("event_type"), 120) != "widget.event.queued":
         return None
-    details = _payload_summary(event.get("details") or {})
+    raw_details_value = event.get("details")
+    raw_details: dict[str, Any] = raw_details_value if isinstance(raw_details_value, dict) else {}
+    details = _payload_summary(raw_details)
     if not isinstance(details, dict):
         return None
     wid = _context_value(details.get("widget_id"), 120)
     if not wid or (widget_id and wid != widget_id):
         return None
     payload_summary = details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}
-    return {
+    summary = {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "space_id": sid,
         "widget_id": wid,
         "event_name": _widget_event_label_summary(details.get("event_name"), 120),
         "status": _widget_event_label_summary(details.get("status") or "queued", 80),
-        "prompt_preview": _payload_text_summary(details.get("prompt_preview"), 1000),
+        "prompt_preview": _payload_text_summary(raw_details.get("prompt_preview"), 1000),
         "payload_summary": payload_summary,
         "created_at": event.get("created_at"),
     }
+    prompt_preflight = raw_details.get("prompt_preflight") if isinstance(raw_details.get("prompt_preflight"), dict) else None
+    if prompt_preflight:
+        summary["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(prompt_preflight)
+    return summary
 
 
 def list_widget_events(space_id: str, widget_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -7301,22 +7433,26 @@ def queue_widget_event(
             "widget_id": wid,
             "event_name": local_message_type,
         }
+    preflight_receipt = _widget_runtime_prompt_preflight_receipt(name, payload_data, prompt=prompt)
     prompt_preview = _payload_text_summary(prompt, 1000)
     payload_summary = _payload_summary(payload_data)
+    event_details = {
+        "widget_id": wid,
+        "event_name": name,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+        "session_id": _context_value(session_id, 120),
+        "status": "queued",
+    }
+    if preflight_receipt:
+        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
     event_id = _record_event(
         sid,
         "widget.event.queued",
-        {
-            "widget_id": wid,
-            "event_name": name,
-            "prompt_preview": prompt_preview,
-            "payload_summary": payload_summary,
-            "session_id": _context_value(session_id, 120),
-            "status": "queued",
-        },
+        event_details,
     )
     _auto_ingest_space_widget_event(event_id)
-    return {
+    response = {
         "queued": True,
         "status": "queued",
         "space_id": sid,
@@ -7326,6 +7462,9 @@ def queue_widget_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
     }
+    if preflight_receipt:
+        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    return response
 
 
 def queue_space_repair_event(
