@@ -37,15 +37,15 @@ Delivered:
 
 ### Phase 1 — Capy Memory Tree design/MVP
 
-Status: **implemented as a local-first MVP; continue hardening ingestion automation**.
+Status: **implemented as a local-first MVP; continue hardening advisory/context enforcement**.
 
 Delivered:
 - `docs/capy-memory-tree.md` defines the clean-room schema, storage, provenance, redaction, and TDD plan.
 - `api/capy_memory.py` implements deterministic source/chunk canonicalization, SQLite tables, redacted Markdown vault writes, status/search APIs, relevant-memory lookup, and metadata-only source refresh-job registration.
 - `tests/test_capy_memory_tree.py` covers hostile Space manifests, revision events, widget events, visual-QA reports, storage/search/status routes, source refresh registration, deterministic IDs, bounded traversal, and leak prevention.
+- Live Spaces boundaries now auto-ingest metadata-only Space manifests/revision events, widget events, repair events, rollback/restore revision anchors, and creator visual-QA reports into the Memory Tree. Local knowledge sources are registered as source records with provenance/freshness metadata rather than copied into prompts.
 
 Remaining:
-- Wire more live Spaces artifacts and local-knowledge sources into automatic `canonicalize_*` + `ingest_source(...)` flows instead of relying on direct helper/API calls.
 - Keep all memory as advisory untrusted context that cannot bypass creator, approval, recovery, or prompt-injection gates.
 
 ### Phase 2 — TokenJuice-style output compaction
@@ -63,28 +63,28 @@ Remaining:
 
 ### Phase 3 — Auto-fetch source registry and freshness
 
-Status: **source registry/status UI implemented; actual refresh workers remain**.
+Status: **source registry/status UI and local-knowledge bridge implemented; broader refresh scheduling/fetchers remain**.
 
 Delivered:
 - `api/capy_memory.py` registers source references idempotently, queues metadata-only `source.refresh` jobs, strips credential/query/fragment markers from public `origin_uri`, requeues terminal jobs, and preserves active leased payloads.
 - `GET /api/capy-memory/status` returns local-only source/chunk/stale/error/refresh-job counts.
 - `static/spaces.js` renders the product-home Memory freshness card from `api/capy-memory/status` with hostile fields ignored/redacted.
+- `api/knowledge.py` / Memory Tree bridge registers local knowledge sources as metadata-only Memory Tree source records with local provenance/freshness status.
 
 Remaining:
 - Implement a safe refresh worker that consumes queued jobs, fetches selected sources under allow-listed policy, writes only sanitized summaries, and updates freshness/error metadata.
-- Bridge existing local knowledge sources into Memory Tree source records with provenance and freshness metadata.
 
 ### Phase 4 — Spaces-aware memory integration
 
-Status: **Space detail and creator preview surfaces implemented; deeper automatic context wiring remains**.
+Status: **Space detail, creator preview, and production artifact auto-ingest surfaces implemented; deeper advisory context wiring remains**.
 
 Delivered:
 - `GET /api/spaces/memory?space_id=...` returns bounded relevant Memory Tree slices with metadata-only snippets.
 - `static/spaces.js` renders a Space detail `Memory Tree context` card and creator-preview `Memory assist` evidence without leaking renderer/source/API-auth/raw-prompt markers.
 - New artifact canonicalizers cover Space manifests, revision events, widget events, and visual/UI QA reports as searchable local artifacts.
+- Production boundaries now call the canonicalizers automatically for Space manifest/revision writes (including rollback/restore anchors), widget events, recovery/repair events, and creator visual-QA commit reports.
 
 Remaining:
-- Automatically ingest revision/rollback/repair/widget-event/visual-QA artifacts at their production boundaries.
 - Inject cited relevant memory into active-space/creator context only after prompt-injection preflight and with explicit redaction/provenance labels.
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
@@ -127,17 +127,16 @@ Only after the remaining Phase 1-6 integration items are working:
 
 ## Next implementation slices for autonomous sprints
 
-1. **Local knowledge bridge into Memory Tree**
-   - Register existing local knowledge sources as Memory Tree source records with provenance/freshness metadata rather than copying raw files into prompts.
-   - Keep source status metadata-only and local-first.
-
-2. **Prompt-preflight + memory/context enforcement**
+1. **Prompt-preflight + memory/context enforcement**
    - Add per-action pass/warn/block receipts for creator/source boundaries before memory can influence agent actions.
    - Treat Memory Tree content as untrusted advisory context.
 
-3. **Broader compaction producers**
+2. **Broader compaction producers**
    - Extend the run-all `output_compaction` receipt pattern to individual long creator/tool/subagent/browser-output boundaries where it adds product value.
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
+
+3. **Broader source-refresh scheduling/fetcher coverage**
+   - Expand safe source refresh worker scheduling/trigger coverage and source-specific fetchers while keeping raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
    - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh workers now cover the first workflow/gate/ingest producers.
@@ -196,8 +195,8 @@ Only after the remaining Phase 1-6 integration items are working:
 
 The first roadmap pass has now delivered the Memory Tree module, source/job schema, compaction helper, memory freshness card, relevant-memory UI, policy card, and product-home plus Space-detail progress cards. Current remaining work is narrower:
 
-- **Automated artifact ingestion:** Space manifests, revision/rollback/repair events, widget events, and visual-QA reports have canonicalizers, but more production boundaries still need to call `canonicalize_*` + `ingest_source(...)` automatically.
-- **Local knowledge bridge:** Local knowledge remains file-index/search oriented and should be registered as Memory Tree source records with freshness/provenance rather than being copied wholesale into prompts.
+- **Automated artifact ingestion:** Core Space manifest/revision, rollback/restore anchor, repair, widget-event, and visual-QA production boundaries now auto-ingest metadata-only Memory Tree records; keep future artifact producers on the same canonicalizer path.
+- **Local knowledge bridge:** Local knowledge now registers metadata-only Memory Tree source records with freshness/provenance rather than copying raw files wholesale into prompts; next work is safe refresh scheduling/fetcher breadth.
 - **Advisory active context:** Active-Space context has display-side relevant memory and compact summaries, but agent/creator context injection should add cited Memory Tree snippets only after prompt-injection preflight.
 - **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
 - **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduling/trigger coverage and source-specific fetchers.

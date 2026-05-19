@@ -133,6 +133,106 @@ def test_widget_events_auto_ingest_into_memory_tree_metadata_only(monkeypatch, t
     assert "api_key" not in serialized
 
 
+def test_repair_events_auto_ingest_into_memory_tree_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.capy_memory as capy_memory
+
+    created = spaces.create_space({"space_id": "repair-memory-lab", "name": "Repair Memory Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "broken-widget", "kind": "status", "title": "Broken Widget"},
+    )
+
+    space_repair = spaces.queue_space_repair_event(
+        created["space_id"],
+        {"renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="repair raw prompt SECRET_VALUE_DO_NOT_LEAK",
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+    widget_repair = spaces.queue_recovery_widget_repair_event(
+        created["space_id"],
+        "broken-widget",
+        {"source": "SECRET_VALUE_DO_NOT_LEAK", "html": "<script>bad()</script>"},
+        prompt="widget repair raw prompt SECRET_VALUE_DO_NOT_LEAK",
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    relevant = capy_memory.relevant_memory_for_space(created["space_id"], limit=20)
+    repair_hits = [
+        row
+        for row in relevant["results"]
+        if row["source_type"] in {"space_revision_event", "space_widget_event"}
+        and (space_repair["event_id"] in json.dumps(row, sort_keys=True) or widget_repair["event_id"] in json.dumps(row, sort_keys=True))
+    ]
+    serialized = json.dumps(repair_hits, sort_keys=True).lower()
+
+    assert space_repair["queued"] is True
+    assert widget_repair["queued"] is True
+    assert space_repair["event_id"] in serialized
+    assert widget_repair["event_id"] in serialized
+    assert "space.repair.queued" in serialized
+    assert "agent.repair" in serialized
+    assert "broken-widget" in serialized
+    assert "raw prompt" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+
+
+def test_creator_commit_visual_qa_auto_ingests_report_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.capy_memory as capy_memory
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build a safe visual QA status card.",
+            "spaceName": "Visual QA Memory Lab",
+            "widgets": [
+                {
+                    "widgetId": "qa-status",
+                    "title": "QA Status",
+                    "kind": "status",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+    commit = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "screenshot_path": "/private/tmp/SECRET_VALUE_DO_NOT_LEAK/visual-qa.png",
+        },
+    )
+
+    relevant = capy_memory.relevant_memory_for_space(commit["space_id"], limit=20)
+    visual_hits = [row for row in relevant["results"] if row["source_type"] == "visual_qa_report"]
+    serialized = json.dumps(visual_hits, sort_keys=True).lower()
+
+    assert commit["ok"] is True
+    assert commit["visual_qa_event"]["event_type"] == "space.visual_qa.completed"
+    assert visual_hits
+    assert "creator commit visual qa" in serialized
+    assert "passed" in serialized
+    assert "visual-qa.png" in serialized
+    assert "/private/tmp" not in serialized
+    assert "raw prompt" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "renderer" not in serialized
+
+
+
 def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "checkpoint-lab", "name": "Checkpoint Lab"})

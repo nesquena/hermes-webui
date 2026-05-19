@@ -20,7 +20,7 @@ Recent safe adapter progress:
 
 Recently landed:
 
-- OpenHuman-inspired context-layer MVPs now exist as metadata-only Capy Spaces surfaces: local Memory Tree canonicalization/search/status, output compaction helper, source registry/freshness counts, Space detail/creator memory assist, product-home autonomy policy, product-home plus Space-detail progress events, Research Harness progress-event producer coverage, creator visual-QA commit progress events, and Memory Tree source-refresh ingest progress events. Remaining parity work should focus on automatic artifact ingestion, product-visible compaction evidence, safe source refresh workers, prompt-preflight enforcement, and broader browser/development/repair progress producers.
+- OpenHuman-inspired context-layer MVPs now exist as metadata-only Capy Spaces surfaces: local Memory Tree canonicalization/search/status, output compaction helper, source registry/freshness counts, local knowledge source registration, automatic Space artifact ingestion at manifest/revision/rollback/repair/widget-event/visual-QA boundaries, Space detail/creator memory assist, product-home autonomy policy, product-home plus Space-detail progress events, Research Harness progress-event producer coverage, creator visual-QA commit progress events, and Memory Tree source-refresh ingest progress events. Remaining parity work should focus on prompt-preflight enforcement, product-visible compaction evidence, safe source-refresh scheduling/fetcher breadth, and broader browser/development/repair progress producers.
 - Recovery/safe-mode tool actions are exposed through safe metadata-only aliases.
 - Demo smoke routes exist and the Spaces UI uses direct `/api/spaces/demo/*` routes instead of generic demo tool actions.
 - Metadata shared data slots exist, show safe details, and can be deleted safely.
@@ -85,9 +85,9 @@ Recently landed:
 
 Next checkpoint emphasis:
 
-1. Local knowledge bridge into Memory Tree with provenance/freshness metadata.
-2. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
-3. Broader compaction producers beyond the run-all demo receipt for long creator/tool/subagent/browser outputs.
+1. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
+2. Broader compaction producers beyond the run-all demo receipt for long creator/tool/subagent/browser outputs.
+3. Broader source-refresh scheduling/fetcher coverage after the metadata-only local knowledge bridge.
 4. Broader structured progress producers for real long-running browser/development/repair flows; Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh ingest workers now emit the first workflow/gate/ingest progress events and Space detail can inspect Space-scoped streams.
 5. Safe admin/recovery, rollback/time-travel, and sandbox/postMessage contracts remain blockers before richer generated widgets expand.
 6. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
@@ -98,6 +98,7 @@ These are additive demo criteria for the new roadmap track. They do not replace 
 
 - **Memory freshness card visible:** **MVP implemented.** Spaces/WebUI shows local-only source counts, stale counts, refresh-job counts, and clear empty/error states without exposing raw fetched content.
 - **Relevant memory slices visible:** **MVP implemented.** Space detail and creator preview show bounded cited memory snippets tied to the current Space, with provenance and redaction status.
+- **Automatic artifact/source ingestion:** **MVP implemented.** Local knowledge sources and core Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries register metadata-only Memory Tree records; future producers should use the same canonicalizer path.
 - **Compaction evidence visible:** **Not yet product-visible.** Long tool/subagent/browser output receipts should show original size, compacted size, retained artifact handles/citations, and redaction status where applicable.
 - **Progress panel visible:** **MVP implemented at product-home aggregate and Space-detail scoped levels.** Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh ingest workers now emit structured metadata-only events; long-running browser/development/repair flows still need broader producer coverage.
 - **Autonomy mode visible:** **MVP implemented at product-home aggregate level.** Per-action receipts still need to show `Supervised`, `Semi-autonomous`, or `Autonomous` mode with a short explanation of required approvals/gates.

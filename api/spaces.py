@@ -592,10 +592,21 @@ def _auto_ingest_space_manifest_and_revision(space: dict[str, Any], event_id: st
         _auto_ingest_memory_record("canonicalize_space_revision_event", event)
 
 
+def _auto_ingest_space_revision_event(event_id: str) -> None:
+    event = _event_payload(event_id)
+    if event is not None:
+        _auto_ingest_memory_record("canonicalize_space_revision_event", event)
+
+
 def _auto_ingest_space_widget_event(event_id: str) -> None:
     event = _event_payload(event_id)
     if event is not None:
         _auto_ingest_memory_record("canonicalize_space_widget_event", event)
+
+
+def _auto_ingest_visual_qa_report(report: dict[str, Any]) -> None:
+    if isinstance(report, dict):
+        _auto_ingest_memory_record("canonicalize_visual_qa_report", report)
 
 
 def _write_manifest(
@@ -3370,9 +3381,17 @@ def _space_creator_commit_gate(payload: dict[str, Any], *aliases: str) -> bool:
     return saw_alias
 
 
-def _record_creator_visual_qa_progress_event(space_id: str) -> dict[str, Any]:
+def _record_creator_visual_qa_progress_event(space_id: str, *, screenshot_path: Any = None) -> dict[str, Any]:
     """Best-effort metadata-only producer event for creator visual-QA gates."""
     sid = validate_space_id(space_id)
+    _auto_ingest_visual_qa_report(
+        {
+            "space_id": sid,
+            "surface": "Creator commit visual QA",
+            "status": "passed",
+            "screenshot_path": screenshot_path,
+        }
+    )
     run_id = f"creator:{sid}"
     try:
         from api.capy_progress import record_progress_event
@@ -3511,7 +3530,10 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         response["revision_preview"] = revision_preview
     if revision_diff is not None:
         response["revision_diff"] = revision_diff
-    response["visual_qa_event"] = _record_creator_visual_qa_progress_event(created["space_id"])
+    response["visual_qa_event"] = _record_creator_visual_qa_progress_event(
+        created["space_id"],
+        screenshot_path=payload.get("screenshot_path") or payload.get("screenshotPath"),
+    )
     return response
 
 
@@ -7750,6 +7772,7 @@ def queue_space_repair_event(
             "status": "queued",
         },
     )
+    _auto_ingest_space_revision_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
     return {
         "queued": True,
@@ -7800,6 +7823,7 @@ def queue_recovery_widget_repair_event(
             "status": "queued",
         },
     )
+    _auto_ingest_space_widget_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
     return {
         "queued": True,
