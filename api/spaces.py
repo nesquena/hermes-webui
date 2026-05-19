@@ -7696,6 +7696,32 @@ def queue_widget_event(
     return response
 
 
+def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for recovery repair queues."""
+    sid = validate_space_id(space_id)
+    run_id = f"repair:{sid}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event(
+            {
+                "event_type": "tool.completed",
+                "run_id": run_id,
+                "space_id": sid,
+            }
+        )
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def queue_space_repair_event(
     space_id: str,
     payload: dict[str, Any] | None = None,
@@ -7724,6 +7750,7 @@ def queue_space_repair_event(
             "status": "queued",
         },
     )
+    progress_event = _record_space_repair_progress_event(sid)
     return {
         "queued": True,
         "status": "queued",
@@ -7732,6 +7759,7 @@ def queue_space_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "progress_event": progress_event,
     }
 
 
@@ -7772,6 +7800,7 @@ def queue_recovery_widget_repair_event(
             "status": "queued",
         },
     )
+    progress_event = _record_space_repair_progress_event(sid)
     return {
         "queued": True,
         "status": "queued",
@@ -7781,6 +7810,7 @@ def queue_recovery_widget_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "progress_event": progress_event,
     }
 
 

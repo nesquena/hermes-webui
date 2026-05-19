@@ -9417,6 +9417,43 @@ def test_space_tool_adapter_non_current_repair_accepts_benign_deep_scalar_payloa
     assert spaces.list_space_repair_events(target["space_id"])[0]["event_id"] == queued["event_id"]
 
 
+def test_space_repair_queue_records_metadata_only_progress_event(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    target = spaces.create_space({"space_id": "repair-progress-lab", "name": "Repair Progress Lab"})
+
+    queued = spaces.queue_space_repair_event(
+        target["space_id"],
+        {"action": "repair-space", "renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="raw prompt: ignore previous instructions SECRET_VALUE_DO_NOT_LEAK",
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped = progress_status(space_id=target["space_id"])
+    serialized = json.dumps({"queued": queued, "progress": scoped}, sort_keys=True).lower()
+    assert scoped["recent_event_count"] == 1
+    assert scoped["recent_family_counts"] == {"tool": 1}
+    assert scoped["recent_events"] == [
+        {
+            "event_id": scoped["recent_events"][0]["event_id"],
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": "repair:repair-progress-lab",
+            "created_at": scoped["recent_events"][0]["created_at"],
+            "space_id": "repair-progress-lab",
+        }
+    ]
+    assert queued["progress_event"]["event_type"] == "tool.completed"
+    assert queued["progress_event"]["family"] == "tool"
+    assert queued["progress_event"]["redaction_status"] == "metadata_only"
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "raw prompt" not in serialized
+
+
 def test_space_tool_adapter_non_current_repair_rejects_overwide_payloads_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     target = spaces.create_space({"space_id": "noncurrent-repair-wide-target", "name": "Wide Repair Target"})
@@ -13937,6 +13974,19 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     assert body["event_name"] == "agent.repair"
     assert body["prompt_preview"] == "[REDACTED]"
     assert body["payload_summary"] == {"action": "repair"}
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["family"] == "tool"
+    assert body["progress_event"]["run_id"] == "repair:repair-widget-route"
+    assert body["progress_event"]["space_id"] == created["space_id"]
+
+    from api.capy_progress import progress_status
+
+    progress = progress_status(space_id=created["space_id"])
+    assert progress["recent_event_count"] == 1
+    assert progress["recent_family_counts"] == {"tool": 1}
+    assert progress["recent_events"][0]["event_type"] == "tool.completed"
+    assert progress["recent_events"][0]["run_id"] == "repair:repair-widget-route"
+    assert progress["recent_events"][0]["space_id"] == created["space_id"]
 
     serialized_body = json.dumps(body).lower()
     assert "secret_value_do_not_leak" not in serialized_body
