@@ -2274,6 +2274,7 @@ try:
         _pending,
         _lock,
         _permanent_approved,
+        _gateway_queues,
         resolve_gateway_approval,
         enable_session_yolo,
         disable_session_yolo,
@@ -2292,6 +2293,7 @@ except ImportError:
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
+    _gateway_queues = {}
 
 
 # ── Approval SSE subscribers (long-connection push) ──────────────────────────
@@ -8683,11 +8685,11 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # that omit approval_id still resolve the oldest entry for compatibility.
     pending = None
     found_target = False
+    gateway_keys = []
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
             if approval_id:
-                # Find and remove the specific entry by approval_id.
                 for i, entry in enumerate(queue):
                     if entry.get("approval_id") == approval_id:
                         pending = queue.pop(i)
@@ -8708,6 +8710,25 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             if not approval_id or queue.get("approval_id") == approval_id:
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
+        # When no _pending entry found, peek into _gateway_queues for
+        # pattern_keys so session-level approval still works. The gateway
+        # path is the primary mechanism during active streaming; _pending
+        # is only used for UI polling/SSE notification.
+        # NOTE: Gateway queue entries don't carry approval_id, so when
+        # approval_id is given and _pending is empty, we assume the gateway
+        # entry at the head of the queue corresponds. This is safe because
+        # gateway entries are consumed synchronously with _pending entries
+        # under the same lock — there is no interleaving where a stale
+        # approval_id could match a different gateway entry.
+        if not pending:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                # _gateway_queues stores _ApprovalEntry objects; their
+                # .data dict carries command, pattern_key, pattern_keys.
+                gw_data = getattr(gw_entry, 'data', None) or {}
+                gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")] if gw_data else []
+                found_target = True
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -8719,16 +8740,26 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         else:
             _approval_sse_notify_locked(sid, None, 0)
 
-    if pending:
-        keys = pending.get("pattern_keys") or [pending.get("pattern_key", "")]
-        if choice in ("once", "session"):
-            for k in keys:
-                approve_session(sid, k)
-        elif choice == "always":
-            for k in keys:
-                approve_session(sid, k)
-                approve_permanent(k)
-            save_permanent_allowlist(_permanent_approved)
+    # Collect keys from both _pending and _gateway_queues
+    keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
+    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
+    if choice in ("once", "session"):
+        for k in all_keys:
+            approve_session(sid, k)
+            # Bugfix: el session_key del agente puede ser "default" entre
+            # turnos de streaming porque HERMES_SESSION_KEY se limpia del
+            # entorno al finalizar. Guardar también contra "default" para
+            # que "Permitir en la sesión" funcione incluso después de que
+            # el streaming termine y el session_key se pierda.
+            if sid != "default":
+                approve_session("default", k)
+    elif choice == "always":
+        for k in all_keys:
+            approve_session(sid, k)
+            if sid != "default":
+                approve_session("default", k)
+            approve_permanent(k)
+        save_permanent_allowlist(_permanent_approved)
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.
