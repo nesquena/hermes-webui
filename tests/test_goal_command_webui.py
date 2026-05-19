@@ -230,6 +230,144 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(monkeypatch, tmp_path
     assert started[0]["model_provider"] == "openai-codex"
 
 
+def test_goal_endpoint_preserves_response_shape_under_runtime_adapter_flag(monkeypatch, tmp_path):
+    """The Slice 3c adapter path delegates /goal without adding adapter-only fields."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeState:
+        goal = "ship the feature"
+        status = "active"
+        turns_used = 1
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = FakeState()
+
+    class FakeSession:
+        session_id = "sid-goal-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(object(), {"session_id": "sid-goal-route", "args": "status"})
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "status"
+    assert result["payload"]["message_key"] == "goal_status_active"
+    assert "run_id" not in result["payload"]
+    assert "active_controls" not in result["payload"]
+
+
+def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(monkeypatch, tmp_path):
+    """The adapter action label must not replace legacy parsing of full goal text."""
+    from api import goals as webui_goals
+    from api import routes
+
+    set_calls = []
+
+    class FakeState:
+        goal = ""
+        status = "active"
+        turns_used = 0
+        max_turns = 20
+        last_verdict = None
+        last_reason = None
+        paused_reason = None
+
+    class FakeGoalManager:
+        def __init__(self, session_id, default_max_turns=20):
+            self.state = FakeState()
+
+        def set(self, text):
+            set_calls.append(text)
+            self.state.goal = text
+            return self.state
+
+    class FakeSession:
+        session_id = "sid-goal-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = None
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_start_chat_stream_for_session",
+        lambda session, **kwargs: {"stream_id": "goal-stream", "session_id": session.session_id},
+    )
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(object(), {"session_id": "sid-goal-route", "args": "set foo"})
+
+    assert result["status"] == 200
+    assert result["payload"]["action"] == "set"
+    assert result["payload"]["kickoff_prompt"] == "set foo"
+    assert set_calls == ["set foo"]
+
+
+def test_goal_endpoint_adapter_error_payload_still_controls_http_status(monkeypatch, tmp_path):
+    """The /goal route preserves legacy error/status handling under the adapter flag."""
+    from api import goals as webui_goals
+    from api import routes
+
+    class FakeGoalManager:
+        state = None
+
+        def __init__(self, session_id, default_max_turns=20):
+            pass
+
+    class FakeSession:
+        session_id = "sid-goal-route"
+        profile = "default"
+        workspace = str(tmp_path)
+        model = "gpt-5.5"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        pending_user_message = None
+        active_stream_id = "running-stream"
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
+    monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    monkeypatch.setitem(routes.STREAMS, "running-stream", {"queue": object()})
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: {"status": status, "payload": payload})
+
+    result = routes._handle_goal_command(object(), {"session_id": "sid-goal-route", "args": "ship it"})
+
+    assert result["status"] == 409
+    assert result["payload"]["ok"] is False
+    assert result["payload"]["error"] == "agent_running"
+
+
 def test_routes_register_goal_endpoint_and_kickoff_stream():
     assert 'if parsed.path == "/api/goal"' in ROUTES_PY
     assert "return _handle_goal_command(handler, body)" in ROUTES_PY

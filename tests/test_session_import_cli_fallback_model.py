@@ -279,5 +279,7 @@ def test_messaging_session_loader_prefers_longer_sidecar_transcript():
     handler = _extract_handler("handle_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
-    assert "sidecar_messages = getattr(s, \"messages\", []) or []" in handler
-    assert "len(sidecar_messages) > len(cli_messages)" in handler
+    assert "_all_msgs = _merged_session_messages_for_display(s, cli_messages)" in handler
+    src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+    assert "sidecar_messages = list(getattr(session, \"messages\", []) or [])" in src
+    assert "len(sidecar_messages) > len(cli_messages)" in src

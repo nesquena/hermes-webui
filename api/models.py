@@ -19,6 +19,7 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
+from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
     read_importable_agent_session_rows,
@@ -634,6 +635,7 @@ class Session:
             'estimated_cost': self.estimated_cost,
             'cache_read_tokens': self.cache_read_tokens,
             'cache_write_tokens': self.cache_write_tokens,
+            'cache_hit_percent': prompt_cache_hit_percent(self.cache_read_tokens, self.input_tokens),
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
@@ -718,7 +720,76 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
     return out
 
 
-def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
+def _normalize_journal_recovery_text(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:
+    candidate = _normalize_journal_recovery_text(content)
+    if not candidate:
+        return None
+    for idx, message in enumerate(session.messages or []):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        if message.get('_error'):
+            continue
+        existing = _normalize_journal_recovery_text(message.get('content'))
+        if not existing:
+            continue
+        if existing == candidate:
+            return idx
+        if len(candidate) >= 24 and candidate in existing:
+            return idx
+    return None
+
+
+def _journal_tool_already_present(session, name: str, preview: str) -> bool:
+    candidate_name = str(name or '')
+    candidate_preview = _normalize_journal_recovery_text(preview)
+    for tool_call in session.tool_calls or []:
+        if not isinstance(tool_call, dict):
+            continue
+        if str(tool_call.get('name') or '') != candidate_name:
+            continue
+        existing_preview = _normalize_journal_recovery_text(
+            tool_call.get('preview') or tool_call.get('snippet') or ''
+        )
+        if existing_preview == candidate_preview:
+            return True
+    return False
+
+
+def _run_journal_has_visible_output(session, stream_id: str | None) -> bool:
+    if not stream_id:
+        return False
+    try:
+        from api.run_journal import read_run_events
+        journal = read_run_events(session.session_id, stream_id)
+    except Exception:
+        return False
+    for event in journal.get('events') or []:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(event.get('event') or event.get('type') or '')
+        payload = event.get('payload') if isinstance(event.get('payload'), dict) else {}
+        if event_name == 'token' and str(payload.get('text') or ''):
+            return True
+        if event_name == 'interim_assistant':
+            if payload.get('already_streamed'):
+                continue
+            if str(payload.get('text') or '').strip():
+                return True
+        if event_name == 'tool':
+            return True
+    return False
+
+
+def _append_journaled_partial_output(
+    session,
+    stream_id: str | None,
+    *,
+    dedupe_existing: bool = False,
+) -> bool:
     """Recover already-emitted visible output from a dead stream journal.
 
     This repair path is intentionally conservative: it restores user-visible
@@ -757,6 +828,12 @@ def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
         assistant_parts = []
         if not content:
             return current_assistant_idx
+        if dedupe_existing:
+            existing_idx = _find_existing_assistant_for_journal_content(session, content)
+            if existing_idx is not None:
+                current_assistant_idx = existing_idx
+                assistant_started_at = None
+                return existing_idx
         timestamp = int(assistant_started_at or time.time())
         session.messages.append({
             'role': 'assistant',
@@ -821,6 +898,9 @@ def _append_journaled_partial_output(session, stream_id: str | None) -> bool:
                 anchor_idx = ensure_assistant_anchor(created_at)
             name = str(payload.get('name') or 'tool')
             preview = str(payload.get('preview') or '')
+            if dedupe_existing and _journal_tool_already_present(session, name, preview):
+                current_assistant_idx = anchor_idx
+                continue
             recovered_tool_calls.append({
                 'name': name,
                 'preview': preview,
@@ -946,19 +1026,48 @@ def _apply_core_sync_or_error_marker(
             core = json.load(f)
         core_messages = core.get('messages', [])
         if core_messages:
+            _stream_id = stream_id_for_recheck or session.active_stream_id
             session.messages = core_messages
             session.tool_calls = core.get('tool_calls', [])
             for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
                 if core.get(field) is not None:
                     setattr(session, field, core[field])
+            _pending_text = _normalize_journal_recovery_text(session.pending_user_message)
+            _already_checkpointed = False
+            if _pending_text and session.messages:
+                for _last_msg in reversed(session.messages):
+                    if isinstance(_last_msg, dict) and _last_msg.get('role') == 'user':
+                        _last_text = _normalize_journal_recovery_text(_last_msg.get('content'))
+                        _already_checkpointed = _last_text == _pending_text
+                        break
+            if (
+                _pending_text
+                and not _already_checkpointed
+                and _run_journal_has_visible_output(session, _stream_id)
+            ):
+                _recovered_ts = int(time.time())
+                if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+                    _recovered_ts = int(session.pending_started_at)
+                _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+            recovered_output = _append_journaled_partial_output(
+                session,
+                _stream_id,
+                dedupe_existing=True,
+            )
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
+            if recovered_output:
+                session.messages.append(
+                    _interrupted_recovery_marker(recovered_output=True)
+                )
             session.save(touch_updated_at=touch_updated_at)
             logger.info(
-                "Session %s: synced %d messages from core transcript",
-                sid, len(core_messages),
+                "Session %s: synced %d messages from core transcript%s",
+                sid,
+                len(core_messages),
+                " and recovered journaled output" if recovered_output else "",
             )
             return True
 
@@ -2119,17 +2228,15 @@ def _json_loads_if_string(value):
         return value
 
 
-def get_cli_session_messages(sid) -> list:
-    """Read messages for a single CLI/external-agent session.
+def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) -> list:
+    """Read messages for a Hermes session from the active profile's state.db.
 
-    Preserve tool-call/result and reasoning metadata from the agent state.db so
-    CLI-origin transcripts render with the same tool cards as WebUI-native
-    sessions. When the requested session is the tip of a compression/CLI-close
-    continuation chain, return the stitched full transcript across all segments
-    in chronological order. Returns empty list on any error.
+    This generic reader intentionally works for any session source, including
+    WebUI-origin sessions that were later updated through another Hermes surface
+    such as the Gateway API Server.  When ``stitch_continuations`` is true it
+    preserves the historical CLI/external-agent behavior of walking compatible
+    compression/close parent segments before reading messages.
     """
-    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
-        return get_claude_code_session_messages(sid)
     try:
         import sqlite3
     except ImportError:
@@ -2160,47 +2267,48 @@ def get_cli_session_messages(sid) -> list:
             ]
             selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
 
-            cur.execute("PRAGMA table_info(sessions)")
-            session_cols = {str(row['name']) for row in cur.fetchall()}
             session_chain = [str(sid)]
-            if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
-                cur.execute(
-                    """
-                    SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                    FROM sessions
-                    WHERE id = ?
-                    """,
-                    (sid,),
-                )
-                rows_by_id = {}
-                row = cur.fetchone()
-                if row:
-                    rows_by_id[str(row['id'])] = dict(row)
-                    current_id = str(row['id'])
-                    seen = {current_id}
-                    for _ in range(20):
-                        current = rows_by_id.get(current_id)
-                        parent_id = current.get('parent_session_id') if current else None
-                        if not parent_id or parent_id in seen:
-                            break
-                        cur.execute(
-                            """
-                            SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                            FROM sessions
-                            WHERE id = ?
-                            """,
-                            (parent_id,),
-                        )
-                        parent_row = cur.fetchone()
-                        if not parent_row:
-                            break
-                        parent_dict = dict(parent_row)
-                        rows_by_id[str(parent_row['id'])] = parent_dict
-                        if not _is_continuation_session(parent_dict, current):
-                            break
-                        session_chain.insert(0, str(parent_row['id']))
-                        current_id = str(parent_row['id'])
-                        seen.add(current_id)
+            if stitch_continuations:
+                cur.execute("PRAGMA table_info(sessions)")
+                session_cols = {str(row['name']) for row in cur.fetchall()}
+                if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    cur.execute(
+                        """
+                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        FROM sessions
+                        WHERE id = ?
+                        """,
+                        (sid,),
+                    )
+                    rows_by_id = {}
+                    row = cur.fetchone()
+                    if row:
+                        rows_by_id[str(row['id'])] = dict(row)
+                        current_id = str(row['id'])
+                        seen = {current_id}
+                        for _ in range(20):
+                            current = rows_by_id.get(current_id)
+                            parent_id = current.get('parent_session_id') if current else None
+                            if not parent_id or parent_id in seen:
+                                break
+                            cur.execute(
+                                """
+                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                FROM sessions
+                                WHERE id = ?
+                                """,
+                                (parent_id,),
+                            )
+                            parent_row = cur.fetchone()
+                            if not parent_row:
+                                break
+                            parent_dict = dict(parent_row)
+                            rows_by_id[str(parent_row['id'])] = parent_dict
+                            if not _is_continuation_session(parent_dict, current):
+                                break
+                            session_chain.insert(0, str(parent_row['id']))
+                            current_id = str(parent_row['id'])
+                            seen.add(current_id)
 
             placeholders = ', '.join('?' for _ in session_chain)
             cur.execute(f"""
@@ -2231,6 +2339,174 @@ def get_cli_session_messages(sid) -> list:
     except Exception:
         return []
     return msgs
+
+
+def get_state_db_session_summary(sid) -> dict:
+    """Return cheap message count/max timestamp for one state.db session.
+
+    This is intentionally narrower than ``get_state_db_session_messages`` for
+    metadata-only WebUI polling: callers only need a staleness signal, not a
+    fully materialized transcript with tool/reasoning metadata.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return {}
+
+    db_path = _active_state_db_path()
+    if not sid or not db_path.exists():
+        return {}
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return {}
+            cur.execute(
+                """
+                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (str(sid),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            count = int(row['message_count'] or 0)
+            last_message_at = row['last_message_at']
+            result = {'message_count': count}
+            if last_message_at not in (None, ''):
+                try:
+                    result['last_message_at'] = float(last_message_at)
+                except (TypeError, ValueError):
+                    pass
+            return result
+    except Exception:
+        return {}
+
+
+def _normalized_message_timestamp_for_key(value):
+    if value is None or value == "":
+        return ""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if timestamp.is_integer():
+        return str(int(timestamp))
+    return ("%.6f" % timestamp).rstrip("0").rstrip(".")
+
+
+def _message_timestamp_as_float(msg):
+    if not isinstance(msg, dict):
+        return None
+    value = msg.get("timestamp")
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_message_merge_key(msg: dict):
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    message_identity = msg.get("id") or msg.get("message_id")
+    if message_identity:
+        return ("message_id", str(message_identity))
+    return (
+        "legacy",
+        str(msg.get("role") or ""),
+        str(msg.get("content") or ""),
+        _normalized_message_timestamp_for_key(msg.get("timestamp")),
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+    )
+
+
+def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
+    """Merge sidecar/context and state.db messages without deleting local rows."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not state_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return state_messages
+
+    merged_messages = []
+    seen_message_keys = set()
+    max_sidecar_timestamp = None
+    for msg in sidecar_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
+        key = _session_message_merge_key(msg)
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    for msg in state_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        key = _session_message_merge_key(msg)
+        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+            if key in seen_message_keys:
+                continue
+            if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
+                continue
+        if key in seen_message_keys:
+            continue
+        # State rows at or before the newest sidecar timestamp are normally
+        # assumed to have already been observed by the sidecar. The <= gate
+        # preserves sidecar-only ordering/metadata for equal timestamps and
+        # prevents duplicate legacy rows when timestamp precision differs
+        # between stores. Explicit message ids are authoritative, though: two
+        # equal-timestamp messages with different ids are distinct retries.
+        if (
+            key[0] != "message_id"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    return merged_messages
+
+
+def reconciled_state_db_messages_for_session(
+    session, *, prefer_context: bool = False, state_messages: list | None = None
+) -> list:
+    """Return append-only messages reconciled with state.db for a WebUI session."""
+    if session is None:
+        return []
+    local_messages = []
+    if prefer_context:
+        context_messages = getattr(session, 'context_messages', None)
+        if isinstance(context_messages, list) and context_messages:
+            local_messages = context_messages
+    if not local_messages:
+        local_messages = getattr(session, 'messages', None) or []
+    if state_messages is None:
+        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    return merge_session_messages_append_only(local_messages, state_messages)
+
+
+def get_cli_session_messages(sid) -> list:
+    """Read messages for a single CLI/external-agent session.
+
+    Preserve tool-call/result and reasoning metadata from the agent state.db so
+    CLI-origin transcripts render with the same tool cards as WebUI-native
+    sessions. When the requested session is the tip of a compression/CLI-close
+    continuation chain, return the stitched full transcript across all segments
+    in chronological order. Returns empty list on any error.
+    """
+    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return get_claude_code_session_messages(sid)
+    return get_state_db_session_messages(sid, stitch_continuations=True)
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

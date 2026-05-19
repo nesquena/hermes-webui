@@ -185,8 +185,17 @@ chown_home_hermeswebui() {
   # macOS Docker bind mounts can expose hermes-agent git object packs as
   # read-only host files. The runtime only needs to read those existing objects;
   # requiring chown on them makes startup fail before WebUI can run (#2237).
+  #
+  # Multi-container compose (#2470) additionally mounts the entire
+  # hermes-agent-src volume read-only on the WebUI side because the WebUI only
+  # reads it for `uv pip install`. On a :ro mount, chown returns EROFS for any
+  # file inside the subtree, which would propagate to `set -e` and kill startup
+  # before the WebUI can run. Either way, the WebUI never writes to the agent
+  # source — prune the entire hermes-agent path from the chown walk so a
+  # read-only or partially-read-only mount doesn't break the rest of the home
+  # ownership alignment.
   find /home/hermeswebui \
-    -path "/home/hermeswebui/.hermes/hermes-agent/.git/objects" -prune \
+    -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
 }
 
@@ -382,7 +391,49 @@ else
     fi
   done
   if [ -n "$_agent_src" ]; then
-    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    if [ -w "$_agent_src" ]; then
+      echo ""
+      echo "!! WARNING: hermes-agent source mount is writable from the WebUI container."
+      echo "!!   Path: $_agent_src"
+      echo "!! The multi-container compose defaults use a read-only mount for defence-in-depth."
+      echo "!! If this is not an intentional local development checkout, switch the WebUI"
+      echo "!! agent source volume/bind mount to read-only. See docs/rfcs/agent-source-boundary.md."
+      echo ""
+    fi
+    # The agent source can be mounted read-only (see docker-compose.two-container.yml
+    # / docker-compose.three-container.yml — the WebUI only reads this volume to
+    # install the agent's Python dependencies and never writes to it). setuptools'
+    # `egg_info` build step, however, touches `hermes_agent.egg-info/` inside the
+    # source tree even under PEP 517 build isolation, which `EROFS`-fails on a
+    # `:ro` mount and (under `set -e`) kills startup of every multi-container
+    # deploy. Stage the source into a writable tmpfs copy so the build can write
+    # its metadata side-by-side without touching the underlying mount.
+    #
+    # The copy excludes any pre-baked `*.egg-info` / `build` / `dist` artifacts
+    # to avoid the timestamp-update path setuptools takes when one is present,
+    # and `--reflink=auto` makes the copy near-free on overlay2/btrfs where
+    # supported. We rebuild on every container start (the agent source can
+    # change across volume re-init); cost is one rsync of ~10MB of Python source.
+    _stage_src="/tmp/hermes-agent-build"
+    rm -rf "$_stage_src"
+    mkdir -p "$_stage_src"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a \
+        --exclude='*.egg-info' --exclude='build' --exclude='dist' \
+        --exclude='__pycache__' --exclude='.git' \
+        "$_agent_src"/ "$_stage_src"/ \
+        || error_exit "Failed to stage hermes-agent source to writable build dir"
+    else
+      # Fallback when rsync isn't in the image — straight cp -a, then drop
+      # the build artifacts that would trip setuptools.
+      cp -a "$_agent_src"/. "$_stage_src"/ \
+        || error_exit "Failed to copy hermes-agent source to writable build dir"
+      rm -rf "$_stage_src"/*.egg-info "$_stage_src"/build "$_stage_src"/dist 2>/dev/null || true
+      find "$_stage_src" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    fi
+    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+      || error_exit "Failed to install hermes-agent's requirements"
+    rm -rf "$_stage_src"
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."

@@ -33,6 +33,12 @@ def _make_link(url, label):
     return f'<a href="{url}" target="_blank" rel="noopener">{esc(label)}</a>'
 
 
+def markdown_href(url):
+    if url.lower().startswith("file://"):
+        return "api/media?path=" + __import__("urllib.parse").parse.quote(url[7:], safe="") + "&inline=1"
+    return url
+
+
 # Minimal Python mirror of the FIXED renderMd() — enough to test link behaviour.
 # Mirrors the stash-based approach introduced by the fix.
 
@@ -48,9 +54,9 @@ def render_links_only(text):
     link_stash = []
     def stash_link(m):
         label, url = m.group(1), m.group(2)
-        link_stash.append(f'<a href="{url}" target="_blank" rel="noopener">{esc(label)}</a>')
+        link_stash.append(f'<a href="{markdown_href(url)}" target="_blank" rel="noopener">{esc(label)}</a>')
         return f'\x00L{len(link_stash)-1}\x00'
-    s = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', stash_link, s)
+    s = re.sub(r'\[([^\]]+)\]\(((?:https?|file)://[^\)]+)\)', stash_link, s)
 
     # Autolink bare URLs (should NOT match inside already-stashed placeholders)
     def autolink(m):
@@ -83,9 +89,9 @@ def render_table_with_links(md):
         stash = []
         def stash_fn(m):
             lb, u = m.group(1), m.group(2)
-            stash.append(f'<a href="{u}" target="_blank" rel="noopener">{esc(lb)}</a>')
+            stash.append(f'<a href="{markdown_href(u)}" target="_blank" rel="noopener">{esc(lb)}</a>')
             return f'\x00L{len(stash)-1}\x00'
-        t = re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', stash_fn, t)
+        t = re.sub(r'\[([^\]]+)\]\(((?:https?|file)://[^\)]+)\)', stash_fn, t)
         # autolink remaining bare URLs
         def autolink(m):
             url = m.group(1)
@@ -168,6 +174,17 @@ def test_labeled_link_renders_as_single_anchor():
     # Must not contain the raw brackets
     assert '[#461]' not in result
     assert f']({url})' not in result
+
+
+def test_labeled_file_link_renders_as_single_anchor():
+    """A labeled local file link must survive the settled render path."""
+    url = 'file:///Users/agent/Documents/Obsidian/Meal-Prep/halal-cart.html'
+    md = f'[Halal Cart Chicken]({url})'
+    result = render_links_only(md)
+    assert result.count('<a ') == 1, f"Expected 1 <a> tag, got: {result}"
+    assert 'href="api/media?path=%2FUsers%2Fagent%2FDocuments%2FObsidian%2FMeal-Prep%2Fhalal-cart.html&inline=1"' in result
+    assert 'Halal Cart Chicken' in result
+    assert '[Halal Cart Chicken]' not in result
 
 
 def test_href_not_html_escaped():
@@ -260,6 +277,13 @@ def test_js_source_sanitizes_quotes_in_href():
     assert "%22" in UI_JS, (
         "URL placed in href should have double-quotes percent-encoded via .replace to %22"
     )
+
+
+def test_js_source_rewrites_file_links_to_media_endpoint():
+    """Browser pages cannot reliably navigate to file://, so renderMd must use /api/media."""
+    assert "function _markdownHref" in UI_JS
+    assert "api/media?path=" in UI_JS
+    assert "file:\\/\\/" in UI_JS
 
 # ── Code-inside-bold tests (pre-existing bug, fixed in same PR) ───────────────
 

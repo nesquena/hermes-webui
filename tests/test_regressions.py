@@ -794,7 +794,7 @@ def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sess
 
 def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_sessions):
     """R19c2/R19c3: reasoning-only messages must remain visible through the
-    shared collapsed activity dropdown, even when the anchor segment has no prose.
+    shared compact timeline activity UI, even when the anchor segment has no prose.
     """
     src = (REPO_ROOT / "static" / "ui.js").read_text()
     compact = src.replace(' ', '').replace('\n', '')

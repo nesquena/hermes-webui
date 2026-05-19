@@ -2,7 +2,7 @@
 
 Concrete diagnostic flows for the most common failure modes when running Hermes WebUI. Each entry has the symptom, the diagnostic commands you should run *before* opening an issue, and the fix that has worked for past reporters.
 
-If your symptom isn't listed and the diagnostics don't narrow it down, file a bug at https://github.com/nesquena/hermes-webui/issues — include the **full output** of every command in the relevant section.
+If your symptom isn't listed and the diagnostics don't narrow it down, file a bug at https://github.com/nesquena/hermes-webui/issues — include the relevant command output after redacting secrets, private paths, full `.env` files, full `auth.json` files, cookies, tokens, and password hashes.
 
 ---
 

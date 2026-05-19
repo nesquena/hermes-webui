@@ -3,7 +3,7 @@ Security tests: credential redaction in API responses.
 
 Verifies that credentials (GitHub PATs, API keys, etc.) are masked in:
   - GET /api/session  (messages and tool_calls)
-  - GET /api/memory   (MEMORY.md and USER.md content)
+ - GET /api/memory (MEMORY.md, USER.md, and SOUL.md content)
   - GET /api/session/export (downloaded JSON)
   - SSE done event    (session payload in stream)
 

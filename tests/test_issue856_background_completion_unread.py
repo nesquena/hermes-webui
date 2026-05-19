@@ -389,7 +389,7 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
 
 def test_completion_unread_clears_only_when_session_is_opened():
-    load_idx = SESSIONS_JS.find("async function loadSession(sid)")
+    load_idx = SESSIONS_JS.find("async function loadSession(sid")
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 

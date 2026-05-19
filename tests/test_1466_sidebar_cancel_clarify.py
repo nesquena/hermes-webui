@@ -23,12 +23,12 @@ class TestSidebarCancelAction:
         """Running sessions need a context-menu cancel action even when not active pane."""
         # Window bumped from 3200 → 4400 in #1764 to accommodate the new
         # Rename action item, then to 5200 in #2111 for response-aware archive
-        # toast handling inside _openSessionActionMenu before the stop/delete
-        # actions.
+        # toast handling, then to 6400 in #2294 for the new "Hide from list"
+        # action prepended for external sessions.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
         # required growing this read window.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 5200)
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 6400)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
@@ -75,8 +75,9 @@ class TestSidebarCancelAction:
     def test_cli_sessions_hide_duplicate_and_delete_in_action_menu(self):
         """Session action menu should hide duplicate/delete for CLI-origin sessions."""
         # Window bumped 3600 → 4800 in #1764 (Rename action prepended), then
-        # to 5200 in #2111 for response-aware archive toast handling.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 5200)
+        # to 5200 in #2111 for response-aware archive toast handling, then
+        # to 6400 in #2294 for the "Hide from list" action on external sessions.
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 6400)
         assert "const isCliSession = _isCliSession(session);" in body
         assert "const isExternalSession = isMessagingSession || isCliSession;" in body
         assert "if(!isExternalSession)" in body

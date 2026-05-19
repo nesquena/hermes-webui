@@ -692,6 +692,7 @@ _OAUTH_PROVIDERS = frozenset({
     "nous",
     "openai-codex",
     "qwen-oauth",
+    "xai-oauth",
 })
 
 # SECTION: Helper functions
@@ -1863,6 +1864,14 @@ def get_providers() -> dict[str, Any]:
                 if mid not in live_ids:
                     live_ids.append(mid)
             live_models = _models_from_live_provider_ids(pid, live_ids)
+            if live_models:
+                models = live_models
+                models_total = len(models)
+        if pid == "xai-oauth":
+            live_models = _models_from_live_provider_ids(
+                pid,
+                _read_live_provider_model_ids("xai-oauth"),
+            )
             if live_models:
                 models = live_models
                 models_total = len(models)

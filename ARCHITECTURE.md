@@ -1318,7 +1318,7 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/crons/output          ?job_id=X&limit=N -> {outputs: [{filename, content}]}
     /api/skills                All skills. Returns {skills: [{name, description, category}]}
     /api/skills/content        ?name=X -> full skill data including SKILL.md content
-    /api/memory                MEMORY.md + USER.md. Returns {memory, user, *_path, *_mtime}
+    /api/memory                MEMORY.md + USER.md + SOUL.md. Returns {memory, user, soul, *_path, *_mtime}
 
 ### POST Endpoints Added in Sprint 3
 
@@ -1453,7 +1453,7 @@ fetches GET /api/skills/content and renders in the right panel using `showPrevie
 #### Memory Panel
 
 `loadMemory()` fetches GET /api/memory (reads MEMORY.md + USER.md from
-~/.hermes/memories/), renders both as markdown via renderMd() with timestamps.
+~/.hermes/memories/, and SOUL.md from ~/.hermes/), renders both as markdown via renderMd() with timestamps.
 
 #### New API Endpoints (Section 18 update)
 
@@ -1464,7 +1464,7 @@ fetches GET /api/skills/content and renders in the right panel using `showPrevie
     POST /api/crons/resume       {job_id} -> resume_job(job_id)
     GET  /api/skills             All skills via tools.skills_tool.skills_list()
     GET  /api/skills/content     ?name=X -> full skill data via skill_view(name)
-    GET  /api/memory             MEMORY.md + USER.md content and mtimes
+    GET  /api/memory             MEMORY.md + USER.md + SOUL.md content and mtimes
 
 #### Phase D Input Validation Applied
 

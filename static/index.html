@@ -26,7 +26,46 @@
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
-<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__};</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>(function(){
+  var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
+  if(!token||!window.fetch)return;
+  var originalFetch=window.fetch.bind(window);
+  function sameOriginUnsafe(input,init){
+    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
+    try{
+      var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
+      var url=new URL(raw,document.baseURI||location.href);
+      if(url.origin!==location.origin)return false;
+      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+    }catch(_){return false;}
+  }
+  window.fetch=function(input,init){
+    if(sameOriginUnsafe(input,init)){
+      var opts=init?Object.assign({},init):{};
+      var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
+      if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      opts.headers=headers;
+      return originalFetch(input,opts);
+    }
+    return originalFetch(input,init);
+  };
+  if(navigator.sendBeacon){
+    var originalBeacon=navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon=function(url,data){
+      try{
+        if(sameOriginUnsafe(url,{method:'POST'})){
+          var headers={'X-Hermes-CSRF-Token':token};
+          if(data&&data.type)headers['Content-Type']=data.type;
+          originalFetch(url,{method:'POST',credentials:'include',headers:headers,body:data,keepalive:true});
+          return true;
+        }
+      }catch(_){}
+      return originalBeacon(url,data);
+    };
+  }
+})()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__&t=20260517rtl">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
@@ -105,6 +144,12 @@
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <button class="app-titlebar-reload" id="btnReload" onclick="window.location.reload()" type="button" aria-label="Reload" title="Reload page">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
@@ -1053,7 +1098,7 @@
                 <input type="checkbox" id="settingsSimplifiedToolCalling" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span>Compact tool activity</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Group thinking and tool calls into one collapsed activity section per assistant turn.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Show thinking and tool calls as compact inline activity while preserving the agent timeline.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -1098,6 +1143,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_previous_messaging_sessions">Show previous messaging sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_previous_messaging_sessions">Show older Discord, Telegram, Slack, and Weixin sessions that were replaced by reset or compression.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
               </label>
@@ -1118,8 +1170,8 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+              <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>

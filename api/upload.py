@@ -258,8 +258,9 @@ def handle_upload_extract(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
-        workspace = Path(s.workspace)
-        result = extract_archive(file_bytes, filename, workspace)
+        session_dir = _session_attachment_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        result = extract_archive(file_bytes, filename, session_dir)
         return j(handler, {'ok': True, **result})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
