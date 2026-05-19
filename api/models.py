@@ -562,7 +562,18 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        data = json.loads(p.read_text(encoding='utf-8'))
+        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        session = cls(**data)
+        if _collapsed_partials:
+            try:
+                # Self-heal bloated sessions on first full load without touching
+                # recency/index ordering; save() creates a .bak because this
+                # intentionally shrinks the transcript (#2592).
+                session.save(touch_updated_at=False, skip_index=True)
+            except Exception:
+                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+        return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -720,6 +731,57 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
 
 def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
+
+
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for partial assistant markers recovered on load."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
+    """Collapse repeated identical partial markers from the same failed turn."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    changed = False
+    previous_partial_sig = None
+    for message in messages:
+        if isinstance(message, dict) and message.get('_partial'):
+            sig = _partial_message_signature(message)
+            if previous_partial_sig == sig:
+                changed = True
+                continue
+            previous_partial_sig = sig
+        else:
+            previous_partial_sig = None
+        collapsed.append(message)
+    return collapsed, changed
 
 
 def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:

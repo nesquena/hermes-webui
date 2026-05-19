@@ -2590,6 +2590,56 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     return tool_calls
 
 
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for a persisted partial assistant marker."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _partial_marker_already_present(messages, candidate: dict, *, before_idx: int | None = None) -> bool:
+    """Check for an equivalent partial marker in the current user turn only."""
+    if not isinstance(messages, list) or not isinstance(candidate, dict):
+        return False
+    end = before_idx if isinstance(before_idx, int) else len(messages)
+    end = max(0, min(end, len(messages)))
+    start = 0
+    for idx in range(end - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            start = idx + 1
+            break
+    candidate_sig = _partial_message_signature(candidate)
+    for msg in messages[start:end]:
+        if isinstance(msg, dict) and msg.get('_partial') and _partial_message_signature(msg) == candidate_sig:
+            return True
+    return False
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -5504,24 +5554,7 @@ def cancel_stream(stream_id: str) -> bool:
                         if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
                             _cancel_marker_idx = _idx
                             break
-                _partial_already_present = False
-                if _stripped:
-                    for _m in _cs.messages:
-                        # Stage-350 Opus SHOULD-FIX (#2151): only dedup
-                        # against actual prior _partial markers from the
-                        # same stream, with exact content match. The original
-                        # substring check (`_stripped in _existing or
-                        # _existing in _stripped`) was too broad — any short
-                        # prior assistant reply (e.g. "OK", "Here is the
-                        # answer:") becomes a substring of many later partial
-                        # bodies and could silently drop the new partial,
-                        # resurrecting the #893 data-loss bug on long sessions.
-                        if not isinstance(_m, dict) or not _m.get('_partial'):
-                            continue
-                        if str(_m.get('content') or '').strip() == _stripped:
-                            _partial_already_present = True
-                            break
-                if (_stripped or _has_reasoning or _has_tools) and not _partial_already_present:
+                if _stripped or _has_reasoning or _has_tools:
                     _partial_msg: dict = {
                         'role': 'assistant',
                         'content': _stripped,  # may be empty for reasoning/tool-only turns
@@ -5548,7 +5581,16 @@ def cancel_stream(stream_id: str) -> bool:
                         # alongside the regular tool_calls path.
                         # (Opus pre-release review pass 2 of v0.50.251.)
                         _partial_msg['_partial_tool_calls'] = list(_cancel_tool_calls)
-                    _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                    # Deduplicate against the full partial payload, not just
+                    # non-empty content. Tool-only/reasoning-only partials have
+                    # empty content, so a content-gated check can append the same
+                    # failed turn repeatedly during cancel/replay recovery (#2592).
+                    if not _partial_marker_already_present(
+                        _cs.messages,
+                        _partial_msg,
+                        before_idx=_cancel_marker_idx,
+                    ):
+                        _cs.messages.insert(_cancel_marker_idx, _partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).

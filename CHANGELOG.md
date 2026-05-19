@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2593** by @Michaelyklam (closes #2592) — Deduplicate cancelled/recovered partial assistant markers using the full `(content, reasoning, partial tool calls)` payload instead of only non-empty text content. Tool-only failed turns no longer append identical empty-content `_partial` messages repeatedly, and full session loads collapse adjacent duplicate partial markers from already-bloated session files while preserving a backup.
 
 ## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
 
