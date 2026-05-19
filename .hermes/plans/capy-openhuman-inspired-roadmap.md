@@ -109,9 +109,10 @@ Delivered:
 - Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
 - Research Harness progress updates now emit metadata-only structured progress events so product-home progress status can reflect real research workflow activity without storing raw prompts, source text, renderer fields, or credentials.
 - Creator-loop commits that pass sandbox preview, visual QA, and explicit approval now emit `space.visual_qa.completed` progress events, giving the product-home stream real visual-QA gate producer coverage without storing prompts, generated bodies, renderers, sources, or credentials.
+- Source refresh workers now emit metadata-only `memory.ingest.started` / `memory.ingest.completed` / `memory.ingest.failed` progress events from opaque source/job run ids, so Memory Tree ingest activity appears in the product progress stream without storing origin URLs, raw summaries, prompts, renderer fields, exception text, or credentials.
 
 Remaining:
-- Emit progress events from more real long-running browser, development, repair, and visual-QA workflows.
+- Emit progress events from more real long-running browser, development, repair, and creator workflows.
 - Consider Space/detail-level progress panels where aggregate product-home status is too coarse.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
@@ -139,7 +140,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 4. **Progress producer expansion**
-- Record structured events from creator/development runs and visual-QA gates so the product-home stream reflects real autonomous work. Research Harness progress updates and creator visual-QA commit gates now cover the first workflow/gate producers.
+   - Record structured events from browser/development/repair flows so the product-home stream reflects real autonomous work. Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh workers now cover the first workflow/gate/ingest producers.
 
 5. **Space/detail-level progress panels**
    - Consider per-Space progress views if aggregate product-home events are too coarse for debugging autonomous creator loops.
@@ -202,9 +203,9 @@ The first roadmap pass has now delivered the Memory Tree module, source/job sche
 - **Local knowledge bridge:** Local knowledge remains file-index/search oriented and should be registered as Memory Tree source records with freshness/provenance rather than being copied wholesale into prompts.
 - **Advisory active context:** Active-Space context has display-side relevant memory and compact summaries, but agent/creator context injection should add cited Memory Tree snippets only after prompt-injection preflight.
 - **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
-- **Source refresh worker:** Metadata-only `source.refresh` jobs are queued and counted, but an allow-listed refresh worker still needs to consume them safely.
+- **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduling/trigger coverage and source-specific fetchers.
 - **Per-action policy/preflight:** Product-home policy visibility exists; creator/source/runtime boundaries still need explicit pass/warn/block receipts where high-risk context can influence actions.
-- **Progress producers:** Structured progress recording/status/card exist and Research Harness progress updates emit events; more real long-running creator/development/visual-QA workflows should emit events.
+- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, and Memory Tree source-refresh ingest now emit events; more real long-running browser/development/repair workflows should emit events.
 
 ---
 

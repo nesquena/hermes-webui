@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-18 22:52 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, product-home autonomy policy, Space detail/creator memory assist, structured progress cards, Research Harness progress-event producer coverage, and creator visual-QA commit progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining integration gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, product-home autonomy policy, Space detail/creator memory assist, structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, and Memory Tree source-refresh ingest progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining integration gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -28,9 +28,9 @@ Roadmap priority for upcoming autonomous sprints:
 
 1. Automated Memory Tree artifact ingestion at live Space manifest/revision/widget-event/repair/rollback/visual-QA boundaries.
 2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
-3. Safe source refresh worker for queued `source.refresh` records and local knowledge bridge.
+3. Broaden safe source refresh worker scheduling/trigger coverage and local knowledge bridge follow-through.
 4. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
-5. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates and creator visual-QA commit gates now emit the first workflow/gate progress events.
+5. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh ingest workers now emit the first workflow/gate/ingest progress events.
 6. Model-routing hint execution path and per-action policy receipts.
 7. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 

@@ -772,6 +772,29 @@ def _safe_refresh_error(_exc: BaseException) -> str:
     return "refresh failed"
 
 
+def _source_refresh_progress_run_id(*, source_id: str, job_id: str) -> str:
+    source_seed = _safe_text(source_id, limit=500) or "source"
+    job_seed = _safe_text(job_id, limit=500) or "job"
+    source_token = _sha256(f"source.refresh.progress.source:{source_seed}")[:24]
+    job_token = _sha256(f"source.refresh.progress.job:{job_seed}")[:24]
+    return f"memory-ingest:src-{source_token}:job-{job_token}"
+
+
+def _record_source_refresh_progress(event_type: str, *, source_id: str, job_id: str) -> None:
+    """Best-effort metadata-only progress producer for source refresh ingest."""
+    try:
+        from api.capy_progress import record_progress_event
+
+        record_progress_event(
+            {
+                "event_type": event_type,
+                "run_id": _source_refresh_progress_run_id(source_id=source_id, job_id=job_id),
+            }
+        )
+    except Exception:  # noqa: BLE001 - progress telemetry must not fail refresh work.
+        return
+
+
 def _refresh_lease_owned(job_id: str, lease_marker: str) -> bool:
     with _connect() as conn:
         return conn.execute(
@@ -855,6 +878,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         origin_uri = _safe_origin_uri(payload.get("origin_uri"), source_id=source_id)
         try:
+            _record_source_refresh_progress("memory.ingest.started", source_id=source_id, job_id=job_id)
             if not _source_refresh_allowed(origin_uri):
                 raise ValueError("refresh failed")
             fetched = fetch(source_id=source_id, origin_uri=origin_uri)
@@ -884,6 +908,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                     """,
                     (completed_at, completed_at, source_id),
                 )
+            _record_source_refresh_progress("memory.ingest.completed", source_id=source_id, job_id=job_id)
             results.append({
                 "job_id": job_id,
                 "source_id": source_id,
@@ -918,6 +943,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                     """,
                     (failed_at, error, failed_at, source_id),
                 )
+            _record_source_refresh_progress("memory.ingest.failed", source_id=source_id, job_id=job_id)
             results.append({
                 "job_id": job_id,
                 "source_id": source_id,
