@@ -246,6 +246,101 @@ def test_progress_status_returns_bounded_recent_event_stream_metadata_only(monke
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_progress_status_scopes_before_bounding_recent_events(monkeypatch, tmp_path):
+    log_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+    rows = [
+        {
+            "event_id": "evt-lab-old",
+            "event_type": "tool.completed",
+            "run_id": "research:lab",
+            "space_id": "lab",
+            "created_at": "2026-05-18T00:00:00Z",
+        }
+    ]
+    rows.extend(
+        {
+            "event_id": f"evt-other-{idx}",
+            "event_type": "tool.completed",
+            "run_id": f"research:other-{idx}",
+            "space_id": f"other-{idx}",
+            "created_at": "2026-05-18T00:00:01Z",
+        }
+        for idx in range(201)
+    )
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    scoped = progress_status(space_id="lab")
+    serialized = json.dumps(scoped, sort_keys=True).lower()
+
+    assert scoped["space_id"] == "lab"
+    assert scoped["recent_event_count"] == 1
+    assert scoped["recent_events"] == [
+        {
+            "event_id": "evt-lab-old",
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": "research:lab",
+            "created_at": "2026-05-18T00:00:00Z",
+            "space_id": "lab",
+        }
+    ]
+    assert "other-200" not in serialized
+
+
+def test_progress_event_rejects_unsafe_space_id_without_persisting_or_echoing(monkeypatch, tmp_path):
+    import pytest
+
+    log_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+
+    with pytest.raises(ValueError, match="Invalid progress space id"):
+        record_progress_event(
+            {
+                "event_type": "tool.completed",
+                "run_id": "safe-run",
+                "space_id": "SECRET_VALUE_DO_NOT_LEAK",
+                "payload": {"renderer": "<script>bad()</script>"},
+            }
+        )
+
+    assert not log_path.exists()
+
+
+def test_progress_status_rejects_blank_explicit_scope_without_returning_global_events(monkeypatch, tmp_path):
+    import pytest
+
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "events.jsonl"))
+    record_progress_event({"event_type": "tool.completed", "run_id": "research:lab", "space_id": "lab"})
+
+    with pytest.raises(ValueError, match="Invalid progress space id"):
+        progress_status(space_id=" ")
+
+
+def test_capy_progress_status_route_rejects_invalid_scope_without_returning_global_events(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "events.jsonl"))
+    record_progress_event({"event_type": "tool.completed", "run_id": "research:lab", "space_id": "lab"})
+
+    for url in (
+        "/api/capy-progress/status?space_id=SECRET_VALUE_DO_NOT_LEAK",
+        "/api/capy-progress/status?space_id=",
+        "/api/capy-progress/status?space_id=%20",
+    ):
+        handler = _RouteHandler()
+        handled = routes.handle_get(handler, urlparse(url))
+
+        assert handled is True
+        assert handler.status == 400
+        data = json.loads(handler.body.getvalue().decode("utf-8"))
+        serialized = json.dumps(data, sort_keys=True).lower()
+        assert data["error"] == "Invalid progress space id"
+        assert "tool.completed" not in serialized
+        assert "research:lab" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+
+
 def test_capy_progress_event_route_records_camelcase_event_metadata_only(monkeypatch, tmp_path):
     import api.routes as routes
 

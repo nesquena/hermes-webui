@@ -3076,12 +3076,17 @@ def handle_get(handler, parsed) -> bool:
         try:
             from api.capy_progress import progress_status
 
-            j(handler, progress_status())
+            params = parse_qs(parsed.query or "", keep_blank_values=True)
+            space_id = params.get("space_id", [None])[0]
+            j(handler, progress_status(space_id=space_id))
+            return True
+        except ValueError as exc:
+            bad(handler, str(exc), status=400)
             return True
         except Exception as exc:
             logger.exception("capy progress status failed")
-            return bad(handler, _sanitize_error(exc), status=500)
-
+            bad(handler, _sanitize_error(exc), status=500)
+            return True
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_get
 

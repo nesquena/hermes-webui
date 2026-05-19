@@ -2203,6 +2203,7 @@ def _record_research_progress_event(space_id: str, *, source_count: int, note_co
             {
                 "event_type": "tool.completed",
                 "run_id": run_id,
+                "space_id": space_id,
                 "payload": {
                     "source_count": max(0, int(source_count)),
                     "note_count": max(0, int(note_count)),
@@ -3380,6 +3381,7 @@ def _record_creator_visual_qa_progress_event(space_id: str) -> dict[str, Any]:
             {
                 "event_type": "space.visual_qa.completed",
                 "run_id": run_id,
+                "space_id": sid,
             }
         )
     except Exception:

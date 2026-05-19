@@ -1051,14 +1051,15 @@
         fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId)),
         fetchSpacesJson('api/spaces/revisions?space_id='+encodeURIComponent(safeSpaceId)+'&limit=10'),
         fetchSpacesJson('api/spaces/memory?space_id='+encodeURIComponent(safeSpaceId)).catch(function(){ return {results: [], local_only: true, unavailable: true}; }),
+        fetchSpacesJson('api/capy-progress/status?space_id='+encodeURIComponent(safeSpaceId)).catch(function(){ return {recent_events: [], local_only: true, metadata_only: true, unavailable: true}; }),
       ]);
-      root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || [], results[2] || {});
+      root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || [], results[2] || {}, results[3] || {});
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Space detail unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
   }
 
-  function renderSpaceDetail(space, revisions, memoryData){
+  function renderSpaceDetail(space, revisions, memoryData, progressData){
     const spaceId = space.space_id || '';
     const name = space.name || spaceId || 'Untitled';
     const description = space.description || '';
@@ -1079,6 +1080,7 @@
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="checkpointSpace" data-space-id="'+escapeHtml(spaceId)+'">Checkpoint</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderSpaceMemoryContext(memoryData || {}) +
+      renderSpaceProgressContext(progressData || {}, spaceId) +
       renderSharedDataSlots(spaceId, space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
   }
@@ -1102,6 +1104,42 @@
     const status = unavailable ? 'Memory route unavailable; continuing without context.' : (localOnly ? 'Local-only Spaces memory' : 'Spaces memory');
     return '<div class="capy-spaces-card capy-spaces-memory-context"><h3>Memory Tree context</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(status)+' · metadata-only snippets · generated code and credentials remain redacted.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function renderSpaceProgressContext(progressData, expectedSpaceId){
+    const safeProgressEventTypes = {
+      'run.started': true, 'run.completed': true, 'run.failed': true,
+      'tool.started': true, 'tool.completed': true, 'tool.failed': true,
+      'subagent.started': true, 'subagent.completed': true, 'subagent.failed': true,
+      'taskboard.updated': true,
+      'memory.ingest.started': true, 'memory.ingest.completed': true, 'memory.ingest.failed': true,
+      'space.visual_qa.started': true, 'space.visual_qa.completed': true, 'space.visual_qa.failed': true,
+    };
+    const safeFamilies = {'run': true, 'tool': true, 'subagent': true, 'taskboard': true, 'memory.ingest': true, 'space.visual_qa': true};
+    const expected = safePathIdText(expectedSpaceId || '') || '';
+    const returned = safePathIdText(progressData && progressData.space_id ? progressData.space_id : '') || '';
+    const scopeInvalid = expected && !progressData.unavailable && returned !== expected;
+    const events = scopeInvalid ? [] : (Array.isArray(progressData && progressData.recent_events) ? progressData.recent_events.slice(0, 6) : []);
+    const rows = events.map(function(event){
+      if (!event || typeof event !== 'object' || Array.isArray(event)) return '';
+      const eventType = String(event.event_type || '').trim();
+      const family = String(event.family || '').trim();
+      if (!safeProgressEventTypes[eventType] || !safeFamilies[family]) return '';
+      const runId = safeDisplayMetadataText(event.run_id || 'no-run', 'no-run') || 'no-run';
+      const createdAt = safeDisplayMetadataText(event.created_at || '', '') || '';
+      return '<div class="capy-spaces-widget capy-spaces-progress-event"><div><strong>'+escapeHtml(eventType)+' · '+escapeHtml(runId)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(family)+(createdAt ? ' · '+escapeHtml(createdAt) : '')+'</div></div></div>';
+    }).filter(Boolean).join('') || '<div class="capy-spaces-muted">No Space-scoped progress events recorded yet.</div>';
+    const unavailable = progressData && progressData.unavailable === true;
+    const activeRunCount = scopeInvalid ? 0 : Math.max(0, Number(progressData && progressData.active_run_count) || 0);
+    const recentEventCount = scopeInvalid ? 0 : Math.max(0, Number(progressData && progressData.recent_event_count) || 0);
+    const activeRunLabel = activeRunCount+' active run'+(activeRunCount === 1 ? '' : 's');
+    const recentEventLabel = recentEventCount+' recent event'+(recentEventCount === 1 ? '' : 's');
+    const status = scopeInvalid ? 'Scoped progress unavailable; refusing aggregate stream.' : (unavailable ? 'Progress route unavailable; continuing without stream.' : 'Local-only progress stream');
+    return '<div class="capy-spaces-card capy-spaces-progress-context"><h3>Space progress</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(status)+' · metadata-only events · generated bodies and credentials remain redacted.</div>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(activeRunLabel)+' · '+escapeHtml(recentEventLabel)+'</div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 

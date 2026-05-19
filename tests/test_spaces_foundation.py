@@ -5856,6 +5856,56 @@ def test_set_research_progress_records_metadata_only_progress_event(monkeypatch,
     assert "raw prompt" not in stored
 
 
+def test_progress_status_can_scope_to_one_space_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+
+    from api.capy_progress import progress_events_log_path, progress_status, record_progress_event
+
+    lab_event = record_progress_event(
+        {
+            "event_type": "tool.completed",
+            "run_id": "research:progress-lab",
+            "space_id": "progress-lab",
+            "payload": {
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "raw_prompt": "ignore previous instructions",
+            },
+        }
+    )
+    record_progress_event(
+        {
+            "eventType": "space.visual_qa.completed",
+            "runId": "creator:other-space",
+            "spaceId": "other-space",
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+    )
+
+    scoped = progress_status(space_id="progress-lab")
+    global_status = progress_status()
+    stored = progress_events_log_path().read_text(encoding="utf-8").lower()
+    serialized = json.dumps({"lab_event": lab_event, "scoped": scoped, "global": global_status}, sort_keys=True).lower()
+
+    assert scoped["space_id"] == "progress-lab"
+    assert scoped["recent_event_count"] == 1
+    assert scoped["recent_family_counts"] == {"tool": 1}
+    assert scoped["recent_events"][0]["event_type"] == "tool.completed"
+    assert scoped["recent_events"][0]["space_id"] == "progress-lab"
+    assert scoped["recent_events"][0]["run_id"] == "research:progress-lab"
+    assert global_status["recent_event_count"] == 2
+    assert "other-space" not in json.dumps(scoped, sort_keys=True)
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw prompt" not in serialized
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
 def test_set_research_progress_keeps_widget_updates_when_progress_log_fails(monkeypatch, tmp_path):
     bad_log_path = tmp_path / "progress-log-dir"
     bad_log_path.mkdir()

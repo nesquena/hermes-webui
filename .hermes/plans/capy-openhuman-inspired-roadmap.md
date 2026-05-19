@@ -101,11 +101,12 @@ Remaining:
 
 ### Phase 6 — Structured progress events
 
-Status: **recorder/status/product-home card implemented; broader producer coverage remains**.
+Status: **recorder/status/product-home and Space-detail cards implemented; broader producer coverage remains**.
 
 Delivered:
 - `api/capy_progress.py` records and summarizes bounded metadata-only progress events.
 - `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, and recent stream rows without raw payload/prompt leakage.
+- Space detail now loads `/api/capy-progress/status?space_id=...` and renders a Space-scoped progress card next to Memory Tree context/revision history, showing bounded active-run/recent-event metadata without unsafe event families, generated bodies, renderer/source fields, raw prompts, or credentials.
 - Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
 - Research Harness progress updates now emit metadata-only structured progress events so product-home progress status can reflect real research workflow activity without storing raw prompts, source text, renderer fields, or credentials.
 - Creator-loop commits that pass sandbox preview, visual QA, and explicit approval now emit `space.visual_qa.completed` progress events, giving the product-home stream real visual-QA gate producer coverage without storing prompts, generated bodies, renderers, sources, or credentials.
@@ -113,7 +114,6 @@ Delivered:
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.
-- Consider Space/detail-level progress panels where aggregate product-home status is too coarse.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
 
@@ -140,10 +140,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 4. **Progress producer expansion**
-   - Record structured events from browser/development/repair flows so the product-home stream reflects real autonomous work. Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh workers now cover the first workflow/gate/ingest producers.
-
-5. **Space/detail-level progress panels**
-   - Consider per-Space progress views if aggregate product-home events are too coarse for debugging autonomous creator loops.
+   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh workers now cover the first workflow/gate/ingest producers.
 
 ---
 
@@ -197,7 +194,7 @@ Only after the remaining Phase 1-6 integration items are working:
 
 ### Gaps to close / next integration targets
 
-The first roadmap pass has now delivered the Memory Tree module, source/job schema, compaction helper, memory freshness card, relevant-memory UI, policy card, and progress card. Current remaining work is narrower:
+The first roadmap pass has now delivered the Memory Tree module, source/job schema, compaction helper, memory freshness card, relevant-memory UI, policy card, and product-home plus Space-detail progress cards. Current remaining work is narrower:
 
 - **Automated artifact ingestion:** Space manifests, revision/rollback/repair events, widget events, and visual-QA reports have canonicalizers, but more production boundaries still need to call `canonicalize_*` + `ingest_source(...)` automatically.
 - **Local knowledge bridge:** Local knowledge remains file-index/search oriented and should be registered as Memory Tree source records with freshness/provenance rather than being copied wholesale into prompts.

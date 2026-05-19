@@ -45,6 +45,16 @@ _SUPPORTED_EVENT_TYPES = [
 ]
 _SUPPORTED_EVENT_SET = set(_SUPPORTED_EVENT_TYPES)
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}$")
+_UNSAFE_PUBLIC_ID_RE = re.compile(
+    r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|ignore\s+previous\s+instructions|"
+    r"credential|password|secret(?!ary)|token(?!ization)|authorization|cookie|"
+    r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])|"
+    r"(?:^|[._/\s])(?:html|script|source|data|body|code)(?:$|[._/\s])|"
+    r"(?:html|script|source|data|body|code)(?:panel|widget|module|source|body)",
+    re.IGNORECASE,
+)
 _SAFE_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _MAX_STATUS_EVENTS = 200
 
@@ -72,7 +82,19 @@ def _event_family(event_type: str) -> str:
 
 def _safe_public_id(value: Any) -> str:
     text = str(value or "").strip()
-    return text if _SAFE_ID_RE.fullmatch(text) else ""
+    if not _SAFE_ID_RE.fullmatch(text):
+        return ""
+    if _UNSAFE_PUBLIC_ID_RE.search(text):
+        return ""
+    return text
+
+
+def _normalize_scoped_space_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    scoped_space_id = _safe_public_id(raw) if raw else ""
+    if not scoped_space_id:
+        raise ValueError("Invalid progress space id")
+    return scoped_space_id
 
 
 def _safe_created_at(value: Any) -> str:
@@ -109,29 +131,64 @@ def _normalize_run_id(payload: dict[str, Any]) -> str:
     return candidates[0] if candidates else ""
 
 
-def _read_events() -> list[dict[str, Any]]:
+def _normalize_space_id(payload: dict[str, Any]) -> str:
+    candidates = []
+    for key in ("space_id", "spaceId"):
+        if key not in payload:
+            continue
+        raw = str(payload.get(key) or "").strip()
+        if not raw:
+            continue
+        value = _safe_public_id(raw)
+        if not value:
+            raise ValueError("Invalid progress space id")
+        candidates.append(value)
+    if candidates and any(value != candidates[0] for value in candidates[1:]):
+        raise ValueError("Conflicting progress space aliases")
+    return candidates[0] if candidates else ""
+
+
+def _space_id_from_record(item: dict[str, Any], run_id: str) -> str:
+    space_id = _safe_public_id(item.get("space_id") or item.get("spaceId"))
+    if space_id:
+        return space_id
+    for prefix in ("research:", "creator:"):
+        if run_id.startswith(prefix):
+            return _safe_public_id(run_id[len(prefix) :])
+    return ""
+def _read_events(space_id: str | None = None) -> list[dict[str, Any]]:
     path = progress_events_log_path()
     if not path.exists():
         return []
     events: list[dict[str, Any]] = []
+    scoped_space_id = _normalize_scoped_space_id(space_id) if space_id else ""
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 try:
                     item = json.loads(line)
-                except Exception:
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
                     continue
                 event_type = item.get("event_type")
                 if event_type in _SUPPORTED_EVENT_SET:
-                    events.append(
-                        {
-                            "event_id": _safe_public_id(item.get("event_id")),
-                            "event_type": event_type,
-                            "family": _event_family(event_type),
-                            "run_id": _safe_public_id(item.get("run_id")),
-                            "created_at": _safe_created_at(item.get("created_at")),
-                        }
-                    )
+                    run_id = _safe_public_id(item.get("run_id"))
+                    event = {
+                        "event_id": _safe_public_id(item.get("event_id")),
+                        "event_type": event_type,
+                        "family": _event_family(event_type),
+                        "run_id": run_id,
+                        "created_at": _safe_created_at(item.get("created_at")),
+                    }
+                    item_space_id = _space_id_from_record(item, run_id)
+                    if scoped_space_id and item_space_id != scoped_space_id:
+                        continue
+                    if item_space_id:
+                        event["space_id"] = item_space_id
+                    events.append(event)
+                    if len(events) > _MAX_STATUS_EVENTS:
+                        events = events[-_MAX_STATUS_EVENTS:]
     except OSError:
         return []
     return events[-_MAX_STATUS_EVENTS:]
@@ -191,16 +248,20 @@ def _recent_events(events: list[dict[str, Any]]) -> list[dict[str, str]]:
                 "created_at": created_at,
             }
         )
+        space_id = _safe_public_id(event.get("space_id"))
+        if space_id:
+            recent[-1]["space_id"] = space_id
         if len(recent) >= 6:
             break
     return recent
 
 
-def progress_status() -> dict[str, Any]:
+def progress_status(space_id: str | None = None) -> dict[str, Any]:
     """Return local-only progress event capability/status metadata."""
-    events = _read_events()
+    scoped_space_id = _normalize_scoped_space_id(space_id) if space_id is not None else ""
+    events = _read_events(space_id=scoped_space_id or None)
     last_event_at = events[-1]["created_at"] if events else ""
-    return {
+    status = {
         "available": True,
         "local_only": True,
         "metadata_only": True,
@@ -215,6 +276,9 @@ def progress_status() -> dict[str, Any]:
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
         "redaction_status": "metadata_only",
     }
+    if scoped_space_id:
+        status["space_id"] = scoped_space_id
+    return status
 
 
 def record_progress_event(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -222,9 +286,10 @@ def record_progress_event(payload: dict[str, Any] | None) -> dict[str, Any]:
     body = payload if isinstance(payload, dict) else {}
     event_type = _normalize_event_type(body)
     run_id = _normalize_run_id(body)
+    space_id = _normalize_space_id(body)
     created_at = _now_iso()
     digest_input = json.dumps(
-        {"event_type": event_type, "run_id": run_id, "created_at": created_at},
+        {"event_type": event_type, "run_id": run_id, "space_id": space_id, "created_at": created_at},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -237,11 +302,13 @@ def record_progress_event(payload: dict[str, Any] | None) -> dict[str, Any]:
         "created_at": created_at,
         "redaction_status": "metadata_only",
     }
+    if space_id:
+        record["space_id"] = space_id
     path = progress_events_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-    return {
+    result = {
         "stored": True,
         "queued": True,
         "event_id": event_id,
@@ -251,6 +318,9 @@ def record_progress_event(payload: dict[str, Any] | None) -> dict[str, Any]:
         "created_at": created_at,
         "redaction_status": "metadata_only",
     }
+    if space_id:
+        result["space_id"] = space_id
+    return result
 
 
 __all__ = ["progress_events_log_path", "progress_status", "record_progress_event"]
