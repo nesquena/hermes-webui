@@ -12620,6 +12620,8 @@ def test_spaces_demo_smoke_routes_are_metadata_only(monkeypatch, tmp_path):
 
 
 def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "semi_autonomous")
     _load_spaces(monkeypatch, tmp_path, enabled=True)
 
     handled, status, suite = _route_post(
@@ -12643,6 +12645,31 @@ def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch,
     assert receipt["compacted"] is True
     assert "cap_section_chars" in receipt["rules_applied"]
     assert receipt["redaction_status"] in {"none", "redacted"}
+
+    context = suite["context_status"]
+    assert context["available"] is True
+    assert context["metadata_only"] is True
+    assert context["local_only"] is True
+    assert context["memory"] == {
+        "available": True,
+        "source_count": context["memory"]["source_count"],
+        "chunk_count": context["memory"]["chunk_count"],
+        "stale_source_count": 0,
+        "refresh_job_count": 0,
+    }
+    assert context["memory"]["source_count"] > 0
+    assert context["memory"]["chunk_count"] > 0
+    assert context["policy"] == {
+        "available": True,
+        "mode": "semi_autonomous",
+        "label": "Semi-autonomous",
+        "prompt_preflight_status": "required",
+        "model_hint_count": 6,
+    }
+    assert context["progress"]["available"] is True
+    assert context["progress"]["recent_event_count"] >= 1
+    assert context["progress"]["active_run_count"] == 0
+    assert context["progress"]["recent_family_counts"].get("tool", 0) >= 1
 
     serialized = json.dumps(suite).lower()
     assert "secret_value_do_not_leak" not in serialized

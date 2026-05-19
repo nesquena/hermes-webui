@@ -2831,6 +2831,83 @@ def _space_demo_suite_summary_lines(results: list[dict[str, Any]], *, passed: in
     return lines
 
 
+def _space_demo_context_status() -> dict[str, Any]:
+    """Return allow-listed context-layer status for demo-suite receipts.
+
+    The run-all smoke receipt is product-visible, so only aggregate counts and
+    fixed policy labels are included. Do not include source names, origin URIs,
+    prompts, model/provider names, event ids, raw progress payloads, or errors.
+    """
+    try:
+        from api.capy_memory import memory_status
+
+        memory = memory_status()
+    except Exception:
+        memory = {"available": False, "source_count": 0, "chunk_count": 0, "stale_source_count": 0, "refresh_job_count": 0}
+    try:
+        from api.capy_policy import policy_status
+
+        policy = policy_status()
+    except Exception:
+        policy = {"available": False, "mode": "unknown", "label": "Unavailable", "prompt_preflight": {}, "model_routing": {}}
+    try:
+        from api.capy_progress import progress_status
+
+        progress = progress_status()
+    except Exception:
+        progress = {"available": False, "recent_event_count": 0, "active_run_count": 0, "recent_family_counts": {}}
+
+    if not isinstance(memory, dict):
+        memory = {"available": False, "source_count": 0, "chunk_count": 0, "stale_source_count": 0, "refresh_job_count": 0}
+    if not isinstance(policy, dict):
+        policy = {"available": False, "mode": "unknown", "label": "Unavailable", "prompt_preflight": {}, "model_routing": {}}
+    if not isinstance(progress, dict):
+        progress = {"available": False, "recent_event_count": 0, "active_run_count": 0, "recent_family_counts": {}}
+
+    raw_routing = policy.get("model_routing")
+    routing = raw_routing if isinstance(raw_routing, dict) else {}
+    raw_hints = routing.get("supported_hints")
+    hints = raw_hints if isinstance(raw_hints, list) else []
+    raw_prompt_preflight = policy.get("prompt_preflight")
+    prompt_preflight = raw_prompt_preflight if isinstance(raw_prompt_preflight, dict) else {}
+    raw_family_counts = progress.get("recent_family_counts")
+    family_counts = raw_family_counts if isinstance(raw_family_counts, dict) else {}
+    safe_family_counts: dict[str, int] = {}
+    for key in ("run", "tool", "subagent", "taskboard", "memory.ingest", "space.visual_qa"):
+        try:
+            count = int(family_counts.get(key) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            safe_family_counts[key] = count
+
+    return {
+        "available": True,
+        "metadata_only": True,
+        "local_only": True,
+        "memory": {
+            "available": bool(memory.get("available")),
+            "source_count": int(memory.get("source_count") or 0),
+            "chunk_count": int(memory.get("chunk_count") or 0),
+            "stale_source_count": int(memory.get("stale_source_count") or 0),
+            "refresh_job_count": int(memory.get("refresh_job_count") or 0),
+        },
+        "policy": {
+            "available": bool(policy.get("available")),
+            "mode": str(policy.get("mode") or "unknown")[:80],
+            "label": str(policy.get("label") or "Unavailable")[:80],
+            "prompt_preflight_status": str(prompt_preflight.get("status") or "unknown")[:80],
+            "model_hint_count": len(hints),
+        },
+        "progress": {
+            "available": bool(progress.get("available")),
+            "recent_event_count": int(progress.get("recent_event_count") or 0),
+            "active_run_count": int(progress.get("active_run_count") or 0),
+            "recent_family_counts": safe_family_counts,
+        },
+    }
+
+
 def space_demo_run_all() -> dict[str, Any]:
     """Run every metadata-only Space Agent video parity smoke fixture."""
     results = [space_demo_run(item["demo"]) for item in _SPACE_DEMO_RUNS]
@@ -2853,6 +2930,7 @@ def space_demo_run_all() -> dict[str, Any]:
         "passed": passed,
         "failed": total - passed,
         "output_compaction": output_compaction,
+        "context_status": _space_demo_context_status(),
         "results": results,
     }
 

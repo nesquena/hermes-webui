@@ -631,6 +631,29 @@
       '</div>';
   }
 
+  function renderContextLayerStatus(status){
+    const data = status && typeof status === 'object' && !Array.isArray(status) ? status : null;
+    if (!data) return '';
+    const memory = data.memory && typeof data.memory === 'object' && !Array.isArray(data.memory) ? data.memory : {};
+    const policy = data.policy && typeof data.policy === 'object' && !Array.isArray(data.policy) ? data.policy : {};
+    const progress = data.progress && typeof data.progress === 'object' && !Array.isArray(data.progress) ? data.progress : {};
+    const families = progress.recent_family_counts && typeof progress.recent_family_counts === 'object' && !Array.isArray(progress.recent_family_counts) ? progress.recent_family_counts : {};
+    const familyOrder = ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
+    const familyParts = familyOrder.map(function(name){
+      const count = safeNonNegativeCount(families[name]);
+      return count ? name+' '+count : '';
+    }).filter(Boolean);
+    const label = safeDisplayMetadataText(policy.label || 'Unavailable', 'Unavailable') || 'Unavailable';
+    const preflight = safeDisplayMetadataText(policy.prompt_preflight_status || 'unknown', 'unknown') || 'unknown';
+    return '<div class="capy-spaces-card capy-spaces-context-status"><h4>Context layer status</h4>' +
+      '<div class="capy-spaces-muted">Memory: '+safeNonNegativeCount(memory.source_count)+' sources · '+safeNonNegativeCount(memory.chunk_count)+' chunks · '+safeNonNegativeCount(memory.stale_source_count)+' stale · '+safeNonNegativeCount(memory.refresh_job_count)+' refresh jobs</div>' +
+      '<div class="capy-spaces-muted">Autonomy: '+escapeHtml(label)+' · Preflight: '+escapeHtml(preflight)+' · Model hints: '+safeNonNegativeCount(policy.model_hint_count)+'</div>' +
+      '<div class="capy-spaces-muted">Progress: '+safeNonNegativeCount(progress.recent_event_count)+' recent events · '+safeNonNegativeCount(progress.active_run_count)+' active runs</div>' +
+      (familyParts.length ? '<div class="capy-spaces-muted">Families: '+escapeHtml(familyParts.join(', '))+'</div>' : '') +
+      '<div class="capy-spaces-muted">Metadata-only status: source bodies, raw prompts, model/provider secrets, and event payloads omitted.</div>' +
+      '</div>';
+  }
+
   function renderDemoSmokeResult(data){
     const space = data && data.space && typeof data.space === 'object' ? data.space : {};
     const demo = data && data.demo ? String(data.demo) : 'demo';
@@ -706,6 +729,7 @@
     const failed = Number(data && data.failed || 0);
     const results = Array.isArray(data && data.results) ? data.results : [];
     const suiteCompaction = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
+    const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const rows = results.slice(0, 20).map(function(item){
       const demo = item && item.demo ? String(item.demo) : 'demo';
       const template = item && item.template ? String(item.template) : 'template';
@@ -780,7 +804,7 @@
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
-      suiteCompaction +
+      suiteCompaction + contextStatus +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 

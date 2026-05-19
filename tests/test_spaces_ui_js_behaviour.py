@@ -388,6 +388,14 @@ global.fetch = async function(path, opts = {}) {
         text: 'renderer <script>SECRET_VALUE_DO_NOT_LEAK</script> raw prompt api_key bearer placeholder',
         command: 'raw prompt should never render',
       },
+      context_status: {
+        available: true,
+        metadata_only: true,
+        local_only: true,
+        memory: { available: true, source_count: 3, chunk_count: 12, stale_source_count: 1, refresh_job_count: 2, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        policy: { available: true, mode: 'semi_autonomous', label: 'Semi-autonomous', prompt_preflight_status: 'required', model_hint_count: 6, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress: { available: true, recent_event_count: 4, active_run_count: 1, recent_family_counts: { run: 2, 'memory.ingest': 1, 'space.visual_qa': 1 }, source: 'SECRET_SOURCE' },
+      },
       results: [
         { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true, queued_event_count: 1, weather_observation: { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } }, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } }, prompt_flow: { blank_space: true, chat_answer_status: 'recorded', widget_created: true, reload_verified: true, query: 'What is the weather in Prague?', answer_preview: 'Prague is partly cloudy at 18 °C; the answer is now saved as safe widget metadata.', widget_request: 'show it to me in a widget', network_mode: 'agent-mediated', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
         { ok: true, demo: 'demo_notes_app', template: 'notes', mode: 'metadata-only-smoke', space: { space_id: 'demo-notes-app', name: 'Notes App Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true, queued_event_count: 1, notes_flow: { folders_ready: true, folder_count: 2, active_folder: 'Demo Project', editor_saved: true, markdown_preview_saved: true, attachments_agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' } },
@@ -5186,6 +5194,11 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Compacted output: 900 chars" in out["rootHtml"]
     assert "Redaction: redacted" in out["rootHtml"]
     assert "Rules: cap_section_chars, preserve_error_blocks, redact_unsafe_markers" in out["rootHtml"]
+    assert "Context layer status" in out["rootHtml"]
+    assert "Memory: 3 sources · 12 chunks · 1 stale · 2 refresh jobs" in out["rootHtml"]
+    assert "Autonomy: Semi-autonomous · Preflight: required · Model hints: 6" in out["rootHtml"]
+    assert "Progress: 4 recent events · 1 active runs" in out["rootHtml"]
+    assert "Families: run 2, memory.ingest 1, space.visual_qa 1" in out["rootHtml"]
     assert "raw_prompt" not in out["rootHtml"]
     assert "smoke patch" not in out["rootHtml"].lower()
     assert "Observation summary" not in out["rootHtml"]
