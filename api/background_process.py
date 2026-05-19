@@ -461,6 +461,75 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
         )
 
 
+# ── xsession wakeup misroute defense-in-depth (選項3) ───────────────────────
+# 選項1 (api/streaming._set_turn_session_identity) is the ROOT fix: it binds
+# the per-turn session identity to a contextvar so a notify_on_complete spawn
+# can no longer capture a concurrent turn's process-global env. 選項3 is an
+# INDEPENDENT completion-time safety net at the wakeup-routing layer: even if
+# some future regression reintroduces a capture race, a positively-detected
+# mismatch must not wake the wrong session.
+#
+# The proc→owner link the WebUI drain trusts is ProcessSession.session_key,
+# which the terminal tool captured from the (historically racy) env at spawn.
+# An env-IMMUNE spawn-time owner would be the authoritative cross-check, but
+# adding such a field to the core ProcessSession is out of scope for this
+# WebUI-only change. So this resolver is forward-compatible by DUCK-TYPING:
+# if a future core grows an env-immune spawn-owner attribute (any of the
+# names below) AND it positively disagrees with the session_key-resolved
+# target, re-route to the env-immune owner and log ERROR. When the owner is
+# absent/empty/unknown (today's core, cron/CLI processes sharing the
+# registry, pre-選項1 spawns) it is a PURE PASS-THROUGH — it never suppresses
+# a legitimate Option Z wakeup on uncertainty (Option Z must keep working).
+_ENV_IMMUNE_OWNER_ATTRS = ("spawn_session_id", "owner_session_id", "turn_session_id")
+
+
+def _env_immune_spawn_owner(proc_session) -> str:
+    """Return the env-immune spawn-time owner sid from the ProcessSession, or
+    "" when none is available (the only contract today; forward-compatible)."""
+    if proc_session is None:
+        return ""
+    for attr in _ENV_IMMUNE_OWNER_ATTRS:
+        try:
+            val = getattr(proc_session, attr, "")
+        except Exception:
+            val = ""
+        if val:
+            return str(val)
+    return ""
+
+
+def _resolve_wakeup_target(
+    *,
+    process_id: str,
+    session_key_resolved_sid: str,
+    proc_session,
+) -> str:
+    """Cross-check the session_key-resolved wakeup target against the
+    env-immune spawn owner. Returns the sid the server-side wakeup turn should
+    actually target.
+
+    - Owner unknown/empty  → pass-through (return session_key_resolved_sid).
+    - Owner == resolved    → pass-through (the normal + post-選項1 case).
+    - Owner != resolved    → POSITIVE mismatch: log ERROR and RE-ROUTE to the
+      env-immune owner (do NOT wake the wrong session — this is the exact
+      agent.log:6632 cross-session misroute).
+    """
+    resolved = str(session_key_resolved_sid or "")
+    owner = _env_immune_spawn_owner(proc_session)
+    if not owner or owner == resolved:
+        return resolved
+    logger.error(
+        "xsession wakeup misroute BLOCKED (選項3 safety net): process %r "
+        "session_key resolved to session %r but the env-immune spawn owner "
+        "is %r — re-routing the server-side wakeup to the true owner. This "
+        "means a per-turn session-identity capture race occurred upstream "
+        "(選項1 should have prevented it); investigate streaming.py "
+        "_set_turn_session_identity coverage.",
+        process_id, resolved, owner,
+    )
+    return owner
+
+
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
@@ -499,6 +568,27 @@ def _process_one(evt: dict) -> None:
         # registry but a non-WebUI session_key. Ignore.
         logger.debug("process_complete drop: no session mapping for key=%r", session_key)
         return
+    # ── xsession wakeup misroute defense-in-depth (選項3) ──────────────────
+    # session_id above came from PROCESS_SESSION_INDEX.get(session_key), and
+    # session_key was captured by the terminal tool from the (historically
+    # racy) process-global env at spawn. 選項1 binds the per-turn identity to
+    # a contextvar so that capture is no longer racy — but as an INDEPENDENT
+    # safety net, cross-check the resolved target against the env-immune
+    # spawn owner (when the core ProcessSession exposes one). On a positive
+    # mismatch this re-routes the wakeup (and the live-view emit + dedupe
+    # markers below) to the TRUE owner instead of waking the wrong session.
+    # Pure pass-through when no env-immune owner is available (today's core,
+    # cron/CLI procs, pre-選項1 spawns) — never suppresses a valid wakeup.
+    try:
+        from tools.process_registry import process_registry as _pr_xs
+        _ps_xs = _pr_xs.get(process_id) if process_id else None
+    except Exception:
+        _ps_xs = None
+    session_id = _resolve_wakeup_target(
+        process_id=process_id,
+        session_key_resolved_sid=session_id,
+        proc_session=_ps_xs,
+    )
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via

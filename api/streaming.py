@@ -686,6 +686,102 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
     return env
 
 
+# ── Per-turn session identity (xsession wakeup misroute root fix — Option 1) ─
+# WebUI bound per-turn session identity ONLY to the process-global
+# os.environ['HERMES_SESSION_KEY'] (turn-start, line ~3263) and released the
+# env lock BEFORE the agent ran. WebUI never called any contextvar setter, so
+# gateway.session_context._SESSION_KEY stayed _UNSET and
+# tools.approval.get_current_session_key (the EXACT call a
+# notify_on_complete background spawn makes in terminal_tool.py:~1928) fell
+# back to that racy process-global slot. Two concurrent WebUI turns therefore
+# raced on one slot: session A's spawn could capture session B's id, and at
+# completion the server-side wakeup turn started for the WRONG session
+# (RCA t_f62ff1e8, agent.log:6632). The agent worker runs synchronously inside
+# the _run_agent_streaming thread (concurrent tool batches use
+# contextvars.copy_context() so children inherit this binding); binding the
+# context-local here makes the capture task/thread-local and race-immune.
+def _set_turn_session_identity(session_id: str):
+    """Bind THIS turn's session identity to the current (task/thread-local)
+    context and return an opaque token for _reset_turn_session_identity.
+
+    Binds two context-locals so every session-key consumer is covered without
+    a race:
+      * ``tools.approval._approval_session_key`` — checked FIRST by
+        ``get_current_session_key`` (the exact call terminal_tool.py makes for
+        a notify_on_complete background spawn: the bug path).
+      * ``gateway.session_context._SESSION_KEY`` — read by direct
+        ``get_session_env("HERMES_SESSION_KEY")`` consumers (e.g. the sudo
+        password cache scope, terminal_tool.py:272).
+
+    It deliberately does NOT call ``gateway.session_context.set_session_vars``:
+    that blanket setter also zeroes the platform/chat_id/user contextvars,
+    flipping ``HERMES_SESSION_PLATFORM`` from its env fallback (``'webui'``,
+    still written to os.environ at turn-start) to an explicit ``""`` — which
+    would break the ``notify_on_complete`` watcher registration gate in
+    terminal_tool.py:~1966. Only the session-key identity is bound; every
+    other session var keeps its existing os.environ fallback (CLI/cron compat
+    preserved — when these contextvars are _UNSET, get_session_env still falls
+    back to os.environ).
+    """
+    sid = str(session_id or "")
+    tokens: dict = {}
+    try:
+        from tools.approval import set_current_session_key
+        tokens["approval"] = set_current_session_key(sid)
+    except Exception:
+        logger.debug("per-turn approval session-key bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_KEY as _SK
+        tokens["session_key"] = _SK.set(sid)
+    except Exception:
+        logger.debug("per-turn _SESSION_KEY bind failed", exc_info=True)
+    return tokens
+
+
+def _reset_turn_session_identity(tokens) -> None:
+    """Restore the context-locals bound by ``_set_turn_session_identity`` via
+    contextvars reset-token semantics.
+
+    Reset-token (not a blanket clear) is the canonical idiom: it composes
+    correctly under nesting and restores ``_UNSET`` for the top-level turn so
+    a reused thread-pool worker leaks no identity and CLI/cron env fallback
+    resumes. Order mirrors the bind in reverse.
+    """
+    if not tokens:
+        return
+    tok = tokens.get("session_key")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_KEY as _SK
+            _SK.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_KEY reset failed", exc_info=True)
+    tok = tokens.get("approval")
+    if tok is not None:
+        try:
+            from tools.approval import reset_current_session_key
+            reset_current_session_key(tok)
+        except Exception:
+            logger.debug("per-turn approval session-key reset failed", exc_info=True)
+
+
+@contextlib.contextmanager
+def _bind_turn_session_identity(session_id: str):
+    """Context-manager form of the per-turn session-identity binding.
+
+    The ``_run_agent_streaming`` worker uses the explicit ``_set``/``_reset``
+    pair directly because its single ``try/finally`` already spans the whole
+    turn (~2k lines) and the binding must cover every mid-turn background
+    spawn; this wrapper is the canonical single-call API for other callers and
+    for tests, and shares the exact same code path.
+    """
+    tokens = _set_turn_session_identity(session_id)
+    try:
+        yield
+    finally:
+        _reset_turn_session_identity(tokens)
+
+
 def _format_process_notification(evt: dict) -> str:
     """Format a completed background process notification for agent input."""
     if not isinstance(evt, dict):
@@ -3163,6 +3259,11 @@ def _run_agent_streaming(
         if _is_fallback_notice:
             put('warning', {'type': 'fallback', 'message': _message})
 
+    # xsession wakeup misroute root fix (Option 1): pre-init so the outer
+    # finally can always reset even if an exception fires before the bind.
+    # Placed ABOVE the _checkpoint_stop cluster so that cluster stays adjacent
+    # to the `try:` (preserves the Issue #765 static-locator invariant).
+    _turn_session_identity_tokens = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -3170,6 +3271,12 @@ def _run_agent_streaming(
     _ckpt_thread = None
     _agent_lock = None
     try:
+        # Bind THIS turn's session identity to the worker thread/context BEFORE
+        # any agent work (so every mid-turn notify_on_complete background spawn
+        # captures THIS session, not a concurrent turn's process-global env).
+        # Co-located with the existing env-restore lifecycle: set here, reset
+        # in the outer finally next to _clear_thread_env().
+        _turn_session_identity_tokens = _set_turn_session_identity(session_id)
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -5221,6 +5328,12 @@ def _run_agent_streaming(
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
+        # xsession wakeup misroute root fix (Option 1): restore the per-turn
+        # session-identity context-locals (reset-token semantics). MUST run on
+        # every exit path so a reused thread-pool worker leaks no identity and
+        # CLI/cron env fallback resumes — same lifecycle slot as the env
+        # restore above.
+        _reset_turn_session_identity(_turn_session_identity_tokens)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
