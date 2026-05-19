@@ -1282,6 +1282,60 @@ def _widget_event_label_summary(value: Any, limit: int = 120) -> str:
     return text
 
 
+def _memory_hit_preflight_passes(hit: dict[str, Any], raw_snippet: str) -> bool:
+    """Return true only when an advisory Memory Tree hit passes prompt preflight.
+
+    Memory Tree content is untrusted context, even after canonicalization. Run a
+    metadata-only prompt-injection preflight immediately before injecting it into
+    creator previews or active-agent context.
+    """
+    preflight_parts = [
+        _context_value(hit.get("source_id"), 200),
+        _context_value(hit.get("source_type"), 120),
+        _context_value(hit.get("redaction_status"), 80),
+        _context_value(raw_snippet, 1_200),
+    ]
+    preflight_text = "\n".join(part for part in preflight_parts if part).strip()
+    if not preflight_text:
+        return False
+    try:
+        from api.capy_policy import prompt_preflight
+
+        receipt = prompt_preflight(preflight_text, boundary="memory_context")
+    except Exception:
+        return False
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("available") is True
+        and receipt.get("action") == "capy.prompt_preflight"
+        and receipt.get("boundary") == "memory_context"
+        and receipt.get("status") == "pass"
+        and receipt.get("metadata_only") is True
+        and receipt.get("raw_prompt_stored") is False
+    )
+
+
+def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool]:
+    """Return a public advisory memory hit plus whether prompt preflight blocked it."""
+    if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
+        return None, False
+    raw_snippet = str(hit.get("snippet") or "")
+    heading_index = raw_snippet.find("# ")
+    if heading_index >= 0:
+        raw_snippet = raw_snippet[heading_index:]
+    if not _memory_hit_preflight_passes(hit, raw_snippet):
+        return None, True
+    safe_hit = {
+        "source_id": _active_context_value(hit.get("source_id"), 160),
+        "source_type": _active_context_value(hit.get("source_type"), 80),
+        "redaction_status": _active_context_value(hit.get("redaction_status"), 80),
+        "snippet": _active_context_value(raw_snippet, 700),
+    }
+    if not any(safe_hit.values()) or any(value == "[REDACTED]" for value in safe_hit.values()):
+        return None, False
+    return safe_hit, False
+
+
 def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) -> dict[str, Any] | None:
     """Return bounded, metadata-only relevant-memory hints for creator previews.
 
@@ -1307,19 +1361,8 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
     for hit in raw_hits:
         if len(results) >= bounded_limit:
             break
-        if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
-            continue
-        raw_snippet = str(hit.get("snippet") or "")
-        heading_index = raw_snippet.find("# ")
-        if heading_index >= 0:
-            raw_snippet = raw_snippet[heading_index:]
-        safe_hit = {
-            "source_id": _active_context_value(hit.get("source_id"), 160),
-            "source_type": _active_context_value(hit.get("source_type"), 80),
-            "redaction_status": _active_context_value(hit.get("redaction_status"), 80),
-            "snippet": _active_context_value(raw_snippet, 700),
-        }
-        if not any(safe_hit.values()) or any(value == "[REDACTED]" for value in safe_hit.values()):
+        safe_hit, _blocked = _safe_advisory_memory_hit(hit)
+        if safe_hit is None:
             continue
         results.append(safe_hit)
     if not results:
@@ -1864,26 +1907,24 @@ def build_agent_context(space_id: str | None) -> str:
     if memory_hits:
         memory_lines: list[str] = []
         rendered_memory_hits = 0
+        blocked_memory_hits = 0
         for hit in memory_hits:
             if rendered_memory_hits >= 3:
                 break
-            if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
+            safe_hit, blocked = _safe_advisory_memory_hit(hit)
+            if blocked:
+                blocked_memory_hits += 1
+            if safe_hit is None:
                 continue
-            source_id = _active_context_value(hit.get("source_id"), 160)
-            source_type = _active_context_value(hit.get("source_type"), 80)
-            redaction_status = _active_context_value(hit.get("redaction_status"), 80)
-            raw_snippet = str(hit.get("snippet") or "")
-            heading_index = raw_snippet.find("# ")
-            if heading_index >= 0:
-                raw_snippet = raw_snippet[heading_index:]
-            snippet = _active_context_value(raw_snippet, 700)
-            if not (source_id or source_type or snippet):
-                continue
-            memory_lines.append(f"- {source_id}|{source_type}|{redaction_status}|{snippet}")
+            memory_lines.append(
+                f"- {safe_hit['source_id']}|{safe_hit['source_type']}|{safe_hit['redaction_status']}|{safe_hit['snippet']}"
+            )
             rendered_memory_hits += 1
         if memory_lines:
             lines.append("relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):")
             lines.extend(memory_lines)
+        if blocked_memory_hits:
+            lines.append(f"memory preflight: omitted {blocked_memory_hits} blocked advisory memory hit(s)")
     revision = _public_revision_event_id(space.get("revision_event_id"))
     if revision:
         lines.append(f"revision_event_id: {revision}")

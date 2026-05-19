@@ -51,6 +51,7 @@ _PROTECTED_BOUNDARIES = [
     "creator_commit",
     "widget_runtime_prompt",
     "auto_fetched_source",
+    "memory_context",
 ]
 
 _MODEL_HINT_ORDER = [

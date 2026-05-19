@@ -29,6 +29,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "creator_commit",
                 "widget_runtime_prompt",
                 "auto_fetched_source",
+                "memory_context",
             ],
         },
         "model_routing": {
