@@ -12876,6 +12876,17 @@ def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch,
     assert context["progress"]["recent_event_count"] >= 1
     assert context["progress"]["active_run_count"] == 0
     assert context["progress"]["recent_family_counts"].get("tool", 0) >= 1
+    assert context["progress"]["recent_family_counts"].get("run", 0) >= 2
+
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    progress = progress_status()
+    assert progress["active_run_count"] == 0
+    assert progress["recent_family_counts"].get("run", 0) >= 2
+    progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo-suite:run-all"]
+    assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.completed"]
+    assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
 
     serialized = json.dumps(suite).lower()
     assert "secret_value_do_not_leak" not in serialized
@@ -12888,6 +12899,36 @@ def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch,
     assert "raw_prompt" not in serialized
     assert "generated body" not in serialized
     assert "source code" not in serialized
+
+
+def test_spaces_demo_run_all_records_failed_progress_when_post_processing_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.capy_compaction as capy_compaction
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    def fail_compaction(*_args, **_kwargs):
+        raise RuntimeError("synthetic compaction failure")
+
+    monkeypatch.setattr(capy_compaction, "compact_output", fail_compaction)
+
+    with pytest.raises(RuntimeError, match="synthetic compaction failure"):
+        spaces.space_demo_run_all()
+
+    progress = progress_status()
+    assert progress["active_run_count"] == 0
+    progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo-suite:run-all"]
+    assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.failed"]
+    assert all(item.get("family") == "run" for item in demo_run_events)
+    assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
+    serialized = json.dumps(demo_run_events, sort_keys=True).lower()
+    assert "synthetic compaction failure" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
 
 
 def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):

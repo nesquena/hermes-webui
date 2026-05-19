@@ -2920,31 +2920,57 @@ def _space_demo_context_status() -> dict[str, Any]:
     }
 
 
+def _record_space_demo_suite_progress_event(event_type: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress event for demo-suite smoke runs."""
+    safe_event_type = event_type if event_type in {"run.started", "run.completed", "run.failed"} else "run.failed"
+    run_id = "space-demo-suite:run-all"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": safe_event_type, "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "run",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def space_demo_run_all() -> dict[str, Any]:
     """Run every metadata-only Space Agent video parity smoke fixture."""
-    results = [space_demo_run(item["demo"]) for item in _SPACE_DEMO_RUNS]
-    passed = sum(1 for item in results if item.get("ok") is True)
-    total = len(results)
-    from api.capy_compaction import compact_output
+    _record_space_demo_suite_progress_event("run.started")
+    try:
+        results = [space_demo_run(item["demo"]) for item in _SPACE_DEMO_RUNS]
+        passed = sum(1 for item in results if item.get("ok") is True)
+        total = len(results)
+        from api.capy_compaction import compact_output
 
-    output_compaction = compact_output(
-        "\n".join(_space_demo_suite_summary_lines(results, passed=passed, total=total)),
-        tool="capy-spaces-demo-suite",
-        command="space.demo.run_all",
-        exit_status=0 if passed == total else 1,
-        max_chars=600,
-    )
-    return {
-        "ok": passed == total,
-        "action": "space.demo.run_all",
-        "mode": "metadata-only-smoke",
-        "total": total,
-        "passed": passed,
-        "failed": total - passed,
-        "output_compaction": output_compaction,
-        "context_status": _space_demo_context_status(),
-        "results": results,
-    }
+        output_compaction = compact_output(
+            "\n".join(_space_demo_suite_summary_lines(results, passed=passed, total=total)),
+            tool="capy-spaces-demo-suite",
+            command="space.demo.run_all",
+            exit_status=0 if passed == total else 1,
+            max_chars=600,
+        )
+        _record_space_demo_suite_progress_event("run.completed" if passed == total else "run.failed")
+        return {
+            "ok": passed == total,
+            "action": "space.demo.run_all",
+            "mode": "metadata-only-smoke",
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "output_compaction": output_compaction,
+            "context_status": _space_demo_context_status(),
+            "results": results,
+        }
+    except Exception:
+        _record_space_demo_suite_progress_event("run.failed")
+        raise
 
 
 def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:

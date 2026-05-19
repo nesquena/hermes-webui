@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-19 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, and Memory Tree source-refresh ingest progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, and Space demo-suite run progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -29,13 +29,18 @@ Roadmap priority for upcoming autonomous sprints:
 1. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
 2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
 3. Broaden safe source refresh worker scheduling/trigger coverage and source-specific fetchers after the local knowledge bridge.
-4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh ingest workers now emit the first workflow/gate/ingest progress events, and Space detail can inspect Space-scoped streams.
+4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, and the demo smoke suite now emit the first workflow/gate/ingest/run events, and Space detail can inspect Space-scoped streams.
 5. Model-routing hint execution path and per-action policy receipts.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): record demo suite progress events`
+  - Added RED/GREEN backend coverage proving `space_demo_run_all()` emits metadata-only `run.started` / `run.completed` progress events for successful smoke-suite runs and records `run.failed` if post-demo processing fails, preventing stale active-run counts.
+  - Wrapped the demo-suite smoke path with a fixed safe run id (`space-demo-suite:run-all`) and no raw demo output, prompts, widget bodies, renderer/source fields, API-auth fields, credentials, exception text, or secret-looking values in persisted progress records.
+  - Validation at completion: focused RED failed before implementation (`run` family count missing) and failed-path RED reproduced stale `active_run_count == 1`; focused GREEN passed (`2 passed`); backend progress + Spaces foundation suites passed (`493 passed`); Spaces UI behavior + demo parity suites passed (`202 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `node --check static/spaces.js`, `git diff --check`, spec/quality reviews, and `/tmp` real-static demo-suite progress browser QA passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c55ed2a5678443dc821b3b67520a1556.png`.
 
 - `fix(spaces): reject ambient package tool selectors`
   - Added RED/GREEN backend coverage proving non-current `space.import` and `space.export` reject same-valued ambient current selectors (`activeSpaceId` / `currentSpaceId`) before package creation/export handling, preserve candidate Spaces and event history, and avoid reflecting hostile renderer/source/API-auth/secret-looking fixture markers.
