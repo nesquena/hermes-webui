@@ -201,7 +201,23 @@
       renderMemoryFreshnessStat(refreshJobCount, 'refresh jobs') +
       '</div>' +
       '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="refreshMemorySources">Refresh sources</button></div>' +
       '</section>';
+  }
+
+  function renderMemoryRefreshResult(result){
+    const processed = safeNonNegativeCount(result && result.processed);
+    const jobs = Array.isArray(result && result.jobs) ? result.jobs.slice(0, 5) : [];
+    const jobRows = jobs.map(function(job){
+      const source = safeDisplayMetadataText(job && job.source_id, 'source') || 'source';
+      const status = safeDisplayMetadataText(job && job.status, 'updated') || 'updated';
+      return '<li>'+escapeHtml(source)+' · '+escapeHtml(status)+'</li>';
+    }).join('');
+    return '<div class="capy-spaces-card capy-spaces-memory-refresh-result" role="status">' +
+      '<h3>Source refresh complete</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(String(processed))+' source refresh '+escapeHtml(processed === 1 ? 'job' : 'jobs')+' processed · metadata-only</div>' +
+      (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
+      '</div>';
   }
 
   function renderMemoryFreshnessStat(value, label){
@@ -898,7 +914,7 @@
   function safeDisplayMetadataText(value, fallback){
     const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
     if (!text) return fallback || '';
-    const unsafeDisplayPattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\s+[^\s,;]+|cookie\s*[:=]|credential|credentials|password|secret(?:[_-][a-z0-9_-]+|\b)|token\s*[:=]|<script|<\/script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt)/i;
+    const unsafeDisplayPattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer\s+[^\s,;]+|cookie\s*[:=]|credential|credentials|password|secret(?:[_-][a-z0-9_-]+|\b)|token\s*[:=]|ghp_[a-z0-9_]+|github_pat_|sk-[a-z0-9_-]{8,}|akia[0-9a-z]{12,}|https?:\/\/[^\/\s:@]+:[^\/\s@]+@|<script|<\/script|javascript:|onerror|onload|renderer|generated[ _-]?code|raw[ _-]?prompt)/i;
     return unsafeDisplayPattern.test(text) ? '[REDACTED]' : text;
   }
 
@@ -2406,6 +2422,13 @@
     if (!button) return;
     const action = button.dataset.capyAction;
     const spaceId = button.dataset.spaceId || '';
+    if (action === 'refreshMemorySources') {
+      const data = await postSpacesJson('api/capy-memory/source/refresh', {limit: 5});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderMemoryRefreshResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
     if (action === 'openSystemPanel') {
       const panel = button.dataset.systemPanel || '';
       if (['chat', 'workspaces', 'tasks', 'memory', 'settings'].indexOf(panel) === -1) return;

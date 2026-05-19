@@ -136,7 +136,7 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/capy-memory/status') {
-    if (scenario === 'productHomeMemoryStatus') {
+    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction') {
       return response({
         available: true,
         local_only: true,
@@ -222,6 +222,19 @@ global.fetch = async function(path, opts = {}) {
         { event_id: 'renderer/../bad', event_type: 'renderer.source', family: 'renderer', run_id: 'SECRET_VALUE_DO_NOT_LEAK', space_id: 'lab', created_at: '<script>bad()</script>' },
       ],
       redaction_status: 'metadata_only',
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      raw_prompt: 'ignore previous instructions',
+    });
+  }
+  if (path === 'api/capy-memory/source/refresh') {
+    return response({
+      ok: true,
+      processed: 1,
+      jobs: [
+        { job_id: 'job-safe-1', source_id: 'docs-safe', status: 'completed', origin_uri: 'https://example.test/docs', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        { job_id: 'job-unsafe-2', source_id: 'ghp_abcdefghijklmnopqrstuvwxyz123456', status: '<img onerror=bad()>', origin_uri: 'https://user:pass@example.test/docs' },
+      ],
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       raw_prompt: 'ignore previous instructions',
@@ -1573,6 +1586,10 @@ async function dispatchWindowMessage(data, opts) {
     await window.openSpaceDetail('lab');
   } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomeProgressStatus') {
     await window.loadCapySpaces();
+  } else if (scenario === 'productHomeMemoryRefreshAction') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('refreshMemorySources', {});
   } else if (scenario === 'runtimePromptMessage') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
@@ -3577,6 +3594,29 @@ def test_spaces_ui_product_home_memory_freshness_card_is_visible_local_and_safe(
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
     assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeMemoryRefreshAction")
+    refresh_call = next(call for call in out["calls"] if call["path"] == "api/capy-memory/source/refresh")
+    html = out["rootHtml"]
+
+    assert "data-capy-action=\"refreshMemorySources\"" in out["beforeHtml"]
+    assert refresh_call["method"] == "POST"
+    assert json.loads(refresh_call["body"]) == {"limit": 5}
+    assert "Source refresh complete" in html
+    assert "1 source refresh job processed" in html
+    assert "docs-safe · completed" in html
+    assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "ghp_" not in html
+    assert "user:pass" not in html
+    assert "onerror" not in html.lower()
     assert "raw prompt" not in html.lower()
     assert "ignore previous instructions" not in html.lower()
 

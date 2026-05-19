@@ -4238,6 +4238,46 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("Capy memory source registration failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/source/refresh":
+        try:
+            from api.capy_memory import run_source_refresh_jobs
+
+            try:
+                limit = int(body.get("limit", 5))
+            except (TypeError, ValueError):
+                limit = 5
+            limit = max(1, min(limit, 25))
+            result = run_source_refresh_jobs(limit=limit)
+            import re as _capy_refresh_re
+
+            safe_jobs = []
+            for job in (result.get("jobs", []) if isinstance(result, dict) else [])[:limit]:
+                if not isinstance(job, dict):
+                    continue
+                safe_job = {}
+                for key in ("job_id", "source_id", "status", "error", "origin_uri"):
+                    value = job.get(key)
+                    if value is None:
+                        continue
+                    text = " ".join(str(value).split()).strip()[:240]
+                    if _capy_refresh_re.search(r"(api[_-]?key|authorization|bearer\s+|cookie\s*[:=]|credential|password|secret|token|ghp_[a-z0-9_]+|github_pat_|sk-[a-z0-9_-]{8,}|akia[0-9a-z]{12,}|https?://[^/\s:@]+:[^/\s@]+@|<script|</script|javascript:|onerror|onload|renderer|raw[_-]?prompt)", text, _capy_refresh_re.I):
+                        text = "[REDACTED]"
+                    safe_job[key] = text
+                if safe_job:
+                    safe_jobs.append(safe_job)
+            try:
+                processed = int(result.get("processed", 0) if isinstance(result, dict) else 0)
+            except (TypeError, ValueError):
+                processed = 0
+            processed = max(0, min(processed, limit))
+            j(handler, {"ok": True, "processed": processed, "jobs": safe_jobs})
+            return True
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Capy memory source refresh failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/capy-memory/local-knowledge/register":
         try:
             from api.capy_memory import register_local_knowledge_sources

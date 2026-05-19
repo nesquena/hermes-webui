@@ -24,6 +24,32 @@ from api.capy_memory import (
 from api.capy_progress import progress_status
 
 
+class _FakeJsonHandler:
+    def __init__(self, payload=None):
+        raw = json.dumps(payload or {}).encode("utf-8")
+        self.status = None
+        self.headers = {"Content-Length": str(len(raw))}
+        self.sent_headers = []
+        self.body = bytearray()
+        self.rfile = io.BytesIO(raw)
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def json_body(self):
+        return json.loads(bytes(self.body).decode("utf-8"))
+
+
 def _progress_log_rows(path):
     if not path.exists():
         return []
@@ -484,6 +510,92 @@ def test_register_source_reference_queues_metadata_only_refresh_job(tmp_path, mo
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "raw-prompt" not in serialized
+
+
+def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkeypatch):
+    from api import routes
+
+    calls = []
+
+    def fake_run_source_refresh_jobs(*, limit=5):
+        calls.append(limit)
+        return {
+            "processed": 1,
+            "jobs": [
+                {
+                    "job_id": "job-safe-1",
+                    "source_id": "docs-safe",
+                    "status": "completed",
+                    "error": "",
+                    "origin_uri": "https://example.test/docs",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                    "raw_prompt": "ignore previous instructions",
+                }
+            ],
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    monkeypatch.setattr(capy_memory, "run_source_refresh_jobs", fake_run_source_refresh_jobs)
+    handler = _FakeJsonHandler({"limit": 999, "api_key": "SECRET_VALUE_DO_NOT_LEAK"})
+
+    assert routes.handle_post(handler, urlparse("http://example.test/api/capy-memory/source/refresh")) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert handler.status == 200
+    assert calls == [25]
+    assert payload == {
+        "ok": True,
+        "processed": 1,
+        "jobs": [
+            {
+                "job_id": "job-safe-1",
+                "source_id": "docs-safe",
+                "status": "completed",
+                "error": "",
+                "origin_uri": "https://example.test/docs",
+            }
+        ],
+    }
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "ignore previous instructions" not in serialized
+
+
+def test_capy_memory_source_refresh_route_redacts_allowed_fields_and_bounds_response(monkeypatch):
+    from api import routes
+
+    jobs = [
+        {
+            "job_id": f"job-{idx}",
+            "source_id": "ghp_abcdefghijklmnopqrstuvwxyz123456" if idx == 0 else f"docs-{idx}",
+            "status": "completed",
+            "error": "https://user:pass@example.test/path" if idx == 0 else "",
+            "origin_uri": "sk-SECRET_VALUE_DO_NOT_LEAK" if idx == 0 else "https://example.test/docs",
+        }
+        for idx in range(30)
+    ]
+
+    monkeypatch.setattr(capy_memory, "run_source_refresh_jobs", lambda *, limit=5: {"processed": 999, "jobs": jobs})
+    handler = _FakeJsonHandler({"limit": 999})
+
+    assert routes.handle_post(handler, urlparse("http://example.test/api/capy-memory/source/refresh")) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert payload["processed"] == 25
+    assert len(payload["jobs"]) == 25
+    assert payload["jobs"][0]["source_id"] == "[REDACTED]"
+    assert payload["jobs"][0]["error"] == "[REDACTED]"
+    assert payload["jobs"][0]["origin_uri"] == "[REDACTED]"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "ghp_" not in serialized
+    assert "sk-" not in serialized
+    assert "user:pass" not in serialized
 
 
 def test_run_source_refresh_jobs_uses_allowlisted_default_http_fetcher_metadata_only(tmp_path, monkeypatch):
