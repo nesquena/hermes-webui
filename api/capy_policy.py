@@ -133,7 +133,7 @@ def _unsafe_public_text(text: str) -> bool:
     if "source code" in lowered:
         return True
     return bool(re.search(
-        r"<\s*script\b|renderer\b|api[_\s-]?key|api[_\s-]?auth|authorization|bearer\b|secret|password|credential|raw\s+prompt|generated\s+(?:widget\s+)?body",
+        r"<\s*script\b|renderer\b|source\b|api[_\s-]?key|api[_\s-]?auth|authorization|bearer\b|secret|password|credential|raw[_\s-]?prompt|generated[_\s-]*(?:widget[_\s-]*)?(?:body|code)",
         lowered,
     ))
 
@@ -209,6 +209,36 @@ def policy_status() -> Dict[str, Any]:
             "protected_boundaries": list(_PROTECTED_BOUNDARIES),
         },
         "model_routing": model_routing_status(),
+        "local_only": True,
+    }
+
+
+def action_policy_receipt(
+    action: str,
+    *,
+    approval_gates: list[str] | None = None,
+    prompt_preflight_status: str | None = None,
+    model_route_hint: str | None = None,
+) -> Dict[str, Any]:
+    """Return bounded policy evidence for a single high-risk product action."""
+
+    status = policy_status()
+    requested_gates = {gate for gate in (approval_gates or []) if gate in _APPROVAL_GATES}
+    gates = [gate for gate in _APPROVAL_GATES if gate in requested_gates]
+    if not gates:
+        gates = ["creator_commit"]
+    hint = model_route_hint if model_route_hint in _MODEL_HINT_ORDER else status["model_routing"]["default_hint"]
+    preflight = prompt_preflight_status if prompt_preflight_status in {"pass", "warn", "block", "required"} else "required"
+    return {
+        "available": True,
+        "action": _safe_route_text(action, "capy.action"),
+        "mode": status["mode"],
+        "label": status["label"],
+        "approval_required": True,
+        "approval_gates": gates,
+        "prompt_preflight_status": preflight,
+        "model_route_hint": hint,
+        "metadata_only": True,
         "local_only": True,
     }
 

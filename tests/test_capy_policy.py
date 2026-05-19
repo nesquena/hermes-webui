@@ -3,7 +3,7 @@ import io
 import json
 from urllib.parse import urlparse
 
-from api.capy_policy import model_routing_status, policy_status, prompt_preflight
+from api.capy_policy import action_policy_receipt, model_routing_status, policy_status, prompt_preflight
 
 
 def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
@@ -145,6 +145,44 @@ def test_model_routing_status_uses_configured_hints_without_exposing_secrets(mon
     assert "bearer placeholder" not in serialized
     assert "renderer" not in serialized
     assert "<script" not in serialized
+
+
+def test_action_policy_receipt_bounds_and_deduplicates_gates_without_leaking_hostile_fields(monkeypatch):
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "semi_autonomous")
+
+    receipt = action_policy_receipt(
+        "space.creator.raw_prompt.generated_code.source",
+        approval_gates=[
+            "creator_commit",
+            "creator_commit",
+            "renderer",
+            "generated_widget_execution",
+            "credential_change",
+            "destructive_external_action",
+        ] * 20,
+        prompt_preflight_status="unsafe raw_prompt SECRET_VALUE_DO_NOT_LEAK",
+        model_route_hint="hint:evil",
+    )
+
+    assert receipt["mode"] == "semi_autonomous"
+    assert receipt["label"] == "Semi-autonomous"
+    assert receipt["action"] == "capy.action"
+    assert receipt["approval_gates"] == [
+        "creator_commit",
+        "destructive_external_action",
+        "generated_widget_execution",
+        "credential_change",
+    ]
+    assert receipt["prompt_preflight_status"] == "required"
+    assert receipt["model_route_hint"] == "hint:reasoning"
+    assert receipt["metadata_only"] is True
+    assert receipt["local_only"] is True
+    serialized = json.dumps(receipt, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "raw_prompt" not in serialized
+    assert len(receipt["approval_gates"]) == len(set(receipt["approval_gates"]))
 
 
 class _RouteHandler:

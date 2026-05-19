@@ -1028,6 +1028,26 @@
       '</div></div></div>';
   }
 
+  function renderActionPolicyEvidence(policy){
+    const data = policy && typeof policy === 'object' && !Array.isArray(policy) ? policy : null;
+    if (!data || data.available !== true) return '';
+    const mode = safePolicyMode(data.mode);
+    const label = safeDisplayMetadataText(data.label || safePolicyLabel(mode), safePolicyLabel(mode)) || safePolicyLabel(mode);
+    const approvalRequired = data.approval_required === true ? 'yes' : 'no';
+    const gates = safePolicyGateLabels(data.approval_gates);
+    const promptStatus = safeDisplayMetadataText(data.prompt_preflight_status || 'required', 'required') || 'required';
+    const routeHint = safeModelRouteHint(data.model_route_hint || '');
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.local_only === true) flags.push('local-only');
+    return '<div class="capy-spaces-card capy-spaces-action-policy"><h4>Action policy</h4>' +
+      '<div class="capy-spaces-muted">Mode: '+escapeHtml(label)+' · Approval required: '+approvalRequired+' · Prompt preflight: '+escapeHtml(promptStatus)+'</div>' +
+      '<div class="capy-spaces-muted">Gates: '+escapeHtml(gates.join(', '))+'</div>' +
+      (routeHint ? '<div class="capy-spaces-muted">Model route hint: '+escapeHtml(routeHint)+'</div>' : '') +
+      (flags.length ? '<div class="capy-spaces-muted">'+escapeHtml(flags.join(' · '))+'</div>' : '') +
+      '</div>';
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -1046,7 +1066,7 @@
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + gateChecklist + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + renderActionPolicyEvidence(data && data.autonomy_policy) + gateChecklist + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){

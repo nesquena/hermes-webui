@@ -2350,6 +2350,18 @@ def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(
         "visual_qa_required": True,
         "approve_commit_required": True,
     }
+    assert preview["autonomy_policy"] == {
+        "available": True,
+        "action": "space.creator.preview",
+        "mode": "supervised",
+        "label": "Supervised",
+        "approval_required": True,
+        "approval_gates": ["creator_commit"],
+        "prompt_preflight_status": "pass",
+        "model_route_hint": "hint:reasoning",
+        "metadata_only": True,
+        "local_only": True,
+    }
     assert preview["prompt_preflight"] == {
         "available": True,
         "action": "capy.prompt_preflight",

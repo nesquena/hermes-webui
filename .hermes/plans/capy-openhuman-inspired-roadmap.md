@@ -89,14 +89,15 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface implemented; per-action enforcement remains**.
+Status: **metadata-only status surface and first per-action creator-preview receipt implemented; broader per-action enforcement remains**.
 
 Delivered:
-- `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, and model-routing hints without echoing raw env/provider/model secrets.
+- `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
 - `static/spaces.js` renders the product-home Autonomy policy card from `api/capy-policy/status`.
+- Creator preview responses now include a metadata-only `autonomy_policy` receipt with approval gates, prompt-preflight status, and model-route hint evidence, and the creator-preview UI renders this Action policy card without exposing raw prompts, generated bodies, renderer/source fields, API-auth fields, or credentials.
 
 Remaining:
-- Surface pass/warn/block preflight receipts on high-risk creator/source/tool boundaries.
+- Extend pass/warn/block preflight and action-policy receipts to additional high-risk source/tool/commit boundaries.
 - Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events

@@ -3421,6 +3421,8 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     draft = _space_creator_sanitized_draft(payload)
     widgets = draft["widget_details"]
     preview_id = _space_creator_store_preview_receipt(draft)
+    from api.capy_policy import action_policy_receipt
+
     response = {
         "ok": True,
         "action": name,
@@ -3429,6 +3431,12 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
         "stored": False,
         "executed": False,
         "gates": _space_creator_preview_gates(),
+        "autonomy_policy": action_policy_receipt(
+            name,
+            approval_gates=["creator_commit"],
+            prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "pass",
+            model_route_hint="hint:reasoning",
+        ),
         "spec": _space_creator_preview_spec(draft),
         "creator_loop": {
             "stage": "bounded-spec-preview",

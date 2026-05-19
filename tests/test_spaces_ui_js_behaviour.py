@@ -700,6 +700,21 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        autonomy_policy: {
+          available: true,
+          action: 'space.creator.preview',
+          mode: 'semi_autonomous',
+          label: 'Semi-autonomous',
+          approval_required: true,
+          approval_gates: ['creator_commit', 'generated_widget_execution', 'renderer'],
+          prompt_preflight_status: 'pass',
+          model_route_hint: 'hint:reasoning',
+          raw_prompt: body.prompt,
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+          renderer: '<script>bad()</script>',
+          metadata_only: true,
+          local_only: true,
+        },
         prompt: body.prompt,
         raw_prompt: body.prompt,
         generated_code: '<script>bad()</script>',
@@ -6309,6 +6324,11 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Boundary: creator_preview" in out["rootHtml"]
     assert "Severity: none" in out["rootHtml"]
     assert "Prompt hash: abcdef012345" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Mode: Semi-autonomous" in out["rootHtml"]
+    assert "Approval required: yes" in out["rootHtml"]
+    assert "Creator commit approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
     assert "metadata-only" in out["rootHtml"]
     assert "local-only" in out["rootHtml"]
     assert "raw prompt not stored" in out["rootHtml"]
