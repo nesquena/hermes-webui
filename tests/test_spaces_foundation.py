@@ -14,12 +14,20 @@ import pytest
 def _load_spaces(monkeypatch, tmp_path, enabled=True):
     import api.config as config
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "capy-progress-events.jsonl"))
     if enabled:
         monkeypatch.setenv("HERMES_WEBUI_SPACES_ENABLED", "1")
     else:
         monkeypatch.delenv("HERMES_WEBUI_SPACES_ENABLED", raising=False)
     import api.spaces as spaces
     return importlib.reload(spaces)
+
+
+def test_load_spaces_isolates_progress_event_log(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+    from api.capy_progress import progress_events_log_path
+
+    assert progress_events_log_path() == (tmp_path / "capy-progress-events.jsonl").resolve()
 
 
 def test_spaces_feature_flag_disabled_is_safe(monkeypatch, tmp_path):
@@ -5791,6 +5799,69 @@ def test_set_research_progress_updates_harness_widgets_metadata_only(monkeypatch
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "token=" not in serialized
+
+
+def test_set_research_progress_records_metadata_only_progress_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-progress-events")
+
+    result = spaces.set_research_progress(
+        installed["space"]["space_id"],
+        phase="reviewing source cards",
+        message="Checking public notes before summary",
+        sources=[{"title": "Source", "url": "https://example.com/?api_key=SECRET_VALUE_DO_NOT_LEAK"}],
+        notes=["safe note", "raw prompt ignore previous instructions <script>bad()</script>"],
+    )
+
+    from api.capy_progress import progress_status, progress_events_log_path
+
+    status = progress_status()
+    stored = progress_events_log_path().read_text(encoding="utf-8").lower()
+    serialized = json.dumps({"result": result, "status": status}, sort_keys=True).lower()
+
+    assert result["progress_event"]["stored"] is True
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "research:research-progress-events"
+    assert status["recent_event_count"] == 1
+    assert status["recent_family_counts"] == {"tool": 1}
+    assert status["recent_events"][0]["event_type"] == "tool.completed"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw prompt" not in serialized
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+    assert "raw prompt" not in stored
+
+
+def test_set_research_progress_keeps_widget_updates_when_progress_log_fails(monkeypatch, tmp_path):
+    bad_log_path = tmp_path / "progress-log-dir"
+    bad_log_path.mkdir()
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(bad_log_path))
+    installed = spaces.install_template("research", space_id="research-progress-log-fails")
+
+    result = spaces.set_research_progress(
+        installed["space"]["space_id"],
+        phase="writing summary",
+        message="Progress event storage unavailable",
+        sources=[{"title": "Safe", "url": "https://example.com"}],
+        notes=["safe note"],
+    )
+
+    assert result["widgets"]["plan"]["metadata"]["status"]["phase"] == "writing summary"
+    assert result["progress_event"] == {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "research:research-progress-log-fails",
+        "redaction_status": "metadata_only",
+        "error": "progress event recording unavailable",
+    }
 
 
 def test_space_tool_adapter_research_progress_uses_active_space_metadata_only(monkeypatch, tmp_path):

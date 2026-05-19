@@ -2193,6 +2193,34 @@ def _research_note_items(notes: Any) -> list[str]:
     return [_payload_text_summary(item, 300) for item in raw_items]
 
 
+def _record_research_progress_event(space_id: str, *, source_count: int, note_count: int) -> dict[str, Any]:
+    """Best-effort metadata-only producer event for Research Harness progress."""
+    run_id = f"research:{space_id}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event(
+            {
+                "event_type": "tool.completed",
+                "run_id": run_id,
+                "payload": {
+                    "source_count": max(0, int(source_count)),
+                    "note_count": max(0, int(note_count)),
+                },
+            }
+        )
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def set_research_progress(
     space_id: str,
     *,
@@ -2235,6 +2263,11 @@ def set_research_progress(
         "research-notes",
         {"notes": {"status": "updated", "items": note_items, "item_count": len(note_items)}},
     )
+    progress_event = _record_research_progress_event(
+        sid,
+        source_count=len(source_rows),
+        note_count=len(note_items),
+    )
     return {
         "space_id": sid,
         "widgets": {
@@ -2248,6 +2281,7 @@ def set_research_progress(
             sources_result["revision_event_id"],
             notes_result["revision_event_id"],
         ],
+        "progress_event": progress_event,
     }
 
 

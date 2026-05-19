@@ -107,9 +107,10 @@ Delivered:
 - `api/capy_progress.py` records and summarizes bounded metadata-only progress events.
 - `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, and recent stream rows without raw payload/prompt leakage.
 - Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
+- Research Harness progress updates now emit metadata-only structured progress events so product-home progress status can reflect real research workflow activity without storing raw prompts, source text, renderer fields, or credentials.
 
 Remaining:
-- Emit progress events from more real long-running creator, research, browser, development, and visual-QA workflows.
+- Emit progress events from more real long-running creator, browser, development, and visual-QA workflows.
 - Consider Space/detail-level progress panels where aggregate product-home status is too coarse.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
@@ -137,7 +138,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 4. **Progress producer expansion**
-   - Record structured events from creator/research/development runs and visual-QA gates so the product-home stream reflects real autonomous work.
+- Record structured events from creator/development runs and visual-QA gates so the product-home stream reflects real autonomous work. Research Harness progress updates now cover the first workflow producer.
 
 5. **Space/detail-level progress panels**
    - Consider per-Space progress views if aggregate product-home events are too coarse for debugging autonomous creator loops.
@@ -202,7 +203,7 @@ The first roadmap pass has now delivered the Memory Tree module, source/job sche
 - **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
 - **Source refresh worker:** Metadata-only `source.refresh` jobs are queued and counted, but an allow-listed refresh worker still needs to consume them safely.
 - **Per-action policy/preflight:** Product-home policy visibility exists; creator/source/runtime boundaries still need explicit pass/warn/block receipts where high-risk context can influence actions.
-- **Progress producers:** Structured progress recording/status/card exist; more real long-running creator/research/development workflows should emit events.
+- **Progress producers:** Structured progress recording/status/card exist and Research Harness progress updates emit events; more real long-running creator/development/visual-QA workflows should emit events.
 
 ---
 
