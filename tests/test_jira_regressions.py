@@ -476,3 +476,53 @@ def test_sync_source_can_collapse_multiple_epics_into_configured_project_group(m
     assert (projects[0].get("external_ref") or {}).get("grouping") == "group"
     task = next(t for t in store["tasks"] if t["external_ref"]["key"] == "TST-42")
     assert task["project_id"] == projects[0]["project_id"]
+
+
+@patch("api.jira.JiraClient.search_issues")
+def test_sync_source_can_group_issues_linked_to_configured_root_key(mock_search, tmp_projects_file):
+    store = json.loads(tmp_projects_file.read_text(encoding="utf-8"))
+    store["sources"][0]["project_groups"] = [
+        {
+            "key": "abratens",
+            "name": "Abratens",
+            "project_id": "prj_test1",
+            "keys": ["TST-101"],
+            "linked_keys": ["TST-101"],
+        }
+    ]
+    tmp_projects_file.write_text(json.dumps(store), encoding="utf-8")
+    mock_search.return_value = [
+        {
+            "key": "TST-101",
+            "fields": {
+                "summary": "Abratens",
+                "issuetype": {"name": "Épico"},
+                "status": {"name": "To Do"},
+                "assignee": None,
+                "priority": {"name": "High"},
+                "issuelinks": [],
+            },
+        },
+        {
+            "key": "TST-116",
+            "fields": {
+                "summary": "Implementações Pré-Deploy",
+                "issuetype": {"name": "Task"},
+                "status": {"name": "In Progress"},
+                "assignee": None,
+                "priority": {"name": "High"},
+                "issuelinks": [{"type": {"name": "Relates"}, "outwardIssue": {"key": "TST-101"}}],
+            },
+        },
+    ]
+
+    from api.jira import sync_source
+
+    result = sync_source("jira_test")
+
+    assert "error" not in result
+    store = json.loads(tmp_projects_file.read_text(encoding="utf-8"))
+    task = next(t for t in store["tasks"] if t["external_ref"]["key"] == "TST-116")
+    assert task["project_id"] == "prj_test1"
+    project = next(p for p in store["projects"] if p["project_id"] == "prj_test1")
+    assert (project.get("external_ref") or {}).get("key") == "abratens"

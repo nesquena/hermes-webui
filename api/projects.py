@@ -142,6 +142,7 @@ def _normalize_source(source: Any) -> dict | None:
         "project_key": str(source.get("project_key") or "").strip(),
         "sync_enabled": bool(source.get("sync_enabled", False)),
         "sync_mode": str(source.get("sync_mode") or "read").strip(),
+        "default_project_id": str(source.get("default_project_id") or "").strip() or None,
         "status_map": source.get("status_map") if isinstance(source.get("status_map"), dict) else {},
         "project_groups": source.get("project_groups") if isinstance(source.get("project_groups"), list) else [],
         "domain": str(source.get("domain") or "projetos")[:64],

@@ -87,6 +87,7 @@ class JiraClient:
             "parent",
             "components",
             "labels",
+            "issuelinks",
         ]
         for page in range(_MAX_SEARCH_PAGES):
             payload: dict[str, Any] = {
@@ -202,18 +203,38 @@ def _find_project_by_external_ref(store: dict, source_id: str, key: str, groupin
     return None
 
 
-def _resolve_project_group(source_config: dict, key: str, name: str) -> dict | None:
+def _issue_linked_keys(issue: dict | None) -> set[str]:
+    keys: set[str] = set()
+    if not isinstance(issue, dict):
+        return keys
+    links = issue.get("fields", {}).get("issuelinks")
+    if not isinstance(links, list):
+        return keys
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        linked = link.get("outwardIssue") or link.get("inwardIssue")
+        if isinstance(linked, dict) and linked.get("key"):
+            keys.add(str(linked["key"]).strip().lower())
+    return keys
+
+
+def _resolve_project_group(source_config: dict, key: str, name: str, issue: dict | None = None) -> dict | None:
     """Return configured business-level grouping for a Jira issue/epic."""
     groups = source_config.get("project_groups")
     if not isinstance(groups, list):
         return None
     key_norm = key.strip().lower()
     name_norm = name.strip().lower()
+    linked_issue_keys = _issue_linked_keys(issue)
     for group in groups:
         if not isinstance(group, dict):
             continue
         keys = {str(item).strip().lower() for item in group.get("keys", []) if str(item).strip()}
         if key_norm and key_norm in keys:
+            return group
+        linked_keys = {str(item).strip().lower() for item in group.get("linked_keys", []) if str(item).strip()}
+        if linked_keys and linked_issue_keys.intersection(linked_keys):
             return group
         contains = [str(item).strip().lower() for item in group.get("name_contains", []) if str(item).strip()]
         if any(token in name_norm for token in contains):
@@ -245,13 +266,14 @@ def _ensure_jira_project(
     name: str,
     grouping: str,
     domain: str,
+    issue: dict | None = None,
 ) -> tuple[dict, bool]:
     import uuid
 
     source_id = source_config["source_id"]
     base_url = source_config["base_url"]
     now = time.time()
-    group = _resolve_project_group(source_config, key, name) if grouping in {"epic", "parent"} else None
+    group = _resolve_project_group(source_config, key, name, issue) if grouping in {"epic", "parent"} else None
     if group:
         group_name = str(group.get("name") or name or key).strip()
         group_key = str(group.get("key") or group_name or key).strip()
@@ -301,6 +323,11 @@ def _ensure_jira_project(
 
 def _linked_or_inbox_project(store: dict, source_config: dict) -> dict:
     source_id = source_config["source_id"]
+    default_project_id = str(source_config.get("default_project_id") or "").strip()
+    if default_project_id:
+        project = _project_by_id(store, default_project_id)
+        if project:
+            return project
     linked = next((p for p in store["projects"] if p.get("default_source_id") == source_id), None)
     if linked:
         return linked
@@ -351,6 +378,19 @@ def _project_for_issue(
             name=parent_summary or parent_key,
             grouping="epic" if _is_epic_type_name(parent_type) or (parent_issue and _is_epic(parent_issue)) else "parent",
             domain=domain,
+            issue=parent_issue,
+        )
+
+    direct_group = _resolve_project_group(source_config, str(issue.get("key") or ""), _issue_summary(issue), issue)
+    if direct_group:
+        return _ensure_jira_project(
+            store,
+            source_config=source_config,
+            key=str(issue.get("key") or ""),
+            name=_issue_summary(issue),
+            grouping="parent",
+            domain=domain,
+            issue=issue,
         )
 
     components = fields.get("components") if isinstance(fields.get("components"), list) else []
@@ -438,6 +478,7 @@ def sync_source(source_id: str) -> dict:
                         name=_issue_summary(issue, key),
                         grouping="epic",
                         domain=source_config.get("domain") or "projetos",
+                        issue=issue,
                     )
                     project["external_ref"]["status"] = jira_status
                     project["external_ref"]["synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
@@ -555,6 +596,7 @@ def get_sources_status() -> list[dict]:
             "sync_enabled": s.get("sync_enabled", False),
             "sync_mode": s.get("sync_mode", "read"),
             "domain": s.get("domain", "projetos"),
+            "default_project_id": s.get("default_project_id"),
             "project_groups": s.get("project_groups", []),
             "last_sync_at": s.get("last_sync_at"),
             "sync_status": s.get("sync_status", "idle"),
