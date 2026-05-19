@@ -37,3 +37,13 @@ def test_placeholder_matches_directory_toggle_slot_width():
     assert "width:10px" in placeholder
     assert "flex:0 0 10px" in placeholder
     assert "display:inline-block" in placeholder
+
+
+def test_render_file_tree_does_not_show_files_view_while_changes_tab_active():
+    start = UI_JS.index("function renderFileTree(){")
+    end = UI_JS.index("\n\nfunction _isWorkspaceMarkdownPath", start)
+    body = UI_JS[start:end]
+
+    assert "selectedTab==='changes'" in body
+    assert "showingChanges?'none':''" in body.replace(" ", "")
+    assert "showingChanges?'none':'flex'" in body.replace(" ", "")

@@ -1,0 +1,980 @@
+import json
+import pathlib
+import subprocess
+import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import pytest
+
+from tests._pytest_port import BASE
+
+
+ROOT = pathlib.Path(__file__).parent.parent
+
+
+def _git(cwd, *args):
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        shell=False,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return result.stdout
+
+
+def _init_repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init")
+    _git(path, "config", "user.email", "hermes-tests@example.invalid")
+    _git(path, "config", "user.name", "Hermes Tests")
+    return path
+
+
+def _commit_all(path, message="initial"):
+    _git(path, "add", ".")
+    _git(path, "commit", "-m", message)
+
+
+def _get(path):
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=10) as r:
+            return json.loads(r.read()), r.status
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read()), e.code
+
+
+def _post(path, body=None):
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        BASE + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()), r.status
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read()), e.code
+
+
+def _make_session(created_list, ws=None):
+    body = {}
+    if ws:
+        body["workspace"] = str(ws)
+    data, status = _post("/api/session/new", body)
+    assert status == 200
+    sid = data["session"]["session_id"]
+    created_list.append(sid)
+    return sid, pathlib.Path(data["session"]["workspace"])
+
+
+def test_git_status_non_git_workspace(tmp_path):
+    from api.workspace_git import git_status
+
+    ws = tmp_path / "plain"
+    ws.mkdir()
+    assert git_status(ws) == {"is_git": False}
+
+
+def test_git_status_handles_staged_unstaged_untracked_deleted_and_renamed(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    (repo / "delete-me.txt").write_text("bye\n", encoding="utf-8")
+    (repo / "old name.txt").write_text("move\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "staged.txt").write_text("staged\n", encoding="utf-8")
+    _git(repo, "add", "staged.txt")
+    (repo / "delete-me.txt").unlink()
+    _git(repo, "mv", "old name.txt", "new name.txt")
+    (repo / "untracked space.txt").write_text("new\nfile\n", encoding="utf-8")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+
+    assert status["is_git"] is True
+    assert by_path["tracked.txt"]["unstaged"] is True
+    assert by_path["staged.txt"]["staged"] is True
+    assert by_path["delete-me.txt"]["status"] == "D"
+    assert by_path["new name.txt"]["old_path"] == "old name.txt"
+    assert by_path["untracked space.txt"]["untracked"] is True
+    assert by_path["untracked space.txt"]["additions"] == 2
+    assert status["totals"]["changed"] >= 5
+
+
+def test_git_status_reports_ignored_files_without_counting_them_as_changes(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "debug.log").write_text("ignored log\n", encoding="utf-8")
+    build = repo / "build"
+    build.mkdir()
+    (build / "artifact.txt").write_text("ignored artifact\n", encoding="utf-8")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+
+    assert by_path["tracked.txt"]["unstaged"] is True
+    assert by_path["debug.log"]["ignored"] is True
+    assert by_path["debug.log"]["status"] == "Ignored"
+    assert by_path["build/"]["ignored"] is True
+    assert by_path["build/"]["staged"] is False
+    assert by_path["build/"]["untracked"] is False
+    assert status["totals"]["changed"] == 1
+    assert status["totals"]["untracked"] == 0
+
+
+def test_git_status_ignores_crlf_only_worktree_noise(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\r\ntwo\r\n", encoding="utf-8", newline="")
+
+    raw = _git(repo, "status", "--porcelain", "--", "tracked.txt")
+    assert raw.startswith(" M")
+
+    status = git_status(repo)
+    assert status["totals"]["changed"] == 0
+    assert status["files"] == []
+    assert status["noise_filtering"]["active"] is True
+    assert status["noise_filtering"]["crlf_only"] == 1
+
+
+def test_git_status_keeps_real_edit_with_crlf_endings(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8", newline="\n")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\r\ntwo\r\nthree\r\n", encoding="utf-8", newline="")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+    assert status["totals"]["changed"] == 1
+    assert by_path["tracked.txt"]["unstaged"] is True
+    assert by_path["tracked.txt"]["additions"] == 1
+    assert by_path["tracked.txt"]["deletions"] == 0
+
+
+def test_git_status_ignores_filemode_only_noise(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    script = repo / "script.sh"
+    script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    _commit_all(repo)
+
+    _git(repo, "update-index", "--chmod=+x", "script.sh")
+
+    raw = _git(repo, "status", "--porcelain", "--", "script.sh")
+    assert "script.sh" in raw
+
+    status = git_status(repo)
+    assert status["totals"]["changed"] == 0
+    assert status["files"] == []
+    assert status["noise_filtering"]["active"] is True
+
+
+def test_git_status_scopes_nested_workspace_to_that_directory(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    nested = repo / "app"
+    nested.mkdir()
+    (nested / "inside.txt").write_text("inside\n", encoding="utf-8")
+    (repo / "outside.txt").write_text("outside\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (nested / "inside.txt").write_text("inside\nchanged\n", encoding="utf-8")
+    (repo / "outside.txt").write_text("outside\nchanged\n", encoding="utf-8")
+
+    status = git_status(nested)
+    paths = {item["path"] for item in status["files"]}
+    assert paths == {"inside.txt"}
+
+
+def test_git_diff_generates_untracked_text_diff_and_blocks_escape(tmp_path):
+    from api.workspace_git import GitWorkspaceError, git_diff
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "new file.txt").write_text("hello\nworld\n", encoding="utf-8")
+
+    diff = git_diff(repo, "new file.txt", "unstaged")
+    assert diff["binary"] is False
+    assert "+++ b/new file.txt" in diff["diff"]
+    assert "+hello" in diff["diff"]
+
+    with pytest.raises(GitWorkspaceError):
+        git_diff(repo, "../outside.txt", "unstaged")
+
+
+def test_git_status_reports_untracked_files_inside_directories(tmp_path):
+    from api.workspace_git import git_discard, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    nested = repo / "newdir"
+    nested.mkdir()
+    (nested / "a.txt").write_text("hello\n", encoding="utf-8")
+
+    status = git_status(repo)
+    paths = {item["path"] for item in status["files"]}
+    assert "newdir/a.txt" in paths
+    assert "newdir/" not in paths
+
+    git_discard(repo, ["newdir/a.txt"], delete_untracked=True)
+    assert not (nested / "a.txt").exists()
+
+
+def test_git_status_reports_ignored_files_without_counting_them_as_changed(tmp_path):
+    from api.workspace_git import git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "debug.log").write_text("ignored log\n", encoding="utf-8")
+    build = repo / "build"
+    build.mkdir()
+    (build / "artifact.txt").write_text("ignored artifact\n", encoding="utf-8")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+
+    assert by_path["tracked.txt"]["unstaged"] is True
+    assert by_path["debug.log"]["ignored"] is True
+    assert by_path["debug.log"]["status"] == "Ignored"
+    assert by_path["debug.log"]["staged"] is False
+    assert by_path["debug.log"]["unstaged"] is False
+    assert by_path["debug.log"]["untracked"] is False
+    assert any(item["ignored"] and item["path"].startswith("build") for item in status["files"])
+    assert status["totals"]["changed"] == 1
+    assert status["totals"]["untracked"] == 0
+
+
+def test_git_diff_large_untracked_file_is_bounded(tmp_path):
+    from api.workspace_git import DIFF_SIZE_LIMIT, git_diff, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    large = repo / "large.txt"
+    large.write_text("x" * (DIFF_SIZE_LIMIT + 1), encoding="utf-8")
+
+    status = git_status(repo)
+    by_path = {item["path"]: item for item in status["files"]}
+    assert by_path["large.txt"]["untracked"] is True
+    assert by_path["large.txt"]["additions"] == 0
+
+    diff = git_diff(repo, "large.txt", "unstaged")
+    assert diff["too_large"] is True
+    assert diff["diff"] == ""
+
+
+def test_git_stage_unstage_discard_and_commit(tmp_path):
+    from api.workspace_git import git_commit, git_discard, git_stage, git_status, git_unstage
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    staged = git_stage(repo, ["tracked.txt"])
+    assert staged["totals"]["staged"] == 1
+
+    unstaged = git_unstage(repo, ["tracked.txt"])
+    assert unstaged["totals"]["staged"] == 0
+    assert unstaged["totals"]["unstaged"] == 1
+
+    git_discard(repo, ["tracked.txt"])
+    assert git_status(repo)["totals"]["changed"] == 0
+
+    (repo / "tracked.txt").write_text("one\nthree\n", encoding="utf-8")
+    git_stage(repo, ["tracked.txt"])
+    committed = git_commit(repo, "Update tracked file")
+    assert committed["ok"] is True
+    assert committed["commit"]
+    assert committed["status"]["totals"]["changed"] == 0
+
+
+def test_git_commit_selected_ignores_unrelated_real_index(tmp_path):
+    from api.workspace_git import git_commit_selected, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "selected.txt").write_text("one\n", encoding="utf-8")
+    (repo / "staged.txt").write_text("alpha\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "selected.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "staged.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    _git(repo, "add", "staged.txt")
+
+    committed = git_commit_selected(repo, "Commit selected only", ["selected.txt"])
+    assert committed["ok"] is True
+    assert committed["paths"] == ["selected.txt"]
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["selected.txt"]
+
+    by_path = {item["path"]: item for item in git_status(repo)["files"]}
+    assert "selected.txt" not in by_path
+    assert by_path["staged.txt"]["staged"] is True
+
+
+def test_git_commit_selected_supports_initial_commit(tmp_path):
+    from api.workspace_git import git_commit_selected, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "first.txt").write_text("first\n", encoding="utf-8")
+
+    committed = git_commit_selected(repo, "Initial selected commit", ["first.txt"])
+    assert committed["ok"] is True
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["first.txt"]
+    assert git_status(repo)["totals"]["changed"] == 0
+
+
+def test_git_commit_selected_preserves_rename_semantics(tmp_path):
+    from api.workspace_git import git_commit_selected, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "old.txt").write_text("old\n", encoding="utf-8")
+    _commit_all(repo)
+
+    _git(repo, "mv", "old.txt", "new.txt")
+
+    committed = git_commit_selected(repo, "Rename selected file", ["new.txt"])
+    assert committed["ok"] is True
+    assert _git(repo, "ls-tree", "--name-only", "HEAD").splitlines() == ["new.txt"]
+    assert "old.txt" not in _git(repo, "status", "--porcelain=v2")
+    assert git_status(repo)["totals"]["changed"] == 0
+
+
+def test_git_commit_selected_handles_untracked_and_mixed_paths(tmp_path):
+    from api.workspace_git import git_commit_selected
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "new.txt").write_text("new\n", encoding="utf-8")
+
+    committed = git_commit_selected(repo, "Commit mixed selected files", ["tracked.txt", "new.txt"])
+    assert committed["ok"] is True
+    assert set(_git(repo, "show", "--name-only", "--format=", "HEAD").splitlines()) == {
+        "tracked.txt",
+        "new.txt",
+    }
+
+
+def test_git_commit_selected_respects_nested_workspace_scope(tmp_path):
+    from api.workspace_git import GitWorkspaceError, git_commit_selected
+
+    repo = _init_repo(tmp_path / "repo")
+    nested = repo / "app"
+    nested.mkdir()
+    (nested / "inside.txt").write_text("inside\n", encoding="utf-8")
+    (repo / "outside.txt").write_text("outside\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (nested / "inside.txt").write_text("inside\nchanged\n", encoding="utf-8")
+    (repo / "outside.txt").write_text("outside\nchanged\n", encoding="utf-8")
+
+    committed = git_commit_selected(nested, "Nested selected commit", ["inside.txt"])
+    assert committed["paths"] == ["inside.txt"]
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["app/inside.txt"]
+
+    with pytest.raises(GitWorkspaceError) as outside:
+        git_commit_selected(nested, "Outside", ["../outside.txt"])
+    assert outside.value.code == "path_outside_workspace"
+
+
+def test_git_commit_selected_rejects_conflicts_and_path_traversal(tmp_path):
+    from api.workspace_git import GitWorkspaceError, git_commit_selected
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "conflict.txt").write_text("base\n", encoding="utf-8")
+    _commit_all(repo)
+    _git(repo, "checkout", "-b", "side")
+    (repo / "conflict.txt").write_text("side\n", encoding="utf-8")
+    _commit_all(repo, "side")
+    _git(repo, "checkout", "master")
+    (repo / "conflict.txt").write_text("main\n", encoding="utf-8")
+    _commit_all(repo, "main")
+    subprocess.run(["git", "merge", "side"], cwd=repo, shell=False, text=True, capture_output=True, timeout=20)
+
+    with pytest.raises(GitWorkspaceError) as conflict:
+        git_commit_selected(repo, "Nope", ["conflict.txt"])
+    assert conflict.value.code == "conflict"
+
+    with pytest.raises(GitWorkspaceError) as traversal:
+        git_commit_selected(repo, "Nope", ["../outside.txt"])
+    assert traversal.value.code == "path_outside_workspace"
+
+
+def test_selected_commit_message_prompt_uses_selected_diff(tmp_path):
+    from api.workspace_git import selected_commit_message_prompt
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "selected.txt").write_text("one\n", encoding="utf-8")
+    (repo / "other.txt").write_text("alpha\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "selected.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "other.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    prompt = selected_commit_message_prompt(repo, ["selected.txt"])
+    assert "selected.txt" in prompt["user_prompt"]
+    assert "+two" in prompt["user_prompt"]
+    assert "other.txt" not in prompt["user_prompt"]
+    assert "beta" not in prompt["user_prompt"]
+
+
+def test_staged_commit_message_prompt_uses_only_staged_diff(tmp_path):
+    from api.workspace_git import (
+        GitWorkspaceError,
+        clean_generated_commit_message,
+        staged_commit_message_prompt,
+    )
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    (repo / "tracked.txt").write_text("one\nstaged\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    (repo / "tracked.txt").write_text("one\nstaged\nunstaged\n", encoding="utf-8")
+
+    prompt = staged_commit_message_prompt(repo)
+    assert prompt["truncated"] is False
+    assert "tracked.txt" in prompt["user_prompt"]
+    assert "+staged" in prompt["user_prompt"]
+    assert "unstaged" not in prompt["user_prompt"]
+    assert "Never mention AI, Cursor, Zed, agents" in prompt["system_prompt"]
+
+    _git(repo, "restore", "--staged", "tracked.txt")
+    with pytest.raises(GitWorkspaceError):
+        staged_commit_message_prompt(repo)
+
+    assert clean_generated_commit_message("```text\nSubject\n\n- Body\n```") == "Subject\n\n- Body"
+
+
+def test_git_fetch_pull_and_push_with_upstream(tmp_path):
+    from api.workspace_git import git_fetch, git_pull, git_push, git_status
+
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+
+    origin = _init_repo(tmp_path / "origin")
+    (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(origin)
+    _git(origin, "remote", "add", "origin", str(remote))
+    _git(origin, "push", "-u", "origin", "HEAD")
+
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(remote), str(clone))
+    _git(clone, "config", "user.email", "hermes-tests@example.invalid")
+    _git(clone, "config", "user.name", "Hermes Tests")
+
+    (origin / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _commit_all(origin, "Remote update")
+    _git(origin, "push")
+
+    fetched = git_fetch(clone)
+    assert fetched["status"]["behind"] == 1
+
+    pulled = git_pull(clone)
+    assert pulled["status"]["behind"] == 0
+    assert (clone / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+
+    (clone / "tracked.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    _git(clone, "add", "tracked.txt")
+    _git(clone, "commit", "-m", "Local update")
+    assert git_status(clone)["ahead"] == 1
+
+    pushed = git_push(clone)
+    assert pushed["status"]["ahead"] == 0
+
+
+def test_git_branches_lists_local_remote_and_upstream(tmp_path):
+    from api.workspace_git import git_branches
+
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    origin = _init_repo(tmp_path / "origin")
+    (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(origin)
+    _git(origin, "branch", "-M", "main")
+    _git(origin, "remote", "add", "origin", str(remote))
+    _git(origin, "push", "-u", "origin", "main")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(remote), str(clone))
+    branches = git_branches(clone)
+    assert branches["current"] == "main"
+    assert branches["detached"] is False
+    assert any(item["name"] == "main" and item["upstream"] == "origin/main" for item in branches["local"])
+    main = next(item for item in branches["local"] if item["name"] == "main")
+    assert "updated_relative" in main and "author" in main and "subject" in main
+    assert any(item["name"] == "origin/main" for item in branches["remote"])
+    assert not any(item["name"] == "origin" for item in branches["remote"])
+
+
+def test_git_checkout_local_new_remote_dirty_and_invalid_refs(tmp_path):
+    from api.workspace_git import GitWorkspaceError, git_branches, git_checkout
+
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "--bare", str(remote))
+    origin = _init_repo(tmp_path / "origin")
+    (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(origin)
+    _git(origin, "branch", "-M", "main")
+    _git(origin, "remote", "add", "origin", str(remote))
+    _git(origin, "push", "-u", "origin", "main")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git(origin, "checkout", "-b", "remote-feature")
+    (origin / "remote.txt").write_text("remote\n", encoding="utf-8")
+    _commit_all(origin, "remote feature")
+    _git(origin, "push", "-u", "origin", "remote-feature")
+
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", str(remote), str(clone))
+    _git(clone, "config", "user.email", "hermes-tests@example.invalid")
+    _git(clone, "config", "user.name", "Hermes Tests")
+
+    created = git_checkout(clone, "main", "new", new_branch="local-work")
+    assert created["current_branch"] == "local-work"
+    assert git_branches(clone)["current"] == "local-work"
+
+    switched = git_checkout(clone, "main", "local")
+    assert switched["current_branch"] == "main"
+
+    tracked = git_checkout(clone, "origin/remote-feature", "remote", new_branch="remote-feature", track=True)
+    assert tracked["current_branch"] == "remote-feature"
+    assert git_branches(clone)["upstream"] == "origin/remote-feature"
+
+    (clone / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(GitWorkspaceError) as dirty:
+        git_checkout(clone, "main", "local")
+    assert dirty.value.code == "dirty_worktree"
+    _git(clone, "restore", "tracked.txt")
+
+    with pytest.raises(GitWorkspaceError) as invalid:
+        git_checkout(clone, "does-not-exist", "local")
+    assert invalid.value.code in {"invalid_ref", "git_failed"}
+
+
+def test_git_checkout_detached_requires_explicit_mode(tmp_path):
+    from api.workspace_git import git_branches, git_checkout
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    sha = _git(repo, "rev-parse", "--short", "HEAD").strip()
+
+    result = git_checkout(repo, sha, "detached")
+    assert result["ok"] is True
+    branches = git_branches(repo)
+    assert branches["detached"] is True
+    assert branches["current"] == sha
+
+
+def test_git_stash_and_checkout_is_explicit(tmp_path):
+    from api.workspace_git import git_stash_and_checkout, git_status
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    _git(repo, "checkout", "-b", "target")
+    _git(repo, "checkout", "master")
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = git_stash_and_checkout(repo, "target", "local")
+    assert result["ok"] is True
+    assert result["stashed"] is True
+    assert result["stash_name"].startswith("hermes-webui branch switch")
+    assert result["current_branch"] == "target"
+    assert git_status(repo)["totals"]["changed"] == 0
+    assert "hermes-webui branch switch target" in _git(repo, "stash", "list")
+
+
+def test_git_stash_checkout_validates_before_stashing(tmp_path):
+    from api.workspace_git import GitWorkspaceError, git_stash_and_checkout
+
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(GitWorkspaceError) as invalid:
+        git_stash_and_checkout(repo, "missing-branch", "local")
+
+    assert invalid.value.code == "invalid_ref"
+    assert "M tracked.txt" in _git(repo, "status", "--porcelain")
+    assert _git(repo, "stash", "list") == ""
+
+
+def test_git_routes_status_diff_stage_unstage_discard_commit(cleanup_test_sessions):
+    sid, base_ws = _make_session(cleanup_test_sessions)
+    repo = base_ws / f"git-route-{uuid.uuid4().hex[:8]}"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+
+    _post("/api/session/update", {"session_id": sid, "workspace": str(repo), "model": "openai/gpt-5.4-mini"})
+    (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    status, code = _get(f"/api/git/status?session_id={sid}")
+    assert code == 200
+    assert status["git"]["totals"]["unstaged"] == 1
+
+    diff, code = _get(
+        f"/api/git/diff?session_id={sid}&path={urllib.parse.quote('tracked.txt')}&kind=unstaged"
+    )
+    assert code == 200
+    assert "+two" in diff["diff"]["diff"]
+
+    staged, code = _post("/api/git/stage", {"session_id": sid, "paths": ["tracked.txt"]})
+    assert code == 200 and staged["git"]["totals"]["staged"] == 1
+
+    unstaged, code = _post("/api/git/unstage", {"session_id": sid, "paths": ["tracked.txt"]})
+    assert code == 200 and unstaged["git"]["totals"]["unstaged"] == 1
+
+    discarded, code = _post("/api/git/discard", {"session_id": sid, "paths": ["tracked.txt"]})
+    assert code == 200 and discarded["git"]["totals"]["changed"] == 0
+
+    (repo / "tracked.txt").write_text("one\nthree\n", encoding="utf-8")
+    _post("/api/git/stage", {"session_id": sid, "paths": ["tracked.txt"]})
+    committed, code = _post("/api/git/commit", {"session_id": sid, "message": "Route commit"})
+    assert code == 200
+    assert committed["ok"] is True
+    assert committed["status"]["totals"]["changed"] == 0
+
+
+def test_git_routes_branches_and_checkout(cleanup_test_sessions):
+    sid, base_ws = _make_session(cleanup_test_sessions)
+    repo = base_ws / f"git-branch-route-{uuid.uuid4().hex[:8]}"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repo)
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "checkout", "-b", "feature")
+    _git(repo, "checkout", "main")
+
+    _post("/api/session/update", {"session_id": sid, "workspace": str(repo), "model": "openai/gpt-5.4-mini"})
+    branches, code = _get(f"/api/git/branches?session_id={sid}")
+    assert code == 200
+    assert branches["branches"]["current"] == "main"
+    assert any(item["name"] == "feature" for item in branches["branches"]["local"])
+
+    checked, code = _post(
+        "/api/git/checkout",
+        {"session_id": sid, "ref": "feature", "mode": "local", "dirty_mode": "block"},
+    )
+    assert code == 200
+    assert checked["ok"] is True
+    assert checked["current_branch"] == "feature"
+    assert checked["git"]["branch"] == "feature"
+
+
+def test_git_routes_selected_commit_and_structured_error(cleanup_test_sessions):
+    sid, base_ws = _make_session(cleanup_test_sessions)
+    repo = base_ws / f"git-selected-route-{uuid.uuid4().hex[:8]}"
+    _init_repo(repo)
+    (repo / "selected.txt").write_text("one\n", encoding="utf-8")
+    (repo / "other.txt").write_text("alpha\n", encoding="utf-8")
+    _commit_all(repo)
+
+    _post("/api/session/update", {"session_id": sid, "workspace": str(repo), "model": "openai/gpt-5.4-mini"})
+    (repo / "selected.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (repo / "other.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+
+    bad, code = _post("/api/git/commit-selected", {"session_id": sid, "message": "Bad", "paths": ["../x"]})
+    assert code == 400
+    assert bad["code"] == "path_outside_workspace"
+
+    committed, code = _post(
+        "/api/git/commit-selected",
+        {"session_id": sid, "message": "Selected route commit", "paths": ["selected.txt"]},
+    )
+    assert code == 200
+    assert committed["ok"] is True
+    assert committed["paths"] == ["selected.txt"]
+    assert _git(repo, "show", "--name-only", "--format=", "HEAD").splitlines() == ["selected.txt"]
+
+
+def test_workspace_git_static_contracts():
+    index = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    workspace_js = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    ui_js = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    style = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    for dom_id in [
+        "workspaceGitTabs",
+        "btnWorkspaceFilesTab",
+        "btnWorkspaceChangesTab",
+        "gitChangesView",
+        "gitChangesList",
+        "gitCommitBox",
+        "gitCommitMessage",
+        "gitSelectionSummary",
+        "btnPreviewBack",
+        "previewBackLabel",
+        "btnGitGenerateCommitMessage",
+        "btnGitCommit",
+        "btnMarkdownPopout",
+        "gitDiffView",
+        "gitBranchControl",
+        "btnGitBranchMenu",
+        "gitBranchMenu",
+        "workspaceEditorShell",
+        "previewCodeGutter",
+        "previewCodeGuides",
+        "previewReadShell",
+        "previewEditShell",
+        "previewEditGutter",
+        "previewEditGuides",
+        "previewWrapToggle",
+        "previewEditorStatus",
+        "previewEditorActions",
+        "btnEditorCancel",
+        "btnEditorSave",
+        "editorDirtyState",
+    ]:
+        assert f'id="{dom_id}"' in index
+
+    for fn in [
+        "refreshGitStatus",
+        "renderGitChanges",
+        "openGitDiff",
+        "renderGitDiff",
+        "stageGitPath",
+        "stageGitAllChanges",
+        "unstageGitPath",
+        "discardGitPath",
+        "commitGitChanges",
+        "generateGitCommitMessage",
+        "runGitRemoteAction",
+        "_gitRemoteToastMessage",
+        "switchWorkspacePanelTab",
+        "openMarkdownPopout",
+        "returnFromPreview",
+        "_setPreviewReturnTarget",
+        "_closePreviewSurface",
+        "renderWorkspaceMarkdown",
+        "postProcessWorkspaceMarkdown",
+        "refreshGitBranches",
+        "_gitStatusLabel",
+        "_autoRefreshWorkspaceGitStatus",
+        "_installWorkspaceGitAutoRefresh",
+        "renderGitBranchControl",
+        "toggleGitBranchMenu",
+        "closeGitBranchMenu",
+        "checkoutGitBranch",
+        "setEditorSoftWrap",
+        "requestCancelEditMode",
+        "renderEditorGutter",
+        "renderEditorIndentGuides",
+        "handleEditorKeydown",
+        "handleEditorInput",
+        "parseUnifiedDiff",
+        "renderParsedGitDiff",
+        "setGitDiffMode",
+    ]:
+        assert f"function {fn}" in workspace_js
+
+    discard_body = workspace_js[
+        workspace_js.index("async function discardGitPath") : workspace_js.index("async function commitGitChanges")
+    ]
+    assert "showConfirmDialog" in discard_body
+    remote_action_body = workspace_js[
+        workspace_js.index("function _gitRemoteToastMessage") : workspace_js.index("async function runGitRemoteAction")
+    ]
+    assert "Remote ${remote}" in remote_action_body
+    assert "more refs" in remote_action_body
+    assert "showToast(_gitRemoteToastMessage(action,data),4200)" in workspace_js
+    assert "confirm(" not in discard_body.replace("showConfirmDialog(", "")
+    assert "file-git-status" in ui_js
+    assert "git-ignored" in ui_js
+    assert "gitState.ignored?' ignored'" in ui_js
+    assert "Ignored by Git" in workspace_js
+    assert "f.ignored)return false" in workspace_js
+    assert ".file-item.git-ignored" in style
+    assert ".file-git-status.ignored" in style
+    assert "file-preview-btn" in ui_js
+    assert "function toastMessageHtml" in ui_js
+    assert "toast-title" in ui_js and "toast-detail" in ui_js
+    assert "_isWorkspaceMarkdownPath" in ui_js
+    assert "e.stopPropagation()" in ui_js
+    assert "_gitStageableFiles" in workspace_js
+    assert "GIT_AUTO_REFRESH_MS" in workspace_js
+    assert "_workspacePanelOpenForAutoRefresh" in workspace_js
+    assert "refreshGitStatus({auto:true,refreshBranches:false})" in workspace_js
+    assert "branchMenuOpen" in workspace_js
+    assert "branchFilter" in workspace_js
+    assert "_isSelectableRemoteBranch" in workspace_js
+    assert "_branchMeta" in workspace_js and "_allBranchRows" in workspace_js
+    assert "_installWorkspaceInteractionGuards" in workspace_js
+    assert "'/api/git/checkout'" in workspace_js
+    assert "'/api/git/stash-checkout'" in workspace_js
+    assert "git_stash_and_switch" in workspace_js
+    assert "`/api/git/branches?session_id=${encodeURIComponent(S.session.session_id)}`" in workspace_js
+    assert "dirty_mode:'block'" in workspace_js
+    assert "handleEditorKeydown" in workspace_js
+    assert "requestCancelEditMode()" in workspace_js
+    assert "_indentSelection" in workspace_js and "_unindentSelection" in workspace_js
+    assert "localStorage.setItem('hermes-webui-git-diff-mode'" in workspace_js
+    assert "git-diff-mode-btn" in workspace_js
+    assert ".git-diff-split-row.change .old-code" in style
+    assert ".git-diff-split-row.change .new-code" in style
+    assert ".git-badge{grid-column:1 / -1;grid-row:2;justify-self:start;font-size:11px" in style
+    assert ".git-branch-button{height:30px" in style
+    assert ".git-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:\"SF Mono\",ui-monospace,monospace;font-size:13px" in style
+    assert ".toast{pointer-events:auto;position:fixed;top:24px;right:24px;left:auto;bottom:auto;transform:translateY(-6px);display:flex;align-items:flex-start" in style
+    assert ".toast-title" in style and ".toast-detail" in style
+    assert "selectedPaths:new Set()" in workspace_js
+    assert "selectionKey:scopeKey" in workspace_js
+    assert "_gitGroupHeader" in workspace_js
+    assert "checkbox.indeterminate" in workspace_js
+    assert "_gitSyncLabel" in workspace_js
+    assert "Push local commits" in workspace_js and "Pull remote commits" in workspace_js
+    assert "stagedOnly" in workspace_js
+    assert "openFile(diff.path,{returnTo:'changes'})" in workspace_js
+    assert "openFile(file.path,{returnTo:'changes'})" in workspace_js
+    assert "S.git.selectedTab='changes'" in workspace_js
+    assert "URL.createObjectURL(new Blob" in workspace_js
+    assert "catch(e){\n    renderGitBadge(git.status);" in workspace_js
+    assert "'/api/git/commit-selected'" in workspace_js
+    assert "'/api/git/commit-message-selected'" in workspace_js
+    assert "postProcessRenderedMessages" in workspace_js
+    assert "git-stat-add" in workspace_js and "git-stat-del" in workspace_js
+    for cls in [
+        ".workspace-tabs",
+        ".workspace-editor-shell",
+        ".workspace-editor-gutter",
+        ".workspace-editor-guides",
+        ".workspace-editor-guide-line",
+        ".workspace-editor-textarea",
+        ".workspace-editor-status",
+        ".workspace-editor-actions",
+        ".workspace-editor-save",
+        ".workspace-editor-dirty",
+        ".workspace-editor-line-number",
+        ".git-change-row",
+        ".git-diff-line",
+        ".git-diff-toolbar",
+        ".git-diff-row",
+        ".git-diff-split-row",
+        ".git-diff-mode-btn",
+        ".git-commit-box",
+        ".git-branch-control",
+        ".git-branch-menu",
+        ".git-branch-search",
+        ".git-branch-check",
+        ".git-branch-body",
+        ".git-branch-item",
+        ".git-branch-current-mark",
+        ".git-branch-create",
+        ".git-branch-create-row",
+        ".git-branch-fetch",
+        ".git-stage-all-btn",
+        ".git-summary-text",
+        ".git-summary-actions",
+        ".git-sync-btn",
+        ".git-commit-actions",
+        ".git-commit-primary",
+        ".git-select-checkbox",
+        ".git-selection-summary",
+        ".file-preview-btn",
+        ".preview-back-btn",
+    ]:
+        assert cls in style
+    assert ".git-stat-add" in style and ".git-stat-del" in style
+    assert "background:repeating-linear-gradient(to right" not in style
+    assert "_editorLineIndentDepths" in workspace_js
+    assert "Math.floor(_editorIndentColumns(line,tabSize)/tabSize)" in workspace_js
+    assert "previewCodeGuides" in workspace_js and "previewEditGuides" in workspace_js
+    assert "code==='??')return 'New'" in workspace_js
+    assert "file&&file.ignored" in workspace_js and "return 'Ignored'" in workspace_js
+    assert "!f.ignored&&!f.conflict" in workspace_js
+    assert "git-ignored" in ui_js
+    assert ".file-git-status.ignored" in style
+    assert "status.textContent=_gitStatusLabel(file)" in workspace_js
+    assert "typeof _gitStatusLabel==='function'" in ui_js
+    update_edit_btn_body = workspace_js[
+        workspace_js.index("function updateEditBtn") : workspace_js.index("async function toggleEditMode")
+    ]
+    assert "editable&&!editing" in update_edit_btn_body
+    assert "Save*" not in update_edit_btn_body
+    routes = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+    workspace_git = (ROOT / "api" / "workspace_git.py").read_text(encoding="utf-8")
+    for route in ["/api/git/fetch", "/api/git/pull", "/api/git/push", "/api/git/branches", "/api/git/checkout", "/api/git/stash-checkout"]:
+        assert route in routes
+    assert "/api/git/commit-message" in routes
+    assert "/api/git/commit-selected" in routes
+    assert "/api/git/commit-message-selected" in routes
+    assert "_git_bad" in routes and '"code": getattr(err, "code"' in routes
+    assert 'if parsed.path == "/api/git-info"' in routes and "git_status(Path(s.workspace))" in routes
+    assert "`/api/git/${action}`" in workspace_js
+    assert "'/api/git/commit-message-selected'" in workspace_js
+    checkout_block = workspace_git[workspace_git.index("def git_checkout") : workspace_git.index("def git_stash_and_checkout")]
+    stash_block = workspace_git[workspace_git.index("def git_stash_and_checkout") :]
+    assert "with _git_mutation_lock(ctx):" in checkout_block
+    assert "with _git_mutation_lock(ctx):" in stash_block
+    assert "_dirty_worktree(ctx)" in checkout_block
+    assert "dirty_worktree" in checkout_block
+
+    for token in [
+        'data-i18n="git_files"',
+        'data-i18n="git_changes"',
+        'data-i18n-placeholder="git_commit_message"',
+        'data-i18n="git_commit"',
+    ]:
+        assert token in index
+
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    for key in [
+        "git_files",
+        "git_changes",
+        "git_stage_all",
+        "git_commit_message",
+        "git_delete_untracked_confirm",
+        "git_fetch",
+        "git_pull",
+        "git_push",
+        "git_sync_failed",
+        "editor_soft_wrap",
+        "git_current_branch",
+        "git_local_branches",
+        "git_remote_branches",
+        "git_create_branch",
+        "git_checkout_failed",
+        "git_stash_and_switch",
+        "git_stashed",
+        "git_diff_unified",
+        "git_diff_split",
+    ]:
+        assert i18n.count(f"{key}:") >= 11
+    for key in ["git_tracked", "git_select_files", "git_commit_message_privacy"]:
+        assert i18n.count(f"{key}:") >= 11
