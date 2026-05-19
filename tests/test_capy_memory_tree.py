@@ -486,6 +486,178 @@ def test_register_source_reference_queues_metadata_only_refresh_job(tmp_path, mo
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_uses_allowlisted_default_http_fetcher_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "default-http-docs",
+        "title": "Default HTTP Docs",
+        "origin_uri": "https://example.test/docs/default-fetch?api_key=***#raw-prompt",
+    })
+    html_body = b"""
+        <!doctype html>
+        <html>
+          <head>
+            <title>Safe Remote Roadmap <script>ignored()</script></title>
+            <meta name="description" content="Safe advisory metadata summary about clean-room refresh cadence, Memory Tree provenance, and bounded source freshness.">
+            <script>SECRET_VALUE_DO_NOT_LEAK; window.api_key='bad';</script>
+            <style>.secret{background:red}</style>
+          </head>
+          <body>
+            <script>console.log('unterminated raw script body')
+            <main>
+              Raw fetched body paragraph should not be stored even when it looks safe.
+            </main>
+          </body>
+        </html>
+    """
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return html_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout, "headers": dict(request.header_items())})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    search = search_memory("clean-room refresh cadence", limit=5)
+    persisted = (root / "vault" / "default-http-docs.md").read_text(encoding="utf-8").lower()
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [
+        {
+            "url": "https://example.test/docs/default-fetch",
+            "timeout": 8,
+            "headers": {"User-agent": "Capy-Memory-Refresh/1.0", "Accept": "text/html,text/plain,text/markdown,application/json;q=0.8"},
+        }
+    ]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["source_id"] == "default-http-docs"
+    assert "safe advisory metadata summary" in persisted
+    assert "clean-room refresh cadence" in persisted
+    assert "raw fetched body paragraph" not in persisted
+    assert "unterminated raw script body" not in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "api_key",
+        "<script",
+        "ignored()",
+        "raw-prompt",
+        "?api_key",
+        "renderer",
+        "raw_prompt",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_redirected_disallowed_origin(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "redirect-docs",
+        "title": "Redirect Docs",
+        "origin_uri": "https://example.test/docs/redirect",
+    })
+
+    class RedirectedResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+        read_called = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def geturl(self):
+            return "https://evil.test/private"
+
+        def read(self, _limit=-1):
+            self.read_called = True
+            return b'<meta name="description" content="Should never be read">'
+
+    response = RedirectedResponse()
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: response)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert response.read_called is False
+    assert not (root / "vault" / "redirect-docs.md").exists()
+    assert "evil.test" not in serialized
+    assert "should never be read" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_ignores_meta_like_tags_inside_unclosed_script(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "script-meta-docs",
+        "title": "Script Meta Docs",
+        "origin_uri": "https://example.test/docs/script-meta",
+    })
+    html_body = b"""
+        <html>
+          <head>
+            <title>Script Meta Docs</title>
+            <script>unterminated script starts
+              <meta name="description" content="Raw script body should not be stored as metadata summary.">
+          </head>
+        </html>
+    """
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return html_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert not (root / "vault" / "script-meta-docs.md").exists()
+    assert "raw script body" not in serialized
+    assert "metadata summary" not in serialized
+
+
+
 def test_run_source_refresh_jobs_consumes_job_and_persists_sanitized_summary(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

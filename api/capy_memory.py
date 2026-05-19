@@ -16,13 +16,24 @@ import socket
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 _MAX_SCAN_DEPTH = 24
 _MAX_SCAN_NODES = 2_000
 _MAX_TEXT_LEN = 500
+_MAX_REFRESH_FETCH_BYTES = 64 * 1024
+_REFRESH_FETCH_TIMEOUT_SECONDS = 8
+_REFRESH_ALLOWED_CONTENT_TYPES = (
+    "text/html",
+    "text/plain",
+    "text/markdown",
+    "text/x-markdown",
+    "application/json",
+)
 
 _UNSAFE_KEY_RE = re.compile(
     r"renderer|html|script|source|data|code|body|generated[_-]?code|generatedbody|rendercode|widgetbody|"
@@ -641,8 +652,165 @@ def list_source_refresh_jobs(*, limit: int = 10) -> dict[str, Any]:
     return {"local_only": True, "limit": limit, "jobs": jobs}
 
 
+def _refresh_content_type(headers: Any) -> str:
+    try:
+        raw = headers.get("Content-Type") or headers.get("content-type") or ""
+    except AttributeError:
+        raw = ""
+    return str(raw).split(";", 1)[0].strip().lower()
+
+
+def _refresh_charset(headers: Any) -> str:
+    try:
+        raw = headers.get("Content-Type") or headers.get("content-type") or ""
+    except AttributeError:
+        raw = ""
+    match = re.search(r"charset=([A-Za-z0-9._:-]+)", str(raw), flags=re.IGNORECASE)
+    return match.group(1) if match else "utf-8"
+
+
+class _NoRefreshRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802 - urllib hook name.
+        raise RuntimeError("refresh fetcher disabled")
+
+
+def _refresh_open(request: Request, *, timeout: int = _REFRESH_FETCH_TIMEOUT_SECONDS):
+    opener = build_opener(_NoRefreshRedirect)
+    return opener.open(request, timeout=timeout)
+
+
+class _RefreshMetadataParser(HTMLParser):
+    _HIDDEN_TAGS = {"script", "style", "noscript", "template", "svg"}
+    _DESCRIPTION_MARKERS = {"description", "og:description", "twitter:description"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hidden_depth = 0
+        self.in_title = False
+        self.title_parts: list[str] = []
+        self.description_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in self._HIDDEN_TAGS:
+            self.hidden_depth += 1
+            return
+        if self.hidden_depth:
+            return
+        if tag == "title":
+            self.in_title = True
+            return
+        if tag != "meta":
+            return
+        attr_map = {str(key).lower(): (value or "") for key, value in attrs}
+        marker = (attr_map.get("name") or attr_map.get("property") or "").strip().lower()
+        content = attr_map.get("content") or ""
+        if marker in self._DESCRIPTION_MARKERS and content:
+            self.description_parts.append(content)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._HIDDEN_TAGS and self.hidden_depth:
+            self.hidden_depth -= 1
+            return
+        if tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.hidden_depth or not self.in_title:
+            return
+        self.title_parts.append(data)
+
+
+def _bounded_refresh_summary(text: Any, *, limit: int = 1_200) -> str:
+    if not isinstance(text, _PUBLIC_SCALAR_TYPES):
+        return ""
+    raw = str(text)
+    parts = [part.strip() for part in re.split(r"[\r\n]+|(?<=[.!?])\s+", raw) if part.strip()]
+    if not parts:
+        parts = [raw]
+    safe_parts: list[str] = []
+    for part in parts:
+        cleaned = _safe_text(part, limit=limit)
+        if not cleaned or _REFRESH_BLOCKED_VALUE_RE.search(cleaned):
+            continue
+        safe_parts.append(cleaned)
+        if len(" ".join(safe_parts)) >= limit:
+            break
+    return _safe_text(" ".join(safe_parts), limit=limit)
+
+
+def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("refresh failed")
+    title = _safe_public_text(payload.get("title") or payload.get("name") or payload.get("display_name"), limit=200)
+    summary = _bounded_refresh_summary(payload.get("summary") or payload.get("description") or payload.get("abstract"))
+    if not summary:
+        raise ValueError("refresh failed")
+    return {
+        "metadata_only": True,
+        "title": title or source_id,
+        "summary": summary,
+        "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+    }
+
+
+def _refresh_record_from_text(source_id: str, origin_uri: str, text: str, *, content_type: str) -> dict[str, Any]:
+    source_text = text
+    title = ""
+    summary = ""
+    if content_type == "text/html":
+        parser = _RefreshMetadataParser()
+        parser.feed(source_text)
+        parser.close()
+        title = _safe_public_text(" ".join(parser.title_parts), limit=200)
+        summary = _bounded_refresh_summary(" ".join(parser.description_parts))
+    else:
+        lines = []
+        for line in source_text.splitlines():
+            if re.match(r"^\s*(summary|description)\s*:", line, flags=re.IGNORECASE):
+                lines.append(re.sub(r"^\s*(summary|description)\s*:\s*", "", line, flags=re.IGNORECASE))
+        summary = _bounded_refresh_summary(" ".join(lines))
+    if not summary:
+        raise ValueError("refresh failed")
+    return {
+        "metadata_only": True,
+        "title": title or source_id,
+        "summary": summary,
+        "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+    }
+
+
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
-    raise RuntimeError("refresh fetcher disabled")
+    safe_source_id = _safe_public_id(source_id, fallback="source")
+    safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
+    if not _source_refresh_allowed(safe_origin_uri):
+        raise RuntimeError("refresh fetcher disabled")
+    request = Request(
+        safe_origin_uri,
+        headers={
+            "User-Agent": "Capy-Memory-Refresh/1.0",
+            "Accept": "text/html,text/plain,text/markdown,application/json;q=0.8",
+        },
+    )
+    with _refresh_open(request, timeout=_REFRESH_FETCH_TIMEOUT_SECONDS) as response:
+        final_url = getattr(response, "geturl", lambda: safe_origin_uri)()
+        if not _source_refresh_allowed(_safe_origin_uri(final_url, source_id=safe_source_id)):
+            raise RuntimeError("refresh fetcher disabled")
+        content_type = _refresh_content_type(response.headers)
+        if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
+            raise RuntimeError("refresh fetcher disabled")
+        raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
+        if len(raw) > _MAX_REFRESH_FETCH_BYTES:
+            raw = raw[:_MAX_REFRESH_FETCH_BYTES]
+        text = raw.decode(_refresh_charset(response.headers), errors="replace")
+    if content_type == "application/json":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("refresh fetcher disabled") from exc
+        return _refresh_record_from_json(safe_source_id, safe_origin_uri, payload)
+    return _refresh_record_from_text(safe_source_id, safe_origin_uri, text, content_type=content_type)
 
 
 def _refresh_allowed_hosts() -> set[str]:
