@@ -3569,7 +3569,12 @@ function _showProjectPicker(session, anchorEl){
     picker.remove();
     document.removeEventListener('click',close);
     await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-    session.project_id=null;
+    // Sidebar rows are shallow copies of _allSessions entries (see
+    // _attachChildSessionsToSidebarRows), so mutating `session` only updates
+    // the discarded copy. Write into the authoritative cache so the next
+    // renderSessionListFromCache() reflects the move. (#2551)
+    const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+    if(idx>=0) _allSessions[idx].project_id=null;
     renderSessionListFromCache();
     showToast('Removed from project');
   };
@@ -3591,7 +3596,9 @@ function _showProjectPicker(session, anchorEl){
       picker.remove();
       document.removeEventListener('click',close);
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-      session.project_id=p.project_id;
+      // See #2551 — write to _allSessions, not the shallow sidebar copy.
+      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+      if(idx>=0) _allSessions[idx].project_id=p.project_id;
       renderSessionListFromCache();
       showToast('Moved to '+p.name);
     };

@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+
+## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
+
+### Fixed
+
+- **PR #2563** by @Michaelyklam (closes #2554) — Align workspace-tree file rows with sibling directory rows by reserving the same expand/collapse toggle slot for files via a new `.file-tree-toggle-placeholder` element. Expanded directories now show child files stepped in at the same icon column as child folders. Directory toggles and file interactions are unchanged; source-level regression coverage and before/after PNGs included.
+- **PR #2561** by @nanookclaw (closes #2551) — Refresh the authoritative `_allSessions` cache when the project picker moves a session to/from a project. Previous code mutated only the shallow sidebar row copy, so `renderSessionListFromCache()` re-read the unchanged cache and repainted a stale project dot until the next `/api/sessions` poll healed the UI. Both the "Removed from project" and "Moved to <project>" branches now write the new `project_id` into `_allSessions[idx]` before re-rendering.
+- **PR #2567** by @dso2ng (refs #2477) — Surface automatic-compression handoff metadata through the `compressed` SSE event so the active browser stream keeps its completion card even after the backend rotates the session id from the origin to a compressed continuation. The event now carries both `old_session_id` and `new_session_id`/`continuation_session_id`; the frontend `compressed` listener accepts either, and the automatic-compression detail line names the compressed continuation session so the done state isn't silently dropped.
+- **PR #2568** by @Michaelyklam (closes #2545) — Add the Hermes Agent `xai-oauth` provider to the WebUI's OAuth provider catalog so Grok OAuth accounts authenticated via the Hermes CLI appear in Settings → Providers and the `/api/models` picker. The provider is treated as CLI-managed OAuth (no WebUI API-key form) and uses the live Hermes CLI model catalog when available with a Grok 4.20 static fallback.
+- **PR #2550** by @espokaos-ops (refs #2542) — Keep anonymous custom OpenAI-compatible endpoints in the model picker even when the configured `/v1/models` probe fails. Lightweight relays and llama-server-style deployments that authenticate `/v1/chat/completions` but not `/v1/models` no longer have their provider group silently dropped from the picker. Users can type a model id manually in the free-form input when no live catalog is available.
+
+### Added
+
+- **PR #2548** by @espokaos-ops — Add a PWA-standalone reload affordance. A small refresh button appears in the app titlebar (visible only under `@media (display-mode: standalone), (display-mode: fullscreen)`) so users running the WebUI as an installed home-screen PWA can reload without re-launching the app. Adds a complementary pull-to-refresh gesture on the messages container with an 80px threshold and a smooth-scroll-to-top guard so accidental triggers while reading history feel intentional. 4-viewport screenshots (390/1280/1440/1920, light/dark, hover/idle) included under `docs/pr-media/2548/`.
+
+### Documentation
+
+- **PR #2560** by @Michaelyklam (refs #1925) — Clarify the RuntimeAdapter Slice 3c state after #2544 shipped. The RFC now distinguishes shipped `/api/goal` routing through `RuntimeAdapter.update_goal(...)` from the still-staged `queue_message(...)` protocol method, and explicitly warns not to add a new server-side queue endpoint or queue scheduler merely for adapter symmetry while `/queue` remains browser-side queue/drain behavior.
+
+## [v0.51.91] — 2026-05-18 — Release BO (stage-384 — 5-PR full sweep batch — reasoning-replay history fix + archive-extract per-session inbox + fallback streaming warnings + sanitized custom-provider env hints + Slice 3c queue/goal adapter routing)
+
+### Fixed
+
+- **PR #2536** by @Michaelyklam (closes #2514, refs #2535) — Stop reasoning-only Thinking entries from being replayed into provider-facing history as blank assistant turns. Long WebUI sessions were accumulating duplicated stale Thinking blocks and inflated Activity/tool metadata on later turns when reasoning-only display entries (from interrupted/canceled turns) got reinserted into the restored conversation history. The fix keeps visible Thinking cards in the transcript while filtering them out of provider-facing replay. Settled compact Activity rerenders now also clear previously inserted Thinking rows before rebuilding the visible transcript.
+- **PR #2520** by @OneFat3 (refs #2247) — Route archive extraction (`/api/upload/extract`) through the per-session attachment inbox (`_session_attachment_dir`) instead of hardcoded `Path(s.workspace)`, matching the single-file upload path. Extracted archives now land at `<attachment_root>/<session_id>/<archive_stem>/` so session deletion cleanup covers them and per-session isolation is preserved when `HERMES_WEBUI_ATTACHMENT_DIR` is configured.
+- **PR #2505** by @cyberdyne187 — Surface provider fallback and rate-limit lifecycle notices as auto-clearing fallback warnings in the streaming composer status. The new bridge in `_agent_status_callback` matches agent lifecycle messages containing `rate limited` / `switching to fallback` / `falling back` / `fallback activated` / `trying fallback` and emits them as `warning` events with `type=fallback`, so the existing `static/messages.js` warning channel surfaces them with the correct auto-clear contract instead of letting them drop silently.
+- **PR #2556** by @Michaelyklam (closes #2541) — Sanitize auto-generated custom-provider API-key environment variable names so endpoint-derived provider ids such as `custom:gpu.local-8000` use POSIX-safe names like `CUSTOM_GPU_LOCAL_8000_API_KEY`. Runtime custom-provider key resolution now checks the sanitized env var first and falls back to the legacy punctuation-preserving name with a one-shot deprecation warning. Configured literal `api_key` values and explicit `key_env` config are unchanged.
+
+### Documentation
+
+- **PR #2544** by @Michaelyklam (refs #1925) — Implement the first Slice 3c RuntimeAdapter control routing. `RuntimeAdapter` / `LegacyJournalRuntimeAdapter` now expose `queue_message(...)` and `update_goal(...)` as protocol-translator delegates, and the `/api/goal` route uses `update_goal(...)` only when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled while preserving the legacy-direct response shape. The change keeps `/queue`'s existing browser-side drain semantics and goal post-turn evaluation in the current agent loop; no runner/sidecar, WebUI-owned queue, goal scheduler, cached-agent table, or execution-survives-restart claim is introduced.
+
 ## [v0.51.90] — 2026-05-18 — Release BN (stage-383 — 10-PR full sweep batch — empty-gateway messaging history fix + previous-messaging-sessions setting + Kanban board switcher layout + UI/UX demo theme controls + Slice 3c queue/goal RFC gate + keyless custom endpoints + custom-provider remote model catalog parity + auto-compression elapsed timer + new-conversation cold-start guard + Kanban drag-drop detail open fix)
 
 ### Fixed
@@ -22,7 +54,6 @@
 
 - **PR #2511** by @franksong2702 (refs #2502 / #2503) — Update the `docs/ui-ux/` demo appearance controls to initialize as `class="dark" data-skin="slate"` instead of the deprecated `data-theme`-only buttons and legacy theme names. Brings the demo pages in line with the live Theme + Skin contract referenced from the new `docs/CONTRACTS.md` so contributors following the contract-index path don't land on stale demos.
 - **PR #2509** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC after the Slice 3b approval/clarify seam shipped in v0.51.89. The RFC now marks Slice 3b as shipped and defines the next Slice 3c queue/continue + goal control gate: route those controls through `RuntimeAdapter.queue_message(...)` / `update_goal(...)` only after pinning stable response contracts, bounded unavailable-control behavior, replayable lifecycle/status evidence, ordering/idempotency expectations, and explicit non-goals for runner/sidecar ownership or a WebUI-owned queue/goal scheduler. Docs + adapter-seam regression test only — no runtime/control routing changes in this PR.
-
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed

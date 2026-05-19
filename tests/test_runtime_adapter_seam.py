@@ -12,6 +12,8 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
         "cancel_run",
         "respond_approval",
         "respond_clarify",
+        "queue_message",
+        "update_goal",
     )
     for name in required:
         assert hasattr(runtime.RuntimeAdapter, name)
@@ -22,17 +24,6 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) == "legacy-journal"
     assert runtime.runtime_adapter_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) is True
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "sidecar"}) == "legacy-direct"
-
-
-def test_queue_goal_adapter_methods_remain_docs_only_until_slice3c_implementation():
-    # REMOVAL REQUIRED: delete this test as part of Slice 3c implementation (refs #1925),
-    # at the point queue_message / update_goal land on RuntimeAdapter / LegacyJournalRuntimeAdapter.
-    # See docs/rfcs/hermes-run-adapter-contract.md Slice 3c acceptance + non-goals.
-    runtime = importlib.import_module("api.runtime_adapter")
-
-    for name in ("queue_message", "queue_input", "update_goal"):
-        assert not hasattr(runtime.RuntimeAdapter, name)
-        assert not hasattr(runtime.LegacyJournalRuntimeAdapter, name)
 
 
 def test_legacy_journal_adapter_start_run_delegates_without_owning_runtime_state():
@@ -120,6 +111,30 @@ def test_legacy_journal_adapter_controls_delegate_to_existing_handlers():
     ]
 
 
+def test_legacy_journal_adapter_queue_and_goal_delegate_without_owning_runtime_state():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+    adapter = runtime.LegacyJournalRuntimeAdapter(
+        queue_delegate=lambda run_id, message, mode: calls.append(("queue", run_id, message, mode)) or True,
+        goal_delegate=lambda session_id, action, text: calls.append(("goal", session_id, action, text)) or {
+            "ok": True,
+            "action": action,
+            "message": "Goal updated.",
+        },
+    )
+
+    queued = adapter.queue_message("r1", "follow up", mode="queue")
+    goal = adapter.update_goal("s1", "set", "finish the task")
+
+    assert queued.accepted is True
+    assert goal.accepted is True
+    assert goal.payload["action"] == "set"
+    assert calls == [
+        ("queue", "r1", "follow up", "queue"),
+        ("goal", "s1", "set", "finish the task"),
+    ]
+
+
 def test_legacy_journal_adapter_cancel_returns_bounded_not_active_status():
     runtime = importlib.import_module("api.runtime_adapter")
     calls = []
@@ -156,6 +171,29 @@ def test_legacy_journal_adapter_approval_and_clarify_return_bounded_not_active_s
     assert clarify.status == "not-active"
 
 
+def test_legacy_journal_adapter_queue_and_goal_return_bounded_statuses():
+    runtime = importlib.import_module("api.runtime_adapter")
+    adapter = runtime.LegacyJournalRuntimeAdapter(
+        queue_delegate=lambda run_id, message, mode: False,
+        goal_delegate=lambda session_id, action, text: {
+            "ok": False,
+            "action": action,
+            "error": "agent_running",
+            "message": "Agent is running.",
+        },
+    )
+
+    queued = adapter.queue_message("already-finished-run", "follow up")
+    goal = adapter.update_goal("s1", "set", "new goal")
+
+    assert queued.accepted is False
+    assert queued.status == "not-active"
+    assert goal.accepted is False
+    assert goal.status == "set"
+    assert goal.safe_message == "Agent is running."
+    assert goal.payload["error"] == "agent_running"
+
+
 def test_chat_cancel_route_uses_adapter_only_when_flag_enabled():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
@@ -189,6 +227,35 @@ def test_approval_and_clarify_routes_use_adapter_only_when_flag_enabled():
     assert "adapter.respond_clarify(sid, clarify_id, response).accepted" in clarify_body
     assert "else:\n        ok = _resolve_clarify_legacy(sid, clarify_id, response)" in clarify_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in clarify_body
+
+
+def test_goal_route_uses_adapter_only_when_flag_enabled():
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    goal_idx = src.index("def _handle_goal_command")
+    goal_body = src[goal_idx:src.index("def _handle_chat_start", goal_idx)]
+
+    assert "runtime_adapter_enabled()" in goal_body
+    assert "LegacyJournalRuntimeAdapter(goal_delegate=_legacy_goal_update)" in goal_body
+    assert "goal_adapter_action = _runtime_adapter_goal_action(goal_args)" in goal_body
+    assert "adapter.update_goal(" in goal_body
+    assert "goal_adapter_action," in goal_body
+    assert "payload = dict(control_result.payload)" in goal_body
+    assert "else:\n        payload = _legacy_goal_update" in goal_body
+    assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in goal_body
+
+
+def test_goal_adapter_action_is_bounded_to_slice3c_actions():
+    routes = importlib.import_module("api.routes")
+
+    assert routes._runtime_adapter_goal_action("") == "status"
+    assert routes._runtime_adapter_goal_action("status") == "status"
+    assert routes._runtime_adapter_goal_action("pause") == "pause"
+    assert routes._runtime_adapter_goal_action("resume") == "resume"
+    assert routes._runtime_adapter_goal_action("clear") == "clear"
+    assert routes._runtime_adapter_goal_action("stop") == "clear"
+    assert routes._runtime_adapter_goal_action("done") == "clear"
+    assert routes._runtime_adapter_goal_action("ship #1925") == "set"
 
 
 def test_approval_respond_does_not_fallback_to_oldest_when_explicit_id_is_stale():
@@ -235,3 +302,14 @@ def test_chat_start_adapter_path_preserves_legacy_response_shape():
     assert 'response.setdefault("run_id", result.run_id)' not in adapter_branch
     assert 'response.setdefault("status", result.status)' not in adapter_branch
     assert 'response.setdefault("active_controls", result.active_controls)' not in adapter_branch
+
+
+def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#2544 shipped the first Slice 3c implementation" in rfc
+    assert "route now uses `RuntimeAdapter.update_goal(...)`" in rfc
+    assert "`queue_message(...)` remains a staged protocol method" in rfc
+    assert "no new server-side queue endpoint" in rfc
+    assert "or queue scheduler should be added just for adapter symmetry" in rfc

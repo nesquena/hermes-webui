@@ -7798,6 +7798,18 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _runtime_adapter_goal_action(goal_args: str) -> str:
+    """Return the bounded RuntimeAdapter goal action for WebUI /goal args."""
+    action = str(goal_args or "").strip().lower()
+    if not action or action == "status":
+        return "status"
+    if action in ("pause", "resume"):
+        return action
+    if action in ("clear", "stop", "done"):
+        return "clear"
+    return "set"
+
+
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
     try:
@@ -7870,12 +7882,30 @@ def _handle_goal_command(handler, body):
         )
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
-    payload = goal_command_payload(
-        s.session_id,
-        goal_args,
-        stream_running=stream_running,
-        profile_home=profile_home,
-    )
+    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
+
+    def _legacy_goal_update(session_id: str, _action: str, text: str) -> dict:
+        return goal_command_payload(
+            session_id,
+            text,
+            stream_running=stream_running,
+            profile_home=profile_home,
+        )
+
+    goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    if runtime_adapter_enabled():
+        adapter = LegacyJournalRuntimeAdapter(goal_delegate=_legacy_goal_update)
+        control_result = adapter.update_goal(
+            s.session_id,
+            goal_adapter_action,
+            goal_args,
+        )
+        # Slice 3c keeps the adapter as a structural seam only.  Preserve the
+        # public /api/goal response by passing through the legacy payload rather
+        # than deriving HTTP behavior from ControlResult.accepted/status.
+        payload = dict(control_result.payload)
+    else:
+        payload = _legacy_goal_update(s.session_id, goal_adapter_action, goal_args)
     if not payload.get("ok", True):
         status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
@@ -8158,6 +8188,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _merge_display_messages_after_agent_result,
+                _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _context_messages_for_new_turn,
@@ -8210,7 +8241,7 @@ def _handle_chat_sync(handler, body):
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
-            _restore_reasoning_metadata(_previous_messages, _result_messages),
+            _restore_display_reasoning_metadata(_previous_messages, _result_messages),
             msg,
         )
         # Only auto-generate title when still default; preserves user renames

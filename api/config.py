@@ -692,6 +692,7 @@ _PROVIDER_DISPLAY = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "openai-codex": "OpenAI Codex",
+    "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
@@ -972,6 +973,49 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
+_LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
+
+
+def _api_key_env_name(provider_id: object) -> str:
+    """Return the POSIX-safe default API-key env var for a custom provider id."""
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
+    if not sanitized:
+        sanitized = "CUSTOM"
+    if not sanitized.startswith("CUSTOM_"):
+        sanitized = f"CUSTOM_{sanitized}"
+    return f"{sanitized}_API_KEY"
+
+
+def _legacy_custom_api_key_env_name(provider_id: object) -> str:
+    """Return the pre-#2541 custom-provider env hint shape, if any."""
+    raw = str(provider_id or "").strip().upper()
+    if not raw:
+        return ""
+    return f"{raw}_API_KEY"
+
+
+def _lookup_custom_api_key_env(provider_id: object) -> str | None:
+    """Look up sanitized custom-provider env first, then legacy broken shape."""
+    env_name = _api_key_env_name(provider_id)
+    api_key = os.getenv(env_name, "").strip()
+    if api_key:
+        return api_key
+
+    legacy_env_name = _legacy_custom_api_key_env_name(provider_id)
+    if legacy_env_name and legacy_env_name != env_name:
+        legacy_key = os.getenv(legacy_env_name, "").strip()
+        if legacy_key:
+            if legacy_env_name not in _LEGACY_CUSTOM_API_KEY_ENV_WARNED:
+                _LEGACY_CUSTOM_API_KEY_ENV_WARNED.add(legacy_env_name)
+                logger.warning(
+                    "Custom provider API key env var %s is deprecated; use %s instead",
+                    legacy_env_name,
+                    env_name,
+                )
+            return legacy_key
+    return None
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
@@ -1164,6 +1208,9 @@ _PROVIDER_MODELS = {
     ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
+        {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    "xai-oauth": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
 }
@@ -1841,7 +1888,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     # cases after profile switches or runtime config edits.
     cfg_data = get_config()
 
-    def _resolve_key(raw_api_key, raw_key_env) -> str | None:
+    def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
         api_key = None
         if raw_api_key is not None:
             key_text = str(raw_api_key).strip()
@@ -1853,6 +1900,8 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             key_env = str(raw_key_env or "").strip()
             if key_env:
                 api_key = os.getenv(key_env, "").strip() or None
+        if not api_key and provider_hint:
+            api_key = _lookup_custom_api_key_env(provider_hint)
         return api_key
 
     custom_providers = cfg_data.get("custom_providers", [])
@@ -1870,7 +1919,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             continue
 
         base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"))
+        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
         return api_key, base_url
 
     # If exactly one custom provider is configured, use it as a pragmatic
@@ -1878,7 +1927,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
         entry = custom_providers[0]
         return (
-            _resolve_key(entry.get("api_key"), entry.get("key_env")),
+            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
             str(entry.get("base_url") or "").strip() or None,
         )
 
@@ -1900,11 +1949,11 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 
     fallback_key = None
     if isinstance(provider_specific, dict):
-        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"))
+        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
     if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"))
+        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
     if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
+        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
 
     if fallback_key or fallback_base:
         return fallback_key, fallback_base or None
@@ -3807,6 +3856,18 @@ def get_available_models() -> dict:
                                 "models": models_for_group,
                             }
                         )
+                    elif pid == "custom" and cfg_base_url:
+                        # Anonymous custom endpoint: /v1/models probe may have
+                        # failed (e.g. llama-server, lightweight relay), but the
+                        # chat endpoint itself may still work.  Add the group
+                        # with an empty model list so the user can type a model
+                        # ID manually rather than being blocked by a silent
+                        # probe failure (#2542).
+                        groups.append({
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": [],
+                        })
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Literal, Protocol
 
 _RUNTIME_ADAPTER_ENV = "HERMES_WEBUI_RUNTIME_ADAPTER"
 _RUNTIME_ADAPTER_DIRECT = "legacy-direct"
@@ -66,12 +66,17 @@ class RunStatus:
     pending_clarify_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=True, unsafe_hash=False)
 class ControlResult:
+    # NOTE: `payload: dict` makes this dataclass unhashable by design.
+    # `unsafe_hash=False` makes that explicit so future maintainers don't try
+    # to add `frozen=True`-implied hashability back (would silently break the
+    # moment any caller adds dict / list fields). Opus advisor stage-384 followup.
     accepted: bool
     status: str = "accepted"
     event_id: str | None = None
     safe_message: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 class RuntimeAdapter(Protocol):
@@ -81,6 +86,13 @@ class RuntimeAdapter(Protocol):
     def cancel_run(self, run_id: str) -> ControlResult: ...
     def respond_approval(self, run_id: str, approval_id: str, choice: str) -> ControlResult: ...
     def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> ControlResult: ...
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult: ...
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult: ...
 
 
 def runtime_adapter_mode(environ: dict[str, str] | None = None) -> str:
@@ -107,6 +119,23 @@ def _cursor_to_after_seq(cursor: str | None) -> int | None:
 
 
 def _active_control_result(value: Any) -> ControlResult:
+    """Normalize legacy delegate responses without changing their payloads.
+
+    ``status`` is an adapter-level summary used by current control tests and
+    future runtime backends.  For legacy goal payloads it may mirror the goal
+    action (``set`` / ``pause`` / ``status``), while public route behavior keeps
+    using the payload itself to preserve existing HTTP response shapes.
+    """
+    if isinstance(value, ControlResult):
+        return value
+    if isinstance(value, dict):
+        accepted = bool(value.get("ok", True))
+        return ControlResult(
+            accepted=accepted,
+            status=str(value.get("status") or value.get("action") or ("accepted" if accepted else "not-active")),
+            safe_message=value.get("message") if not accepted else None,
+            payload=dict(value),
+        )
     accepted = bool(value)
     return ControlResult(
         accepted=accepted,
@@ -129,6 +158,8 @@ class LegacyJournalRuntimeAdapter:
         cancel_delegate: Callable[[str], Any] | None = None,
         approval_delegate: Callable[[str, str, str], Any] | None = None,
         clarify_delegate: Callable[[str, str, str], Any] | None = None,
+        queue_delegate: Callable[[str, str, str], Any] | None = None,
+        goal_delegate: Callable[[str, str, str], Any] | None = None,
         live_stream_lookup: Callable[[str], bool] | None = None,
         session_dir: Path | None = None,
     ):
@@ -136,6 +167,8 @@ class LegacyJournalRuntimeAdapter:
         self._cancel_delegate = cancel_delegate
         self._approval_delegate = approval_delegate
         self._clarify_delegate = clarify_delegate
+        self._queue_delegate = queue_delegate
+        self._goal_delegate = goal_delegate
         self._live_stream_lookup = live_stream_lookup or (lambda _run_id: False)
         self._session_dir = Path(session_dir) if session_dir is not None else None
 
@@ -221,3 +254,18 @@ class LegacyJournalRuntimeAdapter:
         if self._clarify_delegate is None:
             return ControlResult(False, status="unsupported", safe_message="Clarify is delegated to the legacy path.")
         return _active_control_result(self._clarify_delegate(run_id, clarify_id, response))
+
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult:
+        if self._queue_delegate is None:
+            return ControlResult(False, status="unsupported", safe_message="Queue is delegated to the legacy path.")
+        return _active_control_result(self._queue_delegate(run_id, message, mode))
+
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult:
+        if self._goal_delegate is None:
+            return ControlResult(False, status="unsupported", safe_message="Goal is delegated to the legacy path.")
+        return _active_control_result(self._goal_delegate(session_id, action, text))
