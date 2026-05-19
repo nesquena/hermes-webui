@@ -1019,6 +1019,109 @@ def _allowed_public_origins() -> set[str]:
     return result
 
 
+# ── ServeAI context cookie helpers ───────────────────────────────────────────
+
+def _parse_cookie_header(raw: str) -> dict:
+    """Parse a Cookie request header into a name→value dict.
+
+    Uses simple semicolon/equals splitting instead of http.cookies.SimpleCookie
+    to avoid parser failures when values contain JSON or JWT characters
+    ({, }, ", :, .) that SimpleCookie considers illegal in unquoted values.
+    When SimpleCookie encounters such a value it can silently drop all cookies
+    that follow it in the header, making subsequent reads return None.
+
+    Strips surrounding double-quotes from values (RFC 6265 dquote syntax) and
+    unescapes backslash-escaped characters produced by SimpleCookie's Set-Cookie
+    quoting (e.g. \\" → ").
+    """
+    result = {}
+    for part in raw.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition('=')
+        if not sep:
+            continue
+        name = name.strip()
+        value = value.strip()
+        # Strip optional surrounding double-quotes and unescape backslashes
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        if name:
+            result.setdefault(name, value)  # first occurrence wins
+    return result
+
+
+def _get_serveai_ctx_cookie(handler) -> dict:
+    """Read serveai_ctx cookie → {'instanceId': ..., 'orgId': ..., 'userId': ...}"""
+    raw = handler.headers.get('Cookie', '')
+    if not raw:
+        return {}
+    try:
+        value = _parse_cookie_header(raw).get('serveai_ctx', '')
+        if value:
+            return json.loads(value)
+    except Exception:
+        pass
+    return {}
+
+
+def _build_serveai_ctx_cookie(ctx: dict) -> str:
+    """Build a Set-Cookie header value for the serveai_ctx cookie."""
+    import http.cookies as _hc_mod
+    c = _hc_mod.SimpleCookie()
+    c['serveai_ctx'] = json.dumps(ctx, separators=(',', ':'))
+    c['serveai_ctx']['path'] = '/'
+    c['serveai_ctx']['httponly'] = True
+    c['serveai_ctx']['samesite'] = 'Lax'
+    # Output is like: serveai_ctx="..."; Path=/; HttpOnly; SameSite=Lax
+    return c.output(header='').strip()
+
+
+def _get_access_token_from_cookie(handler) -> str | None:
+    """Extract ServeAI accessToken JWT from the Cookie header.
+
+    Uses _parse_cookie_header instead of SimpleCookie because JWT values
+    (header.payload.signature, base64url-encoded) contain dots and other
+    characters that can confuse SimpleCookie's strict RFC 2109 parser,
+    causing it to silently drop the cookie or all cookies after a bad one.
+    """
+    raw = handler.headers.get('Cookie', '')
+    if not raw:
+        return None
+    token = _parse_cookie_header(raw).get('accessToken', '')
+    # Reject placeholder values set by VueUse useCookie(…).value = null
+    if not token or token in ('null', 'undefined', '""', "''"):
+        return None
+    return token
+
+
+_SERVEAI_ID_RE = _re.compile(r'^[a-fA-F0-9\-]{1,64}$')
+
+
+def _get_serveai_instance_id_from_request(handler) -> str:
+    """Extract serveai_instance_id scoped to the current browser tab.
+
+    Priority order:
+    1. Referer header — the browser sends the tab's current page URL as Referer
+       on every fetch. Since each tab has its own URL with serveai_instance_id
+       as a query param, this is per-tab and immune to cookie cross-tab bleed.
+    2. serveai_ctx cookie — fallback for cases where Referer is absent (e.g.
+       direct API calls, same-tab navigations without the param).
+    """
+    from urllib.parse import urlparse as _urlparse, parse_qs as _pqs
+    referer = handler.headers.get('Referer', '')
+    if referer:
+        try:
+            ref_q = _pqs(_urlparse(referer).query)
+            iid = ref_q.get('serveai_instance_id', [''])[0]
+            if iid and _SERVEAI_ID_RE.match(iid):
+                return iid
+        except Exception:
+            pass
+    return _get_serveai_ctx_cookie(handler).get('instanceId', '')
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin POST requests. Returns True if OK."""
     origin = handler.headers.get("Origin", "")
@@ -2868,10 +2971,214 @@ def handle_get(handler, parsed) -> bool:
             from api.extensions import inject_extension_tags
 
             html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
+
+            # ── ServeAI context injection ───────────────────────────────────
+            # When opened from ServeAI (gt-serveai-web), the URL carries
+            # serveai_* query params that identify the calling organization,
+            # user, and specific Hermes instance. These are injected as
+            # window.SERVEAI_CONTEXT so all frontend modules can read them for
+            # multi-tenant scoping and session isolation.
+            # IDs are validated to [a-fA-F0-9\-] (MongoDB ObjectID / UUID)
+            # before embedding to prevent XSS injection via crafted URLs.
+            qs = parse_qs(parsed.query or "")
+
+            def _safe_id(val):
+                raw = val[0] if isinstance(val, list) and val else (val or "")
+                return raw if (raw and re.match(r'^[a-fA-F0-9\-]{1,64}$', raw)) else ""
+
+            serveai_instance_id = _safe_id(qs.get("serveai_instance_id", ""))
+            serveai_org_id = _safe_id(qs.get("serveai_org_id", ""))
+            serveai_user_id = _safe_id(qs.get("serveai_user_id", ""))
+
+            # ── Fallback: read context from cookie on plain refresh ─────────
+            # When the page is refreshed (no URL params), read the persisted
+            # context from the serveai_ctx cookie so we can still enforce
+            # access control. This is the fix for the logout-then-refresh gap:
+            # the access token will be gone after logout, but the ctx cookie
+            # survives → we detect the missing token and return 403.
+            _ctx_from_url = bool(serveai_instance_id or serveai_org_id or serveai_user_id)
+            if not _ctx_from_url:
+                _stored_ctx = _get_serveai_ctx_cookie(handler)
+                if _stored_ctx.get('instanceId'):
+                    serveai_instance_id = _safe_id(_stored_ctx.get('instanceId', ''))
+                    serveai_org_id = _safe_id(_stored_ctx.get('orgId', ''))
+                    serveai_user_id = _safe_id(_stored_ctx.get('userId', ''))
+
+            # ── Guard: block direct access with no ServeAI context ──────────
+            # If there is no serveai_instance_id from either the URL or the
+            # serveai_ctx cookie, the visitor arrived without going through
+            # ServeAI (e.g. typed the URL directly or stripped query params).
+            # Return a 401 login-required page so the raw Hermes UI is never
+            # exposed without a valid ServeAI session.
+            if not serveai_instance_id:
+                _login_required_html = (
+                    '<!doctype html><html lang="en"><head>'
+                    '<meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>Login Required — ServeAI</title>'
+                    '<style>'
+                    'body{font-family:system-ui,sans-serif;display:flex;align-items:center;'
+                    'justify-content:center;min-height:100vh;margin:0;'
+                    'background:#0D0D1A;color:#e0e0e0;}'
+                    '.card{text-align:center;padding:2.5rem 3rem;max-width:420px;'
+                    'background:#15152a;border:1px solid #2a2a4a;border-radius:16px;}'
+                    '.icon{font-size:3rem;margin-bottom:1rem;}'
+                    'h1{color:#8b8bf5;font-size:1.5rem;font-weight:700;margin:0 0 .75rem;}'
+                    'p{color:#8a8aaa;font-size:.95rem;line-height:1.6;margin:.4rem 0;}'
+                    '.btn{display:inline-block;margin-top:1.75rem;padding:.75rem 2rem;'
+                    'background:#8b8bf5;color:#fff;border-radius:8px;'
+                    'text-decoration:none;font-weight:600;font-size:.95rem;'
+                    'transition:background .2s;}'
+                    '.btn:hover{background:#7a7ae0;}'
+                    '</style></head><body>'
+                    '<div class="card">'
+                    '<div class="icon">&#128274;</div>'
+                    '<h1>Login Required</h1>'
+                    '<p>Hermes Agent can only be accessed through the ServeAI platform.</p>'
+                    '<p>Please open Hermes Agent from your ServeAI dashboard.</p>'
+                    '<a class="btn" href="javascript:void(0)" '
+                    'onclick="window.location.href=window.location.origin+\'/login\';">'
+                    'Go to ServeAI Login'
+                    '</a>'
+                    '</div></body></html>'
+                )
+                return t(handler, _login_required_html, status=401,
+                         content_type="text/html; charset=utf-8")
+
+            if serveai_instance_id or serveai_org_id or serveai_user_id:
+                # ── C: Validate instance access via gateway ─────────────────
+                # When a serveai_instance_id is present, verify that the
+                # caller's JWT actually has access to that instance.
+                # - dict  → valid, proceed and inject name (B)
+                # - False → unauthorized/not found → return 403 page
+                # - None  → gateway unreachable → fail open (don't lock out)
+                #
+                # If access token is missing entirely (user logged out of
+                # ServeAI), also return 403 — the session is no longer valid.
+                _instance_name = ''
+                _access_token = _get_access_token_from_cookie(handler)
+                if serveai_instance_id and not _access_token:
+                    # No JWT → user has logged out of ServeAI → block access
+                    _403_html = (
+                        '<!doctype html><html lang="en"><head>'
+                        '<meta charset="utf-8">'
+                        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                        '<title>Login Required — ServeAI</title>'
+                        '<style>'
+                        'body{font-family:system-ui,sans-serif;display:flex;align-items:center;'
+                        'justify-content:center;min-height:100vh;margin:0;'
+                        'background:#0D0D1A;color:#e0e0e0;}'
+                        '.card{text-align:center;padding:2.5rem 3rem;max-width:420px;'
+                        'background:#15152a;border:1px solid #2a2a4a;border-radius:16px;}'
+                        '.icon{font-size:3rem;margin-bottom:1rem;}'
+                        'h1{color:#8b8bf5;font-size:1.5rem;font-weight:700;margin:0 0 .75rem;}'
+                        'p{color:#8a8aaa;font-size:.95rem;line-height:1.6;margin:.4rem 0;}'
+                        '.btn{display:inline-block;margin-top:1.75rem;padding:.75rem 2rem;'
+                        'background:#8b8bf5;color:#fff;border-radius:8px;'
+                        'text-decoration:none;font-weight:600;font-size:.95rem;'
+                        'transition:background .2s;}'
+                        '.btn:hover{background:#7a7ae0;}'
+                        '</style></head><body>'
+                        '<div class="card">'
+                        '<div class="icon">&#128274;</div>'
+                        '<h1>Login Required</h1>'
+                        '<p>Your ServeAI session has ended.</p>'
+                        '<p>Please log in again to continue using Hermes Agent.</p>'
+                        '<a class="btn" href="javascript:void(0)" '
+                        'onclick="window.location.href=window.location.origin+\'/login\';">'
+                        'Go to ServeAI Login'
+                        '</a>'
+                        '</div></body></html>'
+                    )
+                    return t(handler, _403_html, status=403,
+                             content_type="text/html; charset=utf-8")
+                if serveai_instance_id and _access_token:
+                    try:
+                        from api.serveai_client import get_hermes_instance as _get_instance
+                        _instance_result = _get_instance(serveai_instance_id, _access_token)
+                        if _instance_result is False:
+                            # Explicit 4xx — block access
+                            _403_html = (
+                                '<!doctype html><html><head><meta charset="utf-8">'
+                                '<title>Access Denied</title>'
+                                '<style>body{font-family:sans-serif;display:flex;align-items:center;'
+                                'justify-content:center;height:100vh;margin:0;background:#0D0D1A;color:#fff;}'
+                                '.box{text-align:center;padding:2rem;}'
+                                'h1{color:#e05252;font-size:1.5rem;margin-bottom:.5rem;}'
+                                'p{color:#aaa;margin:.25rem 0;}'
+                                'a{color:#8b8bf5;text-decoration:none;}'
+                                '</style></head><body>'
+                                '<div class="box">'
+                                '<h1>Access Denied</h1>'
+                                '<p>You do not have access to this Hermes instance.</p>'
+                                '<p>Please return to <a href="javascript:history.back()">ServeAI</a>'
+                                ' and try again.</p>'
+                                '</div></body></html>'
+                            )
+                            return t(handler, _403_html, status=403,
+                                     content_type="text/html; charset=utf-8")
+                        elif isinstance(_instance_result, dict):
+                            # ── B: Extract instance name ────────────────────
+                            _data = _instance_result.get('data') or _instance_result
+                            _instance_name = _data.get('name', '') if isinstance(_data, dict) else ''
+                    except Exception:
+                        pass  # gateway down → fail open
+
+                ctx_json = json.dumps({
+                    "instanceId": serveai_instance_id,
+                    "orgId": serveai_org_id,
+                    "userId": serveai_user_id,
+                    "instanceName": _instance_name,
+                })
+                ctx_script = (
+                    '<script id="serveai-context">'
+                    'window.SERVEAI_CONTEXT=' + ctx_json + ';'
+                    '</script>\n'
+                )
+                html = html.replace('<head>', '<head>\n' + ctx_script, 1)
+
+                # ── B: Inject instance name badge into titlebar ─────────────
+                # Uses #appTitlebarSub (already in HTML, hidden by default).
+                # Runs on DOMContentLoaded so it doesn't race with boot.js.
+                if _instance_name:
+                    _safe_name = _instance_name.replace('\\', '\\\\').replace("'", "\\'").replace('<', '').replace('>', '')
+                    _badge_script = (
+                        '<script>'
+                        '(function(){'
+                        "var ctx=window.SERVEAI_CONTEXT;"
+                        "if(!ctx||!ctx.instanceName)return;"
+                        "var n=ctx.instanceName;"
+                        "function _applyBadge(){"
+                        "var sub=document.getElementById('appTitlebarSub');"
+                        "if(sub){sub.textContent=n;sub.removeAttribute('hidden');}"
+                        "}"
+                        "if(document.readyState==='loading'){"
+                        "document.addEventListener('DOMContentLoaded',_applyBadge);"
+                        "}else{_applyBadge();}"
+                        "})()"
+                        '</script>\n'
+                    )
+                    html = html.replace('</body>', _badge_script + '</body>', 1)
+
+            # ── Set serveai_ctx cookie (fallback for Referer-less requests) ─
+            # Only set/refresh the cookie when context came from URL params
+            # (first open). On plain refreshes the cookie already exists and
+            # must NOT be renewed — that would extend the session lifetime
+            # beyond the ServeAI accessToken's validity.
+            _extra_response_headers = {}
+            if serveai_instance_id and _ctx_from_url:
+                _ctx = {
+                    "instanceId": serveai_instance_id,
+                    "orgId": serveai_org_id,
+                    "userId": serveai_user_id,
+                }
+                _extra_response_headers['Set-Cookie'] = _build_serveai_ctx_cookie(_ctx)
+
             return t(
                 handler,
                 inject_extension_tags(html),
                 content_type="text/html; charset=utf-8",
+                extra_headers=_extra_response_headers if _extra_response_headers else None,
             )
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
@@ -3124,6 +3431,26 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+
+            # ── ServeAI instance isolation ──────────────────────────────────
+            # When hermes-webui is opened from ServeAI, each browser tab is
+            # scoped to a specific Hermes instance via serveai_instance_id.
+            # A session that was created for a DIFFERENT instance (or with no
+            # instance ID at all) must not be readable by the current tab —
+            # the sidebar list filters are not enough on their own because a
+            # user could craft or remember a session URL from another instance.
+            #
+            # Only enforce when the current request carries an instance ID
+            # (i.e. opened from ServeAI). Standalone/direct hermes-webui
+            # usage (no instance ID) remains unrestricted.
+            # This is intentionally identical to the /api/sessions list filter:
+            #   if s.get('serveai_instance_id') == _serveai_iid
+            _req_iid = _get_serveai_instance_id_from_request(handler)
+            if _req_iid:
+                _sess_iid = getattr(s, 'serveai_instance_id', None) or ''
+                if _sess_iid != _req_iid:
+                    return j(handler, {"error": "session not found"}, status=404)
+
             _clear_stale_stream_state(s)
             cli_meta = _lookup_cli_session_metadata(sid)
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
@@ -3385,6 +3712,15 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
+            # ── ServeAI instance scoping ────────────────────────────────────
+            # Use Referer header to extract the instance ID for this specific
+            # request. Referer carries the browser tab's current URL which
+            # includes serveai_instance_id as a query param — this is per-tab
+            # and unaffected by cross-tab cookie bleed.
+            _serveai_iid = _get_serveai_instance_id_from_request(handler)
+            if _serveai_iid:
+                webui_sessions = [s for s in webui_sessions
+                                  if s.get('serveai_instance_id') == _serveai_iid]
             diag.stage("load_settings")
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
@@ -3960,6 +4296,12 @@ def handle_post(handler, parsed) -> bool:
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
+        # ── ServeAI instance scoping ────────────────────────────────────────
+        # Tag the new session with the instance ID from the Referer header
+        # (per-tab, not affected by cross-tab cookie bleed).
+        _serveai_iid = _get_serveai_instance_id_from_request(handler)
+        if _serveai_iid:
+            s.serveai_instance_id = _serveai_iid
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/session/duplicate":
