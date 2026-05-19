@@ -9,6 +9,7 @@ in the agent execution layer.
 from __future__ import annotations
 
 import errno
+import atexit
 import codecs
 import fcntl
 import os
@@ -67,6 +68,20 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+
+
+def _terminal_shell_preexec_fn() -> None:
+    """Ask Linux to terminate the PTY shell when the WebUI parent dies."""
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG=1, SIGTERM=15
+    except Exception:
+        # Non-Linux platforms or restricted runtimes should still be able to
+        # open an embedded terminal; they just do not get the Linux pdeathsig
+        # hardening.
+        pass
 
 
 def _decode_terminal_output(decoder, data: bytes) -> str:
@@ -178,6 +193,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=True,
+            preexec_fn=_terminal_shell_preexec_fn,
             start_new_session=True,
         )
         os.close(slave_fd)
@@ -240,9 +256,24 @@ def close_terminal(session_id: str) -> bool:
                     os.killpg(term.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                try:
+                    term.proc.wait(timeout=1.0)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    pass
     finally:
         try:
             os.close(term.master_fd)
         except OSError:
             pass
     return True
+
+
+def close_all_terminals() -> None:
+    """Best-effort reap of embedded shells during graceful WebUI shutdown."""
+    with _LOCK:
+        session_ids = list(_TERMINALS)
+    for session_id in session_ids:
+        close_terminal(session_id)
+
+
+atexit.register(close_all_terminals)

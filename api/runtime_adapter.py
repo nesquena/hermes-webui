@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Literal, Protocol
 
 _RUNTIME_ADAPTER_ENV = "HERMES_WEBUI_RUNTIME_ADAPTER"
 _RUNTIME_ADAPTER_DIRECT = "legacy-direct"
@@ -66,12 +66,17 @@ class RunStatus:
     pending_clarify_id: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=True, unsafe_hash=False)
 class ControlResult:
+    # NOTE: `payload: dict` makes this dataclass unhashable by design.
+    # `unsafe_hash=False` makes that explicit so future maintainers don't try
+    # to add `frozen=True`-implied hashability back (would silently break the
+    # moment any caller adds dict / list fields). Opus advisor stage-384 followup.
     accepted: bool
     status: str = "accepted"
     event_id: str | None = None
     safe_message: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 class RuntimeAdapter(Protocol):
@@ -81,6 +86,13 @@ class RuntimeAdapter(Protocol):
     def cancel_run(self, run_id: str) -> ControlResult: ...
     def respond_approval(self, run_id: str, approval_id: str, choice: str) -> ControlResult: ...
     def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> ControlResult: ...
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult: ...
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult: ...
 
 
 def runtime_adapter_mode(environ: dict[str, str] | None = None) -> str:
@@ -107,12 +119,152 @@ def _cursor_to_after_seq(cursor: str | None) -> int | None:
 
 
 def _active_control_result(value: Any) -> ControlResult:
+    """Normalize legacy delegate responses without changing their payloads.
+
+    ``status`` is an adapter-level summary used by current control tests and
+    future runtime backends.  For legacy goal payloads it may mirror the goal
+    action (``set`` / ``pause`` / ``status``), while public route behavior keeps
+    using the payload itself to preserve existing HTTP response shapes.
+    """
+    if isinstance(value, ControlResult):
+        return value
+    if isinstance(value, dict):
+        accepted = bool(value.get("ok", True))
+        return ControlResult(
+            accepted=accepted,
+            status=str(value.get("status") or value.get("action") or ("accepted" if accepted else "not-active")),
+            safe_message=value.get("message") if not accepted else None,
+            payload=dict(value),
+        )
     accepted = bool(value)
     return ControlResult(
         accepted=accepted,
         status="accepted" if accepted else "not-active",
         safe_message=None if accepted else "Legacy control did not accept the request.",
     )
+
+
+def _runner_unsupported_control(name: str) -> ControlResult:
+    return ControlResult(
+        False,
+        status="unsupported",
+        safe_message=f"{name} is not supported by this runner backend.",
+    )
+
+
+class RunnerRuntimeAdapter:
+    """Protocol-translator facade for a future runner/sidecar backend.
+
+    Slice 4 moves runtime ownership behind a runner boundary, but the WebUI
+    adapter must remain a translator.  This class deliberately delegates to an
+    injected client instead of owning process-local streams, cancellation flags,
+    approval queues, clarify queues, or cached agent instances itself.
+    """
+
+    def __init__(self, *, client: Any):
+        self._client = client
+
+    def start_run(self, request: StartRunRequest) -> RunStartResult:
+        start_run = getattr(self._client, "start_run", None)
+        if start_run is None:
+            raise NotImplementedError("RunnerRuntimeAdapter.start_run requires a runner client")
+        payload = start_run(request)
+        if isinstance(payload, RunStartResult):
+            return payload
+        payload = dict(payload or {})
+        run_id = str(payload.get("run_id") or payload.get("stream_id") or "")
+        stream_id = str(payload.get("stream_id") or run_id)
+        session_id = str(payload.get("session_id") or request.session_id)
+        active_controls = payload.get("active_controls")
+        if not isinstance(active_controls, list):
+            active_controls = []
+        return RunStartResult(
+            run_id=run_id,
+            session_id=session_id,
+            stream_id=stream_id,
+            status=str(payload.get("status") or "started"),
+            started_at=payload.get("started_at"),
+            cursor=payload.get("cursor"),
+            active_controls=active_controls,
+            payload=payload,
+        )
+
+    def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream:
+        observe_run = getattr(self._client, "observe_run", None)
+        if observe_run is None:
+            return RunEventStream(run_id=run_id, events=[], cursor=cursor, last_event_id=None)
+        result = observe_run(run_id, cursor=cursor)
+        if isinstance(result, RunEventStream):
+            return result
+        payload = dict(result or {})
+        events = list(payload.get("events") or [])
+        last_event_id = payload.get("last_event_id") or (events[-1].get("event_id") if events else None)
+        next_cursor = payload.get("cursor")
+        if next_cursor is None and events:
+            next_cursor = str(events[-1].get("seq") or "")
+        return RunEventStream(
+            run_id=str(payload.get("run_id") or run_id),
+            events=events,
+            cursor=str(next_cursor) if next_cursor is not None else cursor,
+            last_event_id=last_event_id,
+        )
+
+    def get_run(self, run_id: str) -> RunStatus:
+        get_run = getattr(self._client, "get_run", None)
+        if get_run is None:
+            return RunStatus(run_id=run_id)
+        result = get_run(run_id)
+        if isinstance(result, RunStatus):
+            return result
+        payload = dict(result or {})
+        active_controls = payload.get("active_controls")
+        if not isinstance(active_controls, list):
+            active_controls = []
+        return RunStatus(
+            run_id=str(payload.get("run_id") or run_id),
+            session_id=str(payload.get("session_id") or "") or None,
+            status=str(payload.get("status") or "unknown"),
+            last_event_id=payload.get("last_event_id"),
+            terminal_state=payload.get("terminal_state"),
+            active_controls=active_controls,
+            pending_approval_id=payload.get("pending_approval_id"),
+            pending_clarify_id=payload.get("pending_clarify_id"),
+        )
+
+    def cancel_run(self, run_id: str) -> ControlResult:
+        cancel_run = getattr(self._client, "cancel_run", None)
+        if cancel_run is None:
+            return _runner_unsupported_control("Cancel")
+        return _active_control_result(cancel_run(run_id))
+
+    def respond_approval(self, run_id: str, approval_id: str, choice: str) -> ControlResult:
+        respond_approval = getattr(self._client, "respond_approval", None)
+        if respond_approval is None:
+            return _runner_unsupported_control("Approval")
+        return _active_control_result(respond_approval(run_id, approval_id, choice))
+
+    def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> ControlResult:
+        respond_clarify = getattr(self._client, "respond_clarify", None)
+        if respond_clarify is None:
+            return _runner_unsupported_control("Clarify")
+        return _active_control_result(respond_clarify(run_id, clarify_id, response))
+
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult:
+        queue_message = getattr(self._client, "queue_message", None)
+        if queue_message is None:
+            return _runner_unsupported_control("Queue")
+        return _active_control_result(queue_message(run_id, message, mode=mode))
+
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult:
+        update_goal = getattr(self._client, "update_goal", None)
+        if update_goal is None:
+            return _runner_unsupported_control("Goal")
+        return _active_control_result(update_goal(session_id, action, text))
 
 
 class LegacyJournalRuntimeAdapter:
@@ -129,6 +281,8 @@ class LegacyJournalRuntimeAdapter:
         cancel_delegate: Callable[[str], Any] | None = None,
         approval_delegate: Callable[[str, str, str], Any] | None = None,
         clarify_delegate: Callable[[str, str, str], Any] | None = None,
+        queue_delegate: Callable[[str, str, str], Any] | None = None,
+        goal_delegate: Callable[[str, str, str], Any] | None = None,
         live_stream_lookup: Callable[[str], bool] | None = None,
         session_dir: Path | None = None,
     ):
@@ -136,6 +290,8 @@ class LegacyJournalRuntimeAdapter:
         self._cancel_delegate = cancel_delegate
         self._approval_delegate = approval_delegate
         self._clarify_delegate = clarify_delegate
+        self._queue_delegate = queue_delegate
+        self._goal_delegate = goal_delegate
         self._live_stream_lookup = live_stream_lookup or (lambda _run_id: False)
         self._session_dir = Path(session_dir) if session_dir is not None else None
 
@@ -221,3 +377,18 @@ class LegacyJournalRuntimeAdapter:
         if self._clarify_delegate is None:
             return ControlResult(False, status="unsupported", safe_message="Clarify is delegated to the legacy path.")
         return _active_control_result(self._clarify_delegate(run_id, clarify_id, response))
+
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult:
+        if self._queue_delegate is None:
+            return ControlResult(False, status="unsupported", safe_message="Queue is delegated to the legacy path.")
+        return _active_control_result(self._queue_delegate(run_id, message, mode))
+
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult:
+        if self._goal_delegate is None:
+            return ControlResult(False, status="unsupported", safe_message="Goal is delegated to the legacy path.")
+        return _active_control_result(self._goal_delegate(session_id, action, text))

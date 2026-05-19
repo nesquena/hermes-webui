@@ -278,6 +278,9 @@ class TestToolCallGroupingStatic:
         assert "anchorParent.insertBefore(thinkingNode, anchorRow)" in render_fn, (
             "Settled Thinking cards should appear before their visible assistant process text."
         )
+        assert ".agent-activity-thinking:not([data-live-thinking=\"1\"])" in render_fn, (
+            "Settled rerenders must remove previously inserted Thinking activity rows before rebuilding."
+        )
         assert "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))" in render_fn, (
             "The non-simplified path should preserve standalone settled thinking cards."
         )

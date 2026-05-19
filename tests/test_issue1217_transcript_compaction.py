@@ -1,10 +1,12 @@
-from api.models import Session
+from api.models import Session, reconciled_state_db_messages_for_session
 import contextlib
+from types import SimpleNamespace
 
 from api.streaming import (
     _assistant_reply_added_after_current_turn,
     _context_messages_for_new_turn,
     _merge_display_messages_after_agent_result,
+    _new_turn_context_from_messages,
     _sanitize_messages_for_api,
     _session_context_messages,
 )
@@ -312,6 +314,40 @@ def test_explicit_continue_keeps_compacted_active_task_context(tmp_path):
     )
 
     assert _context_messages_for_new_turn(session, "继续") == compacted_task_context
+
+
+def test_streaming_reconciled_context_keeps_casual_greeting_suppression():
+    compacted_task_context = [
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted. "
+                "Your current task is identified in the Active Task section — resume exactly from there."
+            ),
+            "timestamp": 1.0,
+        },
+        {"role": "assistant", "content": "I will inspect api/config.py next.", "timestamp": 2.0},
+    ]
+    session = SimpleNamespace(
+        session_id="issue2308-streaming",
+        messages=[{"role": "user", "content": "old task", "timestamp": 0.5}],
+        context_messages=compacted_task_context,
+    )
+    external_state_messages = list(compacted_task_context)
+
+    # Mirror the streaming pre-turn assembly for prefer_context=True: reconcile
+    # sidecar context with one state.db snapshot, then apply the normal new-turn
+    # context filter that suppresses casual greetings from resuming stale tasks.
+    previous_context_messages = _new_turn_context_from_messages(
+        reconciled_state_db_messages_for_session(
+            session,
+            prefer_context=True,
+            state_messages=external_state_messages,
+        ),
+        "你好",
+    )
+
+    assert previous_context_messages == []
 
 
 def test_all_cjk_greetings_drop_stale_compaction_context(tmp_path):

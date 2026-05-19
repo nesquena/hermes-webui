@@ -12,7 +12,7 @@ Covers:
 import pathlib
 import re
 
-from api.streaming import _restore_reasoning_metadata
+from api.streaming import _restore_reasoning_metadata, _sanitize_messages_for_api
 
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -108,3 +108,38 @@ def test_restore_reasoning_metadata_does_not_preserve_timestamp_for_changed_mess
 
     assert restored[0]["timestamp"] == 1713500000
     assert "timestamp" not in restored[1]
+
+
+def test_sanitize_messages_for_api_drops_reasoning_only_display_entries():
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "", "reasoning": "hidden chain", "_partial_tool_calls": [{"name": "read_file"}]},
+        {"role": "assistant", "content": "visible answer", "reasoning": "display metadata"},
+        {"role": "assistant", "content": [{"type": "reasoning", "text": "hidden"}]},
+    ]
+
+    sanitized = _sanitize_messages_for_api(messages)
+
+    assert sanitized == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "visible answer"},
+    ]
+
+
+def test_restore_reasoning_metadata_does_not_reinsert_reasoning_only_display_entries():
+    previous_messages = [
+        {"role": "user", "content": "hello", "timestamp": 1713500000},
+        {"role": "assistant", "content": "", "reasoning": "old hidden thought", "timestamp": 1713500001},
+        {"role": "assistant", "content": "visible answer", "reasoning": "answer thought", "timestamp": 1713500060},
+    ]
+    updated_messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "visible answer"},
+    ]
+
+    restored = _restore_reasoning_metadata(previous_messages, updated_messages)
+
+    assert len(restored) == 2
+    assert restored[1]["content"] == "visible answer"
+    assert restored[1]["reasoning"] == "answer thought"
+    assert restored[1]["timestamp"] == 1713500060

@@ -554,7 +554,8 @@ class TestSmdUrlSchemeSanitization:
     def test_sanitize_uses_scheme_allowlist(self):
         # The allowlist regex must permit the safe schemes that the legacy
         # renderMd path emitted (http/https + relative/anchor paths + mailto/tel)
-        # and reject everything else — including javascript:, data:, vbscript:, file:.
+        # and reject dangerous executable schemes. file:// anchors are rewritten
+        # to api/media before click time rather than allowed through raw.
         assert "_SMD_SAFE_URL_RE" in MESSAGES_JS, (
             "Expected a _SMD_SAFE_URL_RE regex defining the safe-scheme allowlist"
         )
@@ -565,10 +566,16 @@ class TestSmdUrlSchemeSanitization:
         pattern = m.group(1)
         # Must mention https? and must NOT mention javascript/vbscript/data
         assert "https?" in pattern, "allowlist must permit https?:"
+        assert "file:" not in pattern, "raw file: anchors must be rewritten, not allowed through"
+        assert "api" in MESSAGES_JS, "allowlist must permit rewritten api/media anchors"
         for bad in ("javascript", "vbscript", "data:"):
             assert bad not in pattern, (
                 f"allowlist must NOT mention {bad!r} — schemes are denied by default"
             )
+
+    def test_file_anchor_rewrite_helper_exists(self):
+        assert "_smdFileHref" in MESSAGES_JS
+        assert "api/media?path=" in MESSAGES_JS
 
     def test_sanitize_called_after_smd_write(self):
         # _smdWrite must invoke _sanitizeSmdLinks on assistantBody after feeding the parser,

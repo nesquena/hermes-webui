@@ -808,6 +808,52 @@ class TestNonEmptyMessagesPendingCleared:
         assert s.pending_user_message is None
         assert s.active_stream_id is None
 
+    def test_finished_worker_can_supersede_its_own_interrupted_marker(self):
+        """A live worker that finishes after stale repair should be allowed to
+        replace the recovery marker for the same user turn."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert streaming._stream_writeback_can_supersede_recovery_marker(s, "deploy")
+
+    def test_finished_worker_does_not_supersede_after_newer_turn_appended(self):
+        """Once a follow-up turn changes the visible tail, stale writeback stays
+        blocked so old workers cannot overwrite newer transcript state."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+                {"role": "user", "content": "what happened?"},
+                {"role": "assistant", "content": "I checked the deployment status."},
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert not streaming._stream_writeback_can_supersede_recovery_marker(s, "deploy")
+
+    def test_finished_worker_does_not_supersede_different_user_turn(self):
+        """The supersede path is tied to the pending prompt that was repaired."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert not streaming._stream_writeback_can_supersede_recovery_marker(s, "ship it")
+
     def test_core_sync_branch_does_not_duplicate_journal_output_already_in_core(
         self, hermes_home, monkeypatch
     ):
