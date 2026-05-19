@@ -964,6 +964,40 @@
       '</div></div>'+rows+'</div>';
   }
 
+  function renderPromptPreflightEvidence(receipt){
+    const data = receipt && typeof receipt === 'object' && !Array.isArray(receipt) ? receipt : null;
+    if (!data) return '';
+    const status = safeDisplayMetadataText(data.status || 'unknown', 'unknown') || 'unknown';
+    const boundary = safeDisplayMetadataText(data.boundary || 'unknown', 'unknown') || 'unknown';
+    const severity = safeDisplayMetadataText(data.severity || 'unknown', 'unknown') || 'unknown';
+    const rawHash = String(data.prompt_hash == null ? '' : data.prompt_hash).replace(/\s+/g, '').trim();
+    const promptHash = /^[a-f0-9]{12,128}$/i.test(rawHash) ? rawHash.slice(0, 12) : '';
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.local_only === true) flags.push('local-only');
+    if (data.raw_prompt_stored === false) flags.push('raw prompt not stored');
+    const listValues = [];
+    ['checks', 'categories'].forEach(function(key){
+      if (!Array.isArray(data[key])) return;
+      data[key].slice(0, 4).forEach(function(item){
+        const safe = safeDisplayMetadataText(item, '');
+        if (safe && safe !== '[REDACTED]' && listValues.indexOf(safe) === -1) listValues.push(safe);
+      });
+    });
+    const details = [
+      'Status: '+status,
+      'Boundary: '+boundary,
+      'Severity: '+severity,
+    ];
+    if (promptHash) details.push('Prompt hash: '+promptHash);
+    if (flags.length) details.push(flags.join(' · '));
+    if (listValues.length) details.push('Checks: '+listValues.join(' · '));
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Prompt preflight</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
+      '<div class="capy-spaces-muted">Preflight receipt is metadata-only; raw prompt/source text remains omitted.</div>' +
+      '</div></div></div>';
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -982,7 +1016,7 @@
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + gateChecklist + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + gateChecklist + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){

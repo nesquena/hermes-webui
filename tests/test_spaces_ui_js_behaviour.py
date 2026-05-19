@@ -654,6 +654,22 @@ global.fetch = async function(path, opts = {}) {
           rules_applied: ['cap_section_chars', 'redact_unsafe_markers'],
           text: 'safe-summary\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK',
         },
+        prompt_preflight: {
+          available: true,
+          action: 'capy.prompt_preflight',
+          boundary: 'creator_preview',
+          status: 'pass',
+          severity: 'none',
+          categories: [],
+          checks: [],
+          prompt_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          metadata_only: true,
+          raw_prompt_stored: false,
+          local_only: true,
+          raw_prompt: body.prompt,
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
         prompt: body.prompt,
         raw_prompt: body.prompt,
         generated_code: '<script>bad()</script>',
@@ -6231,6 +6247,14 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Original output: 2048 chars" in out["rootHtml"]
     assert "Compacted output: 512 chars" in out["rootHtml"]
     assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: creator_preview" in out["rootHtml"]
+    assert "Severity: none" in out["rootHtml"]
+    assert "Prompt hash: abcdef012345" in out["rootHtml"]
+    assert "metadata-only" in out["rootHtml"]
+    assert "local-only" in out["rootHtml"]
+    assert "raw prompt not stored" in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
