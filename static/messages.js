@@ -2218,6 +2218,7 @@ function hideApprovalCard(force=false) {
     }
   }
   _approvalSessionId = null;
+  _approvalAgentSessionKey = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
   $("approvalCmd").textContent = "";
@@ -2226,6 +2227,7 @@ function hideApprovalCard(force=false) {
 
 // Track session_id of the active approval so respond goes to the right session
 let _approvalSessionId = null;
+let _approvalAgentSessionKey = null;  // agent's session_key for approve_session matching
 let _approvalCurrentId = null;  // approval_id of the card currently shown
 let _approvalPendingBySession = new Map();
 
@@ -2265,6 +2267,12 @@ function _renderPendingApprovalForActiveSession() {
 function showApprovalForSession(sid, pending, pendingCount) {
   if (!pending) return;
   pending._session_id = sid;
+  // Preserve the agent's session_key from the backend through the
+  // SSE→frontend→respond round-trip. The backend stashed it at
+  // submit_pending time; don't overwrite it with the WebUI sid.
+  if (pending.agent_session_key) {
+    _approvalAgentSessionKey = pending.agent_session_key;
+  }
   showApprovalCard(pending, pendingCount);
 }
 
@@ -2320,9 +2328,16 @@ async function respondApproval(choice) {
   _clearApprovalPendingForSession(sid);
   hideApprovalCard(true);
   try {
+    // Include the agent's session_key so the backend can call
+    // approve_session against the correct key for is_approved() matching.
+    const body = { session_id: sid, choice, approval_id: approvalId };
+    if (_approvalAgentSessionKey) {
+      body.agent_session_key = _approvalAgentSessionKey;
+    }
+    _approvalAgentSessionKey = null;
     await api("/api/approval/respond", {
       method: "POST",
-      body: JSON.stringify({ session_id: sid, choice, approval_id: approvalId })
+      body: JSON.stringify(body)
     });
   } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
 }

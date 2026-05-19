@@ -218,8 +218,8 @@ def test_approval_and_clarify_routes_use_adapter_only_when_flag_enabled():
 
     assert "runtime_adapter_enabled()" in approval_body
     assert "LegacyJournalRuntimeAdapter(approval_delegate=_resolve_approval_legacy)" in approval_body
-    assert "adapter.respond_approval(sid, approval_id, choice).accepted" in approval_body
-    assert "else:\n        ok = _resolve_approval_legacy(sid, approval_id, choice)" in approval_body
+    assert 'adapter.respond_approval(agent_session_key, approval_id, choice).accepted' in approval_body
+    assert 'else:\n        ok = _resolve_approval_legacy(agent_session_key, approval_id, choice)' in approval_body
     assert "HERMES_WEBUI_RUNTIME_ADAPTER" not in approval_body
 
     assert "runtime_adapter_enabled()" in clarify_body

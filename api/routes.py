@@ -2367,6 +2367,10 @@ def submit_pending(session_key: str, approval: dict) -> None:
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
+    # Stash the agent's session_key so it survives the SSE→frontend→respond
+    # round-trip. The frontend uses the WebUI session_id for SSE routing, but
+    # approve_session needs the agent's session_key to match is_approved().
+    entry["agent_session_key"] = session_key
     with _lock:
         queue_list = _pending.setdefault(session_key, [])
         # Replace a legacy non-list value if the agent version uses the old pattern.
@@ -8748,14 +8752,20 @@ def _handle_approval_respond(handler, body):
     if choice not in ("once", "session", "always", "deny"):
         return bad(handler, f"Invalid choice: {choice}")
     approval_id = body.get("approval_id", "")
+    # Use the agent's real session_key for approve_session matching.
+    # The frontend sends the WebUI session_id for SSE routing, but the
+    # agent stores approvals under its own session_key.  When the agent
+    # session_key is available (from submit_pending -> SSE -> frontend ->
+    # respond round-trip), use it instead of the WebUI sid.
+    agent_session_key = body.get("agent_session_key", "") or sid
 
     from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
 
     if runtime_adapter_enabled():
         adapter = LegacyJournalRuntimeAdapter(approval_delegate=_resolve_approval_legacy)
-        ok = adapter.respond_approval(sid, approval_id, choice).accepted
+        ok = adapter.respond_approval(agent_session_key, approval_id, choice).accepted
     else:
-        ok = _resolve_approval_legacy(sid, approval_id, choice)
+        ok = _resolve_approval_legacy(agent_session_key, approval_id, choice)
     return j(handler, {"ok": ok, "choice": choice})
 
 
