@@ -108,9 +108,10 @@ Delivered:
 - `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, and recent stream rows without raw payload/prompt leakage.
 - Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
 - Research Harness progress updates now emit metadata-only structured progress events so product-home progress status can reflect real research workflow activity without storing raw prompts, source text, renderer fields, or credentials.
+- Creator-loop commits that pass sandbox preview, visual QA, and explicit approval now emit `space.visual_qa.completed` progress events, giving the product-home stream real visual-QA gate producer coverage without storing prompts, generated bodies, renderers, sources, or credentials.
 
 Remaining:
-- Emit progress events from more real long-running creator, browser, development, and visual-QA workflows.
+- Emit progress events from more real long-running browser, development, repair, and visual-QA workflows.
 - Consider Space/detail-level progress panels where aggregate product-home status is too coarse.
 
 ### Phase 7 — Optional integration catalog/sidecar exploration
@@ -138,7 +139,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 4. **Progress producer expansion**
-- Record structured events from creator/development runs and visual-QA gates so the product-home stream reflects real autonomous work. Research Harness progress updates now cover the first workflow producer.
+- Record structured events from creator/development runs and visual-QA gates so the product-home stream reflects real autonomous work. Research Harness progress updates and creator visual-QA commit gates now cover the first workflow/gate producers.
 
 5. **Space/detail-level progress panels**
    - Consider per-Space progress views if aggregate product-home events are too coarse for debugging autonomous creator loops.

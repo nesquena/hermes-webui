@@ -3321,6 +3321,31 @@ def _space_creator_commit_gate(payload: dict[str, Any], *aliases: str) -> bool:
     return saw_alias
 
 
+def _record_creator_visual_qa_progress_event(space_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only producer event for creator visual-QA gates."""
+    sid = validate_space_id(space_id)
+    run_id = f"creator:{sid}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event(
+            {
+                "event_type": "space.visual_qa.completed",
+                "run_id": run_id,
+            }
+        )
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "space.visual_qa.completed",
+            "family": "space.visual_qa",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Persist a creator-loop draft only after sandbox, visual-QA, and approval gates."""
     sandbox_previewed = _space_creator_commit_gate(payload, "sandbox_previewed", "sandboxPreviewed")
@@ -3436,6 +3461,7 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         response["revision_preview"] = revision_preview
     if revision_diff is not None:
         response["revision_diff"] = revision_diff
+    response["visual_qa_event"] = _record_creator_visual_qa_progress_event(created["space_id"])
     return response
 
 

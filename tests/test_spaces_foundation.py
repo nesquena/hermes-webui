@@ -3469,10 +3469,16 @@ def test_creator_commit_persists_metadata_only_revisioned_space_after_gates(monk
             "approve_commit": True,
         },
     )
+    from api.capy_progress import progress_status
+
     serialized = json.dumps({"committed": committed, "spaces": spaces.list_spaces(), "detail": spaces.read_space("research-creator-lab")}).lower()
 
     assert committed["ok"] is True
     assert committed["action"] == "space.spaces.commitcreatorspec"
+    assert committed["visual_qa_event"]["event_type"] == "space.visual_qa.completed"
+    assert committed["visual_qa_event"]["family"] == "space.visual_qa"
+    assert committed["visual_qa_event"]["run_id"] == "creator:research-creator-lab"
+    assert progress_status()["recent_family_counts"]["space.visual_qa"] == 1
     assert committed["creator_loop"] == {
         "stage": "revisioned-commit",
         "mode": "metadata-only",
