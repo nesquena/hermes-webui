@@ -9,6 +9,7 @@ import http.cookies
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -57,9 +58,55 @@ COOKIE_NAME = 'hermes_session'
 CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
+_SESSION_PROFILE_RE = re.compile(r'^(default|[a-z0-9][a-z0-9_-]{0,63})$')
 
 
-def _load_sessions() -> dict[str, float]:
+def _session_expiry(record) -> float | None:
+    """Return the expiry timestamp from a legacy or metadata session record."""
+    if isinstance(record, (int, float)):
+        return float(record)
+    if isinstance(record, dict) and isinstance(record.get('exp'), (int, float)):
+        return float(record['exp'])
+    return None
+
+
+def _safe_session_value(value, *, max_len: int = 128) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > max_len:
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return None
+    return value
+
+
+def _session_metadata(record) -> dict:
+    """Return safe identity metadata from a session record."""
+    if not isinstance(record, dict):
+        return {}
+    result = {}
+    user = _safe_session_value(record.get('user'))
+    if user:
+        result['user'] = user
+    profile = _safe_session_value(record.get('profile'), max_len=64)
+    if profile and _SESSION_PROFILE_RE.fullmatch(profile):
+        result['profile'] = profile
+    return result
+
+
+def _session_record(expiry: float, *, username: str | None = None, profile: str | None = None):
+    """Build a persisted session record, preserving legacy float records when empty."""
+    metadata = {}
+    user = _safe_session_value(username)
+    if user:
+        metadata['user'] = user
+    prof = _safe_session_value(profile, max_len=64)
+    if prof and _SESSION_PROFILE_RE.fullmatch(prof):
+        metadata['profile'] = prof
+    if not metadata:
+        return expiry
+    return {'exp': expiry, **metadata}
+
+
+def _load_sessions() -> dict[str, object]:
     """Load persisted sessions from STATE_DIR, pruning expired entries.
 
     Returns an empty dict on any read or parse error so startup is never
@@ -71,14 +118,22 @@ def _load_sessions() -> dict[str, float]:
             if not isinstance(data, dict):
                 raise ValueError('malformed sessions file — expected dict')
             now = time.time()
-            return {t: exp for t, exp in data.items()
-                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
+            sessions: dict[str, object] = {}
+            for token, record in data.items():
+                exp = _session_expiry(record)
+                if not isinstance(token, str) or exp is None or exp <= now:
+                    continue
+                if isinstance(record, dict):
+                    sessions[token] = {'exp': exp, **_session_metadata(record)}
+                else:
+                    sessions[token] = exp
+            return sessions
     except Exception as e:
         logger.debug("Failed to load sessions file, starting fresh: %s", e)
     return {}
 
 
-def _save_sessions(sessions: dict[str, float]) -> None:
+def _save_sessions(sessions: dict[str, object]) -> None:
     """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
 
     Uses a temp file + os.replace() so a crash mid-write never leaves a
@@ -243,6 +298,7 @@ def _hash_password(password, *, salt: bytes | None = None) -> str:
 _AUTH_HASH_LOCK = threading.Lock()
 _AUTH_HASH_COMPUTED: bool = False
 _AUTH_HASH_CACHE: str | None = None
+_PAM_SENTINEL = "__pam_auth_enabled__"
 
 
 def _invalidate_password_hash_cache() -> None:
@@ -279,11 +335,16 @@ def get_password_hash() -> str | None:
         if _AUTH_HASH_COMPUTED:
             return _AUTH_HASH_CACHE
 
-        env_pw = os.getenv('HERMES_WEBUI_PASSWORD', '').strip()
-        if env_pw:
-            result = _hash_password(env_pw)
+        from api import auth_pam
+
+        if auth_pam.enabled():
+            result = _PAM_SENTINEL
         else:
-            result = load_settings().get('password_hash') or None
+            env_pw = os.getenv('HERMES_WEBUI_PASSWORD', '').strip()
+            if env_pw:
+                result = _hash_password(env_pw)
+            else:
+                result = load_settings().get('password_hash') or None
 
         _AUTH_HASH_CACHE = result
         _AUTH_HASH_COMPUTED = True
@@ -306,6 +367,10 @@ def verify_password(plain: str) -> bool:
     expected = get_password_hash()
     if not expected:
         return False
+    if expected == _PAM_SENTINEL:
+        from api import auth_pam
+
+        return auth_pam.authenticate(None, plain) is not None
     # Fast path: current PBKDF2 key
     if hmac.compare_digest(_hash_password(plain), expected):
         return True
@@ -326,10 +391,33 @@ def verify_password(plain: str) -> bool:
     return False
 
 
-def create_session() -> str:
+def verify_login(username: str | None, plain: str) -> dict | None:
+    """Verify a login request and return optional session identity metadata."""
+    expected = get_password_hash()
+    if not expected:
+        return None
+    if expected == _PAM_SENTINEL:
+        from api import auth_pam
+
+        return auth_pam.authenticate(username, plain)
+    return {} if verify_password(plain) else None
+
+
+def login_uses_username() -> bool:
+    """Return True when the login page should ask for a username."""
+    from api import auth_pam
+
+    return auth_pam.login_uses_username()
+
+
+def create_session(username: str | None = None, profile: str | None = None) -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
-    _sessions[token] = time.time() + _resolve_session_ttl()
+    _sessions[token] = _session_record(
+        time.time() + _resolve_session_ttl(),
+        username=username,
+        profile=profile,
+    )
     _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
@@ -338,7 +426,10 @@ def create_session() -> str:
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
-    expired = [t for t, exp in _sessions.items() if now > exp]
+    expired = [
+        token for token, record in _sessions.items()
+        if (exp := _session_expiry(record)) is None or now > exp
+    ]
     if expired:
         for token in expired:
             _sessions.pop(token, None)
@@ -360,7 +451,7 @@ def verify_session(cookie_value: str) -> bool:
     )
     if not valid:
         return False
-    expiry = _sessions.get(token)
+    expiry = _session_expiry(_sessions.get(token))
     if not expiry or time.time() > expiry:
         _sessions.pop(token, None)
         return False
@@ -373,6 +464,22 @@ def _session_token_from_cookie_value(cookie_value: str) -> str | None:
         return None
     token, _sig = cookie_value.rsplit('.', 1)
     return token or None
+
+
+def session_identity(cookie_value: str) -> dict:
+    """Return server-side identity metadata for a valid signed session cookie."""
+    if not cookie_value or not verify_session(cookie_value):
+        return {}
+    token = _session_token_from_cookie_value(cookie_value)
+    if not token:
+        return {}
+    return _session_metadata(_sessions.get(token))
+
+
+def session_profile(cookie_value: str) -> str | None:
+    """Return the Hermes profile bound to a valid signed session cookie."""
+    profile = session_identity(cookie_value).get('profile')
+    return profile if isinstance(profile, str) and profile else None
 
 
 def csrf_token_for_session(cookie_value: str) -> str | None:

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add optional PAM-backed system-user authentication for WebUI. PAM mode can authenticate either one configured local account or, when explicitly enabled, local login users through a username field. Multi-user PAM sessions are bound server-side to clean per-user Hermes profiles so profile cookies cannot hop across accounts, and deployments that need elevated PAM checks must configure an explicit helper command rather than relying on implicit sudo.
 
 ## [v0.51.92] — 2026-05-19 — Release BP (stage-385 — 7-PR full sweep batch — RFC Slice 3c clarification + workspace tree icon alignment + project move cache refresh + auto-compression handoff metadata + Grok OAuth provider catalog + anonymous custom endpoint picker fallback + PWA standalone reload + pull-to-refresh)
 

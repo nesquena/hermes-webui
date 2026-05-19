@@ -272,11 +272,46 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_AUTH_MODE` | *(unset)* | Set to `pam` to authenticate with local PAM instead of a WebUI password hash |
+| `HERMES_WEBUI_PAM_USER` | current process user | Single local account for PAM auth when multi-user login is disabled |
+| `HERMES_WEBUI_PAM_ALLOW_ANY_USER` | `0` | Set to `1` to show a username field and allow real local login users |
+| `HERMES_WEBUI_PAM_MIN_UID` | `1000` | Minimum UID accepted for multi-user PAM logins |
+| `HERMES_WEBUI_PAM_SERVICE` | `login` | PAM service name used for password checks |
+| `HERMES_WEBUI_PAM_HELPER` | *(unset)* | Optional explicit helper command for deployments that need elevated PAM checks; receives password on stdin plus `--user` and `--service` args |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Path to Hermes config file |
+
+---
+
+### System user authentication with PAM
+
+For LAN or shared-host deployments, WebUI can authenticate against local system
+accounts instead of a shared WebUI password:
+
+```bash
+HERMES_WEBUI_AUTH_MODE=pam ./start.sh
+```
+
+By default PAM mode authenticates only the configured `HERMES_WEBUI_PAM_USER`
+(or the WebUI process user). To let any real local login user sign in with their
+own username and password:
+
+```bash
+HERMES_WEBUI_AUTH_MODE=pam HERMES_WEBUI_PAM_ALLOW_ANY_USER=1 ./start.sh
+```
+
+Multi-user PAM sessions are bound server-side to a Hermes profile derived from
+the system username. The profile is created cleanly on first login; WebUI does
+not clone the default profile's config or API keys into new login profiles.
+Service accounts are filtered out by shell and `HERMES_WEBUI_PAM_MIN_UID`.
+
+Some PAM stacks only allow password checks for the current process user unless
+the WebUI is running with additional privileges. In that case configure a
+tightly scoped helper with `HERMES_WEBUI_PAM_HELPER`; no sudo or helper command
+is assumed by default.
 
 ---
 
