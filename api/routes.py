@@ -1913,6 +1913,17 @@ def _resolve_effective_session_model_for_display(session) -> str:
     effective_model, _provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         getattr(session, "model_provider", None),
+        # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
+        # It must never pay the cold live provider-catalog rebuild (a
+        # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
+        # network, plus anthropic/openrouter /models). That rebuild is
+        # un-cacheable here (auth.json fingerprint churn) so every cold call
+        # cost ~10s and, run concurrently across browser tabs, serialized on
+        # the models-cache lock and starved SSE/streaming -> BrokenPipe storm
+        # (#multi-tab-streaming-interlock). The persisted session model is
+        # authoritative; the catalog is only a default-model backstop, which
+        # the network-free minimal catalog already provides.
+        prefer_cached_catalog=True,
     )
     return effective_model or original_model
 
@@ -1921,6 +1932,11 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         getattr(session, "model_provider", None),
+        # See _resolve_effective_session_model_for_display: same hot
+        # side-effect-free GET /api/session path; must not trigger the cold
+        # live rebuild. prefer_cached_catalog resolves from warm/disk cache
+        # or the network-free minimal catalog.
+        prefer_cached_catalog=True,
     )
     return provider
 
