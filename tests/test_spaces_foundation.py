@@ -2403,6 +2403,82 @@ def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(
     assert "api_key" not in serialized
 
 
+def test_creator_commit_returns_preview_preflight_and_policy_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build a safe operations board with status and queue cards.",
+            "spaceName": "Creator Commit Policy Lab",
+            "widgets": [
+                {
+                    "widgetId": "commit-status",
+                    "title": "Commit Status",
+                    "kind": "markdown",
+                    "renderer": "<script>bad()</script>",
+                    "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+
+    commit = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+            "screenshot_path": "/tmp/SECRET_VALUE_DO_NOT_LEAK/creator-commit-policy.png",
+        },
+    )
+
+    assert commit["prompt_preflight"] == {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "boundary": "creator_preview",
+        "status": "pass",
+        "severity": "none",
+        "categories": [],
+        "checks": [],
+        "prompt_hash": preview["prompt_preflight"]["prompt_hash"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+    assert len(commit["prompt_preflight"]["prompt_hash"]) == 64
+    assert commit["autonomy_policy"] == {
+        "available": True,
+        "action": "space.creator.commit",
+        "mode": "supervised",
+        "label": "Supervised",
+        "approval_required": True,
+        "approval_gates": ["creator_commit"],
+        "prompt_preflight_status": "pass",
+        "model_route_hint": "hint:reasoning",
+        "metadata_only": True,
+        "local_only": True,
+    }
+
+    manifest = json.loads((spaces.manifests_dir() / "creator-commit-policy-lab" / "space.json").read_text(encoding="utf-8"))
+    event_path = spaces.events_dir() / f"{manifest['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    serialized_public = json.dumps({"preview": preview, "commit": commit}, sort_keys=True).lower()
+    serialized_persisted = json.dumps({"manifest": manifest, "event": event}, sort_keys=True).lower()
+    for serialized_blob in (serialized_public, serialized_persisted):
+        assert "safe operations board" not in serialized_blob
+        assert "status and queue cards" not in serialized_blob
+        assert "secret_value_do_not_leak" not in serialized_blob
+        assert "<script" not in serialized_blob
+        assert "bad()" not in serialized_blob
+        assert "renderer" not in serialized_blob
+        assert "api_auth" not in serialized_blob
+        assert "bearer" not in serialized_blob
+        assert "build a safe operations" not in serialized_blob
+        assert "generated_body" not in serialized_blob
+
+
 def test_creator_preview_targets_existing_space_with_revision_diff_without_persistence(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

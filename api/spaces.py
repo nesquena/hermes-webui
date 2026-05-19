@@ -3419,6 +3419,8 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
     """
     preflight_receipt = _space_creator_prompt_preflight_receipt(payload)
     draft = _space_creator_sanitized_draft(payload)
+    if preflight_receipt:
+        draft["prompt_preflight"] = copy.deepcopy(preflight_receipt)
     widgets = draft["widget_details"]
     preview_id = _space_creator_store_preview_receipt(draft)
     from api.capy_policy import action_policy_receipt
@@ -3621,6 +3623,17 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         "revision_event_id": created.get("revision_event_id"),
         "safety": draft["safety"],
     }
+    preflight_receipt = draft.get("prompt_preflight") if isinstance(draft.get("prompt_preflight"), dict) else None
+    if preflight_receipt:
+        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    from api.capy_policy import action_policy_receipt
+
+    response["autonomy_policy"] = action_policy_receipt(
+        name,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "pass",
+        model_route_hint="hint:reasoning",
+    )
     memory_assist = draft.get("memory_assist") if isinstance(draft.get("memory_assist"), dict) else None
     if memory_assist:
         response["memory_assist"] = copy.deepcopy(memory_assist)

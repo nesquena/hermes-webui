@@ -773,6 +773,33 @@ global.fetch = async function(path, opts = {}) {
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         } : undefined,
         revision_event: noRevisionCommit ? undefined : { event_id: safeCreatorCommitRevision, event_type: 'creator.commit', details: { preview_id: body.preview_id, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+        prompt_preflight: {
+          available: true,
+          action: 'capy.prompt_preflight',
+          boundary: 'creator_preview',
+          status: 'pass',
+          severity: 'none',
+          prompt_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          metadata_only: true,
+          raw_prompt_stored: false,
+          local_only: true,
+          raw_prompt: 'Build SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
+        autonomy_policy: {
+          available: true,
+          action: 'space.creator.commit',
+          mode: 'supervised',
+          label: 'Supervised',
+          approval_required: true,
+          approval_gates: ['creator_commit'],
+          prompt_preflight_status: 'pass',
+          model_route_hint: 'hint:reasoning',
+          metadata_only: true,
+          local_only: true,
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
       });
     }
   }
@@ -6500,6 +6527,15 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "stored: true" in out["rootHtml"]
     assert "executed: false" in out["rootHtml"]
     assert "revisioned-commit" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: creator_preview" in out["rootHtml"]
+    assert "raw prompt not stored" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Mode: Supervised" in out["rootHtml"]
+    assert "Approval required: yes" in out["rootHtml"]
+    assert "Gates: Creator commit approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
     assert "abcdef0123456789abcdef0123456789" in out["rootHtml"]
     assert "Open committed Space" in out["rootHtml"]
     assert "Manage committed widgets" in out["rootHtml"]

@@ -89,15 +89,16 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface and first per-action creator-preview receipt implemented; broader per-action enforcement remains**.
+Status: **metadata-only status surface plus creator preview/commit per-action receipts implemented; broader per-action enforcement remains**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
 - `static/spaces.js` renders the product-home Autonomy policy card from `api/capy-policy/status`.
 - Creator preview responses now include a metadata-only `autonomy_policy` receipt with approval gates, prompt-preflight status, and model-route hint evidence, and the creator-preview UI renders this Action policy card without exposing raw prompts, generated bodies, renderer/source fields, API-auth fields, or credentials.
+- Creator commit responses now carry forward the preview prompt-preflight receipt and add a commit-scoped `autonomy_policy` receipt after the sandbox preview, visual-QA, and explicit approval gates pass, giving the revisioned-commit result metadata-only policy evidence without persisting raw prompts, generated bodies, renderer/source fields, API-auth fields, credentials, or unsafe screenshot paths.
 
 Remaining:
-- Extend pass/warn/block preflight and action-policy receipts to additional high-risk source/tool/commit boundaries.
+- Extend pass/warn/block preflight and action-policy receipts to additional high-risk source/tool boundaries beyond the creator preview/commit path.
 - Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events
@@ -130,7 +131,7 @@ Only after the remaining Phase 1-6 integration items are working:
 ## Next implementation slices for autonomous sprints
 
 1. **Prompt-preflight + memory/context enforcement**
-   - Add per-action pass/warn/block receipts for creator/source boundaries before memory can influence agent actions.
+   - Add per-action pass/warn/block receipts for source/context boundaries before memory can influence agent actions; creator preview/commit now have the first metadata-only receipts.
    - Treat Memory Tree content as untrusted advisory context.
 
 2. **Broader compaction producers**

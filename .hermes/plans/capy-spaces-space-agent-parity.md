@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-19 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, first creator-preview per-action autonomy policy receipt, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, and Space demo-suite run progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, and Space demo-suite run progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -30,12 +30,17 @@ Roadmap priority for upcoming autonomous sprints:
 2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
 3. Broaden safe source refresh worker scheduling/trigger coverage and source-specific fetchers after the local knowledge bridge.
 4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, and the demo smoke suite now emit the first workflow/gate/ingest/run events, and Space detail can inspect Space-scoped streams.
-5. Model-routing hint execution path and remaining per-action policy receipts for source/tool/commit boundaries; creator preview now has the first metadata-only action-policy receipt.
+5. Model-routing hint execution path and remaining per-action policy receipts for source/tool boundaries; creator preview and creator commit now have the first metadata-only action-policy receipts.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): surface creator commit policy receipts`
+  - Added RED/GREEN backend coverage proving `space.creator.commit` carries forward the preview `prompt_preflight` receipt and returns a commit-scoped `autonomy_policy` receipt after sandbox preview, visual-QA, and explicit approval gates pass.
+  - Hardened the creator-loop preview receipt cache so commit can surface policy/preflight evidence without storing or returning raw prompts, generated bodies, renderer/source fields, API-auth fields, credentials, or unsafe screenshot paths.
+  - Validation at completion: focused RED failed before implementation (`prompt_preflight` missing from commit receipt); focused GREEN passed; targeted creator preview/commit regressions, relevant UI receipt rendering coverage, browser Visual/UI QA, syntax/compile/diff checks, spec/quality reviews, and live health are recorded in the scheduled sprint report for this run.
 
 - `feat(spaces): record demo suite progress events`
   - Added RED/GREEN backend coverage proving `space_demo_run_all()` emits metadata-only `run.started` / `run.completed` progress events for successful smoke-suite runs and records `run.failed` if post-demo processing fails, preventing stale active-run counts.
