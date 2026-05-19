@@ -13975,6 +13975,10 @@ const LOCALES = {
     workspace_use_title: 'Mevcut oturumda kullan',
     workspaces_empty_sub: 'Dosyalarını ve ayarlarını görüntülemek için kenar çubuğundan bir alan seçin veya yeni bir tane ekleyin.',
     workspaces_empty_title: 'Alan seçin',
+    session_hide_external_desc: 'Bu aktarılan oturumu kaynak geçmişini silmeden WebUI\'dan gizle.',
+    settings_plugins_empty: 'Şu anda görünür herhangi bir Hermes eklentisi yok. Burada görmek için Hermes CLI/ayarlarından eklentileri yükleyin veya etkinleştirin.',
+    import_session_json_tooltip: 'Oturumu JSON\'dan içe aktar',
+    skills_back_to: '{0} sayfasına dön',
   },
 };
 
