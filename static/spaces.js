@@ -883,7 +883,7 @@
   }
 
   function safeCreatorSummaryText(value){
-    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw_prompt|generated_code|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
+    const unsafeValuePattern = /(api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|raw[ _-]?prompt|generated[ _-]?(?:code|(?:widget[ _-]?)?body)|source|(?:^|[_\-\s<>])(?:html|script|data)(?:$|[_\-\s<>]))/i;
     const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 120);
     return text && !unsafeValuePattern.test(text) ? text : '';
   }
@@ -963,6 +963,20 @@
   function renderCreatorMemoryAssist(data){
     const assist = data && data.memory_assist && typeof data.memory_assist === 'object' && !Array.isArray(data.memory_assist) ? data.memory_assist : null;
     if (!assist || !Array.isArray(assist.results)) return '';
+    const preflight = assist.prompt_preflight && typeof assist.prompt_preflight === 'object' && !Array.isArray(assist.prompt_preflight) ? assist.prompt_preflight : null;
+    let preflightRow = '';
+    if (preflight) {
+      const status = safeDisplayMetadataText(preflight.status || 'unknown', 'unknown') || 'unknown';
+      const boundary = safeDisplayMetadataText(preflight.boundary || 'unknown', 'unknown') || 'unknown';
+      const checked = Math.max(0, Number(preflight.checked_count || 0));
+      const blocked = Math.max(0, Number(preflight.blocked_count || 0));
+      const flags = [];
+      if (preflight.metadata_only === true) flags.push('metadata-only');
+      if (preflight.local_only === true) flags.push('local-only');
+      if (preflight.raw_prompt_stored === false) flags.push('source text omitted');
+      preflightRow = '<div class="capy-spaces-widget"><div><strong>Memory preflight: '+escapeHtml(status)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(['Boundary: '+boundary, 'checked '+String(checked), 'blocked '+String(blocked)].concat(flags).join(' · '))+'</div></div></div>';
+    }
     const rows = assist.results.slice(0, 5).map(function(hit){
       if (!hit || typeof hit !== 'object' || Array.isArray(hit)) return '';
       const sourceId = safeCreatorIdText(hit.source_id || '');
@@ -973,11 +987,11 @@
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(snippet || sourceId || sourceType || 'Memory slice')+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml([sourceType, redactionStatus, sourceId].filter(Boolean).join(' · '))+'</div></div></div>';
     }).filter(Boolean).join('');
-    if (!rows) return '';
+    if (!rows && !preflightRow) return '';
     const count = Math.max(0, Number(assist.hit_count || assist.results.length || 0));
     return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Memory assist</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(String(count || assist.results.length))+' relevant metadata slice(s) · advisory context only</div>' +
-      '</div></div>'+rows+'</div>';
+      '</div></div>'+preflightRow+rows+'</div>';
   }
 
   function renderPromptPreflightEvidence(receipt){

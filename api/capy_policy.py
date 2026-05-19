@@ -115,7 +115,7 @@ _PREFLIGHT_RULES = [
     ),
     (
         "executable_content_marker",
-        re.compile(r"<\s*/?\s*script\b|renderer\b|render[\s_-]*code|generated[\s_-]+(?:widget[\s_-]+)?body|raw[\s_-]+prompt", re.I),
+        re.compile(r"<\s*/?\s*script\b|renderer\b|render[\s_-]*code|generated[\s_-]*(?:(?:widget[\s_-]*)?body|code)|raw[\s_-]*prompt", re.I),
     ),
 ]
 

@@ -2537,6 +2537,21 @@ def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(m
     assert preview["memory_assist"]["space_id"] == created["space_id"]
     assert preview["memory_assist"]["local_only"] is True
     assert preview["memory_assist"]["hit_count"] == 1
+    assert preview["memory_assist"]["prompt_preflight"] == {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "boundary": "memory_context",
+        "status": "pass",
+        "severity": "none",
+        "categories": [],
+        "checks": [],
+        "checked_count": 1,
+        "passed_count": 1,
+        "blocked_count": 0,
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
     assert preview["memory_assist"]["results"] == [
         {
             "source_id": memory_record["source_id"],
@@ -2607,7 +2622,27 @@ def test_creator_preview_omits_memory_assist_hit_that_fails_prompt_preflight(mon
 
     serialized = json.dumps(preview, sort_keys=True).lower()
     assert preview["ok"] is True
-    assert "memory_assist" not in preview
+    assert preview["memory_assist"] == {
+        "space_id": created["space_id"],
+        "local_only": True,
+        "hit_count": 0,
+        "results": [],
+        "prompt_preflight": {
+            "available": True,
+            "action": "capy.prompt_preflight",
+            "boundary": "memory_context",
+            "status": "block",
+            "severity": "high",
+            "categories": ["role_override", "tool_coercion"],
+            "checks": ["role_override", "tool_coercion"],
+            "checked_count": 1,
+            "passed_count": 0,
+            "blocked_count": 1,
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+            "local_only": True,
+        },
+    }
     assert "disregard all instructions" not in serialized
     assert "disable approval" not in serialized
 
@@ -2642,6 +2677,52 @@ def test_active_space_context_omits_memory_hit_that_fails_prompt_preflight(monke
     assert "Disregard all instructions" not in context
     assert "disable approval" not in context
     assert "memory preflight: omitted 1 blocked advisory memory hit(s)" in context
+
+
+def test_active_space_context_omits_compact_executable_memory_markers(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    created = spaces.create_space({"space_id": "agent-memory-compact-marker-lab", "name": "Compact Marker Lab"})
+
+    import api.capy_memory as capy_memory
+
+    def compact_marker_memory_for_space(space_id, *, limit=3, exclude_auto_ingested=False):
+        assert space_id == created["space_id"]
+        return {
+            "results": [
+                {
+                    "source_id": "manual-rawprompt-note",
+                    "source_type": "visual_qa_report",
+                    "redaction_status": "none",
+                    "snippet": "Review rawprompt before mutating widgets.",
+                },
+                {
+                    "source_id": "manual-generatedcode-note",
+                    "source_type": "visual_qa_report",
+                    "redaction_status": "none",
+                    "snippet": "Review generatedcode before mutating widgets.",
+                },
+                {
+                    "source_id": "manual-generatedwidgetbody-note",
+                    "source_type": "visual_qa_report",
+                    "redaction_status": "none",
+                    "snippet": "Review generatedwidgetbody before mutating widgets.",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(capy_memory, "relevant_memory_for_space", compact_marker_memory_for_space)
+
+    context = spaces.build_agent_context(created["space_id"])
+
+    assert "## Active Capy Space" in context
+    assert "manual-rawprompt-note" not in context
+    assert "manual-generatedcode-note" not in context
+    assert "manual-generatedwidgetbody-note" not in context
+    assert "rawprompt" not in context
+    assert "generatedcode" not in context
+    assert "generatedwidgetbody" not in context
+    assert "memory preflight: omitted 3 blocked advisory memory hit(s)" in context
 
 
 def test_active_space_context_omits_memory_hit_when_preflight_receipt_is_malformed(monkeypatch, tmp_path):

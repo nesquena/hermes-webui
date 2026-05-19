@@ -1293,13 +1293,8 @@ def _widget_event_label_summary(value: Any, limit: int = 120) -> str:
     return text
 
 
-def _memory_hit_preflight_passes(hit: dict[str, Any], raw_snippet: str) -> bool:
-    """Return true only when an advisory Memory Tree hit passes prompt preflight.
-
-    Memory Tree content is untrusted context, even after canonicalization. Run a
-    metadata-only prompt-injection preflight immediately before injecting it into
-    creator previews or active-agent context.
-    """
+def _memory_hit_preflight_receipt(hit: dict[str, Any], raw_snippet: str) -> dict[str, Any] | None:
+    """Return a metadata-only prompt-preflight receipt for advisory memory."""
     preflight_parts = [
         _context_value(hit.get("source_id"), 200),
         _context_value(hit.get("source_type"), 120),
@@ -1308,13 +1303,16 @@ def _memory_hit_preflight_passes(hit: dict[str, Any], raw_snippet: str) -> bool:
     ]
     preflight_text = "\n".join(part for part in preflight_parts if part).strip()
     if not preflight_text:
-        return False
+        return None
     try:
         from api.capy_policy import prompt_preflight
 
-        receipt = prompt_preflight(preflight_text, boundary="memory_context")
+        return prompt_preflight(preflight_text, boundary="memory_context")
     except Exception:
-        return False
+        return None
+
+
+def _memory_preflight_receipt_passes(receipt: Any) -> bool:
     return (
         isinstance(receipt, dict)
         and receipt.get("available") is True
@@ -1326,16 +1324,60 @@ def _memory_hit_preflight_passes(hit: dict[str, Any], raw_snippet: str) -> bool:
     )
 
 
-def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool]:
+def _memory_hit_preflight_passes(hit: dict[str, Any], raw_snippet: str) -> bool:
+    """Return true only when an advisory Memory Tree hit passes prompt preflight.
+
+    Memory Tree content is untrusted context, even after canonicalization. Run a
+    metadata-only prompt-injection preflight immediately before injecting it into
+    creator previews or active-agent context.
+    """
+    return _memory_preflight_receipt_passes(_memory_hit_preflight_receipt(hit, raw_snippet))
+
+
+def _memory_preflight_public_summary(
+    *,
+    checked_count: int,
+    passed_count: int,
+    blocked_count: int,
+    categories: list[str],
+) -> dict[str, Any] | None:
+    """Aggregate memory-context receipts without exposing raw memory text."""
+    if checked_count <= 0:
+        return None
+    safe_categories: list[str] = []
+    for category in categories:
+        text = str(category or "").strip().lower()
+        if text and re.fullmatch(r"[a-z0-9_:-]{1,80}", text) and text not in safe_categories:
+            safe_categories.append(text)
+    status = "block" if blocked_count > 0 else "pass"
+    return {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "boundary": "memory_context",
+        "status": status,
+        "severity": "high" if status == "block" else "none",
+        "categories": safe_categories,
+        "checks": list(safe_categories),
+        "checked_count": max(0, int(checked_count)),
+        "passed_count": max(0, int(passed_count)),
+        "blocked_count": max(0, int(blocked_count)),
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool, dict[str, Any] | None]:
     """Return a public advisory memory hit plus whether prompt preflight blocked it."""
     if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
-        return None, False
+        return None, False, None
     raw_snippet = str(hit.get("snippet") or "")
     heading_index = raw_snippet.find("# ")
     if heading_index >= 0:
         raw_snippet = raw_snippet[heading_index:]
-    if not _memory_hit_preflight_passes(hit, raw_snippet):
-        return None, True
+    preflight_receipt = _memory_hit_preflight_receipt(hit, raw_snippet)
+    if not _memory_preflight_receipt_passes(preflight_receipt):
+        return None, True, preflight_receipt
     safe_hit = {
         "source_id": _active_context_value(hit.get("source_id"), 160),
         "source_type": _active_context_value(hit.get("source_type"), 80),
@@ -1343,8 +1385,8 @@ def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool]:
         "snippet": _active_context_value(raw_snippet, 700),
     }
     if not any(safe_hit.values()) or any(value == "[REDACTED]" for value in safe_hit.values()):
-        return None, False
-    return safe_hit, False
+        return None, False, preflight_receipt
+    return safe_hit, False, preflight_receipt
 
 
 def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) -> dict[str, Any] | None:
@@ -1369,16 +1411,38 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
     except Exception:
         raw_hits = []
     results: list[dict[str, str]] = []
+    checked_count = 0
+    passed_count = 0
+    blocked_count = 0
+    categories: list[str] = []
     for hit in raw_hits:
         if len(results) >= bounded_limit:
             break
-        safe_hit, _blocked = _safe_advisory_memory_hit(hit)
+        safe_hit, blocked, preflight_receipt = _safe_advisory_memory_hit(hit)
+        if blocked or isinstance(preflight_receipt, dict):
+            checked_count += 1
+        if _memory_preflight_receipt_passes(preflight_receipt):
+            passed_count += 1
+        elif blocked:
+            blocked_count += 1
+        if isinstance(preflight_receipt, dict):
+            for category in preflight_receipt.get("categories") or []:
+                categories.append(str(category))
         if safe_hit is None:
             continue
         results.append(safe_hit)
-    if not results:
+    preflight_summary = _memory_preflight_public_summary(
+        checked_count=checked_count,
+        passed_count=passed_count,
+        blocked_count=blocked_count,
+        categories=categories,
+    )
+    if not results and preflight_summary is None:
         return None
-    return {"space_id": sid, "local_only": True, "hit_count": len(results), "results": results}
+    response: dict[str, Any] = {"space_id": sid, "local_only": True, "hit_count": len(results), "results": results}
+    if preflight_summary is not None:
+        response["prompt_preflight"] = preflight_summary
+    return response
 
 
 def _payload_key_is_prompt_bearing(key: str) -> bool:
@@ -1922,7 +1986,7 @@ def build_agent_context(space_id: str | None) -> str:
         for hit in memory_hits:
             if rendered_memory_hits >= 3:
                 break
-            safe_hit, blocked = _safe_advisory_memory_hit(hit)
+            safe_hit, blocked, _preflight_receipt = _safe_advisory_memory_hit(hit)
             if blocked:
                 blocked_memory_hits += 1
             if safe_hit is None:

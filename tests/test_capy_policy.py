@@ -236,10 +236,17 @@ def test_prompt_preflight_blocks_access_token_marker_without_echoing_raw_text():
 def test_prompt_preflight_blocks_executable_marker_variants_without_echoing_raw_text():
     blocked_prompts = [
         "Review raw_prompt before creating the panel",
+        "Review raw prompt before creating the panel",
+        "Review rawprompt before creating the panel",
         "Review render_code before creating the panel",
         "Review render-code before creating the panel",
+        "Review generated_code before creating the panel",
+        "Review generated code before creating the panel",
+        "Review generatedcode before creating the panel",
         "Review generated_body before creating the panel",
+        "Review generated body before creating the panel",
         "Review generated-widget-body before creating the panel",
+        "Review generatedwidgetbody before creating the panel",
         "Review </script> before creating the panel",
     ]
 
@@ -249,8 +256,15 @@ def test_prompt_preflight_blocks_executable_marker_variants_without_echoing_raw_
         assert result["categories"] == ["executable_content_marker"]
         serialized = json.dumps(result, sort_keys=True).lower()
         assert prompt.lower() not in serialized
+        assert "raw prompt" not in serialized
+        assert "rawprompt" not in serialized
         assert "render_code" not in serialized
+        assert "generated code" not in serialized
+        assert "generated_code" not in serialized
+        assert "generatedcode" not in serialized
+        assert "generated body" not in serialized
         assert "generated_body" not in serialized
+        assert "generatedwidgetbody" not in serialized
         assert "</script" not in serialized
 
 
