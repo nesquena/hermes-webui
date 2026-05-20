@@ -144,6 +144,129 @@ def _active_control_result(value: Any) -> ControlResult:
     )
 
 
+def _runner_unsupported_control(name: str) -> ControlResult:
+    return ControlResult(
+        False,
+        status="unsupported",
+        safe_message=f"{name} is not supported by this runner backend.",
+    )
+
+
+class RunnerRuntimeAdapter:
+    """Protocol-translator facade for a future runner/sidecar backend.
+
+    Slice 4 moves runtime ownership behind a runner boundary, but the WebUI
+    adapter must remain a translator.  This class deliberately delegates to an
+    injected client instead of owning process-local streams, cancellation flags,
+    approval queues, clarify queues, or cached agent instances itself.
+    """
+
+    def __init__(self, *, client: Any):
+        self._client = client
+
+    def start_run(self, request: StartRunRequest) -> RunStartResult:
+        start_run = getattr(self._client, "start_run", None)
+        if start_run is None:
+            raise NotImplementedError("RunnerRuntimeAdapter.start_run requires a runner client")
+        payload = start_run(request)
+        if isinstance(payload, RunStartResult):
+            return payload
+        payload = dict(payload or {})
+        run_id = str(payload.get("run_id") or payload.get("stream_id") or "")
+        stream_id = str(payload.get("stream_id") or run_id)
+        session_id = str(payload.get("session_id") or request.session_id)
+        active_controls = payload.get("active_controls")
+        if not isinstance(active_controls, list):
+            active_controls = []
+        return RunStartResult(
+            run_id=run_id,
+            session_id=session_id,
+            stream_id=stream_id,
+            status=str(payload.get("status") or "started"),
+            started_at=payload.get("started_at"),
+            cursor=payload.get("cursor"),
+            active_controls=active_controls,
+            payload=payload,
+        )
+
+    def observe_run(self, run_id: str, *, cursor: str | None = None) -> RunEventStream:
+        observe_run = getattr(self._client, "observe_run", None)
+        if observe_run is None:
+            return RunEventStream(run_id=run_id, events=[], cursor=cursor, last_event_id=None)
+        result = observe_run(run_id, cursor=cursor)
+        if isinstance(result, RunEventStream):
+            return result
+        payload = dict(result or {})
+        events = list(payload.get("events") or [])
+        last_event_id = payload.get("last_event_id") or (events[-1].get("event_id") if events else None)
+        next_cursor = payload.get("cursor")
+        if next_cursor is None and events:
+            next_cursor = str(events[-1].get("seq") or "")
+        return RunEventStream(
+            run_id=str(payload.get("run_id") or run_id),
+            events=events,
+            cursor=str(next_cursor) if next_cursor is not None else cursor,
+            last_event_id=last_event_id,
+        )
+
+    def get_run(self, run_id: str) -> RunStatus:
+        get_run = getattr(self._client, "get_run", None)
+        if get_run is None:
+            return RunStatus(run_id=run_id)
+        result = get_run(run_id)
+        if isinstance(result, RunStatus):
+            return result
+        payload = dict(result or {})
+        active_controls = payload.get("active_controls")
+        if not isinstance(active_controls, list):
+            active_controls = []
+        return RunStatus(
+            run_id=str(payload.get("run_id") or run_id),
+            session_id=str(payload.get("session_id") or "") or None,
+            status=str(payload.get("status") or "unknown"),
+            last_event_id=payload.get("last_event_id"),
+            terminal_state=payload.get("terminal_state"),
+            active_controls=active_controls,
+            pending_approval_id=payload.get("pending_approval_id"),
+            pending_clarify_id=payload.get("pending_clarify_id"),
+        )
+
+    def cancel_run(self, run_id: str) -> ControlResult:
+        cancel_run = getattr(self._client, "cancel_run", None)
+        if cancel_run is None:
+            return _runner_unsupported_control("Cancel")
+        return _active_control_result(cancel_run(run_id))
+
+    def respond_approval(self, run_id: str, approval_id: str, choice: str) -> ControlResult:
+        respond_approval = getattr(self._client, "respond_approval", None)
+        if respond_approval is None:
+            return _runner_unsupported_control("Approval")
+        return _active_control_result(respond_approval(run_id, approval_id, choice))
+
+    def respond_clarify(self, run_id: str, clarify_id: str, response: str) -> ControlResult:
+        respond_clarify = getattr(self._client, "respond_clarify", None)
+        if respond_clarify is None:
+            return _runner_unsupported_control("Clarify")
+        return _active_control_result(respond_clarify(run_id, clarify_id, response))
+
+    def queue_message(self, run_id: str, message: str, *, mode: str = "queue") -> ControlResult:
+        queue_message = getattr(self._client, "queue_message", None)
+        if queue_message is None:
+            return _runner_unsupported_control("Queue")
+        return _active_control_result(queue_message(run_id, message, mode=mode))
+
+    def update_goal(
+        self,
+        session_id: str,
+        action: Literal["set", "pause", "resume", "clear", "status", "edit"],
+        text: str = "",
+    ) -> ControlResult:
+        update_goal = getattr(self._client, "update_goal", None)
+        if update_goal is None:
+            return _runner_unsupported_control("Goal")
+        return _active_control_result(update_goal(session_id, action, text))
+
+
 class LegacyJournalRuntimeAdapter:
     """Protocol-translator facade over the current legacy streaming path.
 

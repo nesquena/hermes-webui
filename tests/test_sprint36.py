@@ -218,7 +218,7 @@ def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
     persisting the marker to the session.
     """
     src = read("api/streaming.py")
-    idx = src.find("'content': _cancelled_turn_content(message)")
+    idx = src.find("'content': _cancelled_turn_content(message")
     assert idx != -1, "cancel marker content writer not found in cancel_stream()"
 
     # Walk back to the start of the dict literal (opening brace)

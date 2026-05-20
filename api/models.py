@@ -19,6 +19,7 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
+from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
     read_importable_agent_session_rows,
@@ -376,6 +377,11 @@ class Session:
                  compression_anchor_message_key=None,
                  compression_anchor_summary=None,
                  pre_compression_snapshot: bool=False,
+                 context_engine=None,
+                 compression_anchor_engine=None,
+                 compression_anchor_mode=None,
+                 compression_anchor_details=None,
+                 context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
@@ -416,6 +422,11 @@ class Session:
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
         self.pre_compression_snapshot = bool(pre_compression_snapshot)
+        self.context_engine = context_engine
+        self.compression_anchor_engine = compression_anchor_engine
+        self.compression_anchor_mode = compression_anchor_mode
+        self.compression_anchor_details = compression_anchor_details if isinstance(compression_anchor_details, dict) else {}
+        self.context_engine_state = context_engine_state if isinstance(context_engine_state, dict) else {}
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -435,7 +446,14 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
-        self._metadata_message_count = None
+        raw_message_count = kwargs.get('message_count')
+        parsed_message_count = None
+        if raw_message_count is not None:
+            try:
+                parsed_message_count = int(raw_message_count)
+            except (TypeError, ValueError):
+                parsed_message_count = None
+        self._metadata_message_count = parsed_message_count if parsed_message_count is not None and parsed_message_count >= 0 else None
 
     @property
     def path(self):
@@ -473,6 +491,8 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
+            'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
+            'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
@@ -562,7 +582,18 @@ class Session:
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        data = json.loads(p.read_text(encoding='utf-8'))
+        data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        session = cls(**data)
+        if _collapsed_partials:
+            try:
+                # Self-heal bloated sessions on first full load without touching
+                # recency/index ordering; save() creates a .bak because this
+                # intentionally shrinks the transcript (#2592).
+                session.save(touch_updated_at=False, skip_index=True)
+            except Exception:
+                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+        return session
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -589,7 +620,19 @@ class Session:
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
-            session._metadata_message_count = _lookup_index_message_count(sid)
+            metadata_message_count = _lookup_index_message_count(sid)
+            if metadata_message_count is None:
+                raw_count = parsed.get('message_count')
+                if isinstance(raw_count, int) and raw_count >= 0:
+                    metadata_message_count = raw_count
+                else:
+                    try:
+                        parsed_count = int(raw_count)
+                    except (TypeError, ValueError):
+                        parsed_count = None
+                    if parsed_count is not None and parsed_count >= 0:
+                        metadata_message_count = parsed_count
+            session._metadata_message_count = metadata_message_count
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -634,11 +677,17 @@ class Session:
             'estimated_cost': self.estimated_cost,
             'cache_read_tokens': self.cache_read_tokens,
             'cache_write_tokens': self.cache_write_tokens,
+            'cache_hit_percent': prompt_cache_hit_percent(self.cache_read_tokens, self.input_tokens),
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
             'compression_anchor_summary': self.compression_anchor_summary,
             'pre_compression_snapshot': self.pre_compression_snapshot,
+            'context_engine': self.context_engine,
+            'compression_anchor_engine': self.compression_anchor_engine,
+            'compression_anchor_mode': self.compression_anchor_mode,
+            'compression_anchor_details': self.compression_anchor_details,
+            'context_engine_state': self.context_engine_state,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -720,6 +769,57 @@ def _truncate_journal_tool_args(args, limit: int = 4) -> dict:
 
 def _normalize_journal_recovery_text(value) -> str:
     return " ".join(str(value or "").split())
+
+
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for partial assistant markers recovered on load."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _collapse_adjacent_duplicate_partials(messages) -> tuple[list, bool]:
+    """Collapse repeated identical partial markers from the same failed turn."""
+    if not isinstance(messages, list):
+        return messages, False
+    collapsed = []
+    changed = False
+    previous_partial_sig = None
+    for message in messages:
+        if isinstance(message, dict) and message.get('_partial'):
+            sig = _partial_message_signature(message)
+            if previous_partial_sig == sig:
+                changed = True
+                continue
+            previous_partial_sig = sig
+        else:
+            previous_partial_sig = None
+        collapsed.append(message)
+    return collapsed, changed
 
 
 def _find_existing_assistant_for_journal_content(session, content: str) -> int | None:
@@ -2226,17 +2326,15 @@ def _json_loads_if_string(value):
         return value
 
 
-def get_cli_session_messages(sid) -> list:
-    """Read messages for a single CLI/external-agent session.
+def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) -> list:
+    """Read messages for a Hermes session from the active profile's state.db.
 
-    Preserve tool-call/result and reasoning metadata from the agent state.db so
-    CLI-origin transcripts render with the same tool cards as WebUI-native
-    sessions. When the requested session is the tip of a compression/CLI-close
-    continuation chain, return the stitched full transcript across all segments
-    in chronological order. Returns empty list on any error.
+    This generic reader intentionally works for any session source, including
+    WebUI-origin sessions that were later updated through another Hermes surface
+    such as the Gateway API Server.  When ``stitch_continuations`` is true it
+    preserves the historical CLI/external-agent behavior of walking compatible
+    compression/close parent segments before reading messages.
     """
-    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
-        return get_claude_code_session_messages(sid)
     try:
         import sqlite3
     except ImportError:
@@ -2267,47 +2365,48 @@ def get_cli_session_messages(sid) -> list:
             ]
             selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
 
-            cur.execute("PRAGMA table_info(sessions)")
-            session_cols = {str(row['name']) for row in cur.fetchall()}
             session_chain = [str(sid)]
-            if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
-                cur.execute(
-                    """
-                    SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                    FROM sessions
-                    WHERE id = ?
-                    """,
-                    (sid,),
-                )
-                rows_by_id = {}
-                row = cur.fetchone()
-                if row:
-                    rows_by_id[str(row['id'])] = dict(row)
-                    current_id = str(row['id'])
-                    seen = {current_id}
-                    for _ in range(20):
-                        current = rows_by_id.get(current_id)
-                        parent_id = current.get('parent_session_id') if current else None
-                        if not parent_id or parent_id in seen:
-                            break
-                        cur.execute(
-                            """
-                            SELECT id, source, started_at, parent_session_id, ended_at, end_reason
-                            FROM sessions
-                            WHERE id = ?
-                            """,
-                            (parent_id,),
-                        )
-                        parent_row = cur.fetchone()
-                        if not parent_row:
-                            break
-                        parent_dict = dict(parent_row)
-                        rows_by_id[str(parent_row['id'])] = parent_dict
-                        if not _is_continuation_session(parent_dict, current):
-                            break
-                        session_chain.insert(0, str(parent_row['id']))
-                        current_id = str(parent_row['id'])
-                        seen.add(current_id)
+            if stitch_continuations:
+                cur.execute("PRAGMA table_info(sessions)")
+                session_cols = {str(row['name']) for row in cur.fetchall()}
+                if {'parent_session_id', 'end_reason', 'started_at', 'source'}.issubset(session_cols):
+                    cur.execute(
+                        """
+                        SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                        FROM sessions
+                        WHERE id = ?
+                        """,
+                        (sid,),
+                    )
+                    rows_by_id = {}
+                    row = cur.fetchone()
+                    if row:
+                        rows_by_id[str(row['id'])] = dict(row)
+                        current_id = str(row['id'])
+                        seen = {current_id}
+                        for _ in range(20):
+                            current = rows_by_id.get(current_id)
+                            parent_id = current.get('parent_session_id') if current else None
+                            if not parent_id or parent_id in seen:
+                                break
+                            cur.execute(
+                                """
+                                SELECT id, source, started_at, parent_session_id, ended_at, end_reason
+                                FROM sessions
+                                WHERE id = ?
+                                """,
+                                (parent_id,),
+                            )
+                            parent_row = cur.fetchone()
+                            if not parent_row:
+                                break
+                            parent_dict = dict(parent_row)
+                            rows_by_id[str(parent_row['id'])] = parent_dict
+                            if not _is_continuation_session(parent_dict, current):
+                                break
+                            session_chain.insert(0, str(parent_row['id']))
+                            current_id = str(parent_row['id'])
+                            seen.add(current_id)
 
             placeholders = ', '.join('?' for _ in session_chain)
             cur.execute(f"""
@@ -2338,6 +2437,174 @@ def get_cli_session_messages(sid) -> list:
     except Exception:
         return []
     return msgs
+
+
+def get_state_db_session_summary(sid) -> dict:
+    """Return cheap message count/max timestamp for one state.db session.
+
+    This is intentionally narrower than ``get_state_db_session_messages`` for
+    metadata-only WebUI polling: callers only need a staleness signal, not a
+    fully materialized transcript with tool/reasoning metadata.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return {}
+
+    db_path = _active_state_db_path()
+    if not sid or not db_path.exists():
+        return {}
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if not {'session_id', 'timestamp'}.issubset(available):
+                return {}
+            cur.execute(
+                """
+                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                FROM messages
+                WHERE session_id = ?
+                """,
+                (str(sid),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            count = int(row['message_count'] or 0)
+            last_message_at = row['last_message_at']
+            result = {'message_count': count}
+            if last_message_at not in (None, ''):
+                try:
+                    result['last_message_at'] = float(last_message_at)
+                except (TypeError, ValueError):
+                    pass
+            return result
+    except Exception:
+        return {}
+
+
+def _normalized_message_timestamp_for_key(value):
+    if value is None or value == "":
+        return ""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if timestamp.is_integer():
+        return str(int(timestamp))
+    return ("%.6f" % timestamp).rstrip("0").rstrip(".")
+
+
+def _message_timestamp_as_float(msg):
+    if not isinstance(msg, dict):
+        return None
+    value = msg.get("timestamp")
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_message_merge_key(msg: dict):
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    message_identity = msg.get("id") or msg.get("message_id")
+    if message_identity:
+        return ("message_id", str(message_identity))
+    return (
+        "legacy",
+        str(msg.get("role") or ""),
+        str(msg.get("content") or ""),
+        _normalized_message_timestamp_for_key(msg.get("timestamp")),
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+    )
+
+
+def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
+    """Merge sidecar/context and state.db messages without deleting local rows."""
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not state_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return state_messages
+
+    merged_messages = []
+    seen_message_keys = set()
+    max_sidecar_timestamp = None
+    for msg in sidecar_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is not None:
+            max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
+        key = _session_message_merge_key(msg)
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    for msg in state_messages:
+        timestamp = _message_timestamp_as_float(msg)
+        key = _session_message_merge_key(msg)
+        if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
+            if key in seen_message_keys:
+                continue
+            if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
+                continue
+        if key in seen_message_keys:
+            continue
+        # State rows at or before the newest sidecar timestamp are normally
+        # assumed to have already been observed by the sidecar. The <= gate
+        # preserves sidecar-only ordering/metadata for equal timestamps and
+        # prevents duplicate legacy rows when timestamp precision differs
+        # between stores. Explicit message ids are authoritative, though: two
+        # equal-timestamp messages with different ids are distinct retries.
+        if (
+            key[0] != "message_id"
+            and max_sidecar_timestamp is not None
+            and timestamp is not None
+            and timestamp <= max_sidecar_timestamp
+        ):
+            continue
+        seen_message_keys.add(key)
+        merged_messages.append(msg)
+    return merged_messages
+
+
+def reconciled_state_db_messages_for_session(
+    session, *, prefer_context: bool = False, state_messages: list | None = None
+) -> list:
+    """Return append-only messages reconciled with state.db for a WebUI session."""
+    if session is None:
+        return []
+    local_messages = []
+    if prefer_context:
+        context_messages = getattr(session, 'context_messages', None)
+        if isinstance(context_messages, list) and context_messages:
+            local_messages = context_messages
+    if not local_messages:
+        local_messages = getattr(session, 'messages', None) or []
+    if state_messages is None:
+        state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    return merge_session_messages_append_only(local_messages, state_messages)
+
+
+def get_cli_session_messages(sid) -> list:
+    """Read messages for a single CLI/external-agent session.
+
+    Preserve tool-call/result and reasoning metadata from the agent state.db so
+    CLI-origin transcripts render with the same tool cards as WebUI-native
+    sessions. When the requested session is the tip of a compression/CLI-close
+    continuation chain, return the stitched full transcript across all segments
+    in chronological order. Returns empty list on any error.
+    """
+    if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
+        return get_claude_code_session_messages(sid)
+    return get_state_db_session_messages(sid, stitch_continuations=True)
 
 
 def count_conversation_rounds(sid: str, since: float | None = None) -> int:

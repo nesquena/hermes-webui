@@ -2256,6 +2256,8 @@ from api.models import (
     import_cli_session,
     get_cli_sessions,
     get_cli_session_messages,
+    get_state_db_session_messages,
+    merge_session_messages_append_only,
     ensure_cron_project,
     is_cron_session,
 )
@@ -2311,6 +2313,7 @@ try:
         _pending,
         _lock,
         _permanent_approved,
+        _gateway_queues,
         resolve_gateway_approval,
         enable_session_yolo,
         disable_session_yolo,
@@ -2329,6 +2332,7 @@ except ImportError:
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
+    _gateway_queues = {}
 
 
 # ── Approval SSE subscribers (long-connection push) ──────────────────────────
@@ -3702,8 +3706,25 @@ def handle_get(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid) if _session_requires_cli_metadata_lookup(s) else {}
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
+            state_db_messages = []
+            sidecar_metadata_messages = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
+            elif load_messages:
+                state_db_messages = get_state_db_session_messages(sid)
+            elif not is_messaging_session:
+                # Metadata-only callers still need the same append-only
+                # reconciliation contract as full loads. A raw state.db summary
+                # can count stale rows that the merge intentionally filters out,
+                # which makes sidebar polling think the transcript is always
+                # newer than the loaded conversation.
+                state_db_messages = get_state_db_session_messages(sid)
+                sidecar_metadata_session = Session.load(sid)
+                sidecar_metadata_messages = (
+                    getattr(sidecar_metadata_session, "messages", []) or []
+                    if sidecar_metadata_session
+                    else []
+                )
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3727,9 +3748,41 @@ def handle_get(handler, parsed) -> bool:
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
                 else:
-                    _all_msgs = s.messages
+                    _all_msgs = merge_session_messages_append_only(s.messages, state_db_messages)
             else:
-                _all_msgs = []
+                if is_messaging_session and cli_messages:
+                    sidecar_messages = getattr(s, "messages", []) or []
+                    _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
+                else:
+                    _metadata_sidecar = sidecar_metadata_messages
+                    if _metadata_sidecar is None:
+                        _metadata_sidecar = getattr(s, "messages", []) or []
+                    _all_msgs = merge_session_messages_append_only(_metadata_sidecar, state_db_messages)
+            if not load_messages:
+                _summary_message_count = len(_all_msgs)
+                if _summary_message_count == 0:
+                    # Legacy session with no loaded sidecar and no state.db summary —
+                    # fall back to the persisted metadata count from session JSON.
+                    # See PR #2605 (LumenYoung): without this, the metadata poll
+                    # returns 0 and the active-session external-refresh signal
+                    # never trips on legacy sessions.
+                    try:
+                        metadata_count = getattr(s, "_metadata_message_count", None)
+                        if metadata_count is not None:
+                            _summary_message_count = max(0, int(metadata_count))
+                    except (TypeError, ValueError):
+                        pass
+                try:
+                    _summary_last_message_at = max(
+                        float((m or {}).get("timestamp") or 0)
+                        for m in _all_msgs
+                        if isinstance(m, dict)
+                    ) if _all_msgs else 0
+                except (TypeError, ValueError):
+                    _summary_last_message_at = 0
+            else:
+                _summary_message_count = None
+                _summary_last_message_at = None
             if load_messages:
                 if msg_before is not None:
                     # Scroll-to-top paging: msg_before is a 0-based index into
@@ -3745,7 +3798,7 @@ def handle_get(handler, parsed) -> bool:
                 else:
                     _truncated_msgs = _all_msgs
             else:
-                _truncated_msgs = _all_msgs
+                _truncated_msgs = []
             # Resolve effective context_length with model-metadata fallback so
             # older sessions (pre-#1318) that have context_length=0 persisted
             # still render a meaningful indicator on load.  Mirrors the
@@ -3785,8 +3838,20 @@ def handle_get(handler, parsed) -> bool:
                 # messages already carry per-message tool metadata. Avoid sending
                 # the full historical list with a small tail window.
                 _session_tool_calls = []
+            _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
+            _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
+            if _summary_last_message_at is None and _all_msgs:
+                try:
+                    _merged_last_message_at = max(
+                        float((m or {}).get("timestamp") or 0)
+                        for m in _all_msgs
+                        if isinstance(m, dict)
+                    )
+                except (TypeError, ValueError):
+                    _merged_last_message_at = 0
             raw = s.compact() | {
                 "messages": _truncated_msgs,
+                "message_count": _merged_message_count,
                 "tool_calls": _session_tool_calls,
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
@@ -3806,6 +3871,15 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=bool(getattr(s, "active_stream_id", None)),
                     )
+            if _merged_last_message_at:
+                raw["last_message_at"] = max(
+                    float(raw.get("last_message_at") or 0),
+                    _merged_last_message_at,
+                )
+                raw["updated_at"] = max(
+                    float(raw.get("updated_at") or 0),
+                    _merged_last_message_at,
+                )
             if cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
             # Signal to the frontend that older messages were omitted.
@@ -4186,6 +4260,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
+
+    if parsed.path == "/api/folder/download":
+        return _handle_folder_download(handler, parsed)
 
     if parsed.path == "/api/file":
         return _handle_file_read(handler, parsed)
@@ -4836,7 +4913,11 @@ def handle_post(handler, parsed) -> bool:
             if files is not None:
                 draft["files"] = files
             s.composer_draft = draft
-            s.save()
+            # Draft persistence is not conversation activity. Touching updated_at
+            # here makes the active-session external-refresh poll force-reload the
+            # current chat every few seconds while the user is typing, and that
+            # delayed reload can restore an older draft over newer local input.
+            s.save(touch_updated_at=False)
         return j(handler, {"ok": True, "draft": s.composer_draft})
 
     if parsed.path == "/api/session/update":
@@ -6674,6 +6755,146 @@ def _file_raw_target(session, sid: str, rel: str) -> Path | None:
     if attachment_target.exists() and attachment_target.is_file():
         return attachment_target
     return None
+
+
+# ─── /api/folder/download ───────────────────────────────────────────────────
+# Configurable caps. Match the HERMES_WEBUI_MAX_UPLOAD_MB style used elsewhere
+# (api/config.py) so operators have one consistent env-var convention.
+# Bound on per-request wall-clock and bandwidth, not RSS. The zip streams
+# straight into handler.wfile, so peak memory is the per-file read buffer
+# inside zipfile, not the cap value.
+def _folder_zip_max_bytes() -> int:
+    try:
+        mb = int(os.getenv("HERMES_WEBUI_FOLDER_ZIP_MAX_MB", "1024"))
+    except ValueError:
+        mb = 1024
+    return max(1, mb) * 1024 * 1024
+
+
+def _folder_zip_max_files() -> int:
+    try:
+        return max(1, int(os.getenv("HERMES_WEBUI_FOLDER_ZIP_MAX_FILES", "50000")))
+    except ValueError:
+        return 50000
+
+
+def _folder_download_collect(target: Path, workspace_root: Path,
+                              max_bytes: int, max_files: int):
+    """Walk target dir; return (files, total_bytes, hit_limit_reason_or_None).
+
+    files is a list of (filesystem_path, archive_name) tuples ready for
+    ZipFile.write. Symlinks escaping the workspace are skipped.
+    """
+    import os as _os
+    files = []
+    total_bytes = 0
+    for root, dirs, names in _os.walk(target, followlinks=False):
+        root_path = Path(root)
+        try:
+            if not root_path.resolve().is_relative_to(workspace_root):
+                dirs[:] = []
+                continue
+        except (ValueError, OSError):
+            dirs[:] = []
+            continue
+        for name in names:
+            fp = root_path / name
+            if fp.is_symlink():
+                try:
+                    if not fp.resolve().is_relative_to(workspace_root):
+                        continue
+                except (ValueError, OSError):
+                    continue
+            try:
+                size = fp.stat().st_size
+            except OSError:
+                continue
+            if len(files) >= max_files:
+                return files, total_bytes, "max_files"
+            if total_bytes + size > max_bytes:
+                return files, total_bytes, "max_bytes"
+            try:
+                arcname = fp.relative_to(target)
+            except ValueError:
+                continue
+            files.append((fp, str(arcname)))
+            total_bytes += size
+    return files, total_bytes, None
+
+
+def _handle_folder_download(handler, parsed):
+    """GET /api/folder/download?session_id=...&path=...
+
+    Streams a zip of <session.workspace>/<path>. Symlinks escaping the
+    workspace are skipped. Empty folders return an empty (valid) zip.
+    Respects HERMES_WEBUI_FOLDER_ZIP_MAX_MB and HERMES_WEBUI_FOLDER_ZIP_MAX_FILES.
+    Pre-flights the walk so size/count failures return a clean 413 with JSON
+    body BEFORE any zip bytes are sent.
+    """
+    import zipfile
+    from urllib.parse import parse_qs
+
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+
+    rel = qs.get("path", [""])[0]
+    try:
+        target = safe_resolve(Path(s.workspace), rel)
+    except ValueError:
+        return bad(handler, "invalid path", 400)
+    if not target.exists():
+        return j(handler, {"error": "not found"}, status=404)
+    if not target.is_dir():
+        return bad(handler, "path must be a directory; use /api/file/raw for single files", 400)
+
+    workspace_root = Path(s.workspace).resolve()
+    max_bytes = _folder_zip_max_bytes()
+    max_files = _folder_zip_max_files()
+
+    files, total_bytes, limit_hit = _folder_download_collect(
+        target, workspace_root, max_bytes, max_files
+    )
+    if limit_hit == "max_files":
+        return j(handler, {
+            "error": "too many files",
+            "limit": max_files,
+            "configure": "HERMES_WEBUI_FOLDER_ZIP_MAX_FILES",
+        }, status=413)
+    if limit_hit == "max_bytes":
+        return j(handler, {
+            "error": "folder too large",
+            "limit_bytes": max_bytes,
+            "configure": "HERMES_WEBUI_FOLDER_ZIP_MAX_MB",
+        }, status=413)
+
+    zip_name = (target.name or "workspace") + ".zip"
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header(
+        "Content-Disposition",
+        _content_disposition_value("attachment", zip_name),
+    )
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+
+    written = 0
+    with zipfile.ZipFile(handler.wfile, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for fp, arcname in files:
+            try:
+                zf.write(fp, arcname=arcname)
+                written += 1
+            except (OSError, PermissionError) as e:
+                logger.warning("folder-download: skipping %s: %s", fp, e)
+    logger.info(
+        "folder-download: streamed %d/%d files (~%d bytes) from %s",
+        written, len(files), total_bytes, target,
+    )
 
 
 def _handle_file_raw(handler, parsed):
@@ -8986,6 +9207,7 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
     # that omit approval_id still resolve the oldest entry for compatibility.
     pending = None
     found_target = False
+    gateway_keys = []
     with _lock:
         queue = _pending.get(sid)
         if isinstance(queue, list):
@@ -9011,6 +9233,30 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
             if not approval_id or queue.get("approval_id") == approval_id:
                 pending = _pending.pop(sid, None)
                 found_target = pending is not None
+        # When no _pending entry found, peek into _gateway_queues for
+        # pattern_keys so session-level approval still works. The gateway
+        # path is the primary mechanism during active streaming; _pending
+        # is only used for UI polling/SSE notification.
+        # NOTE: Gateway queue entries don't carry approval_id, so when
+        # approval_id is given and _pending is empty, we assume the gateway
+        # entry at the head of the queue corresponds. This is safe because
+        # gateway entries are consumed synchronously with _pending entries
+        # under the same lock — there is no interleaving where a stale
+        # approval_id could match a different gateway entry.
+        if not pending:
+            gw_queue = _gateway_queues.get(sid)
+            if gw_queue and len(gw_queue) > 0:
+                gw_entry = gw_queue[0]
+                # _gateway_queues stores _ApprovalEntry objects; their
+                # .data dict carries command, pattern_key, pattern_keys.
+                gw_data = getattr(gw_entry, 'data', None) or {}
+                gateway_keys = gw_data.get("pattern_keys") or [gw_data.get("pattern_key", "")]
+                # Peek is not strict — a concurrent resolver may pop a
+                # different gateway entry before we reach
+                # resolve_gateway_approval below, but approve_session is
+                # idempotent over the session key set so the outcome is
+                # the same regardless of which entry wins the race.
+                found_target = True
         # Notify SSE subscribers of the new head (or empty state) so the UI
         # surfaces any trailing approvals that were queued behind this one
         # without waiting for the next submit_pending. Without this, a parallel
@@ -9022,16 +9268,17 @@ def _resolve_approval_legacy(sid: str, approval_id: str, choice: str) -> bool:
         else:
             _approval_sse_notify_locked(sid, None, 0)
 
-    if pending:
-        keys = pending.get("pattern_keys") or [pending.get("pattern_key", "")]
-        if choice in ("once", "session"):
-            for k in keys:
-                approve_session(sid, k)
-        elif choice == "always":
-            for k in keys:
-                approve_session(sid, k)
-                approve_permanent(k)
-            save_permanent_allowlist(_permanent_approved)
+    # Collect keys from both _pending and _gateway_queues
+    keys_from_pending = pending.get("pattern_keys") or [pending.get("pattern_key", "")] if pending else []
+    all_keys = [k for k in keys_from_pending if k] + [k for k in gateway_keys if k]
+    if choice in ("once", "session"):
+        for k in all_keys:
+            approve_session(sid, k)
+    elif choice == "always":
+        for k in all_keys:
+            approve_session(sid, k)
+            approve_permanent(k)
+        save_permanent_allowlist(_permanent_approved)
     # Unblock the agent thread waiting in the gateway approval queue.
     # This is the primary signal when streaming is active — the agent
     # thread is parked in entry.event.wait() and needs to be woken up.

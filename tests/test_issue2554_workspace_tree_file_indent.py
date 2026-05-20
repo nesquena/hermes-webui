@@ -30,10 +30,17 @@ def test_file_rows_get_toggle_placeholder_before_icon():
 def test_placeholder_matches_directory_toggle_slot_width():
     assert ".file-tree-toggle{" in STYLE_CSS
     assert ".file-tree-toggle-placeholder{" in STYLE_CSS
+    assert "--file-tree-toggle-width:10px" in STYLE_CSS
+
+    toggle_start = STYLE_CSS.index(".file-tree-toggle{")
+    toggle_end = STYLE_CSS.index("}", toggle_start)
+    toggle = STYLE_CSS[toggle_start:toggle_end]
+
     placeholder_start = STYLE_CSS.index(".file-tree-toggle-placeholder{")
     placeholder_end = STYLE_CSS.index("}", placeholder_start)
     placeholder = STYLE_CSS[placeholder_start:placeholder_end]
 
-    assert "width:10px" in placeholder
-    assert "flex:0 0 10px" in placeholder
+    assert "width:var(--file-tree-toggle-width)" in toggle
+    assert "width:var(--file-tree-toggle-width)" in placeholder
+    assert "flex:0 0 var(--file-tree-toggle-width)" in placeholder
     assert "display:inline-block" in placeholder

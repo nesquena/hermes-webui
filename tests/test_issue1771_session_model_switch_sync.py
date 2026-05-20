@@ -98,6 +98,7 @@ const window = { _botName: 'Hermes', _defaultModel: null, _activeProvider: null 
 function fetch(url, opts) { calls.fetches.push({url: String(url), body: opts && opts.body || ''}); return Promise.resolve({ok: true}); }
 
 for (const name of [
+  'assistantDisplayName',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',
