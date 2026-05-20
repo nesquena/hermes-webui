@@ -4656,6 +4656,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             }
         space_id = validate_space_id(current_id)
         context = build_agent_context(space_id)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="context")
         return {
             "ok": True,
             "action": name,
@@ -4663,6 +4664,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "context": context,
             "output_compaction": _space_current_context_output_compaction(context),
             "context_status": context_status,
+            "progress_event": progress_event,
         }
     if name in {"space.current.widgets", "space.current.widget.list", "space.current.listwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8245,10 +8247,10 @@ def queue_widget_event(
 
 
 def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict[str, Any]:
-    """Best-effort metadata-only progress producer for Space recovery tools."""
+    """Best-effort metadata-only progress producer for Space tool receipts."""
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
-    if safe_prefix not in {"repair", "recovery.disable", "recovery.enable"}:
+    if safe_prefix not in {"context", "repair", "recovery.disable", "recovery.enable"}:
         safe_prefix = "tool"
     run_id = f"{safe_prefix}:{sid}"
     try:

@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, Space demo-suite run progress events, individual browser demo smoke run progress events, and source-style layout-repair progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, Space demo-suite run progress events, individual browser demo smoke run progress events, source-style layout-repair progress events, and active-context tool progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -36,6 +36,11 @@ Roadmap priority for upcoming autonomous sprints:
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): record active context progress events`
+  - Added RED/GREEN backend coverage proving `space.current.context` / `space.context` / `space.current.prompt_context` returns a metadata-only `tool.completed` progress receipt after successful active context retrieval.
+  - Reused the shared Space-tool progress helper with a safe `context:<space_id>` run id so product-home and Space-scoped progress streams can show context retrieval without persisting raw prompts, renderer/source fields, API-auth fields, credentials, scripts, exception text, or secret-looking values.
+  - Validation at completion: focused RED failed before implementation (`progress_event` missing from the context receipt); focused GREEN passed; full Spaces foundation suite passed (`494 passed`); progress suite passed (`13 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and live isolated browser Visual/UI QA passed with metadata-only leak checks. Screenshot artifact: `/tmp/capy-context-progress-qa/screens/context-progress-cdp.png`.
 
 - `feat(spaces): record browser demo progress events`
   - Added RED/GREEN backend coverage proving the individual Browser Surface smoke emits metadata-only `run.started` / `run.completed` events on success and `run.started` / `run.failed` when the demo install path raises.

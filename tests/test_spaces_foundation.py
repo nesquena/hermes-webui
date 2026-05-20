@@ -6206,6 +6206,9 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
 
     result = spaces.run_space_tool("space.current.context", {"active_space_id": created["space_id"]})
     no_current = spaces.run_space_tool("space.current.context", {})
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
     serialized = json.dumps(result).lower()
 
     assert result["ok"] is True
@@ -6227,6 +6230,18 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert result["context_status"]["metadata_only"] is True
     assert result["context_status"]["local_only"] is True
     assert {"memory", "policy", "progress"}.issubset(result["context_status"])
+    progress_event = result["progress_event"]
+    assert progress_event["stored"] is True
+    assert progress_event["queued"] is True
+    assert progress_event["event_type"] == "tool.completed"
+    assert progress_event["family"] == "tool"
+    assert progress_event["run_id"] == "context:context-lab"
+    assert progress_event["space_id"] == created["space_id"]
+    assert progress_event["redaction_status"] == "metadata_only"
+    assert scoped_progress["space_id"] == created["space_id"]
+    assert scoped_progress["recent_family_counts"]["tool"] >= 2
+    assert scoped_progress["recent_events"][0]["run_id"] == "context:context-lab"
+    assert scoped_progress["recent_events"][0]["event_type"] == "tool.completed"
     assert no_current["ok"] is True
     assert no_current["action"] == "space.current.context"
     assert no_current["active_space_id"] is None
