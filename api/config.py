@@ -2413,13 +2413,15 @@ def _load_models_cache_from_disk() -> dict | None:
             return None
         # Strip the disk-only metadata before returning, so the in-memory
         # cache shape stays exactly what the rest of the code expects.
-        return {
+        result = {
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
-            "model_warnings": cache.get("model_warnings", []),
         }
+        if "model_warnings" in cache:
+            result["model_warnings"] = cache.get("model_warnings", [])
+        return result
     except Exception:
         return None
 
@@ -2450,8 +2452,9 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
-            "model_warnings": cache.get("model_warnings", []),
         }
+        if "model_warnings" in cache:
+            payload["model_warnings"] = cache.get("model_warnings", [])
         runtime_version = _current_webui_version()
         if runtime_version is not None:
             payload["_webui_version"] = runtime_version
