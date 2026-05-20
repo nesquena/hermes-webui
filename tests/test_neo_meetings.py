@@ -82,6 +82,6 @@ class TestMeetingsPanelRegistration:
 
     def test_style_has_meetings_classes(self):
         style_css = (Path(__file__).parent.parent / "static" / "style.css").read_text()
-        assert ".meetings-panel" in style_css
+        assert ".meetings-form" in style_css
         assert ".meetings-iframe-wrapper" in style_css
         assert "showing-meetings" in style_css

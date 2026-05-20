@@ -71,12 +71,53 @@ function renderMeetingForm() {
         </select>
       </div>
       <div class="meetings-form-row">
-        <label for="meetingParticipants" data-i18n="meetings_participants">${t('meetings_participants')}</label>
-        <input type="text" id="meetingParticipants" class="input" placeholder="nome1, nome2..." />
+        <label>${t('meetings_participants')}</label>
+        <div class="meetings-participants-list" id="meetingsParticipantsList"></div>
+        <button type="button" class="meetings-add-participant-btn" onclick="addParticipantRow()">+ ${t('meetings_add_participant')}</button>
       </div>
-      <button class="btn btn-primary" onclick="createMeetingFromForm()" data-i18n="meetings_generate_room">${t('meetings_generate_room')}</button>
+      <button class="neo-btn--primary" onclick="createMeetingFromForm()" data-i18n="meetings_generate_room">${t('meetings_generate_room')}</button>
     </div>
   `;
+}
+
+function addParticipantRow(data) {
+  const list = document.getElementById('meetingsParticipantsList');
+  if (!list) return;
+  const idx = list.children.length;
+  const p = data || { name: '', email: '', whatsapp: '', role: 'guest' };
+  const row = document.createElement('div');
+  row.className = 'meetings-participant-row';
+  row.innerHTML = `
+    <div class="meetings-participant-fields">
+      <input type="text" class="input mp-name" placeholder="${t('meetings_participant_name')}" value="${_mesc(p.name)}" required />
+      <input type="email" class="input mp-email" placeholder="${t('meetings_participant_email')}" value="${_mesc(p.email)}" />
+      <input type="text" class="input mp-whatsapp" placeholder="${t('meetings_participant_whatsapp')}" value="${_mesc(p.whatsapp)}" />
+      <select class="input mp-role">
+        <option value="guest"${p.role === 'guest' ? ' selected' : ''}>${t('meetings_role_guest')}</option>
+        <option value="client"${p.role === 'client' ? ' selected' : ''}>${t('meetings_role_client')}</option>
+        <option value="team"${p.role === 'team' ? ' selected' : ''}>${t('meetings_role_team')}</option>
+        <option value="host"${p.role === 'host' ? ' selected' : ''}>${t('meetings_role_host')}</option>
+      </select>
+    </div>
+    <button type="button" class="meetings-participant-remove" onclick="this.closest('.meetings-participant-row').remove()" title="${t('meetings_participant_remove')}">×</button>
+  `;
+  list.appendChild(row);
+}
+
+function getParticipantsFromForm() {
+  const rows = document.querySelectorAll('#meetingsParticipantsList .meetings-participant-row');
+  const participants = [];
+  rows.forEach(row => {
+    const name = row.querySelector('.mp-name')?.value?.trim();
+    if (!name) return;
+    participants.push({
+      name,
+      email: row.querySelector('.mp-email')?.value?.trim() || '',
+      whatsapp: row.querySelector('.mp-whatsapp')?.value?.trim() || '',
+      role: row.querySelector('.mp-role')?.value || 'guest',
+    });
+  });
+  return participants;
 }
 
 function renderMeetingCard(meeting) {
@@ -108,8 +149,7 @@ async function createMeetingFromForm() {
   const title = document.getElementById('meetingTitle')?.value?.trim();
   const project = document.getElementById('meetingProject')?.value?.trim();
   const objective = document.getElementById('meetingObjective')?.value || 'alinhamento';
-  const participantsRaw = document.getElementById('meetingParticipants')?.value || '';
-  const participants = participantsRaw.split(',').map(s => s.trim()).filter(Boolean);
+  const participants = getParticipantsFromForm();
 
   if (!title || !project) {
     if (typeof showToast === 'function') showToast('Title and project required', 2500, 'warning');
@@ -172,8 +212,8 @@ function renderActiveMeeting(container) {
         <span class="badge badge--active">${t('meetings_status_active')}</span>
       </div>
       <div class="meetings-active-actions">
-        <a href="${_mesc(m.room_url)}" target="_blank" rel="noopener" class="btn btn-sm">${t('meetings_open_tab')}</a>
-        <button class="btn btn-sm btn-danger" onclick="endCurrentMeeting()">⏹ ${t('meetings_end')}</button>
+        <a href="${_mesc(m.room_url)}" target="_blank" rel="noopener" class="btn-sm">${t('meetings_open_tab')}</a>
+        <button class="btn-sm btn-danger" onclick="endCurrentMeeting()">⏹ ${t('meetings_end')}</button>
       </div>
       <div class="meetings-iframe-wrapper" id="meetingsIframeWrapper">
         <iframe
@@ -217,22 +257,22 @@ function renderPostMeeting(container) {
       <div class="meetings-post-info">
         <p><strong>${t('meetings_project')}:</strong> ${_mesc(m.project)}</p>
         <p><strong>${t('meetings_objective')}:</strong> ${t('meetings_obj_' + m.objective)}</p>
-        ${m.participants.length ? `<p><strong>${t('meetings_participants')}:</strong> ${m.participants.map(_mesc).join(', ')}</p>` : ''}
+        ${m.participants.length ? `<p><strong>${t('meetings_participants')}:</strong> ${m.participants.map(p => typeof p === 'string' ? _mesc(p) : _mesc(p.name)).join(', ')}</p>` : ''}
       </div>
       <div class="meetings-post-actions">
-        <button class="btn btn-primary" onclick="generateMeetingSummary()">
+        <button class="btn" onclick="generateMeetingSummary()">
           📝 ${t('meetings_post_summary')}
         </button>
-        <button class="btn btn-sm" onclick="saveMeetingToObsidian()" disabled title="Phase 2">
+        <button class="btn" onclick="saveMeetingToObsidian()" disabled title="Phase 2">
           📓 ${t('meetings_post_obsidian')}
         </button>
-        <button class="btn btn-sm" onclick="createMeetingJiraTask()" disabled title="Phase 2">
+        <button class="btn" onclick="createMeetingJiraTask()" disabled title="Phase 2">
           🎫 ${t('meetings_post_jira')}
         </button>
       </div>
       <div id="meetingsSummaryOutput" class="meetings-summary-output"></div>
       <div class="meetings-post-footer">
-        <button class="btn btn-sm" onclick="closeMeetingView()">← ${t('tab_meetings')}</button>
+        <button class="btn" onclick="closeMeetingView()">← ${t('tab_meetings')}</button>
       </div>
     </div>
   `;

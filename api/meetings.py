@@ -18,6 +18,30 @@ OBJECTIVE_VALUES = {"alinhamento", "homologacao", "fechamento_sprint", "briefing
 
 MEET_BASE_URL = os.getenv("NEO_MEET_BASE_URL", "https://meet.jit.si")
 
+PARTICIPANT_ROLES = {"host", "client", "team", "guest"}
+
+
+def _normalize_participants(raw: list | None) -> list[dict]:
+    """Accept both legacy string[] and structured object[] formats."""
+    if not raw:
+        return []
+    result = []
+    for item in raw:
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                result.append({"name": name, "email": "", "whatsapp": "", "role": "guest"})
+        elif isinstance(item, dict):
+            name = (item.get("name") or "").strip()
+            if name:
+                result.append({
+                    "name": name,
+                    "email": (item.get("email") or "").strip(),
+                    "whatsapp": (item.get("whatsapp") or "").strip(),
+                    "role": item.get("role", "guest") if item.get("role") in PARTICIPANT_ROLES else "guest",
+                })
+    return result
+
 
 def _now() -> float:
     return time.time()
@@ -35,7 +59,12 @@ def _load_store() -> list[dict]:
         return []
     try:
         data = json.loads(MEETINGS_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+        for m in data:
+            if "participants" in m:
+                m["participants"] = _normalize_participants(m["participants"])
+        return data
     except (json.JSONDecodeError, OSError):
         return []
 
@@ -54,7 +83,7 @@ def create_meeting(
     title: str,
     project: str,
     objective: str = "alinhamento",
-    participants: list[str] | None = None,
+    participants: list | None = None,
 ) -> dict:
     room_slug = _generate_room_slug(project, title)
     meeting = {
@@ -62,7 +91,7 @@ def create_meeting(
         "title": title.strip(),
         "project": project.strip(),
         "objective": objective if objective in OBJECTIVE_VALUES else "outro",
-        "participants": participants or [],
+        "participants": _normalize_participants(participants),
         "room_slug": room_slug,
         "room_url": f"{MEET_BASE_URL}/{room_slug}",
         "status": "planned",

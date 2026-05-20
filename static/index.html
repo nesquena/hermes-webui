@@ -1124,16 +1124,19 @@
       </div>
     </div>
     <div id="mainMeetings" class="main-view">
-      <div class="meetings-panel" id="meetingsPanel">
-        <header class="meetings-header">
-          <div>
-            <h2 data-i18n="meetings_title">Reuniões</h2>
-            <p class="meetings-subtitle" data-i18n="meetings_subtitle">Crie e gerencie reuniões de projetos</p>
-          </div>
-          <button class="btn btn-primary meetings-new-btn" onclick="showMeetingForm()" data-i18n="meetings_new">Nova Reunião</button>
-        </header>
-        <div id="meetingsContent" class="meetings-content"></div>
+      <div class="main-view-header meetings-header">
+        <div>
+          <div class="main-view-title" data-i18n="meetings_title">Reuniões</div>
+          <div class="main-view-subtitle" data-i18n="meetings_subtitle">Crie e gerencie reuniões de projetos</div>
+        </div>
+        <div class="main-view-actions meetings-actions">
+          <button class="neo-btn neo-btn--primary" onclick="showMeetingForm()" data-i18n="meetings_new">
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M15 10l5-3v10l-5-3V10z" stroke="currentColor" stroke-width="2" fill="none"/><rect x="3" y="7" width="12" height="10" rx="2" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+            Nova Reunião
+          </button>
+        </div>
       </div>
+      <div class="main-view-body" id="meetingsContent"></div>
     </div>
     <div id="mainProfiles" class="main-view">
       <div class="main-view-header">
