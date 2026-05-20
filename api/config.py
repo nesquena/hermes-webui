@@ -2418,6 +2418,7 @@ def _load_models_cache_from_disk() -> dict | None:
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
+            "model_warnings": cache.get("model_warnings", []),
         }
     except Exception:
         return None
@@ -2449,6 +2450,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
             "groups": cache["groups"],
+            "model_warnings": cache.get("model_warnings", []),
         }
         runtime_version = _current_webui_version()
         if runtime_version is not None:
@@ -3175,6 +3177,8 @@ def get_available_models() -> dict:
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            warning_sink: list[dict] | None = None,
+            provider_display: str | None = None,
         ) -> list[dict]:
             base = str(base_url or "").strip()
             if not base:
@@ -3229,9 +3233,20 @@ def get_available_models() -> dict:
                 return _extract_model_entries_from_payload(data, provider)
             except Exception:
                 logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
+                if warning_sink is not None:
+                    warning = {
+                        "type": "custom_provider_models_unavailable",
+                        "provider_id": provider,
+                        "provider": provider_display or provider,
+                        "base_url": base,
+                        "message": "Live model catalog unavailable; showing configured models only.",
+                    }
+                    if warning not in warning_sink:
+                        warning_sink.append(warning)
                 return []
 
         # 4. Fetch models from custom endpoint if base_url is configured
+        model_warnings: list[dict] = []
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
         if cfg_base_url:
@@ -3335,6 +3350,8 @@ def get_available_models() -> dict:
                         _slug,
                         api_key=_cp_api_key,
                         trusted_base_urls=(_cp_base_url,),
+                        warning_sink=model_warnings,
+                        provider_display=_cp_name,
                     )
                     for _live_model in _live_models:
                         _live_id = str(_live_model.get("id") or "").strip()
@@ -3954,6 +3971,7 @@ def get_available_models() -> dict:
             "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
             "aliases": model_aliases,
+            "model_warnings": model_warnings,
         }
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────

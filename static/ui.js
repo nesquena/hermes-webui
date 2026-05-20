@@ -955,6 +955,14 @@ async function populateModelDropdown(){
     const groups=(Array.isArray(data.groups)&&data.groups.length)
       ? data.groups
       : _synthGroupsFromConfigured();
+    const modelWarnings=Array.isArray(data.model_warnings)?data.model_warnings:[];
+    const warningsByProvider=new Map();
+    for(const w of modelWarnings){
+      const pid=String((w&&w.provider_id)||'').trim();
+      if(!pid) continue;
+      if(!warningsByProvider.has(pid)) warningsByProvider.set(pid,[]);
+      warningsByProvider.get(pid).push(w);
+    }
 
     if(!groups.length) return; // no server groups and no configured fallback
     // Clear existing options
@@ -970,6 +978,13 @@ async function populateModelDropdown(){
         opt.textContent=m.label;
         og.appendChild(opt);
         _dynamicModelLabels[m.id]=m.id;
+      }
+      for(const w of (warningsByProvider.get(String(g.provider_id||''))||[])){
+        const opt=document.createElement('option');
+        opt.disabled=true;
+        opt.value='';
+        opt.textContent='⚠ '+(w.message||'Live model catalog unavailable');
+        og.appendChild(opt);
       }
       // Hydrate the label map from extra_models too (the catalog tail that
       // doesn't render as <option> entries when the picker is capped — see

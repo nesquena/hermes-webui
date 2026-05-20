@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Surface named custom-provider `/models` fetch failures in `/api/models` and the model picker instead of silently showing only configured fallback models.
+
 
 ## [v0.51.95] — 2026-05-20 — Release BS (stage-388 — 5-PR batch — live tool callback event dedup + browser-only dashboard links + messaging transcript merge alignment + Geist Contrast skin + SSE runtime diagnostics)
 

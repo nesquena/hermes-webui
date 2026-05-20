@@ -116,6 +116,39 @@ class TestNamedCustomProviderGroup:
             f"Expected 'my-llm' in Agent37 group models, got {model_ids}"
         )
 
+    def test_named_provider_reports_live_catalog_fetch_failure(self, monkeypatch):
+        """A failing /models fetch should return a structured picker warning."""
+        import urllib.error
+        from email.message import Message
+
+        def fail_urlopen(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:9999/v1/models",
+                401,
+                "Unauthorized",
+                hdrs=Message(),
+                fp=None,
+            )
+
+        monkeypatch.setattr("urllib.request.urlopen", fail_urlopen)
+        result = _models_with_cfg(
+            model_cfg={"provider": "custom"},
+            custom_providers=[
+                {"name": "BrokenProxy", "model": "fallback-model", "base_url": "http://127.0.0.1:9999/v1"}
+            ],
+        )
+
+        warnings = result.get("model_warnings") or []
+        assert warnings == [
+            {
+                "type": "custom_provider_models_unavailable",
+                "provider_id": "custom:brokenproxy",
+                "provider": "BrokenProxy",
+                "base_url": "http://127.0.0.1:9999/v1",
+                "message": "Live model catalog unavailable; showing configured models only.",
+            }
+        ]
+
     def test_multiple_named_providers_each_get_their_own_group(self):
         """Two named custom providers should produce two distinct groups."""
         result = _models_with_cfg(
