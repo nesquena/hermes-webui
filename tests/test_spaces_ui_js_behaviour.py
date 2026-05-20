@@ -1123,7 +1123,7 @@ global.fetch = async function(path, opts = {}) {
     const widgetId = (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather';
     return response({ events: [
       { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
-      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
+      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' }, autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution', 'renderer'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
     ] });
   }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
@@ -1292,7 +1292,7 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/widget/event') {
     const eventBody = opts.body ? JSON.parse(opts.body) : {};
-    return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
+    return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
   }
   if (path === 'api/spaces/recovery/disable-widget') {
     return response({ disabled: true, space_id: 'broken', widget_id: 'bad-widget', revision_event_id: 'rev-disable' });
@@ -3380,6 +3380,11 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "action: refresh" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
     assert "prompt: [REDACTED]" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
+    assert "Gates: Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "metadata-only · local-only" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
@@ -3801,6 +3806,11 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues
     }
     assert "Widget event queued" in out["rootHtml"]
     assert "Sandbox prompt queued" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
+    assert "Gates: Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "metadata-only · local-only" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

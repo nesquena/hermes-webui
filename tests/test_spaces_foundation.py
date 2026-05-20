@@ -5223,6 +5223,7 @@ def test_queue_widget_event_rejects_runtime_prompt_without_preflightable_text_be
 
 
 def test_queue_widget_event_records_metadata_only_prompt_preflight_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "supervised")
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-prompt-preflight-pass-lab", "name": "Runtime Prompt Preflight Pass Lab"})
     spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
@@ -5250,7 +5251,20 @@ def test_queue_widget_event_records_metadata_only_prompt_preflight_receipt(monke
     assert queued["prompt_preflight"]["metadata_only"] is True
     assert queued["prompt_preflight"]["raw_prompt_stored"] is False
     assert len(queued["prompt_preflight"]["prompt_hash"]) == 64
+    assert queued["autonomy_policy"] == {
+        "available": True,
+        "action": "space.widget.event",
+        "mode": "supervised",
+        "label": "Supervised",
+        "approval_required": True,
+        "approval_gates": ["generated_widget_execution"],
+        "prompt_preflight_status": "pass",
+        "model_route_hint": "hint:reasoning",
+        "metadata_only": True,
+        "local_only": True,
+    }
     assert events[0]["prompt_preflight"] == queued["prompt_preflight"]
+    assert events[0]["autonomy_policy"] == queued["autonomy_policy"]
     assert '"raw_prompt":' not in serialized
     assert '"prompthash":' not in serialized
     assert "queue metadata-only prompt safely" not in serialized

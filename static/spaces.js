@@ -123,7 +123,8 @@
     const meta = [widgetId, eventName, eventId].filter(Boolean).join(' · ');
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(meta || 'Metadata-only event queued')+'</div>' +
-      '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div></div>';
+      '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div>' +
+      renderActionPolicyEvidence(result && result.autonomy_policy) + '</div>';
   }
 
   function renderSpacesList(spaces, demos, memoryStatus, policyStatus, progressStatus){
@@ -1662,10 +1663,12 @@
       const details = Object.assign({}, event && event.payload_summary && typeof event.payload_summary === 'object' && !Array.isArray(event.payload_summary) ? event.payload_summary : {});
       if (event && event.prompt_preview) details.prompt = event.prompt_preview;
       const detailText = formatRevisionDetails(details);
+      const policyEvidence = renderActionPolicyEvidence(event && event.autonomy_policy);
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventName)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(widgetId)+' · '+escapeHtml(status)+'</div>' +
         eventMeta +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        policyEvidence +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';
     return '<div class="capy-spaces-card"><h3>Queued widget events</h3>' +

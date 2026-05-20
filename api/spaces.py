@@ -7735,6 +7735,25 @@ def _prompt_preflight_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[
     return summary
 
 
+def _action_policy_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded action-policy receipt summary for queued widget events."""
+
+    raw_gates_value = receipt.get("approval_gates")
+    raw_gates: list[Any] = raw_gates_value if isinstance(raw_gates_value, list) else []
+    return {
+        "available": bool(receipt.get("available")),
+        "action": _widget_event_label_summary(receipt.get("action"), 120),
+        "mode": _widget_event_label_summary(receipt.get("mode"), 80),
+        "label": _widget_event_label_summary(receipt.get("label"), 80),
+        "approval_required": bool(receipt.get("approval_required")),
+        "approval_gates": [_widget_event_label_summary(item, 120) for item in raw_gates[:20]],
+        "prompt_preflight_status": _widget_event_label_summary(receipt.get("prompt_preflight_status"), 80),
+        "model_route_hint": _widget_event_label_summary(receipt.get("model_route_hint"), 80),
+        "metadata_only": bool(receipt.get("metadata_only")),
+        "local_only": bool(receipt.get("local_only")),
+    }
+
+
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
@@ -7764,6 +7783,9 @@ def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None
     prompt_preflight = raw_details.get("prompt_preflight") if isinstance(raw_details.get("prompt_preflight"), dict) else None
     if prompt_preflight:
         summary["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(prompt_preflight)
+    autonomy_policy = raw_details.get("autonomy_policy") if isinstance(raw_details.get("autonomy_policy"), dict) else None
+    if autonomy_policy:
+        summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
     return summary
 
 
@@ -7894,6 +7916,16 @@ def queue_widget_event(
             "event_name": local_message_type,
         }
     preflight_receipt = _widget_runtime_prompt_preflight_receipt(name, payload_data, prompt=prompt)
+    autonomy_policy_receipt = None
+    if preflight_receipt:
+        from api.capy_policy import action_policy_receipt
+
+        autonomy_policy_receipt = action_policy_receipt(
+            "space.widget.event",
+            approval_gates=["generated_widget_execution"],
+            prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+            model_route_hint="hint:reasoning",
+        )
     prompt_preview = _payload_text_summary(prompt, 1000)
     payload_summary = _payload_summary(payload_data)
     event_details = {
@@ -7906,6 +7938,8 @@ def queue_widget_event(
     }
     if preflight_receipt:
         event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
         sid,
         "widget.event.queued",
@@ -7924,6 +7958,8 @@ def queue_widget_event(
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        response["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     return response
 
 
