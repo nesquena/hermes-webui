@@ -1009,7 +1009,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                 status = 'pending'
                 OR (status IN ('leased', 'completing') AND (leased_until IS NULL OR leased_until < ?))
               )
-            ORDER BY created_at ASC, updated_at ASC
+            ORDER BY attempts ASC, updated_at ASC, created_at ASC, job_id ASC
             LIMIT ?
             """,
             (now, limit),
@@ -1041,6 +1041,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
     for row in lease_rows:
         job_id = _safe_public_id(row.get("job_id"), fallback="")
         lease_marker = str(row.get("lease_marker") or "")
+        preflight_receipt: dict[str, Any] | None = None
         try:
             payload = json.loads(str(row.get("payload_json") or "{}"))
         except json.JSONDecodeError:
@@ -1096,7 +1097,8 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
             error = _safe_refresh_error(exc)
             failed_at = _now_iso()
             attempts = max(1, int(row.get("lease_attempts") or 1))
-            next_status = "failed" if attempts >= 3 else "pending"
+            preflight_blocked = isinstance(preflight_receipt, dict) and preflight_receipt.get("status") == "block"
+            next_status = "pending" if preflight_blocked else ("failed" if attempts >= 3 else "pending")
             with _connect() as conn:
                 cursor = conn.execute(
                     """
@@ -1120,13 +1122,16 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                     (failed_at, error, failed_at, source_id),
                 )
             _record_source_refresh_progress("memory.ingest.failed", source_id=source_id, job_id=job_id)
-            results.append({
+            failure_result = {
                 "job_id": job_id,
                 "source_id": source_id,
                 "status": next_status,
                 "error": error,
                 "metadata_only": True,
-            })
+            }
+            if isinstance(preflight_receipt, dict):
+                failure_result["prompt_preflight"] = preflight_receipt
+            results.append(failure_result)
     return {
         "local_only": True,
         "metadata_only": True,
