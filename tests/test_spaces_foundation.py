@@ -13516,6 +13516,53 @@ def test_spaces_demo_run_all_records_failed_progress_when_post_processing_fails(
     assert "secret" not in serialized
 
 
+def test_space_demo_run_exposes_safe_output_compaction_evidence_for_browser_smoke(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_browser_cocontrol_google_or_test_site")
+
+    assert result["ok"] is True
+    assert result["demo"] == "demo_browser_cocontrol_google_or_test_site"
+    context_status = result["context_status"]
+    assert context_status["metadata_only"] is True
+    assert context_status["local_only"] is True
+    assert {"memory", "policy", "progress"}.issubset(context_status)
+    assert isinstance(context_status["memory"]["source_count"], int)
+    assert isinstance(context_status["policy"]["prompt_preflight_status"], str)
+    assert isinstance(context_status["progress"]["recent_event_count"], int)
+    receipt = result["output_compaction"]
+    assert receipt["tool"] == "capy-spaces-demo-run"
+    assert receipt["command"] == "space.demo.run:demo_browser_cocontrol_google_or_test_site"
+    assert receipt["exit_status"] == 0
+    assert receipt["original_chars"] > 0
+    assert 0 < receipt["compacted_chars"] <= receipt["original_chars"]
+    assert receipt["compacted"] is True
+    assert "retain_artifact_handles" in receipt["rules_applied"]
+    assert "demo_browser_cocontrol_google_or_test_site" in receipt["text"]
+    assert "browser-panel" in receipt["text"]
+
+    handles = receipt["retained_artifact_handles"]
+    assert {"kind": "space", "handle": "space:demo_browser_cocontrol_google_or_test_site", "label": "Browser Surface"} in handles
+    assert {
+        "kind": "widget",
+        "handle": "widget:demo_browser_cocontrol_google_or_test_site/browser-panel",
+        "label": "Browser panel",
+    } in handles
+    assert any(item["kind"] == "revision" and item["handle"].startswith("revision:") for item in handles)
+    serialized = json.dumps(receipt, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "ignore previous" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+    assert "raw_prompt" not in serialized
+    assert "generated body" not in serialized
+    assert "source code" not in serialized
+
+
 def test_space_demo_run_records_browser_smoke_progress(monkeypatch, tmp_path):
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)

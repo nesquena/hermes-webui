@@ -2517,6 +2517,97 @@ def _space_demo_run_summary(demo: str, template: str, space_id: str, *, action: 
     }
 
 
+def _space_demo_output_compaction_lines(summary: dict[str, Any]) -> list[str]:
+    """Build allow-listed individual demo-run lines for compaction receipts.
+
+    Keep this intentionally narrower than the demo result object. Individual
+    demo smokes can include nested widget metadata and future fields; the
+    product-visible compaction receipt should expose only the metadata needed to
+    prove what ran and which artifacts were retained.
+    """
+    raw_space = summary.get("space")
+    space: dict[str, Any] = raw_space if isinstance(raw_space, dict) else {}
+    raw_widgets = summary.get("widgets")
+    widgets: list[Any] = raw_widgets if isinstance(raw_widgets, list) else []
+    lines = [
+        "Capy Spaces individual demo metadata-only smoke summary",
+        f"demo={str(summary.get('demo') or '')[:120]}",
+        f"template={str(summary.get('template') or '')[:80]}",
+        f"mode={str(summary.get('mode') or '')[:80]}",
+        f"action={str(summary.get('action') or '')[:80]}",
+        f"ok={bool(summary.get('ok') is True)}",
+        f"exit_status: {0 if summary.get('ok') is True else 1}",
+        f"space={str(space.get('space_id') or '')[:120]}",
+        f"space_label={str(space.get('name') or '')[:120]}",
+        f"widgets={int(summary.get('widget_count') or 0)}",
+        f"persisted={bool(summary.get('persistence_checked') is True)}",
+        f"rollback={bool(summary.get('rollback_point') is True)}",
+        f"revision_count={int(summary.get('revision_event_count') or 0)}",
+    ]
+    for widget in widgets[:8]:
+        if not isinstance(widget, dict):
+            continue
+        lines.append(
+            " | ".join(
+                (
+                    f"widget={str(widget.get('id') or '')[:80]}",
+                    f"kind={str(widget.get('kind') or '')[:80]}",
+                    f"title={str(widget.get('title') or '')[:120]}",
+                )
+            )
+        )
+    return lines
+
+
+def _space_demo_artifact_handles(summary: dict[str, Any]) -> list[dict[str, str]]:
+    """Return safe artifact handles retained by an individual demo receipt."""
+    raw_space = summary.get("space")
+    space: dict[str, Any] = raw_space if isinstance(raw_space, dict) else {}
+    space_id = str(space.get("space_id") or "").strip()
+    if not space_id:
+        return []
+    handles: list[dict[str, str]] = [
+        {
+            "kind": "space",
+            "handle": f"space:{space_id}",
+            "label": str(space.get("name") or space_id)[:120],
+        }
+    ]
+    raw_widgets = summary.get("widgets")
+    widgets: list[Any] = raw_widgets if isinstance(raw_widgets, list) else []
+    for widget in widgets[:5]:
+        if not isinstance(widget, dict):
+            continue
+        widget_id = str(widget.get("id") or "").strip()
+        if not widget_id:
+            continue
+        label = "Browser panel" if widget_id == "browser-panel" else str(widget.get("title") or widget_id)[:120]
+        handles.append({"kind": "widget", "handle": f"widget:{space_id}/{widget_id}", "label": label})
+    for event in list_revision_events(space_id, limit=1):
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id:
+            handles.append({"kind": "revision", "handle": f"revision:{space_id}/{event_id}", "label": "Latest revision"})
+            break
+    return handles
+
+
+def _space_demo_output_compaction(summary: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for one demo smoke run."""
+    from api.capy_compaction import compact_output
+
+    demo = str(summary.get("demo") or "").strip()
+    return compact_output(
+        "\n".join(_space_demo_output_compaction_lines(summary)),
+        tool="capy-spaces-demo-run",
+        command=f"space.demo.run:{demo}" if demo else "space.demo.run",
+        exit_status=0 if summary.get("ok") is True else 1,
+        max_chars=700,
+        artifact_handles=_space_demo_artifact_handles(summary),
+    )
+
+
 def _record_space_demo_progress_event(demo: str, space_id: str, event_type: str) -> dict[str, Any]:
     """Best-effort metadata-only progress event for one demo smoke run."""
     safe_event_type = event_type if event_type in {"run.started", "run.completed", "run.failed"} else "run.failed"
@@ -2971,6 +3062,8 @@ def _space_demo_run_body(name: str) -> dict[str, Any]:
 
     summary = _space_demo_run_summary(demo, template, space_id, action=action)
     summary.update(extra)
+    summary["output_compaction"] = _space_demo_output_compaction(summary)
+    summary["context_status"] = _space_demo_context_status()
     return summary
 
 
@@ -3004,10 +3097,10 @@ def _space_demo_suite_summary_lines(results: list[dict[str, Any]], *, passed: in
 
 
 def _space_demo_context_status() -> dict[str, Any]:
-    """Return allow-listed context-layer status for demo-suite receipts.
+    """Return allow-listed context-layer status for demo smoke receipts.
 
-    The run-all smoke receipt is product-visible, so only aggregate counts and
-    fixed policy labels are included. Do not include source names, origin URIs,
+    Demo smoke receipts are product-visible, so only aggregate counts and fixed
+    policy labels are included. Do not include source names, origin URIs,
     prompts, model/provider names, event ids, raw progress payloads, or errors.
     """
     try:
