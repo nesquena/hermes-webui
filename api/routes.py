@@ -496,6 +496,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
 # NEO Sprint 5: local-first Projects Command Center module.
 from api import projects as neo_projects
 from api import jira as neo_jira
+from api import meetings as neo_meetings
 from api.models import (
     Session,
     get_session,
@@ -1304,6 +1305,16 @@ def handle_get(handler, parsed) -> bool:
                 "prefix": prefix,
             },
         )
+
+    if parsed.path == "/api/meetings":
+        return j(handler, {"meetings": neo_meetings.load_meetings()})
+
+    if parsed.path.startswith("/api/meetings/") and not parsed.path.endswith("/start") and not parsed.path.endswith("/finish"):
+        meeting_id = parsed.path[len("/api/meetings/"):]
+        meeting = neo_meetings.get_meeting(meeting_id)
+        if meeting:
+            return j(handler, {"meeting": meeting})
+        return j(handler, {"error": "not_found"}, status=404)
 
     if parsed.path == "/api/sessions/search":
         return _handle_sessions_search(handler, parsed)
@@ -2292,6 +2303,44 @@ def handle_post(handler, parsed) -> bool:
         except Exception as e:
             logger.exception("Jira create issue failed")
             return bad(handler, str(e))
+
+    # ── NEO Sprint 6: Meetings ──
+    if parsed.path == "/api/meetings/create":
+        title = body.get("title", "").strip()
+        project = body.get("project", "").strip()
+        if not title or not project:
+            return j(handler, {"ok": False, "error": "title and project required"}, status=400)
+        meeting = neo_meetings.create_meeting(
+            title=title,
+            project=project,
+            objective=body.get("objective", "alinhamento"),
+            participants=body.get("participants"),
+        )
+        return j(handler, {"ok": True, "meeting": meeting})
+
+    if parsed.path.startswith("/api/meetings/") and parsed.path.endswith("/start"):
+        meeting_id = parsed.path[len("/api/meetings/"):-len("/start")]
+        result = neo_meetings.start_meeting(meeting_id)
+        if result:
+            return j(handler, {"ok": True, "meeting": result})
+        return j(handler, {"ok": False, "error": "not_found"}, status=404)
+
+    if parsed.path.startswith("/api/meetings/") and parsed.path.endswith("/finish"):
+        meeting_id = parsed.path[len("/api/meetings/"):-len("/finish")]
+        result = neo_meetings.finish_meeting(meeting_id)
+        if result:
+            return j(handler, {"ok": True, "meeting": result})
+        return j(handler, {"ok": False, "error": "not_found"}, status=404)
+
+    if parsed.path.startswith("/api/meetings/") and parsed.path.endswith("/summary"):
+        meeting_id = parsed.path[len("/api/meetings/"):-len("/summary")]
+        summary = body.get("summary")
+        if not summary:
+            return j(handler, {"ok": False, "error": "summary required"}, status=400)
+        result = neo_meetings.update_summary(meeting_id, summary)
+        if result:
+            return j(handler, {"ok": True, "meeting": result})
+        return j(handler, {"ok": False, "error": "not_found"}, status=404)
 
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":
