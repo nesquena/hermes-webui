@@ -3828,18 +3828,56 @@ function _pinPreviewHtml(pin){
   const role=String(pin&&pin.role||'message');
   return `<button class="pinned-message-card" type="button" data-message-index="${Number(pin.message_index)}" onclick="jumpToPinnedMessage(this)"><span class="pinned-message-role">${esc(role)}</span><span class="pinned-message-preview">${esc(preview)}</span><span class="pinned-message-unpin" onclick="unpinPinnedMessage(event,this)">${li('x',12)}</span></button>`;
 }
+function closePinnedMessagesPopover(){
+  const box=$('pinnedMessagesPanel');
+  const toggle=$('pinnedMessagesToggle');
+  if(box) box.hidden=true;
+  if(toggle) toggle.classList.remove('open');
+}
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape') closePinnedMessagesPopover();
+});
+function _positionPinnedMessagesPopover(){
+  const box=$('pinnedMessagesPanel');
+  const toggle=$('pinnedMessagesToggle');
+  if(!box||!toggle||box.hidden) return;
+  const rect=toggle.getBoundingClientRect();
+  const width=Math.min(360,Math.max(260,window.innerWidth-24));
+  box.style.width=width+'px';
+  let left=Math.min(rect.left,window.innerWidth-width-12);
+  if(left<12) left=12;
+  box.style.left=left+'px';
+  box.style.top=Math.min(rect.bottom+8,window.innerHeight-80)+'px';
+}
+function togglePinnedMessagesPopover(event){
+  if(event) event.stopPropagation();
+  const box=$('pinnedMessagesPanel');
+  const toggle=$('pinnedMessagesToggle');
+  if(!box||!toggle||toggle.hidden) return;
+  const opening=box.hidden;
+  if(opening){
+    box.hidden=false;
+    toggle.classList.add('open');
+    _positionPinnedMessagesPopover();
+    setTimeout(()=>document.addEventListener('click',closePinnedMessagesPopover,{once:true}),0);
+  }else closePinnedMessagesPopover();
+}
 function renderPinnedMessages(){
   const box=$('pinnedMessagesPanel');
+  const toggle=$('pinnedMessagesToggle');
+  const count=$('pinnedMessagesCount');
   if(!box)return;
   const pins=_messagePins();
-  if(!S.session||!pins.length){box.hidden=true;box.innerHTML='';return;}
-  box.hidden=false;
+  if(count) count.textContent=String(pins.length);
+  if(toggle) toggle.hidden=!S.session||!pins.length;
+  if(!S.session||!pins.length){box.hidden=true;box.innerHTML='';if(toggle)toggle.classList.remove('open');return;}
   box.innerHTML=`<div class="pinned-messages-head"><span>${li('pin',12)} Pinned messages</span><span>${pins.length}/3</span></div><div class="pinned-messages-list">${pins.map(_pinPreviewHtml).join('')}</div>`;
+  _positionPinnedMessagesPopover();
 }
 function jumpToPinnedMessage(btn){
   const idx=Number(btn&&btn.getAttribute('data-message-index'));
   const target=document.querySelector(`[data-full-msg-idx="${idx}"]`);
-  if(target){target.scrollIntoView({block:'center',behavior:'smooth'});target.classList.add('pin-jump-highlight');setTimeout(()=>target.classList.remove('pin-jump-highlight'),1400);return;}
+  if(target){closePinnedMessagesPopover();target.scrollIntoView({block:'center',behavior:'smooth'});target.classList.add('pin-jump-highlight');setTimeout(()=>target.classList.remove('pin-jump-highlight'),1400);return;}
   showToast('Pinned message is outside the loaded transcript window. Load earlier messages to jump to it.',3000);
 }
 function unpinPinnedMessage(event,el){
@@ -3859,7 +3897,7 @@ function openMessagePinMenu(ev,btn){
   const pinned=btn.classList.contains('active');
   const menu=document.createElement('div');
   menu.className='message-pin-menu session-action-menu open';
-  menu.innerHTML=`<button class="session-action-opt" type="button"><span class="ws-opt-action"><span class="ws-opt-icon">${li('pin',14)}</span><span><span class="ws-opt-title">${pinned?'Unpin message':'Pin message'}</span><span class="ws-opt-desc">Show up to 3 pinned messages in the right panel</span></span></span></button>`;
+  menu.innerHTML=`<button class="session-action-opt" type="button"><span class="ws-opt-action"><span class="ws-opt-icon">${li('pin',14)}</span><span><span class="ws-opt-title">${pinned?'Unpin message':'Pin message'}</span><span class="ws-opt-desc">Show up to 3 pinned messages from the chat header</span></span></span></button>`;
   menu.querySelector('button').onclick=()=>{closeMessagePinMenu();toggleMessagePin(btn);};
   document.body.appendChild(menu);
   const menuW=Math.min(280,Math.max(220,menu.scrollWidth||220));

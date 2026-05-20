@@ -56,10 +56,16 @@ def test_transcript_actions_and_context_menu_can_pin_messages():
     assert "data-full-msg-idx" in UI_JS
 
 
-def test_right_panel_renders_pinned_message_section():
+def test_chat_header_renders_pinned_message_popover():
+    assert 'id="pinnedMessagesToggle"' in INDEX_HTML
     assert 'id="pinnedMessagesPanel"' in INDEX_HTML
+    assert 'id="pinnedMessagesPanel"' in INDEX_HTML.split('id="fileTree"')[0]
+    assert "function togglePinnedMessagesPopover" in UI_JS
     assert "function renderPinnedMessages" in UI_JS
     assert "Pinned messages" in UI_JS
     assert "jumpToPinnedMessage" in UI_JS
-    assert ".pinned-messages-panel" in CSS
+    assert "Show up to 3 pinned messages from the chat header" in UI_JS
+    assert ".app-titlebar-pins" in CSS
+    assert ".pinned-messages-popover" in CSS
     assert ".pinned-message-card" in CSS
+    assert ".pinned-messages-panel" not in CSS

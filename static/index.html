@@ -136,6 +136,11 @@
     </span>
     <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
+    <button class="app-titlebar-pins" id="pinnedMessagesToggle" type="button" onclick="togglePinnedMessagesPopover(event)" aria-label="Pinned messages" title="Pinned messages" hidden>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16h14v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/></svg>
+      <span class="app-titlebar-pins-count" id="pinnedMessagesCount">0</span>
+    </button>
+    <div class="pinned-messages-popover" id="pinnedMessagesPanel" hidden></div>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
   <button class="app-titlebar-reload" id="btnReload" onclick="window.location.reload()" type="button" aria-label="Reload" title="Reload page">
@@ -1278,7 +1283,6 @@
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
-    <div class="pinned-messages-panel" id="pinnedMessagesPanel" hidden></div>
     <div class="file-tree" id="fileTree"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
