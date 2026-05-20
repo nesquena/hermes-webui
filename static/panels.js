@@ -1239,17 +1239,188 @@ function _kanbanRenderSidebar(columns){
 }
 
 
+/**
+ * Render inline markdown (bold, italic, code, links, strikethrough).
+ * Input is already HTML-escaped.
+ */
 function _kanbanRenderMarkdownInline(escaped){
   return String(escaped || '')
+    .replace(/~~([^~\n]+)~~/g, (_m, text) => `<del>${text}</del>`)
     .replace(/`([^`\n]+)`/g, (_m, code) => `<code>${code}</code>`)
     .replace(/\*\*([^*\n]+)\*\*/g, (_m, text) => `<strong>${text}</strong>`)
-    .replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
+    .replace(/(^|[^*a-zA-Z0-9])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_m, text, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`);
 }
 
+/**
+ * Render full markdown block content: headings, code blocks, lists, tables,
+ * task lists, blockquotes, horizontal rules, paragraphs + inline formatting.
+ */
 function _kanbanRenderMarkdown(source){
   if (!source) return '';
-  return `<div class="hermes-kanban-md">${esc(source).split(/\r?\n/).map(line => line.trim() ? `<p>${_kanbanRenderMarkdownInline(line)}</p>` : '').join('')}</div>`;
+  const lines = esc(source).split(/\r?\n/);
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // ── Code block ──
+    if (/^```/.test(trimmed)) {
+      const lang = trimmed.slice(3).trim();
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      const codeHtml = codeLines.join('\n');
+      out.push(lang
+        ? `<pre class="hermes-kanban-code"><code class="language-${_kanbanRenderMarkdownInline(lang)}">${codeHtml}</code></pre>`
+        : `<pre class="hermes-kanban-code"><code>${codeHtml}</code></pre>`);
+      continue;
+    }
+
+    // ── Horizontal rule ──
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) {
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+
+    // ── Heading ──
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      out.push(`<h${level}>${_kanbanRenderMarkdownInline(headingMatch[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // ── Blockquote ──
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i++;
+      }
+      out.push(`<blockquote>${_kanbanRenderMarkdownInline(quoteLines.join('<br>'))}</blockquote>`);
+      continue;
+    }
+
+    // ── Table row ──
+    if (/^\|.+\|$/.test(trimmed)) {
+      const tableRows = [];
+      const tableAligns = [];
+      while (i < lines.length && /^\|.+\|$/.test(lines[i].trim())) {
+        const row = lines[i].trim();
+        // Detect alignment separator row
+        if (/^\|[\s:]*-{3,}[\s:]*\|/.test(row)) {
+          const cells = row.split('|').filter(c => c.trim().length > 0);
+          cells.forEach(c => {
+            const t = c.trim();
+            if (t.startsWith(':') && t.endsWith(':')) tableAligns.push('center');
+            else if (t.endsWith(':')) tableAligns.push('right');
+            else tableAligns.push('left');
+          });
+        } else {
+          const cells = row.split('|').filter(c => c.trim().length > 0);
+          tableRows.push(cells.map((c, ci) => {
+            const align = tableAligns[ci] ? ` style="text-align:${tableAligns[ci]}"` : '';
+            return `<td${align}>${_kanbanRenderMarkdownInline(c.trim())}</td>`;
+          }).join(''));
+        }
+        i++;
+      }
+      if (tableRows.length) {
+        out.push(`<table><tbody>${tableRows.map(r => `<tr>${r}</tr>`).join('')}</tbody></table>`);
+      }
+      continue;
+    }
+
+    // ── Task list item ──
+    const taskMatch = trimmed.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+    if (taskMatch) {
+      const checked = taskMatch[1] !== ' ';
+      const text = taskMatch[2];
+      const items = [];
+      items.push(`<li class="hermes-kanban-task${checked ? ' checked' : ''}"><input type="checkbox"${checked ? ' checked' : ''} disabled> ${_kanbanRenderMarkdownInline(text)}</li>`);
+      i++;
+      // Collect continuation items
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextTask = next.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+        const nextLi = next.match(/^[-*+]\s+(.+)$/);
+        if (nextTask) {
+          const c = nextTask[1] !== ' ';
+          items.push(`<li class="hermes-kanban-task${c ? ' checked' : ''}"><input type="checkbox"${c ? ' checked' : ''} disabled> ${_kanbanRenderMarkdownInline(nextTask[2])}</li>`);
+          i++;
+        } else if (nextLi) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextLi[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // ── Unordered list item ──
+    const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (ulMatch) {
+      const items = [];
+      items.push(`<li>${_kanbanRenderMarkdownInline(ulMatch[1])}</li>`);
+      i++;
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextUl = next.match(/^[-*+]\s+(.+)$/);
+        const nextTask = next.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+        if (nextTask) break; // let task list handler get it
+        if (nextUl) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextUl[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // ── Ordered list item ──
+    const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      const items = [];
+      items.push(`<li>${_kanbanRenderMarkdownInline(olMatch[1])}</li>`);
+      i++;
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextOl = next.match(/^\d+\.\s+(.+)$/);
+        if (nextOl) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextOl[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ol>${items.join('')}</ol>`);
+      continue;
+    }
+
+    // ── Empty line ──
+    if (!trimmed) {
+      out.push('');
+      i++;
+      continue;
+    }
+
+    // ── Paragraph ──
+    out.push(`<p>${_kanbanRenderMarkdownInline(trimmed)}</p>`);
+    i++;
+  }
+  return `<div class="hermes-kanban-md">${out.join('\n')}</div>`;
 }
 
 function _kanbanFormatDuration(seconds){
@@ -1816,7 +1987,7 @@ function _kanbanCommentHtml(comment){
   const by = comment.author || comment.created_by || comment.actor || '';
   const at = _kanbanFormatTimestamp(comment.created_at || comment.ts || '');
   return `<div class="kanban-detail-row">
-    <div class="kanban-detail-row-main">${esc(body)}</div>
+    <div class="kanban-detail-row-main">${_kanbanRenderMarkdown(body)}</div>
     <div class="kanban-detail-row-meta">${esc([by, at].filter(Boolean).join(' · '))}</div>
   </div>`;
 }
@@ -2368,7 +2539,7 @@ function _kanbanRenderTaskDetail(data){
       <div class="kanban-task-preview-title">${esc(title)}</div>
       <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
-    <div class="kanban-task-preview-body">${esc(body)}</div>
+    <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
     <div class="kanban-status-actions">${statusButtons}</div>
     <div class="kanban-detail-grid">
