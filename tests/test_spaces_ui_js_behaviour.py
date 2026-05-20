@@ -800,6 +800,19 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        output_compaction: {
+          tool: 'capy-spaces-creator-loop',
+          command: 'space.creator.commit',
+          exit_status: 0,
+          original_chars: 1800,
+          compacted_chars: 420,
+          redaction_status: 'redacted',
+          rules_applied: ['redact_unsafe_markers', 'cap_section_chars'],
+          text: 'creator commit metadata-only receipt\nspace_id: creator-lab\nwidget: status-card\nraw prompt, widget bodies, and credentials omitted',
+          raw_prompt: 'Build SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
       });
     }
   }
@@ -6536,6 +6549,12 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "Approval required: yes" in out["rootHtml"]
     assert "Gates: Creator commit approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 1800 chars" in out["rootHtml"]
+    assert "Compacted output: 420 chars" in out["rootHtml"]
+    assert "Redaction: redacted" in out["rootHtml"]
+    assert "Rules: redact_unsafe_markers, cap_section_chars" in out["rootHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
     assert "abcdef0123456789abcdef0123456789" in out["rootHtml"]
     assert "Open committed Space" in out["rootHtml"]
     assert "Manage committed widgets" in out["rootHtml"]

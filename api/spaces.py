@@ -3303,6 +3303,61 @@ def _space_creator_preview_compaction(draft: dict[str, Any], *, command: str) ->
     )
 
 
+def _space_creator_commit_compaction(
+    draft: dict[str, Any],
+    created: dict[str, Any],
+    *,
+    command: str,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for a creator commit receipt."""
+    from api.capy_compaction import compact_output
+
+    raw_space = draft.get("space")
+    draft_space: dict[str, Any] = raw_space if isinstance(raw_space, dict) else {}
+    raw_widgets = draft.get("widget_details")
+    widgets: list[Any] = raw_widgets if isinstance(raw_widgets, list) else []
+    raw_safety = draft.get("safety")
+    safety: dict[str, Any] = raw_safety if isinstance(raw_safety, dict) else {}
+    revision_event_id = _public_revision_event_id(created.get("revision_event_id")) or "none"
+    lines = [
+        "creator commit metadata-only receipt",
+        "stage: revisioned-commit",
+        f"space_id: {created.get('space_id') or draft_space.get('space_id') or 'unknown'}",
+        f"space_name: {draft_space.get('name') or created.get('name') or 'Committed Space'}",
+        f"widget_count: {len(widgets)}",
+        f"revision_event_id: {revision_event_id}",
+        "sandbox preview verified: yes",
+        "visual QA verified: yes",
+        "explicit approval verified: yes",
+    ]
+    for widget in widgets[:20]:
+        if not isinstance(widget, dict):
+            continue
+        lines.append(
+            "widget: "
+            + str(widget.get("id") or "unknown")[:80]
+            + " · kind: "
+            + str(widget.get("kind") or "unknown")[:40]
+            + " · title: "
+            + str(widget.get("title") or "Untitled")[:120]
+        )
+    lines.extend(
+        [
+            "raw prompt, source bodies, widget bodies, and credentials omitted",
+            f"omitted_field_count: {int(safety.get('omitted_field_count') or 0)}",
+        ]
+    )
+    if int(safety.get("omitted_field_count") or 0) > 0 or safety.get("unsafe_prompt_redacted"):
+        lines.append("unsafe fields omitted: renderer api_auth api_key raw prompt generated widget body")
+    return compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-creator-loop",
+        command=command,
+        exit_status=0,
+        max_chars=600,
+    )
+
+
 def _space_creator_revision_candidate(draft: dict[str, Any], current_space: dict[str, Any]) -> dict[str, Any]:
     """Build the metadata-only manifest shape a creator commit would revise to."""
     space = draft["space"]
@@ -3620,6 +3675,7 @@ def _space_creator_commit_payload(name: str, payload: dict[str, Any]) -> dict[st
         "space": space_detail,
         "widgets": widgets,
         "widget_count": len(widgets),
+        "output_compaction": _space_creator_commit_compaction(draft, created, command=name),
         "revision_event_id": created.get("revision_event_id"),
         "safety": draft["safety"],
     }

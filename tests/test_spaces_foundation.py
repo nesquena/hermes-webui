@@ -2460,6 +2460,20 @@ def test_creator_commit_returns_preview_preflight_and_policy_receipts_metadata_o
         "metadata_only": True,
         "local_only": True,
     }
+    compaction = commit["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-creator-loop"
+    assert compaction["command"] == "space.creator.commit"
+    assert compaction["exit_status"] == 0
+    assert compaction["original_chars"] > 0
+    assert 0 < compaction["compacted_chars"] < compaction["original_chars"]
+    assert compaction["redaction_status"] == "redacted"
+    assert "redact_unsafe_markers" in compaction["rules_applied"]
+    assert "commit-status" in compaction["text"]
+    assert "revisioned-commit" in compaction["text"]
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in compaction["text"]
+    assert "<script" not in compaction["text"]
+    assert "renderer" not in compaction["text"].lower()
+    assert "api_auth" not in compaction["text"].lower()
 
     manifest = json.loads((spaces.manifests_dir() / "creator-commit-policy-lab" / "space.json").read_text(encoding="utf-8"))
     event_path = spaces.events_dir() / f"{manifest['revision_event_id']}.json"
