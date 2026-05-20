@@ -283,6 +283,24 @@ function expandSidebar(){
   }catch(_){}
   _syncSidebarAria();
 })();
+// ── Boot-time tab visibility ────────────────────────────────────────────────
+// Apply hidden tabs from localStorage before first paint. If the active tab
+// is hidden, switch focus to chat. Runs after DOM is ready (unlike theme/skin
+// flash-prevention, tab elements aren't available in <head>).
+(function _restoreTabVisibility(){
+  try{
+    if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
+      _applyTabVisibility(_getHiddenTabs());
+    }
+    var active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')
+               ||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');
+    if(active&&active.classList.contains('nav-tab-hidden')){
+      var chatBtn=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]');
+      if(chatBtn)chatBtn.classList.add('active');
+      if(active)active.classList.remove('active');
+    }
+  }catch(_){}
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }

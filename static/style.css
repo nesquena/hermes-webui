@@ -2763,6 +2763,16 @@ main.main.showing-logs > #mainLogs{display:flex;}
 #mainSettings .settings-field > div[style*="color:var(--muted)"],
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
+/* Sidebar tab visibility — hide nav-tab and matching rail-btn when toggled off by user */
+.nav-tab-hidden{display:none!important;}
+
+/* Tab visibility chips in Settings > Appearance */
+.tab-visibility-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
+.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--border);background:var(--accent-bg);color:var(--accent-text);cursor:pointer;transition:background .15s,border-color .15s,color .15s;white-space:nowrap;user-select:none;}
+.tab-visibility-chip:hover{border-color:var(--accent);background:var(--accent-bg-strong);}
+.tab-visibility-chip.chip-off{background:var(--input-bg,var(--surface));color:var(--muted);border-color:var(--border);}
+.tab-visibility-chip.chip-off:hover{border-color:var(--muted);}
+
 /* Selects & text/password inputs — uniform. Uses !important to win
    over legacy inline styles that were written for the modal era. */
 #mainSettings select,

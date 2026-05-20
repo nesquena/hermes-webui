@@ -152,6 +152,7 @@ function _beginSettingsPanelSession() {
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
   _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
+  _settingsHiddenTabsOnOpen = _getHiddenTabs().slice();
   _pendingSettingsTargetPanel = null;
   if (_settingsAppearanceAutosaveTimer) {
     clearTimeout(_settingsAppearanceAutosaveTimer);
@@ -5080,9 +5081,83 @@ let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
 let _settingsAppearanceAutosaveTimer = null;
+let _settingsHiddenTabsOnOpen = null; // track hidden_tabs at open time for discard revert
 let _settingsAppearanceAutosaveRetryPayload = null;
 let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
+
+// ── Sidebar tab visibility ─────────────────────────────────────────────────
+const _ALWAYS_VISIBLE_TABS = new Set(['chat','settings']);
+const _HIDDEN_TABS_LS_KEY = 'hermes-webui-hidden-tabs';
+
+function _getHiddenTabs(){
+  try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h){var p=JSON.parse(h);if(Array.isArray(p))return p;}}catch(e){}
+  return[];
+}
+
+function _setHiddenTabs(panels){
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(panels));}catch(e){}
+}
+
+function _applyTabVisibility(hidden){
+  if(!Array.isArray(hidden)) hidden=[];
+  // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
+  document.querySelectorAll('[data-panel]').forEach(function(el){
+    var panel=el.dataset.panel;
+    if(!panel)return;
+    var shouldHide=hidden.indexOf(panel)!==-1;
+    el.classList.toggle('nav-tab-hidden',shouldHide);
+  });
+  // If the currently active tab is hidden, switch to chat
+  var activeRail=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]');
+  var activeSidebar=document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');
+  var activeEl=activeRail||activeSidebar;
+  if(activeEl&&activeEl.classList.contains('nav-tab-hidden')){
+    if(typeof switchPanel==='function') switchPanel('chat');
+  }
+}
+
+function _renderTabVisibilityChips(){
+  var container=$('tabVisibilityChips');
+  if(!container)return;
+  var hidden=_getHiddenTabs();
+  // Scan rail buttons to discover all available panels (skip always-visible + dashboard-link)
+  var tabs=document.querySelectorAll('.rail .rail-btn.nav-tab[data-panel]');
+  container.innerHTML='';
+  tabs.forEach(function(tab){
+    var panel=tab.dataset.panel;
+    if(!panel||_ALWAYS_VISIBLE_TABS.has(panel))return;
+    if(tab.classList.contains('dashboard-link'))return;
+    var label=tab.dataset.tooltip||tab.dataset.label||panel;
+    // Capitalize first letter
+    label=label.charAt(0).toUpperCase()+label.slice(1);
+    var chip=document.createElement('button');
+    chip.type='button';
+    chip.className='tab-visibility-chip';
+    var isOff=hidden.indexOf(panel)!==-1;
+    if(isOff)chip.classList.add('chip-off');
+    chip.textContent=label;
+    chip.setAttribute('data-tab-panel',panel);
+    chip.setAttribute('aria-pressed',isOff?'false':'true');
+    chip.onclick=function(){_toggleTabVisibilityChip(panel);};
+    container.appendChild(chip);
+  });
+}
+
+function _toggleTabVisibilityChip(panel){
+  if(_ALWAYS_VISIBLE_TABS.has(panel))return;
+  var hidden=_getHiddenTabs();
+  var idx=hidden.indexOf(panel);
+  if(idx!==-1){
+    hidden.splice(idx,1);
+  }else{
+    hidden.push(panel);
+  }
+  _setHiddenTabs(hidden);
+  _applyTabVisibility(hidden);
+  _renderTabVisibilityChips();
+  _scheduleAppearanceAutosave();
+}
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
@@ -5211,6 +5286,7 @@ function _appearancePayloadFromUi(){
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    hidden_tabs: _getHiddenTabs(),
   };
 }
 
@@ -5237,6 +5313,7 @@ function _rememberAppearanceSaved(payload){
   _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
   _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
   _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+  _settingsHiddenTabsOnOpen=Array.isArray(payload.hidden_tabs)?payload.hidden_tabs:[];
 }
 
 function _scheduleAppearanceAutosave(){
@@ -5466,6 +5543,18 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    // Tab visibility chips (dynamically populated from DOM)
+    var hiddenTabs=[];
+    if(Array.isArray(settings.hidden_tabs)){
+      // Server value takes priority — even an empty array means "no tabs hidden"
+      hiddenTabs=settings.hidden_tabs.filter(function(s){return typeof s==='string'&&s.trim();});
+    }else{
+      // Server has no hidden_tabs key — fall back to localStorage
+      hiddenTabs=_getHiddenTabs();
+    }
+    _setHiddenTabs(hiddenTabs);
+    _applyTabVisibility(hiddenTabs);
+    _renderTabVisibilityChips();
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
@@ -6346,6 +6435,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
   if(body.default_model) window._defaultModel=body.default_model;
+  _settingsHiddenTabsOnOpen=_getHiddenTabs().slice();
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();

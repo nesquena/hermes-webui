@@ -4259,6 +4259,7 @@ _SETTINGS_DEFAULTS = {
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
+    "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -4444,6 +4445,11 @@ def save_settings(settings: dict) -> dict:
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
+            # Validate hidden_tabs: must be a list of non-empty strings
+            if k == "hidden_tabs":
+                if not isinstance(v, list):
+                    continue
+                v = [s for s in v if isinstance(s, str) and s.strip()]
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
