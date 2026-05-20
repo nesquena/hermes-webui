@@ -6217,7 +6217,24 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "Patch widgets through typed APIs only." in result["context"]
     assert "queued widget events (event_id|widget_id|event_name|status):" in result["context"]
     assert f"{queued['event_id']}|research-summary|agent.prompt|queued" in result["context"]
-    assert no_current == {"ok": True, "action": "space.current.context", "active_space_id": None, "context": ""}
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-context"
+    assert compaction["command"] == "space.current.context"
+    assert compaction["exit_status"] == 0
+    assert compaction["redaction_status"] in {"none", "redacted"}
+    assert compaction["compacted_chars"] > 0
+    assert "## Active Capy Space" in compaction["text"]
+    assert result["context_status"]["metadata_only"] is True
+    assert result["context_status"]["local_only"] is True
+    assert {"memory", "policy", "progress"}.issubset(result["context_status"])
+    assert no_current["ok"] is True
+    assert no_current["action"] == "space.current.context"
+    assert no_current["active_space_id"] is None
+    assert no_current["context"] == ""
+    assert no_current["output_compaction"]["tool"] == "capy-spaces-context"
+    assert no_current["output_compaction"]["command"] == "space.current.context"
+    assert no_current["output_compaction"]["original_chars"] == 0
+    assert no_current["context_status"]["metadata_only"] is True
     assert "investigate secret_value_do_not_leak" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized

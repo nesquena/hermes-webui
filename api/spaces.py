@@ -4568,6 +4568,19 @@ def _space_tool_template_name(payload: dict[str, Any], default: str = "weather")
     return template_name or default
 
 
+def _space_current_context_output_compaction(context: str) -> dict[str, Any]:
+    """Return product-visible compaction evidence for active Space context tool output."""
+    from api.capy_compaction import compact_output
+
+    return compact_output(
+        context,
+        tool="capy-spaces-context",
+        command="space.current.context",
+        exit_status=0,
+        max_chars=1_200,
+    )
+
+
 def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Dispatch a safe, Hermes-tool-shaped Capy Spaces action.
 
@@ -4631,10 +4644,26 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "active_space_id": space_id, "current_id": space_id}
     if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
         current_id = _space_tool_current_id(data)
+        context_status = _space_demo_context_status()
         if not current_id:
-            return {"ok": True, "action": name, "active_space_id": None, "context": ""}
+            return {
+                "ok": True,
+                "action": name,
+                "active_space_id": None,
+                "context": "",
+                "output_compaction": _space_current_context_output_compaction(""),
+                "context_status": context_status,
+            }
         space_id = validate_space_id(current_id)
-        return {"ok": True, "action": name, "active_space_id": space_id, "context": build_agent_context(space_id)}
+        context = build_agent_context(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "context": context,
+            "output_compaction": _space_current_context_output_compaction(context),
+            "context_status": context_status,
+        }
     if name in {"space.current.widgets", "space.current.widget.list", "space.current.listwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
