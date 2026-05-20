@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-19 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, and Space demo-suite run progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, Space demo-suite run progress events, and source-style layout-repair progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -29,13 +29,18 @@ Roadmap priority for upcoming autonomous sprints:
 1. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
 2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
 3. Broaden safe source refresh worker scheduling/trigger coverage and source-specific fetchers after the local knowledge bridge.
-4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, and the demo smoke suite now emit the first workflow/gate/ingest/run events, and Space detail can inspect Space-scoped streams.
+4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, and source-style layout-repair actions now emit the first workflow/gate/ingest/run/repair events, and Space detail can inspect Space-scoped streams.
 5. Model-routing hint execution path and remaining per-action policy receipts for source/tool boundaries; creator preview and creator commit now have the first metadata-only action-policy receipts.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): record layout repair progress events`
+  - Added RED/GREEN backend coverage proving source-style `space.spaces.repairLayout` emits a metadata-only `tool.completed` progress event with a Space-scoped `repair:<space_id>` run id after persisting safe repaired layouts.
+  - Hardened the progress-event fallback receipt so recorder failures return only generic metadata, preserve `space_id` for scoped status consumers, and never expose renderer/source/API-auth fields, prompts, script markers, exception text, or secret-looking values.
+  - Validation at completion: focused RED failed before implementation (`progress_event` missing from the repair receipt); focused GREEN passed; fallback RED/GREEN coverage passed; full Spaces foundation suite passed (`485 passed`); `py_compile api/spaces.py tests/test_spaces_foundation.py`, `git diff --check`, spec/quality reviews, and browser Visual/UI QA are recorded in the scheduled sprint report for this run.
 
 - `feat(spaces): surface creator commit policy receipts`
   - Added RED/GREEN backend coverage proving `space.creator.commit` carries forward the preview `prompt_preflight` receipt and returns a commit-scoped `autonomy_policy` receipt after sandbox preview, visual-QA, and explicit approval gates pass.

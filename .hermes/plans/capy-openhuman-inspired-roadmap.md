@@ -114,6 +114,7 @@ Delivered:
 - Creator-loop commits that pass sandbox preview, visual QA, and explicit approval now emit `space.visual_qa.completed` progress events, giving the product-home stream real visual-QA gate producer coverage without storing prompts, generated bodies, renderers, sources, or credentials.
 - Source refresh workers now emit metadata-only `memory.ingest.started` / `memory.ingest.completed` / `memory.ingest.failed` progress events from opaque source/job run ids, so Memory Tree ingest activity appears in the product progress stream without storing origin URLs, raw summaries, prompts, renderer fields, exception text, or credentials.
 - The metadata-only Space demo smoke suite now emits bounded `run.started` / `run.completed` progress events under a fixed safe run id, so demo-suite compaction/context evidence also appears in the product progress stream without storing raw demo output, prompts, widget bodies, renderers, sources, or credentials.
+- Source-style `space.spaces.repairLayout` now emits metadata-only `tool.completed` progress events with Space-scoped run ids and fallback-safe receipts, giving the progress stream its first direct layout-repair producer without exposing renderer/source/API-auth fields, prompts, script markers, or exception text.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.
@@ -142,7 +143,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Expand safe source refresh worker scheduling/trigger coverage and source-specific fetchers while keeping raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
-   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, and Memory Tree source-refresh workers now cover the first workflow/gate/ingest producers.
+   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, and source-style layout-repair actions now cover the first workflow/gate/ingest/run/repair producers.
 
 ---
 
@@ -204,7 +205,7 @@ The first roadmap pass has now delivered the Memory Tree module, source/job sche
 - **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
 - **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduling/trigger coverage and source-specific fetchers.
 - **Per-action policy/preflight:** Product-home policy visibility exists; creator/source/runtime boundaries still need explicit pass/warn/block receipts where high-risk context can influence actions.
-- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, and Memory Tree source-refresh ingest now emit events; more real long-running browser/development/repair workflows should emit events.
+- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, and source-style layout-repair events now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
 
 ---
 

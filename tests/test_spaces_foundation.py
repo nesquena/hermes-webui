@@ -1976,8 +1976,21 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
     assert repaired["widgets"][1]["layout"] == {"x": 6, "y": 7, "w": 5, "h": 1, "minimized": True}
     assert persisted_widgets["weather-card"]["layout"] == {"x": 0, "y": 2, "w": 24, "h": 5, "minimized": False}
     assert persisted_widgets["notes-card"]["layout"] == {"x": 6, "y": 7, "w": 5, "h": 1, "minimized": True}
+    assert repaired["progress_event"]["event_type"] == "tool.completed"
+    assert repaired["progress_event"]["family"] == "tool"
+    assert repaired["progress_event"]["run_id"] == "repair:source-repair-layout-lab"
+    assert repaired["progress_event"]["space_id"] == created["space_id"]
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
+    assert scoped_progress["recent_event_count"] == 1
+    assert scoped_progress["recent_family_counts"] == {"tool": 1}
+    assert scoped_progress["recent_events"][0]["event_type"] == "tool.completed"
+    assert scoped_progress["recent_events"][0]["run_id"] == "repair:source-repair-layout-lab"
+    assert scoped_progress["recent_events"][0]["space_id"] == created["space_id"]
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert '"data":' not in serialized
@@ -1986,6 +1999,44 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
     assert "secret" not in serialized
     assert '"source":' not in serialized
 
+
+
+def test_space_tool_source_repair_layout_progress_fallback_keeps_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "repair-layout-fallback-lab", "name": "Repair Layout Fallback Lab"})
+
+    import api.capy_progress as capy_progress
+
+    def fail_record_progress_event(_event):
+        raise RuntimeError("SECRET_VALUE_DO_NOT_LEAK renderer <script>bad()</script>")
+
+    monkeypatch.setattr(capy_progress, "record_progress_event", fail_record_progress_event)
+
+    repaired = spaces.run_space_tool(
+        "space.spaces.repairLayout",
+        {
+            "spaceId": created["space_id"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(repaired, sort_keys=True).lower()
+
+    assert repaired["ok"] is True
+    assert repaired["progress_event"] == {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "repair:repair-layout-fallback-lab",
+        "space_id": "repair-layout-fallback-lab",
+        "redaction_status": "metadata_only",
+        "error": "progress event recording unavailable",
+    }
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeypatch, tmp_path):

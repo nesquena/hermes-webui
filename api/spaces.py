@@ -4297,12 +4297,14 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     space["widgets"] = widgets
     _space_tool_sanitize_widgets(space)
     saved = _write_manifest(space, "space.layout.repaired", {"widget_ids": repaired_ids})
+    progress_event = _record_space_repair_progress_event(saved["space_id"])
     return {
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
         "widgets": [widget for widget in list_widgets(saved["space_id"]) if widget["id"] in set(repaired_ids)],
         "widget_count": len(repaired_ids),
         "space": read_space_detail(saved["space_id"]),
+        "progress_event": progress_event,
     }
 
 
@@ -7984,6 +7986,7 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
             "event_type": "tool.completed",
             "family": "tool",
             "run_id": run_id,
+            "space_id": sid,
             "redaction_status": "metadata_only",
             "error": "progress event recording unavailable",
         }
