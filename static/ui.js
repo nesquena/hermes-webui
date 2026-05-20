@@ -285,15 +285,11 @@ function _isBacktickFenceClose(line,minLen){
  */
 
 function _stripWorkspaceDisplayPrefix(text){
-  // Structured WebUI context format injected before the workspace sentinel.
-  // v1 sentinel format `[Workspace::v1: <escaped path>]\n` injected since #1918.
-  // Legacy format `[Workspace: <path>]\n` may still be present in transcripts
-  // saved before the v1 migration; fall through to the legacy regex when the
-  // current structured/v1 strip didn't match. Mirrors the Python
-  // `include_legacy=True` branch in api/streaming.py:_strip_workspace_prefix().
+  // WebUI project-context blocks are model-facing metadata and must never show
+  // in visible chat bubbles. They are followed by the v1 workspace sentinel.
   const value = String(text||'');
-  let stripped = value.replace(/^\s*\[HermesWebUIContext::v1\n[\s\S]*?\n\]\s*/,'');
-  stripped = stripped.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  const contextStripped = value.replace(/^\s*\[HermesWebUIContext::v1\nproject_id:\s*(?:null|"(?:\\.|[^"\\])*")\nproject_name:\s*(?:null|"(?:\\.|[^"\\])*")\nworkspace:\s*(?:null|"(?:\\.|[^"\\])*")\n\]\s*/,'');
+  const stripped = contextStripped.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
   if(stripped !== value) return stripped.trim();
   return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
 }
@@ -6848,8 +6844,10 @@ async function applyUpdates(){
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
-  // Hide any leftover force-update button from a prior conflict so a fresh
-  // retry starts clean (otherwise stale state points at the wrong target).
+  // Hide any leftover rebase/force-update buttons from a prior conflict so a
+  // fresh retry starts clean (otherwise stale state points at the wrong target).
+  const rebaseBtnReset=$('btnRebaseUpdate');
+  if(rebaseBtnReset){rebaseBtnReset.style.display='none';rebaseBtnReset.dataset.target='';}
   const forceBtnReset=$('btnForceUpdate');
   if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
@@ -6899,7 +6897,12 @@ function _showUpdateError(target,res){
   } else {
     showToast(msg);
   }
-  // Show "Force update" button when the error is recoverable by a hard reset
+  // Show rebase + force-update buttons when the repo has diverged local commits
+  const rebaseBtn=$('btnRebaseUpdate');
+  if(rebaseBtn&&res.diverged){
+    rebaseBtn.dataset.target=target;
+    rebaseBtn.style.display='inline-block';
+  }
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
     forceBtn.style.display='inline-block';
@@ -6933,6 +6936,41 @@ async function _readHealthServerIdentity() {
     return _healthResponseServerIdentity(data);
   } catch (_) {
     return null;
+  }
+}
+async function rebaseUpdate(btn){
+  const target=btn&&btn.dataset.target;
+  if(!target) return;
+  const confirmed=await showConfirmDialog({
+    title:'Rebase & update '+target+'?',
+    message:'This will fetch the latest remote changes and rebase your local commits on top. If there are conflicts that cannot be resolved automatically, the rebase will be aborted and no changes will be made.',
+    confirmLabel:'Rebase & update',
+    danger:false,
+    focusCancel:false,
+  });
+  if(!confirmed) return;
+  btn.disabled=true;btn.textContent='Rebasing…';
+  const errEl=$('updateError');
+  if(errEl){errEl.style.display='none';}
+  const rebaseBtn=$('btnRebaseUpdate');
+  const forceBtn=$('btnForceUpdate');
+  try{
+    const res=await api('/api/updates/rebase',{method:'POST',body:JSON.stringify({target})});
+    if(!res.ok){
+      if(errEl){errEl.textContent='Rebase failed: '+(res.message||'unknown error');errEl.style.display='block';}
+      if(forceBtn&&res.diverged){forceBtn.dataset.target=target;forceBtn.style.display='inline-block';}
+      btn.disabled=false;btn.textContent='Rebase & update';
+      return;
+    }
+    if(rebaseBtn) rebaseBtn.style.display='none';
+    if(forceBtn) forceBtn.style.display='none';
+    showToast('Rebase applied — restarting…');
+    sessionStorage.removeItem('hermes-update-checked');
+    sessionStorage.removeItem('hermes-update-dismissed');
+    _waitForServerThenReload();
+  }catch(e){
+    if(errEl){errEl.textContent='Rebase failed: '+e.message;errEl.style.display='block';}
+    btn.disabled=false;btn.textContent='Rebase & update';
   }
 }
 async function forceUpdate(btn){

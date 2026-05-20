@@ -2219,14 +2219,15 @@ def _project_name_for_id(project_id: str | None) -> str | None:
     return None
 
 
-def _hermes_webui_context_prefix(*, project_id=None, project_name=None, workspace_path=None) -> str:
-    """Build the model-facing WebUI context block prepended to user turns."""
+def _hermes_webui_context_prefix(*, project_id=None, project_name=None, workspace=None) -> str:
+    """Return WebUI project metadata prefix followed by the workspace sentinel."""
     return (
         "[HermesWebUIContext::v1\n"
         f"project_id: {_json_or_null(project_id)}\n"
         f"project_name: {_json_or_null(project_name)}\n"
-        f"workspace: {_json_or_null(workspace_path)}\n"
+        f"workspace: {_json_or_null(workspace)}\n"
         "]\n"
+        f"{_workspace_context_prefix(str(workspace or ''))}"
     )
 
 
@@ -2235,13 +2236,10 @@ def _webui_message_context_prefix(session) -> str:
     workspace = str(getattr(session, 'workspace', '') or '')
     project_id = getattr(session, 'project_id', None) or None
     project_name = _project_name_for_id(project_id)
-    return (
-        _hermes_webui_context_prefix(
-            project_id=project_id,
-            project_name=project_name,
-            workspace_path=workspace or None,
-        )
-        + _workspace_context_prefix(workspace)
+    return _hermes_webui_context_prefix(
+        project_id=project_id,
+        project_name=project_name,
+        workspace=workspace or None,
     )
 
 

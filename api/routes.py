@@ -9923,6 +9923,14 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, apply_force_update(target))
 
+    if parsed.path == "/api/updates/rebase":
+        target = body.get("target", "")
+        if target not in ("webui", "agent"):
+            return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import apply_rebase_update
+
+        return j(handler, apply_rebase_update(target))
+
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
 

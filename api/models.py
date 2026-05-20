@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -3310,18 +3311,33 @@ def all_sessions(diag=None):
     return result
 
 
-def _strip_attached_files_marker(text: str) -> str:
-    return re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", str(text or "")).strip()
+_TITLE_WEBUI_CONTEXT_PREFIX_RE = re.compile(
+    r'^\s*\[HermesWebUIContext::v1\n'
+    r'project_id:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'project_name:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'workspace:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'\]\s*'
+)
+_TITLE_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
+_TITLE_ATTACHED_FILES_SUFFIX_RE = re.compile(r'\n\n\[Attached files: [^\]]+\]$')
+
+
+def _strip_title_context_prefix(text: str) -> str:
+    value = str(text or '')
+    value = _TITLE_WEBUI_CONTEXT_PREFIX_RE.sub('', value, count=1)
+    value = _TITLE_WORKSPACE_PREFIX_RE.sub('', value, count=1)
+    value = _TITLE_ATTACHED_FILES_SUFFIX_RE.sub('', value)
+    return value.strip()
 
 
 def title_from(messages, fallback: str='Untitled'):
-    """Derive a session title from the first user message."""
+    """Derive a session title from the first visible user message."""
     for m in messages:
         if m.get('role') == 'user':
             c = m.get('content', '')
             if isinstance(c, list):
                 c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = _strip_attached_files_marker(str(c))
+            text = _strip_title_context_prefix(c)
             if text:
                 return text[:64]
     return fallback
