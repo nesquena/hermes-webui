@@ -6569,6 +6569,42 @@ def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeyp
     assert "api_key" not in serialized
 
 
+def test_research_artifact_set_records_metadata_only_progress_event(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-artifact-progress-lab")
+
+    result = spaces.run_space_tool(
+        "space.research.artifact.set",
+        {
+            "space_id": installed["space"]["space_id"],
+            "title": "Exportable research brief",
+            "markdown": "# Brief\nPublic summary.\napi_key=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["ok"] is True
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "research-artifact:research-artifact-progress-lab"
+    assert result["progress_event"]["space_id"] == installed["space"]["space_id"]
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert "public summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+    from api.capy_progress import progress_status
+
+    status = progress_status(space_id=installed["space"]["space_id"])
+    assert status["recent_event_count"] == 1
+    assert status["recent_family_counts"]["tool"] == 1
+    assert status["recent_events"][0]["run_id"] == "research-artifact:research-artifact-progress-lab"
+
+
 def test_space_tool_adapter_current_research_artifact_aliases_return_active_space_id(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

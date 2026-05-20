@@ -2297,6 +2297,26 @@ def _record_research_progress_event(space_id: str, *, source_count: int, note_co
         }
 
 
+def _record_research_artifact_progress_event(space_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only producer event for Research Harness artifact readiness."""
+    run_id = f"research-artifact:{space_id}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id, "space_id": space_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "space_id": space_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def set_research_progress(
     space_id: str,
     *,
@@ -2403,11 +2423,13 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
             "export": {"pdf": "ready-for-user-request", "artifact_key": "research-summary"},
         },
     )
+    progress_event = _record_research_artifact_progress_event(sid)
     return {
         "space_id": sid,
         "artifact": artifact,
         "widget": widget_result["widget"],
         "revision_event_id": widget_result["revision_event_id"],
+        "progress_event": progress_event,
     }
 
 
