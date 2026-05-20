@@ -225,7 +225,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -5085,6 +5085,16 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
+  // If the main content is not showing settings, switch back first
+  if (_currentPanel !== 'settings') {
+    _currentPanel = 'settings';
+    var mainEl = document.querySelector('main.main');
+    if (mainEl) {
+      ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(function(p) {
+        mainEl.classList.toggle('showing-' + p, p === 'settings');
+      });
+    }
+  }
   const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
@@ -5735,6 +5745,10 @@ function _buildPluginCard(plugin){
   const version=(plugin&&plugin.version)?' · v'+esc(plugin.version):'';
   const desc=(plugin&&plugin.description)?esc(plugin.description):t('plugins_no_description');
   const enabled=plugin&&plugin.enabled!==false;
+  const tab=plugin&&plugin.tab;
+  const openBtn=tab&&tab.path
+    ? `<a href="${esc(tab.path)}" class="plugin-open-btn" onclick="switchPluginPage(event,'${esc(tab.path)}','${esc(tab.label||plugin.name)}');return false;">${esc(tab.label||plugin.name||'Open')} \u2197</a>`
+    : '';
   card.innerHTML=`
     <div class="provider-card-header plugin-card-header">
       <div class="provider-card-info">
@@ -5747,12 +5761,54 @@ function _buildPluginCard(plugin){
       <div class="provider-card-hint">${desc}</div>
       <div class="provider-card-label">${t('plugins_registered_hooks')}</div>
       <div class="plugin-hook-list">${hookHtml}</div>
+      ${openBtn ? `<div class="plugin-card-footer">${openBtn}</div>` : ''}
     </div>
   `;
   return card;
 }
 
-// ── Providers panel ───────────────────────────────────────────────────────
+// ── Plugin pages ─────────────────────────────────────────────────────────────
+
+let _currentPluginPage = null;
+
+async function switchPluginPage(event, path, label) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (!_currentPluginPage || _currentPluginPage.path !== path) {
+    await _loadPluginPage(path, label);
+  }
+  // Update _currentPanel so clicking sidebar items won't short-circuit,
+  // but keep the sidebar panel views intact (no panelPlugin exists).
+  _currentPanel = 'plugin';
+  const mainEl = document.querySelector('main.main');
+  if (mainEl) {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'].forEach(p => {
+      mainEl.classList.toggle('showing-' + p, p === 'plugin');
+    });
+  }
+}
+
+async function _loadPluginPage(path, label) {
+  const container = $('pluginPageContainer');
+  const titleEl = $('pluginPageTitle');
+  if (!container) return;
+  if (titleEl) titleEl.textContent = label || path;
+  container.innerHTML = '';
+
+  // Use an iframe for full isolation (styles, scripts, modals stay sandboxed).
+  // Security note: plugins are locally-installed (~/.hermes/plugins/), similar
+  // trust model to VS Code extensions — only install plugins you trust.
+  const iframe = document.createElement('iframe');
+  iframe.src = path;
+  iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
+  iframe.setAttribute('title', label || 'Plugin');
+  container.appendChild(iframe);
+  _currentPluginPage = { path, label };
+}
+
+// ── Providers panel ─────────────────────────────────────────────────────────
 
 const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
 

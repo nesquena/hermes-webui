@@ -3257,6 +3257,8 @@ def _plugin_visibility_payload(manager=None) -> dict:
     manager.discover_and_load(force=False)
 
     plugins = []
+
+    # Hermes Agent lifecycle-hook plugins
     raw_plugins = getattr(manager, "_plugins", {}) or {}
     for key, loaded in sorted(raw_plugins.items(), key=lambda item: str(item[0])):
         manifest = getattr(loaded, "manifest", None)
@@ -3292,9 +3294,26 @@ def _plugin_visibility_payload(manager=None) -> dict:
     }
 
 
+# WebUI dashboard plugins (from manifest.json discovery)
+def _webui_plugin_payload() -> list[dict]:
+    try:
+        from api.plugins import get_plugin_metadata
+        return get_plugin_metadata()
+    except Exception:
+        return []
+
+
 def _handle_plugins(handler, parsed) -> bool:
     try:
-        return j(handler, _plugin_visibility_payload())
+        hermes_plugins = _plugin_visibility_payload()
+        webui = _webui_plugin_payload()
+        all_plugins = hermes_plugins["plugins"] + webui
+        return j(handler, {
+            "plugins": all_plugins,
+            "empty": not bool(all_plugins),
+            "supported_hooks": hermes_plugins["supported_hooks"],
+            "read_only": True,
+        })
     except Exception as exc:
         logger.warning("Failed to build plugin visibility payload: %s", exc)
         return j(
@@ -4397,6 +4416,108 @@ def handle_get(handler, parsed) -> bool:
         except Exception as e:
             logger.exception("rollback/diff failed")
             return bad(handler, str(e), status=500)
+
+    # ── Plugin shared assets (e.g. /plugins/plugin.css) ──
+    if parsed.path.startswith("/plugins/"):
+        from api.plugins import _get_plugin_base
+        plugin_base = _get_plugin_base()
+        rel = parsed.path[len("/plugins/"):]
+        safe = (plugin_base / rel).resolve()
+        try:
+            safe.relative_to(plugin_base.resolve())
+        except ValueError:
+            pass  # path traversal — fall through to 404
+        else:
+            if safe.is_file():
+                import os as _os
+                data = safe.read_bytes()
+                ext = _os.path.splitext(rel.lower())[1]
+                ct = {
+                    ".css": "text/css; charset=utf-8",
+                    ".js": "application/javascript; charset=utf-8",
+                    ".json": "application/json; charset=utf-8",
+                    ".png": "image/png",
+                    ".svg": "image/svg+xml",
+                }.get(ext, "application/octet-stream")
+                handler.send_response(200)
+                handler.send_header("Content-Type", ct)
+                handler.send_header("Content-Length", str(len(data)))
+                handler.end_headers()
+                handler.wfile.write(data)
+                return True
+
+    # ── Plugin static assets ──
+    if parsed.path.startswith("/dashboard-plugins/"):
+        parts = parsed.path.split("/", 3)
+        if len(parts) >= 3:
+            plugin_name = parts[2]
+            rel_path = parts[3] if len(parts) > 3 else ""
+            from api.plugins import serve_plugin_static
+            result = serve_plugin_static(plugin_name, rel_path)
+            if result:
+                data, content_type = result
+                handler.send_response(200)
+                handler.send_header("Content-Type", content_type)
+                handler.send_header("Content-Length", str(len(data)))
+                handler.end_headers()
+                handler.wfile.write(data)
+                return True
+
+    # ── Plugin pages (HTML shell) ──
+    from api.plugins import PLUGIN_MANIFESTS, _PLUGIN_STATIC_ROOTS
+    for name, manifest in PLUGIN_MANIFESTS.items():
+        tab = manifest.get("tab", {})
+        tab_path = tab.get("path", f"/{name}")
+        if parsed.path == tab_path:
+            dashboard_dir = _PLUGIN_STATIC_ROOTS.get(name)
+            if dashboard_dir:
+                # 1) dashboard/dist/index.html (full SPA build)
+                index_html = dashboard_dir / "dist" / "index.html"
+                if index_html.is_file():
+                    data = index_html.read_bytes()
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "text/html; charset=utf-8")
+                    handler.send_header("Content-Length", str(len(data)))
+                    handler.end_headers()
+                    handler.wfile.write(data)
+                    return True
+                # 2) static/index.html in plugin root (content page for IIFE loader)
+                plugin_root = dashboard_dir.parent
+                static_html = plugin_root / "static" / "index.html"
+                if static_html.is_file():
+                    data = static_html.read_bytes()
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "text/html; charset=utf-8")
+                    handler.send_header("Content-Length", str(len(data)))
+                    handler.end_headers()
+                    handler.wfile.write(data)
+                    return True
+                # 3) Fallback: generate shell that loads the IIFE bundle
+                index_js = dashboard_dir / "dist" / "index.js"
+                if index_js.is_file():
+                    label = manifest.get("label") or name
+                    css = manifest.get("css", "")
+                    css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name}/{css}">' if css else ""
+                    html = (
+                        f"<!doctype html>\n"
+                        f"<html lang=\"en\">\n"
+                        f"<head>\n"
+                        f"  <meta charset=\"utf-8\">\n"
+                        f"  <title>{label}</title>\n"
+                        f"  {css_tag}\n"
+                        f"</head>\n"
+                        f"<body>\n"
+                        f'  <div id="pluginPageContainer"></div>\n'
+                        f'  <script src="/dashboard-plugins/{name}/dist/index.js"></script>\n'
+                        f"</body>\n"
+                        f"</html>\n"
+                    ).encode("utf-8")
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "text/html; charset=utf-8")
+                    handler.send_header("Content-Length", str(len(html)))
+                    handler.end_headers()
+                    handler.wfile.write(html)
+                    return True
 
     return False  # 404
 

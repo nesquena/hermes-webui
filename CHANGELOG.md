@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard plugin system** — Discover and render WebUI dashboard plugins
+  from `~/.hermes/plugins/<name>/dashboard/manifest.json`. Plugins appear as
+  cards in Settings → Plugins with an "Open" button that loads the plugin page
+  in an isolated iframe (CSS/JS/modal sandboxed). Adds `/plugins/` and
+  `/dashboard-plugins/` static asset routes with path-traversal protection.
+  Plugin page serve order: `dashboard/dist/index.html` → `static/index.html` →
+  auto-generated IIFE shell. Clicking Settings sidebar items while viewing a
+  plugin page correctly switches back to the Settings main content.
+
 ## [v0.51.91] — 2026-05-18 — Release BO (stage-384 — 5-PR full sweep batch — reasoning-replay history fix + archive-extract per-session inbox + fallback streaming warnings + sanitized custom-provider env hints + Slice 3c queue/goal adapter routing)
 
 ### Fixed

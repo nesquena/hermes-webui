@@ -2528,7 +2528,7 @@ main.main > #mainWorkspaces,
 main.main > #mainProfiles,
 main.main > #mainInsights,
 main.main > #mainLogs{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs) > #mainChat{display:flex;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-kanban):not(.showing-workspaces):not(.showing-profiles):not(.showing-insights):not(.showing-logs):not(.showing-plugin) > #mainChat{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -2537,6 +2537,10 @@ main.main.showing-kanban > #mainKanban{display:flex;overflow-y:auto;}
 main.main.showing-workspaces > #mainWorkspaces{display:flex;}
 main.main.showing-profiles > #mainProfiles{display:flex;}
 main.main.showing-logs > #mainLogs{display:flex;}
+main.main.showing-plugin > #mainPlugin{display:flex;}
+main.main > #mainPlugin{display:none;}
+#mainPlugin .main-view-body{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+#pluginPageContainer{flex:1;display:flex;flex-direction:column;min-height:0;}
 #mainSettings{overflow-y:auto;}
 
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
@@ -2896,6 +2900,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .plugin-hook-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
 .plugin-hook-badge{display:inline-flex;align-items:center;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:999px;padding:3px 8px;font-size:11px;font-family:var(--font-mono);}
 .plugin-hook-empty{font-size:12px;color:var(--muted);font-style:italic;}
+.plugin-card-footer{margin-top:10px;padding-top:10px;border-top:1px solid var(--border);}
+.plugin-open-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;background:var(--accent);color:var(--accent-text);border:none;border-radius:7px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;}
+.plugin-open-btn:hover{opacity:.85;}
 
 /* ── Provider model tags ── */
 .provider-card-models{

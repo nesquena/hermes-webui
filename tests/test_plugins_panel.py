@@ -156,6 +156,5 @@ class TestPluginsSettingsUi:
         assert "_buildPluginCard" in js
         assert "plugin-hook-badge" in js
         assert "esc(plugin.description" in js
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
-        assert ".path" not in segment
+        segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
         assert ".callback" not in segment
