@@ -480,6 +480,38 @@ def _widget_runtime_prompt_preflight_receipt(
     return receipt
 
 
+def _space_repair_prompt_preflight_receipt(prompt: str, *, error_prefix: str) -> dict[str, Any] | None:
+    """Return metadata-only preflight evidence for recovery repair prompts.
+
+    Recovery repair prompts are tool/agent instructions crossing a high-risk
+    boundary. Empty prompts remain allowed for existing UI controls, but any
+    supplied prompt must pass the same prompt-injection classifier before an
+    event is queued or stored.
+    """
+    if not _context_value(prompt, 1):
+        return None
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight(prompt, boundary="space_repair_prompt")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    if receipt.get("status") != "pass":
+        raise ValueError(f"{error_prefix} prompt preflight blocked")
+    return receipt
+
+
+def _space_repair_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not preflight_receipt:
+        return None
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["generated_widget_execution"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -8148,18 +8180,25 @@ def queue_space_repair_event(
         raise ValueError("payload must be an object")
     read_space(sid)
     name = "agent.repair"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Space repair")
+    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.repair.queue", preflight_receipt)
     prompt_preview = _space_repair_text_summary(prompt, 1000)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    event_details = {
+        "event_name": name,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+        "session_id": _space_repair_text_summary(session_id, 120),
+        "status": "queued",
+    }
+    if preflight_receipt:
+        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
         sid,
         "space.repair.queued",
-        {
-            "event_name": name,
-            "prompt_preview": prompt_preview,
-            "payload_summary": payload_summary,
-            "session_id": _space_repair_text_summary(session_id, 120),
-            "status": "queued",
-        },
+        event_details,
     )
     _auto_ingest_space_revision_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
@@ -8172,6 +8211,8 @@ def queue_space_repair_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
+        **({"autonomy_policy": copy.deepcopy(autonomy_policy_receipt)} if autonomy_policy_receipt else {}),
     }
 
 
@@ -8198,19 +8239,26 @@ def queue_recovery_widget_repair_event(
     space = read_space(sid)
     _widget_index(space, wid)
     name = "agent.repair"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Widget repair")
+    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.widget.repair.queue", preflight_receipt)
     prompt_preview = _space_repair_text_summary(prompt, 1000)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    event_details = {
+        "widget_id": wid,
+        "event_name": name,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+        "session_id": _space_repair_text_summary(session_id, 120),
+        "status": "queued",
+    }
+    if preflight_receipt:
+        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
         sid,
         "widget.event.queued",
-        {
-            "widget_id": wid,
-            "event_name": name,
-            "prompt_preview": prompt_preview,
-            "payload_summary": payload_summary,
-            "session_id": _space_repair_text_summary(session_id, 120),
-            "status": "queued",
-        },
+        event_details,
     )
     _auto_ingest_space_widget_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
@@ -8224,6 +8272,8 @@ def queue_recovery_widget_repair_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
+        **({"autonomy_policy": copy.deepcopy(autonomy_policy_receipt)} if autonomy_policy_receipt else {}),
     }
 
 

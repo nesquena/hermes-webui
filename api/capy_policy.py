@@ -50,6 +50,7 @@ _PROTECTED_BOUNDARIES = [
     "creator_preview",
     "creator_commit",
     "widget_runtime_prompt",
+    "space_repair_prompt",
     "auto_fetched_source",
     "memory_context",
 ]

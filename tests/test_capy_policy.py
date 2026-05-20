@@ -28,6 +28,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "creator_preview",
                 "creator_commit",
                 "widget_runtime_prompt",
+                "space_repair_prompt",
                 "auto_fetched_source",
                 "memory_context",
             ],
