@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -288,8 +289,15 @@ def record_progress_event(payload: dict[str, Any] | None) -> dict[str, Any]:
     run_id = _normalize_run_id(body)
     space_id = _normalize_space_id(body)
     created_at = _now_iso()
+    event_nonce = uuid.uuid4().hex
     digest_input = json.dumps(
-        {"event_type": event_type, "run_id": run_id, "space_id": space_id, "created_at": created_at},
+        {
+            "event_type": event_type,
+            "run_id": run_id,
+            "space_id": space_id,
+            "created_at": created_at,
+            "event_nonce": event_nonce,
+        },
         sort_keys=True,
         separators=(",", ":"),
     )

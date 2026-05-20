@@ -2039,6 +2039,90 @@ def test_space_tool_source_repair_layout_progress_fallback_keeps_space_id_metada
     assert "api_key" not in serialized
 
 
+def test_space_recovery_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "recovery-progress-lab", "name": "Recovery Progress Lab"})
+
+    disabled = spaces.run_space_tool(
+        "space.admin.disable",
+        {
+            "spaceId": created["space_id"],
+            "reason": "broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    enabled = spaces.run_space_tool(
+        "space.admin.enable",
+        {
+            "spaceId": created["space_id"],
+            "reason": "safe recovery complete after SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+        },
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled, "progress": scoped_progress}, sort_keys=True).lower()
+
+    assert disabled["ok"] is True
+    assert enabled["ok"] is True
+    assert disabled["progress_event"]["event_type"] == "tool.completed"
+    assert disabled["progress_event"]["family"] == "tool"
+    assert disabled["progress_event"]["run_id"] == "recovery.disable:recovery-progress-lab"
+    assert disabled["progress_event"]["space_id"] == created["space_id"]
+    assert enabled["progress_event"]["event_type"] == "tool.completed"
+    assert enabled["progress_event"]["family"] == "tool"
+    assert enabled["progress_event"]["run_id"] == "recovery.enable:recovery-progress-lab"
+    assert enabled["progress_event"]["space_id"] == created["space_id"]
+    assert disabled["progress_event"].get("event_id") != enabled["progress_event"].get("event_id")
+    assert scoped_progress["recent_event_count"] == 2
+    assert scoped_progress["recent_family_counts"] == {"tool": 2}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "recovery.enable:recovery-progress-lab",
+        "recovery.disable:recovery-progress-lab",
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_space_recovery_primitives_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "recovery-primitive-progress-lab", "name": "Recovery Primitive Progress Lab"})
+
+    disabled = spaces.disable_space_for_recovery(
+        created["space_id"],
+        reason="broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+    )
+    enabled = spaces.enable_space_for_recovery(
+        created["space_id"],
+        reason="safe recovery complete after SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled, "progress": scoped_progress}, sort_keys=True).lower()
+
+    assert disabled["progress_event"]["event_type"] == "tool.completed"
+    assert disabled["progress_event"]["family"] == "tool"
+    assert disabled["progress_event"]["run_id"] == "recovery.disable:recovery-primitive-progress-lab"
+    assert disabled["progress_event"]["space_id"] == created["space_id"]
+    assert enabled["progress_event"]["event_type"] == "tool.completed"
+    assert enabled["progress_event"]["family"] == "tool"
+    assert enabled["progress_event"]["run_id"] == "recovery.enable:recovery-primitive-progress-lab"
+    assert enabled["progress_event"]["space_id"] == created["space_id"]
+    assert disabled["progress_event"].get("event_id") != enabled["progress_event"].get("event_id")
+    assert scoped_progress["recent_event_count"] == 2
+    assert scoped_progress["recent_family_counts"] == {"tool": 2}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "recovery.enable:recovery-primitive-progress-lab",
+        "recovery.disable:recovery-primitive-progress-lab",
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-toggle-widgets-lab", "name": "Source Toggle Widgets Lab"})

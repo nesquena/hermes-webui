@@ -130,6 +130,23 @@ def test_record_progress_event_updates_status_counts_without_persisting_payload(
     assert progress_status()["active_run_count"] == 0
 
 
+def test_record_progress_event_assigns_unique_event_ids_for_same_second(monkeypatch, tmp_path):
+    import api.capy_progress as capy_progress
+
+    log_path = tmp_path / "progress-events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+    monkeypatch.setattr(capy_progress, "_now_iso", lambda: "2026-05-20T12:00:00Z")
+
+    first = record_progress_event({"event_type": "tool.completed", "run_id": "recovery.disable:lab", "space_id": "lab"})
+    second = record_progress_event({"event_type": "tool.completed", "run_id": "recovery.disable:lab", "space_id": "lab"})
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert first["event_id"] != second["event_id"]
+    assert rows[0]["event_id"] != rows[1]["event_id"]
+    assert first["created_at"] == "2026-05-20T12:00:00Z"
+    assert second["created_at"] == "2026-05-20T12:00:00Z"
+
+
 def test_progress_status_resanitizes_persisted_metadata(monkeypatch, tmp_path):
     log_path = tmp_path / "events.jsonl"
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))

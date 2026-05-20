@@ -7428,10 +7428,12 @@ def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, 
     recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
     space["recovery"] = recovery
     saved = _write_manifest(space, "space.recovery_disabled", {"reason": recovery["disabled_reason"]})
+    progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
+        "progress_event": progress_event,
     }
 
 
@@ -7448,10 +7450,12 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     space["recovery"] = recovery
     detail_reason = _context_value(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "space.recovery_enabled", {"reason": detail_reason})
+    progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
+        "progress_event": progress_event,
     }
 
 
@@ -8044,10 +8048,13 @@ def queue_widget_event(
     return response
 
 
-def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
-    """Best-effort metadata-only progress producer for recovery repair queues."""
+def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for Space recovery tools."""
     sid = validate_space_id(space_id)
-    run_id = f"repair:{sid}"
+    safe_prefix = str(run_prefix or "tool").strip().lower()
+    if safe_prefix not in {"repair", "recovery.disable", "recovery.enable"}:
+        safe_prefix = "tool"
+    run_id = f"{safe_prefix}:{sid}"
     try:
         from api.capy_progress import record_progress_event
 
@@ -8069,6 +8076,19 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
             "redaction_status": "metadata_only",
             "error": "progress event recording unavailable",
         }
+
+
+def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for recovery repair queues."""
+    return _record_space_tool_progress_event(space_id, run_prefix="repair")
+
+
+def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for recovery admin toggles."""
+    safe_action = str(action or "").strip().lower()
+    if safe_action not in {"disable", "enable"}:
+        safe_action = "toggle"
+    return _record_space_tool_progress_event(space_id, run_prefix=f"recovery.{safe_action}")
 
 
 def queue_space_repair_event(
