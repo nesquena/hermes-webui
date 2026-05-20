@@ -3453,6 +3453,30 @@ def _space_creator_store_preview_receipt(draft: dict[str, Any]) -> str:
     return preview_id
 
 
+def _record_creator_preview_progress_event(preview_id: str, space_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only producer event for creator preview generation."""
+    safe_preview_id = str(preview_id or "").strip()
+    if not _SPACE_ID_RE.fullmatch(safe_preview_id):
+        safe_preview_id = "creator-preview-unknown"
+    sid = validate_space_id(space_id)
+    run_id = f"creator-preview:{safe_preview_id}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id, "space_id": sid})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "space_id": sid,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def _space_creator_draft_for_commit(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
     _space_tool_assert_matching_aliases(
         payload,
@@ -3547,6 +3571,7 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             "commit_requires_revision": True,
         },
         "output_compaction": _space_creator_preview_compaction(draft, command=name),
+        "progress_event": _record_creator_preview_progress_event(preview_id, draft["space"]["space_id"]),
         "space": draft["space"],
         "widgets": widgets,
         "widget_count": len(widgets),

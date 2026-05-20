@@ -115,6 +115,7 @@ Delivered:
 - Source refresh workers now emit metadata-only `memory.ingest.started` / `memory.ingest.completed` / `memory.ingest.failed` progress events from opaque source/job run ids, so Memory Tree ingest activity appears in the product progress stream without storing origin URLs, raw summaries, prompts, renderer fields, exception text, or credentials.
 - The metadata-only Space demo smoke suite now emits bounded `run.started` / `run.completed` progress events under a fixed safe run id, so demo-suite compaction/context evidence also appears in the product progress stream without storing raw demo output, prompts, widget bodies, renderers, sources, or credentials.
 - Source-style `space.spaces.repairLayout` now emits metadata-only `tool.completed` progress events with Space-scoped run ids and fallback-safe receipts, giving the progress stream its first direct layout-repair producer without exposing renderer/source/API-auth fields, prompts, script markers, or exception text.
+- Creator-loop sandbox previews now emit metadata-only `tool.completed` progress events keyed by their opaque preview receipt ids, so the product progress stream reflects creator preview activity before commit without storing raw prompts, generated widget bodies, renderer/source fields, API-auth data, script markers, or credentials.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.

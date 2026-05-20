@@ -2272,7 +2272,22 @@ def test_space_tool_adapter_supports_creator_loop_preview_metadata_only_without_
         "generated_bodies_rendered": False,
         "omitted_field_count": 6,
     }
+    assert preview["progress_event"]["event_type"] == "tool.completed"
+    assert preview["progress_event"]["family"] == "tool"
+    assert preview["progress_event"]["run_id"] == f"creator-preview:{preview['preview_id']}"
+    assert preview["progress_event"]["redaction_status"] == "metadata_only"
     assert spaces.list_spaces() == []
+
+    from api.capy_progress import progress_status
+
+    progress = progress_status()
+    assert progress["recent_family_counts"]["tool"] == 1
+    assert progress["recent_events"][0]["event_type"] == "tool.completed"
+    assert progress["recent_events"][0]["run_id"] == f"creator-preview:{preview['preview_id']}"
+    scoped_progress = progress_status(space_id=preview["space"]["space_id"])
+    assert scoped_progress["recent_family_counts"]["tool"] == 1
+    assert scoped_progress["recent_events"][0]["space_id"] == preview["space"]["space_id"]
+    assert scoped_progress["recent_events"][0]["run_id"] == f"creator-preview:{preview['preview_id']}"
     assert "research dashboard" not in serialized
     assert "access_token" not in serialized
     assert "token_value" not in serialized
