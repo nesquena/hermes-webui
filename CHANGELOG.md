@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Sidebar tab visibility** — a chip row in Settings → Appearance lets users toggle individual sidebar tabs (Tasks, Kanban, Skills, Memory, Spaces, Profiles, Todos, Insights, Logs) on or off. Chat and Settings are always visible. Hidden tabs persist via localStorage (instant) and server-side settings (autosave); active-tab fallback switches to Chat if the current tab is hidden. Covers backend `hidden_tabs` list validation, frontend boot-time restore, appearance autosave integration, and 5 regression tests.
+
 
 ## [v0.51.95] — 2026-05-20 — Release BS (stage-388 — 5-PR batch — live tool callback event dedup + browser-only dashboard links + messaging transcript merge alignment + Geist Contrast skin + SSE runtime diagnostics)
 
