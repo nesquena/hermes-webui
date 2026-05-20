@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 from urllib.parse import unquote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -33,6 +34,10 @@ _REFRESH_ALLOWED_CONTENT_TYPES = (
     "text/markdown",
     "text/x-markdown",
     "application/json",
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/xml",
+    "text/xml",
 )
 
 _UNSAFE_KEY_RE = re.compile(
@@ -781,6 +786,78 @@ def _refresh_record_from_text(source_id: str, origin_uri: str, text: str, *, con
     }
 
 
+def _xml_local_name(tag: Any) -> str:
+    text = str(tag or "")
+    if "}" in text:
+        text = text.rsplit("}", 1)[-1]
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    return text.strip().lower()
+
+
+def _refresh_xml_child_text(parent: ElementTree.Element, names: set[str]) -> str:
+    for child in list(parent):
+        if _xml_local_name(child.tag) in names and not _refresh_xml_has_unsafe_descendant(child):
+            return " ".join(part.strip() for part in child.itertext() if part.strip())
+    return ""
+
+
+def _refresh_xml_has_unsafe_descendant(parent: ElementTree.Element) -> bool:
+    for descendant in list(parent.iter())[1:]:
+        if _UNSAFE_KEY_RE.search(_xml_local_name(descendant.tag)):
+            return True
+    return False
+
+
+def _refresh_xml_feed_entries(root: ElementTree.Element) -> list[ElementTree.Element]:
+    root_name = _xml_local_name(root.tag)
+    if root_name == "feed":
+        return [child for child in list(root) if _xml_local_name(child.tag) == "entry"]
+    if root_name == "rss":
+        entries: list[ElementTree.Element] = []
+        for channel in list(root):
+            if _xml_local_name(channel.tag) == "channel":
+                entries.extend(child for child in list(channel) if _xml_local_name(child.tag) == "item")
+        return entries
+    if root_name == "rdf":
+        return [child for child in list(root) if _xml_local_name(child.tag) == "item"]
+    return []
+
+
+def _refresh_record_from_feed(source_id: str, origin_uri: str, text: str) -> dict[str, Any]:
+    if re.search(r"<!\s*(?:doctype|entity)\b", text, flags=re.IGNORECASE):
+        raise RuntimeError("refresh fetcher disabled")
+    try:
+        root = ElementTree.fromstring(text.strip())
+    except ElementTree.ParseError as exc:
+        raise RuntimeError("refresh fetcher disabled") from exc
+
+    if _xml_local_name(root.tag) not in {"rss", "feed", "rdf"}:
+        raise ValueError("refresh failed")
+    entries = _refresh_xml_feed_entries(root)
+    if not entries:
+        raise ValueError("refresh failed")
+    containers = entries
+    title = ""
+    summary = ""
+    for container in containers[:5]:
+        candidate_summary = _bounded_refresh_summary(
+            _refresh_xml_child_text(container, {"description", "summary", "subtitle"})
+        )
+        if candidate_summary:
+            title = _safe_public_text(_refresh_xml_child_text(container, {"title"}), limit=200)
+            summary = candidate_summary
+            break
+    if not summary:
+        raise ValueError("refresh failed")
+    return {
+        "metadata_only": True,
+        "title": title or source_id,
+        "summary": summary,
+        "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+    }
+
+
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
@@ -790,7 +867,7 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         safe_origin_uri,
         headers={
             "User-Agent": "Capy-Memory-Refresh/1.0",
-            "Accept": "text/html,text/plain,text/markdown,application/json;q=0.8",
+            "Accept": "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8",
         },
     )
     with _refresh_open(request, timeout=_REFRESH_FETCH_TIMEOUT_SECONDS) as response:
@@ -810,6 +887,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         except json.JSONDecodeError as exc:
             raise RuntimeError("refresh fetcher disabled") from exc
         return _refresh_record_from_json(safe_source_id, safe_origin_uri, payload)
+    if content_type in {"application/rss+xml", "application/atom+xml", "application/xml", "text/xml"}:
+        return _refresh_record_from_feed(safe_source_id, safe_origin_uri, text)
     return _refresh_record_from_text(safe_source_id, safe_origin_uri, text, content_type=content_type)
 
 

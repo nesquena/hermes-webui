@@ -667,7 +667,7 @@ def test_run_source_refresh_jobs_uses_allowlisted_default_http_fetcher_metadata_
         {
             "url": "https://example.test/docs/default-fetch",
             "timeout": 8,
-            "headers": {"User-agent": "Capy-Memory-Refresh/1.0", "Accept": "text/html,text/plain,text/markdown,application/json;q=0.8"},
+            "headers": {"User-agent": "Capy-Memory-Refresh/1.0", "Accept": "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8"},
         }
     ]
     assert result["processed"] == 1
@@ -696,6 +696,271 @@ def test_run_source_refresh_jobs_uses_allowlisted_default_http_fetcher_metadata_
         assert unsafe not in persisted
     assert '"raw_prompt":' not in serialized
     assert '"raw_prompt":' not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_ingests_rss_feed_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "rss-roadmap-feed",
+        "title": "RSS Roadmap Feed",
+        "origin_uri": "https://example.test/feeds/roadmap.xml?api_key=***#raw-prompt",
+    })
+    rss_body = b"""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0">
+          <channel>
+            <title>Capy Roadmap Feed <script>ignored()</script></title>
+            <description>General channel text should stay secondary to item summaries.</description>
+            <item>
+              <title>Memory freshness digest</title>
+              <description>Safe feed summary about source refresh cadence and cited Memory Tree provenance.</description>
+              <content:encoded xmlns:content="http://purl.org/rss/1.0/modules/content/">
+                Raw fetched feed body SECRET_VALUE_DO_NOT_LEAK <script>steal()</script>
+              </content:encoded>
+            </item>
+          </channel>
+        </rss>
+    """
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/rss+xml; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return rss_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "rss-roadmap-feed.md").read_text(encoding="utf-8").lower()
+    search = search_memory("source refresh cadence", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://example.test/feeds/roadmap.xml", "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    preflight = result["jobs"][0]["prompt_preflight"]
+    assert preflight["boundary"] == "auto_fetched_source"
+    assert preflight["status"] == "pass"
+    assert preflight["metadata_only"] is True
+    assert preflight["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "rss-roadmap-feed"
+    assert "memory freshness digest" in persisted
+    assert "safe feed summary about source refresh cadence" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "<script",
+        "ignored()",
+        "steal()",
+        "content:encoded",
+        "raw fetched feed body",
+        "api_key",
+        "raw-prompt",
+        "renderer",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_feed_metadata_with_unsafe_descendants(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "unsafe-rss-feed",
+        "title": "Unsafe RSS Feed",
+        "origin_uri": "https://example.test/feeds/unsafe.xml",
+    })
+    rss_body = b"""
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Unsafe metadata digest</title>
+              <description>Safe advisory summary <script>alert(1)</script> trailing text.</description>
+            </item>
+          </channel>
+        </rss>
+    """
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/rss+xml; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return rss_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert not (root / "vault" / "unsafe-rss-feed.md").exists()
+    assert "alert(1)" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_generic_xml_metadata_root(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "generic-xml-source",
+        "title": "Generic XML Source",
+        "origin_uri": "https://example.test/generic.xml",
+    })
+    xml_body = b"""
+        <data>
+          <title>Generic XML</title>
+          <summary>Safe-looking metadata from a non-feed XML root should not be ingested.</summary>
+        </data>
+    """
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/xml; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return xml_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert not (root / "vault" / "generic-xml-source.md").exists()
+    assert "safe-looking metadata" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_items_nested_in_content_modules(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "nested-content-rss-feed",
+        "title": "Nested Content RSS Feed",
+        "origin_uri": "https://example.test/feeds/nested-content.xml",
+    })
+    rss_body = b"""
+        <rss version="2.0">
+          <channel>
+            <content:encoded xmlns:content="http://purl.org/rss/1.0/modules/content/">
+              <item>
+                <title>Nested article body digest</title>
+                <description>Safe-looking article paragraph from a full content module should not be persisted.</description>
+              </item>
+            </content:encoded>
+          </channel>
+        </rss>
+    """
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/rss+xml; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return rss_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert not (root / "vault" / "nested-content-rss-feed.md").exists()
+    assert "safe-looking article paragraph" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_feed_doctype_entities(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "entity-rss-feed",
+        "title": "Entity RSS Feed",
+        "origin_uri": "https://example.test/feeds/entity.xml",
+    })
+    rss_body = b"""
+        <!DOCTYPE rss [<!ENTITY unsafe "Safe DTD metadata should not be ingested.">]>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <title>Entity metadata digest</title>
+              <description>&unsafe;</description>
+            </item>
+          </channel>
+        </rss>
+    """
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/rss+xml; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return rss_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert not (root / "vault" / "entity-rss-feed.md").exists()
+    assert "safe dtd metadata" not in serialized
 
 
 def test_run_source_refresh_jobs_default_fetcher_rejects_redirected_disallowed_origin(tmp_path, monkeypatch):
