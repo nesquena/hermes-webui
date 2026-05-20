@@ -3770,6 +3770,17 @@ def test_spaces_ui_product_home_close_button_and_icons_have_polished_css():
     assert ".capy-spaces-resource-external" in css
 
 
+def test_spaces_ui_progress_events_card_stacks_on_mobile():
+    css = SPACES_CSS_PATH.read_text()
+
+    assert (
+        "  .capy-spaces-memory-freshness,\n"
+        "  .capy-spaces-autonomy-policy,\n"
+        "  .capy-spaces-progress-events { grid-template-columns: minmax(0, 1fr); }"
+    ) in css
+    assert ".capy-spaces-progress-events-stats {\n  min-width: 0;\n}" in css
+
+
 def test_spaces_ui_widget_details_renders_opaque_metadata_only_sandbox_iframe(driver_path):
     out = _run_spaces_scenario(driver_path, "viewWidgetDetails")
     html = out["rootHtml"]

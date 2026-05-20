@@ -114,6 +114,7 @@ Delivered:
 - Creator-loop commits that pass sandbox preview, visual QA, and explicit approval now emit `space.visual_qa.completed` progress events, giving the product-home stream real visual-QA gate producer coverage without storing prompts, generated bodies, renderers, sources, or credentials.
 - Source refresh workers now emit metadata-only `memory.ingest.started` / `memory.ingest.completed` / `memory.ingest.failed` progress events from opaque source/job run ids, so Memory Tree ingest activity appears in the product progress stream without storing origin URLs, raw summaries, prompts, renderer fields, exception text, or credentials.
 - The metadata-only Space demo smoke suite now emits bounded `run.started` / `run.completed` progress events under a fixed safe run id, so demo-suite compaction/context evidence also appears in the product progress stream without storing raw demo output, prompts, widget bodies, renderers, sources, or credentials.
+- Individual Browser Surface demo smoke runs now emit metadata-only `run.started` / `run.completed` / `run.failed` progress events under safe `space-demo:<demo>` run ids, so the product progress stream reflects targeted browser parity smokes without storing raw browser output, prompts, widget bodies, renderer/source fields, exception text, or credentials.
 - Source-style `space.spaces.repairLayout` now emits metadata-only `tool.completed` progress events with Space-scoped run ids and fallback-safe receipts, giving the progress stream its first direct layout-repair producer without exposing renderer/source/API-auth fields, prompts, script markers, or exception text.
 - Creator-loop sandbox previews now emit metadata-only `tool.completed` progress events keyed by their opaque preview receipt ids, so the product progress stream reflects creator preview activity before commit without storing raw prompts, generated widget bodies, renderer/source fields, API-auth data, script markers, or credentials.
 
@@ -144,7 +145,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Expand safe source refresh worker scheduling/trigger coverage and source-specific fetchers while keeping raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
-   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, and source-style layout-repair actions now cover the first workflow/gate/ingest/run/repair producers.
+   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, individual Browser Surface demo smokes, and source-style layout-repair actions now cover the first workflow/gate/ingest/run/browser/repair producers.
 
 ---
 

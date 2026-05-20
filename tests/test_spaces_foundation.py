@@ -13442,6 +13442,70 @@ def test_spaces_demo_run_all_records_failed_progress_when_post_processing_fails(
     assert "secret" not in serialized
 
 
+def test_space_demo_run_records_browser_smoke_progress(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    result = spaces.space_demo_run("demo_browser_cocontrol_google_or_test_site")
+
+    assert result["ok"] is True
+    assert result["demo"] == "demo_browser_cocontrol_google_or_test_site"
+    assert result["template"] == "browser"
+    run_id = "space-demo:demo_browser_cocontrol_google_or_test_site"
+    space_id = "demo_browser_cocontrol_google_or_test_site"
+    progress = progress_status(space_id=space_id)
+    assert progress["active_run_count"] == 0
+    assert progress["recent_family_counts"].get("run", 0) == 2
+    progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == run_id]
+    assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.completed"]
+    assert all(item.get("space_id") == space_id for item in demo_run_events)
+    assert all(item.get("family") == "run" for item in demo_run_events)
+    assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
+    serialized = json.dumps(demo_run_events, sort_keys=True).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret" not in serialized
+    assert "raw_prompt" not in serialized
+
+
+def test_space_demo_run_records_failed_browser_smoke_progress(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    def fail_install_template(*_args, **_kwargs):
+        raise RuntimeError("SECRET_VALUE_DO_NOT_LEAK renderer <script> synthetic browser failure")
+
+    monkeypatch.setattr(spaces, "install_template", fail_install_template)
+
+    with pytest.raises(RuntimeError, match="synthetic browser failure"):
+        spaces.space_demo_run("demo_browser_cocontrol_google_or_test_site")
+
+    run_id = "space-demo:demo_browser_cocontrol_google_or_test_site"
+    space_id = "demo_browser_cocontrol_google_or_test_site"
+    progress = progress_status(space_id=space_id)
+    assert progress["active_run_count"] == 0
+    assert progress["recent_family_counts"].get("run", 0) == 2
+    progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == run_id]
+    assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.failed"]
+    assert all(item.get("space_id") == space_id for item in demo_run_events)
+    assert all(item.get("family") == "run" for item in demo_run_events)
+    assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
+    serialized = json.dumps(demo_run_events, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
 

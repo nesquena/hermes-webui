@@ -2485,7 +2485,49 @@ def _space_demo_run_summary(demo: str, template: str, space_id: str, *, action: 
     }
 
 
+def _record_space_demo_progress_event(demo: str, space_id: str, event_type: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress event for one demo smoke run."""
+    safe_event_type = event_type if event_type in {"run.started", "run.completed", "run.failed"} else "run.failed"
+    safe_demo = str(demo or "").strip()
+    safe_space_id = str(space_id or "").strip()
+    run_id = f"space-demo:{safe_demo}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": safe_event_type, "run_id": run_id, "space_id": safe_space_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "run",
+            "run_id": run_id,
+            "space_id": safe_space_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def space_demo_run(name: str) -> dict[str, Any]:
+    """Run one safe metadata-only smoke for a Space Agent video demo fixture."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    demo = str(name or "").strip()
+    spec = _SPACE_DEMO_RUN_BY_NAME.get(demo)
+    if spec is None:
+        raise ValueError("Unsupported demo")
+    space_id = validate_space_id(_slugify(demo))
+    _record_space_demo_progress_event(demo, space_id, "run.started")
+    try:
+        result = _space_demo_run_body(demo)
+    except Exception:
+        _record_space_demo_progress_event(demo, space_id, "run.failed")
+        raise
+    _record_space_demo_progress_event(demo, space_id, "run.completed" if result.get("ok") is True else "run.failed")
+    return result
+
+
+def _space_demo_run_body(name: str) -> dict[str, Any]:
     """Run one safe metadata-only smoke for a Space Agent video demo fixture.
 
     This is intentionally not a renderer executor. It launches the matching

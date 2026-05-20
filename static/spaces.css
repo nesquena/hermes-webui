@@ -641,6 +641,10 @@
   gap: 8px;
 }
 
+.capy-spaces-progress-events-stats {
+  min-width: 0;
+}
+
 .capy-spaces-memory-freshness-stats span,
 .capy-spaces-autonomy-policy-stats span,
 .capy-spaces-progress-events-stats span,
@@ -821,7 +825,8 @@ button.capy-spaces-product-space-card { cursor: pointer; }
   .capy-spaces-agent-float { align-items: stretch; border-radius: 24px; flex-wrap: wrap; }
   .capy-spaces-product-topbar { border-radius: 0 0 18px 18px; }
   .capy-spaces-memory-freshness,
-  .capy-spaces-autonomy-policy { grid-template-columns: 1fr; }
+  .capy-spaces-autonomy-policy,
+  .capy-spaces-progress-events { grid-template-columns: minmax(0, 1fr); }
   .capy-spaces-memory-freshness-state { justify-self: start; }
 }
 
