@@ -319,6 +319,137 @@ def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
     }
 
 
+def _active_profile_skill_disabled(skill_name: str, skills_dir: Path) -> bool:
+    try:
+        import yaml as _yaml
+
+        cfg_path = skills_dir.parent / "config.yaml"
+        cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        skills_cfg = cfg.get("skills", {})
+        if not isinstance(skills_cfg, dict):
+            return False
+        resolved_platform = os.getenv("HERMES_PLATFORM") or ""
+        if not resolved_platform:
+            try:
+                from gateway.session_context import get_session_env
+
+                resolved_platform = get_session_env("HERMES_SESSION_PLATFORM") or ""
+            except Exception:
+                resolved_platform = ""
+        platform_disabled = skills_cfg.get("platform_disabled")
+        if resolved_platform and isinstance(platform_disabled, dict) and resolved_platform in platform_disabled:
+            disabled = platform_disabled.get(resolved_platform) or []
+            return skill_name in disabled
+        return skill_name in (skills_cfg.get("disabled") or [])
+    except Exception:
+        return False
+
+
+def _disabled_skill_payload(skill_name: str) -> dict:
+    return {
+        "success": False,
+        "error": (
+            f"Skill '{skill_name}' is disabled. "
+            "Enable it with `hermes skills` or inspect the files directly on disk."
+        ),
+        "linked_files": {},
+    }
+
+
+def _skill_name_from_metadata(skill_dir: Path | None, skill_md: Path) -> str:
+    try:
+        from tools.skills_tool import _parse_frontmatter
+
+        frontmatter, _body = _parse_frontmatter(skill_md.read_text(encoding="utf-8")[:4000])
+        return frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
+    except Exception:
+        return skill_md.stem if not skill_dir else skill_dir.name
+
+
+def _linked_skill_files_payload(skill_dir: Path | None) -> dict:
+    if not skill_dir:
+        return {}
+    linked: dict[str, list[str]] = {}
+    grouped_patterns = {
+        "references": ["*.md"],
+        "templates": ["*.md", "*.py", "*.yaml", "*.yml", "*.json", "*.tex", "*.sh"],
+        "assets": ["*"],
+        "scripts": ["*.py", "*.sh", "*.bash", "*.js", "*.ts", "*.rb"],
+    }
+    for folder, patterns in grouped_patterns.items():
+        root = skill_dir / folder
+        if not root.exists():
+            continue
+        files: list[str] = []
+        for pattern in patterns:
+            for candidate in root.rglob(pattern):
+                if candidate.is_file():
+                    files.append(str(candidate.relative_to(skill_dir)))
+        if files:
+            linked[folder] = sorted(set(files))
+    return linked
+
+
+def _local_skill_view_payload(name: str, skills_dir: Path, skill_dir: Path | None, skill_md: Path) -> dict:
+    from tools.skills_tool import SkillReadinessStatus, _parse_frontmatter, _parse_tags, skill_matches_platform
+
+    try:
+        content = skill_md.read_text(encoding="utf-8")
+    except Exception as exc:
+        return {"success": False, "error": f"Failed to read skill '{name}': {exc}", "linked_files": {}}
+
+    try:
+        frontmatter, _body = _parse_frontmatter(content)
+    except Exception:
+        frontmatter = {}
+    if not skill_matches_platform(frontmatter):
+        return {
+            "success": False,
+            "error": f"Skill '{name}' is not supported on this platform.",
+            "readiness_status": SkillReadinessStatus.UNSUPPORTED.value,
+            "linked_files": {},
+        }
+
+    metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
+    hermes_meta = metadata.get("hermes", {}) if isinstance(metadata, dict) else {}
+    tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
+    related_skills = _parse_tags(
+        hermes_meta.get("related_skills") or frontmatter.get("related_skills", "")
+    )
+    linked_files = _linked_skill_files_payload(skill_dir)
+    try:
+        rel_path = str(skill_md.relative_to(skills_dir))
+    except ValueError:
+        rel_path = str(skill_md)
+    skill_name = frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
+    if _active_profile_skill_disabled(skill_name, skills_dir):
+        return _disabled_skill_payload(skill_name)
+    return {
+        "success": True,
+        "name": skill_name,
+        "description": frontmatter.get("description", ""),
+        "tags": tags,
+        "related_skills": related_skills,
+        "content": content,
+        "path": rel_path,
+        "skill_dir": str(skill_dir) if skill_dir else None,
+        "linked_files": linked_files,
+        "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
+        if linked_files
+        else None,
+        "required_environment_variables": [],
+        "required_commands": [],
+        "missing_required_environment_variables": [],
+        "missing_credential_files": [],
+        "missing_required_commands": [],
+        "setup_needed": False,
+        "setup_skipped": True,
+        "readiness_status": SkillReadinessStatus.AVAILABLE.value,
+    }
+
+
 def _skill_view_from_active_dir(name: str) -> dict:
     from tools.skills_tool import skill_view as _skill_view
 
@@ -342,10 +473,7 @@ def _skill_view_from_active_dir(name: str) -> dict:
             except Exception:
                 pass
         return _skill_not_found_payload(name, skills_dir)
-    target_name = str(skill_dir) if skill_dir and (skill_dir / "SKILL.md") == skill_md else str(skill_md)
-    raw = _skill_view(target_name)
-    data = json.loads(raw) if isinstance(raw, str) else raw
-    return data
+    return _local_skill_view_payload(name, skills_dir, skill_dir, skill_md)
 
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
@@ -3984,9 +4112,12 @@ def handle_get(handler, parsed) -> bool:
             if _re.search(r"[*?\[\]]", name):
                 return bad(handler, "Invalid skill name", 400)
             skills_dir = _active_skills_dir()
-            skill_dir, _skill_md = _find_skill_in_dir(name, skills_dir)
-            if not skill_dir:
+            skill_dir, skill_md = _find_skill_in_dir(name, skills_dir)
+            if not skill_dir or not skill_md:
                 return bad(handler, "Skill not found", 404)
+            skill_name = _skill_name_from_metadata(skill_dir, skill_md)
+            if _active_profile_skill_disabled(skill_name, skills_dir):
+                return bad(handler, f"Skill '{skill_name}' is disabled", 403)
             target = (skill_dir / file_path).resolve()
             try:
                 target.relative_to(skill_dir.resolve())

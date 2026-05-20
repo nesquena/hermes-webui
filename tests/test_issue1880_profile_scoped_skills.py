@@ -138,6 +138,84 @@ def test_api_skills_list_and_content_respect_profile_cookie():
         assert linked.get("content") == "linked file for profile-only-skill-1880\n"
 
 
+def test_skills_content_profile_lookup_avoids_process_global_skill_resolver(monkeypatch):
+    profile = "skills1880noglobal"
+
+    from api import routes
+    import tools.skills_tool as skills_tool
+
+    def fail_global_skill_view(*_args, **_kwargs):
+        raise AssertionError("profile-scoped skill content must not call process-global skill_view")
+
+    monkeypatch.setattr(skills_tool, "skill_view", fail_global_skill_view)
+
+    with _IsolatedSkillsDirs(profile) as dirs:
+        _write_skill(
+            dirs.profile_skills,
+            "profile-no-global-skill-1880",
+            "Secondary profile skill without globals",
+            "This skill must be served from the active profile path.",
+        )
+        monkeypatch.setattr(routes, "_active_skills_dir", lambda: dirs.profile_skills)
+
+        detail = routes._skill_view_from_active_dir("profile-no-global-skill-1880")
+
+        assert detail.get("success") is True
+        assert detail.get("name") == "profile-no-global-skill-1880"
+        assert "active profile path" in detail.get("content", "")
+        assert isinstance(detail.get("linked_files"), dict)
+
+
+def test_skills_content_profile_lookup_respects_disabled_skill_guard(monkeypatch):
+    profile = "skills1880disabled"
+
+    from api import routes
+
+    with _IsolatedSkillsDirs(profile) as dirs:
+        _write_skill(
+            dirs.profile_skills,
+            "profile-disabled-skill-1880",
+            "Disabled profile skill",
+            "This disabled skill must not be served through the API.",
+        )
+        (dirs.profile_home / "config.yaml").write_text(
+            "skills:\n  disabled:\n    - profile-disabled-skill-1880\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(routes, "_active_skills_dir", lambda: dirs.profile_skills)
+
+        detail = routes._skill_view_from_active_dir("profile-disabled-skill-1880")
+
+        assert detail.get("success") is False
+        assert "disabled" in detail.get("error", "")
+        assert "must not be served" not in json.dumps(detail)
+
+
+def test_skills_content_linked_file_respects_profile_disabled_skill_guard():
+    profile = "skills1880disabledfile"
+    with _IsolatedSkillsDirs(profile) as dirs:
+        _write_skill(
+            dirs.profile_skills,
+            "profile-disabled-file-skill-1880",
+            "Disabled profile skill with file",
+            "The linked file path must not bypass the disabled guard.",
+        )
+        (dirs.profile_home / "config.yaml").write_text(
+            "skills:\n  disabled:\n    - profile-disabled-file-skill-1880\n",
+            encoding="utf-8",
+        )
+        linked_path = urllib.parse.quote("references/note.md", safe="")
+
+        linked, linked_status = _get(
+            f"/api/skills/content?name=profile-disabled-file-skill-1880&file={linked_path}",
+            profile=profile,
+        )
+
+        assert linked_status == 403
+        assert "disabled" in linked.get("error", "")
+        assert "linked file for profile-disabled-file-skill-1880" not in json.dumps(linked)
+
+
 def test_skill_save_and_delete_respect_profile_cookie():
     profile = "skills1880save"
     with _IsolatedSkillsDirs(profile) as dirs:
