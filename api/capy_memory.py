@@ -893,6 +893,7 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
         limit=200,
         fallback=source_id,
     )
+    title_preflight_text = title if dropped == 0 else ""
     dropped_field_count += dropped
     summary, dropped = _safe_refresh_summary_with_drop(
         fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
@@ -932,6 +933,7 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
         "content_sha256": content_sha256,
         "redaction_status": redaction_status,
         "dropped_field_count": dropped_field_count,
+        "prompt_preflight_text": "\n".join(part for part in (title_preflight_text, summary) if part),
         "markdown": frontmatter + "\n\n" + body,
     }
 
@@ -1051,6 +1053,11 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                 raise ValueError("refresh failed")
             fetched = fetch(source_id=source_id, origin_uri=origin_uri)
             record = _source_refresh_record(source_id, origin_uri, fetched)
+            from api.capy_policy import prompt_preflight
+
+            preflight_receipt = prompt_preflight(record.get("prompt_preflight_text") or record.get("markdown", ""), boundary="auto_fetched_source")
+            if preflight_receipt.get("status") == "block":
+                raise ValueError("refresh failed")
             if not _refresh_lease_owned(job_id, lease_marker):
                 continue
             if not _refresh_mark_completing_if_owned(job_id, lease_marker):
@@ -1082,6 +1089,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                 "source_id": source_id,
                 "status": "completed",
                 "chunk_id": receipt["chunk_id"],
+                "prompt_preflight": preflight_receipt,
                 "metadata_only": True,
             })
         except Exception as exc:  # noqa: BLE001 - failures are captured as safe metadata for retry/status.

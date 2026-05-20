@@ -232,7 +232,7 @@ global.fetch = async function(path, opts = {}) {
       ok: true,
       processed: 1,
       jobs: [
-        { job_id: 'job-safe-1', source_id: 'docs-safe', status: 'completed', origin_uri: 'https://example.test/docs', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        { job_id: 'job-safe-1', source_id: 'docs-safe', status: 'completed', origin_uri: 'https://example.test/docs', prompt_preflight: { boundary: 'auto_fetched_source', status: 'pass', metadata_only: true, raw_prompt_stored: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { job_id: 'job-unsafe-2', source_id: 'ghp_abcdefghijklmnopqrstuvwxyz123456', status: '<img onerror=bad()>', origin_uri: 'https://user:pass@example.test/docs' },
       ],
       renderer: '<script>bad()</script>',
@@ -3688,6 +3688,8 @@ def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely
     assert "Source refresh complete" in html
     assert "1 source refresh job processed" in html
     assert "docs-safe · completed" in html
+    assert "Prompt preflight pass" in html
+    assert "auto fetched source" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert "<script>" not in html
     assert "renderer" not in html.lower()

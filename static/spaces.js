@@ -211,7 +211,11 @@
     const jobRows = jobs.map(function(job){
       const source = safeDisplayMetadataText(job && job.source_id, 'source') || 'source';
       const status = safeDisplayMetadataText(job && job.status, 'updated') || 'updated';
-      return '<li>'+escapeHtml(source)+' · '+escapeHtml(status)+'</li>';
+      const preflight = job && job.prompt_preflight && typeof job.prompt_preflight === 'object' && !Array.isArray(job.prompt_preflight) ? job.prompt_preflight : null;
+      const preflightStatus = safePromptPreflightStatus(preflight && preflight.status);
+      const preflightBoundary = safePromptBoundaryLabel(preflight && preflight.boundary);
+      const preflightText = preflightStatus ? '<div class="capy-spaces-muted">Prompt preflight '+escapeHtml(preflightStatus)+(preflightBoundary ? ' · '+escapeHtml(preflightBoundary) : '')+'</div>' : '';
+      return '<li>'+escapeHtml(source)+' · '+escapeHtml(status)+preflightText+'</li>';
     }).join('');
     return '<div class="capy-spaces-card capy-spaces-memory-refresh-result" role="status">' +
       '<h3>Source refresh complete</h3>' +
@@ -365,6 +369,23 @@
     if (mode === 'autonomous') return 'Autonomous';
     if (mode === 'semi_autonomous') return 'Semi-autonomous';
     return 'Supervised';
+  }
+
+  function safePromptPreflightStatus(value){
+    const status = String(value == null ? '' : value).trim().toLowerCase();
+    return /^(pass|warn|block)$/.test(status) ? status : '';
+  }
+
+  function safePromptBoundaryLabel(value){
+    const boundary = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s-]+/g, '_');
+    const labels = {
+      auto_fetched_source: 'auto fetched source',
+      memory_context: 'memory context',
+      creator_preview: 'creator preview',
+      creator_commit: 'creator commit',
+      widget_runtime_prompt: 'widget runtime prompt'
+    };
+    return labels[boundary] || '';
   }
 
   function safePolicyGateLabels(gates){

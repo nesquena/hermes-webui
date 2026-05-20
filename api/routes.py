@@ -4263,6 +4263,17 @@ def handle_post(handler, parsed) -> bool:
                     if _capy_refresh_re.search(r"(api[_-]?key|authorization|bearer\s+|cookie\s*[:=]|credential|password|secret|token|ghp_[a-z0-9_]+|github_pat_|sk-[a-z0-9_-]{8,}|akia[0-9a-z]{12,}|https?://[^/\s:@]+:[^/\s@]+@|<script|</script|javascript:|onerror|onload|renderer|raw[_-]?prompt)", text, _capy_refresh_re.I):
                         text = "[REDACTED]"
                     safe_job[key] = text
+                preflight = job.get("prompt_preflight")
+                if isinstance(preflight, dict):
+                    status = " ".join(str(preflight.get("status") or "").split()).strip().lower()
+                    boundary = " ".join(str(preflight.get("boundary") or "").split()).strip().lower()
+                    if status in {"pass", "warn", "block"} and boundary in {"auto_fetched_source", "memory_context", "creator_preview", "creator_commit", "widget_runtime_prompt"}:
+                        safe_job["prompt_preflight"] = {
+                            "status": status,
+                            "boundary": boundary,
+                            "metadata_only": preflight.get("metadata_only") is True,
+                            "raw_prompt_stored": False,
+                        }
                 if safe_job:
                     safe_jobs.append(safe_job)
             try:
