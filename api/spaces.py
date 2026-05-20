@@ -4838,7 +4838,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if not name.startswith("space.current."):
             _space_tool_reject_ambient_current_selectors(data)
         result = save_space_meta_from_tool(data)
-        response = {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-meta")
+        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
@@ -4846,7 +4847,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if not name.startswith("space.current."):
             _space_tool_reject_ambient_current_selectors(data)
         result = save_space_layout_from_tool(data)
-        response = {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-layout")
+        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
@@ -8246,11 +8248,28 @@ def queue_widget_event(
     return response
 
 
+def _space_tool_progress_fallback_space_id(space_id: str) -> str:
+    """Return a safe public Space id for fallback progress receipts."""
+    sid = str(space_id or "").strip()
+    try:
+        from api.capy_progress import _safe_public_id  # type: ignore[attr-defined]
+
+        safe_sid = _safe_public_id(sid)
+        return safe_sid or "redacted-space"
+    except Exception:
+        if _EVENT_NAME_RE.fullmatch(sid) and not _SECRET_LIKE_VALUE_RE.search(sid):
+            lowered = sid.lower()
+            if not any(marker in lowered for marker in ("renderer", "script", "source", "body", "credential")):
+                return sid
+        return "redacted-space"
+
+
+
 def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for Space tool receipts."""
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
-    if safe_prefix not in {"context", "repair", "recovery.disable", "recovery.enable"}:
+    if safe_prefix not in {"context", "repair", "recovery.disable", "recovery.enable", "save-meta", "save-layout"}:
         safe_prefix = "tool"
     run_id = f"{safe_prefix}:{sid}"
     try:
@@ -8264,13 +8283,14 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
             }
         )
     except Exception:
+        fallback_sid = _space_tool_progress_fallback_space_id(sid)
         return {
             "stored": False,
             "queued": False,
             "event_type": "tool.completed",
             "family": "tool",
-            "run_id": run_id,
-            "space_id": sid,
+            "run_id": f"{safe_prefix}:{fallback_sid}",
+            "space_id": fallback_sid,
             "redaction_status": "metadata_only",
             "error": "progress event recording unavailable",
         }

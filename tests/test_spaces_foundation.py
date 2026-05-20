@@ -1357,6 +1357,11 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
     assert saved_meta["space"]["name"] == "Renamed Source Space"
     assert saved_meta["space"]["description"] == "Safe description"
     assert saved_meta["space"]["agent_instructions"] == "Prefer metadata-only widget patches."
+    assert saved_meta["progress_event"]["event_type"] == "tool.completed"
+    assert saved_meta["progress_event"]["family"] == "tool"
+    assert saved_meta["progress_event"]["run_id"] == "save-meta:source-layout-lab"
+    assert saved_meta["progress_event"]["space_id"] == created["space_id"]
+    assert saved_meta["progress_event"]["redaction_status"] == "metadata_only"
     assert saved_layout["ok"] is True
     assert saved_layout["action"] == "space.spaces.savespacelayout"
     assert saved_layout["space"]["layout"] == {
@@ -1365,10 +1370,16 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
         "widget_sizes": {"weather-card": {"w": 8, "h": 5}},
         "minimized_widget_ids": ["weather-card"],
     }
+    assert saved_layout["progress_event"]["event_type"] == "tool.completed"
+    assert saved_layout["progress_event"]["family"] == "tool"
+    assert saved_layout["progress_event"]["run_id"] == "save-layout:source-layout-lab"
+    assert saved_layout["progress_event"]["space_id"] == created["space_id"]
+    assert saved_layout["progress_event"]["redaction_status"] == "metadata_only"
     assert persisted["name"] == "Renamed Source Space"
     assert persisted["layout"] == saved_layout["space"]["layout"]
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
@@ -1506,13 +1517,26 @@ def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helper
         },
     )
     persisted = spaces.read_space(created["space_id"])
-    serialized = json.dumps({"saved_meta": saved_meta, "saved_layout": saved_layout, "persisted": persisted}).lower()
+    from api.capy_progress import progress_status
+
+    status = progress_status(space_id=created["space_id"])
+    serialized = json.dumps(
+        {"saved_meta": saved_meta, "saved_layout": saved_layout, "persisted": persisted, "status": status},
+        sort_keys=True,
+    ).lower()
 
     assert saved_meta["ok"] is True
     assert saved_meta["action"] == "space.current.savemeta"
     assert saved_meta["active_space_id"] == created["space_id"]
     assert saved_meta["space"]["name"] == "Current Metadata Space"
     assert saved_meta["space"]["agent_instructions"] == "Keep generated widget bodies quarantined."
+    assert saved_meta["progress_event"]["stored"] is True
+    assert saved_meta["progress_event"]["queued"] is True
+    assert saved_meta["progress_event"]["event_type"] == "tool.completed"
+    assert saved_meta["progress_event"]["family"] == "tool"
+    assert saved_meta["progress_event"]["run_id"] == "save-meta:current-layout-lab"
+    assert saved_meta["progress_event"]["space_id"] == created["space_id"]
+    assert saved_meta["progress_event"]["redaction_status"] == "metadata_only"
     assert saved_layout["ok"] is True
     assert saved_layout["action"] == "space.current.savelayout"
     assert saved_layout["active_space_id"] == created["space_id"]
@@ -1522,16 +1546,63 @@ def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helper
         "widget_sizes": {"notes-card": {"w": 7, "h": 4}},
         "minimized_widget_ids": ["notes-card"],
     }
+    assert saved_layout["progress_event"]["stored"] is True
+    assert saved_layout["progress_event"]["queued"] is True
+    assert saved_layout["progress_event"]["event_type"] == "tool.completed"
+    assert saved_layout["progress_event"]["family"] == "tool"
+    assert saved_layout["progress_event"]["run_id"] == "save-layout:current-layout-lab"
+    assert saved_layout["progress_event"]["space_id"] == created["space_id"]
+    assert saved_layout["progress_event"]["redaction_status"] == "metadata_only"
     assert persisted["name"] == "Current Metadata Space"
     assert persisted["layout"] == saved_layout["space"]["layout"]
+    assert status["space_id"] == created["space_id"]
+    assert status["recent_family_counts"]["tool"] >= 2
+    assert any(event.get("run_id") == "save-meta:current-layout-lab" for event in status["recent_events"])
+    assert any(event.get("run_id") == "save-layout:current-layout-lab" for event in status["recent_events"])
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "token" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
+
+
+
+def test_space_tool_save_meta_progress_fallback_redacts_secret_like_space_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "secret-lab", "name": "Secret Looking Lab"})
+
+    saved_meta = spaces.run_space_tool(
+        "space.spaces.saveSpaceMeta",
+        {
+            "spaceId": created["space_id"],
+            "title": "Redacted Progress Lab",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized_progress = json.dumps(saved_meta["progress_event"], sort_keys=True).lower()
+
+    assert saved_meta["ok"] is True
+    assert saved_meta["space_id"] == "secret-lab"
+    assert saved_meta["progress_event"] == {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "save-meta:redacted-space",
+        "space_id": "redacted-space",
+        "redaction_status": "metadata_only",
+        "error": "progress event recording unavailable",
+    }
+    assert "secret-lab" not in serialized_progress
+    assert "secret_value_do_not_leak" not in serialized_progress
+    assert "renderer" not in serialized_progress
+    assert "<script" not in serialized_progress
+    assert "api_key" not in serialized_progress
 
 
 
@@ -2058,11 +2129,12 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
     from api.capy_progress import progress_status
 
     scoped_progress = progress_status(space_id=created["space_id"])
-    assert scoped_progress["recent_event_count"] == 1
-    assert scoped_progress["recent_family_counts"] == {"tool": 1}
+    assert scoped_progress["recent_event_count"] >= 2
+    assert scoped_progress["recent_family_counts"]["tool"] >= 2
     assert scoped_progress["recent_events"][0]["event_type"] == "tool.completed"
     assert scoped_progress["recent_events"][0]["run_id"] == "repair:source-repair-layout-lab"
     assert scoped_progress["recent_events"][0]["space_id"] == created["space_id"]
+    assert any(event.get("run_id") == "save-layout:source-repair-layout-lab" for event in scoped_progress["recent_events"])
     assert "steal" not in serialized
     assert "stored()" not in serialized
     assert "<script" not in serialized
