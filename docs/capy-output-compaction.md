@@ -4,7 +4,7 @@
 
 **Goal:** Bound noisy tool, browser, test, Spaces, and subagent output before it enters model context or product receipts, while preserving action-critical error/approval evidence and redacting unsafe prompt/source/auth markers.
 
-**Current MVP:** `api/capy_compaction.py::compact_output(...)` returns a metadata-only receipt with original/compacted character counts, rules applied, redaction status, exit status, and bounded text.
+**Current MVP:** `api/capy_compaction.py::compact_output(...)` returns a metadata-only receipt with original/compacted character counts, rules applied, redaction status, exit status, bounded text, and optional sanitized artifact/citation handles.
 
 ---
 
@@ -17,6 +17,7 @@ Capy output compaction should make long-running autonomous work readable without
 - Collapse local repo paths to stable short paths where possible.
 - Dedupe repeated noisy lines.
 - Keep receipts bounded with `original_chars`, `compacted_chars`, `rules_applied`, and `redaction_status`.
+- Retain only allow-listed, sanitized artifact/citation handles; filter secret-shaped tokens (`sk-`, `ghp_`, `github_pat_`, `AKIA...`, `xox...`, `hf_`, `SG.`) and raw local paths (`/Users/`, `/home/`, `~/`, Windows drive paths, and system/temp paths) before receipt storage or UI rendering.
 - Treat compaction output as context, not authority; it must not bypass approval, creator-loop, visual-QA, sandbox, or recovery gates.
 
 ## Non-goals
@@ -88,6 +89,15 @@ If `exit_status` is nonzero or the output contains failure/error lines, preserve
 
 Approval prompts are kept ahead of noise trimming. Compaction must never silently remove a prompt that implies user approval is needed; if multiple approval lines are present, each one becomes required evidence before generic context is considered.
 
+### `retain_artifact_handles` and `retain_citations`
+
+Compaction receipts may include bounded, metadata-only references to trusted backend artifacts or citation records so the UI can show provenance without showing raw output. These fields are allow-listed and filtered independently of the compacted text:
+
+- Artifact rows require safe `kind`, `handle`, and `label` values; citations require safe `citation_id`, `source_type`, and `title` values.
+- Raw local paths, URLs, traversal markers, backslashes, prompt/source/body/render fields, and credential-looking strings are omitted, not partially displayed.
+- Secret-shaped standalone tokens such as `sk-...`, `ghp_...`, `github_pat_...`, `AKIA...`, Slack `xox...`, Hugging Face `hf_...`, and SendGrid `SG.` are treated as unsafe even when they do not include an explicit `secret` or `token` label.
+- Spaces UI rendering repeats the same safety envelope and renders only the known compaction rule names, so fixture-supplied `unknown_safe_rule` or token-shaped rule names are not displayed.
+
 ### `cap_section_chars`
 
 When safe output still exceeds the requested character budget, the receipt records `cap_section_chars` and keeps required exit/error/approval evidence before optional context.
@@ -119,7 +129,13 @@ Receipt shape:
   "rules_applied": ["collapse_paths", "preserve_error_blocks"],
   "redaction_status": "none",
   "redacted_count": 0,
-  "text": "...bounded output..."
+  "text": "...bounded output...",
+  "retained_artifact_handles": [
+    {"kind": "artifact", "handle": "artifact:demo-summary", "label": "Demo summary"}
+  ],
+  "retained_citations": [
+    {"citation_id": "cite-001", "source_type": "memory", "title": "Roadmap acceptance evidence"}
+  ]
 }
 ```
 
@@ -127,7 +143,7 @@ Receipt shape:
 
 - `output` must be raw text. Structured dictionaries are rejected instead of stringified, because stringifying objects can leak hidden fields.
 - Unsafe lines are redacted before truncation so tail/head slicing cannot leak them.
-- Receipt metadata never stores redacted raw values.
+- Receipt metadata never stores redacted raw values; retained handles/citations are dropped when any field looks like raw prompt/source/body/html/script data, a raw path/URL, or a secret-shaped token.
 - `max_chars` has a lower bound so callers cannot accidentally erase required exit/error/approval context.
 - Approval prompts and error evidence are included before generic context when bounding.
 
@@ -142,6 +158,7 @@ Required behavior covered:
 - Redact synthetic unsafe markers without leaking them through receipt JSON.
 - Reject non-string raw outputs and invalid budgets.
 - Preserve approval prompts when a long output is character-bounded.
+- Retain safe artifact handles and citations while filtering secret-shaped tokens and raw paths from receipt metadata and Spaces UI evidence cards.
 
 Validation commands:
 
@@ -153,8 +170,6 @@ git diff --check -- api/capy_compaction.py tests/test_capy_output_compaction.py 
 
 ## Future slices
 
-1. Add route/tool receipt integration for Spaces long outputs and demo smoke suites.
-2. Add a product-visible `Compaction evidence` card in Spaces progress/detail surfaces.
-3. Add user/project rule loading from a local, non-secret config path.
-4. Add provenance/citation handles so compacted receipts point to trusted backend-only raw artifacts when raw retention is explicitly enabled.
-5. Connect compaction stats to the structured progress-event stream.
+1. Add user/project rule loading from a local, non-secret config path.
+2. Connect compaction stats to the structured progress-event stream.
+3. Add backend-only raw artifact retention/quarantine controls when raw retention is explicitly enabled, with UI receipts limited to sanitized handles.
