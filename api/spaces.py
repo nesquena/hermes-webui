@@ -7899,6 +7899,36 @@ def list_space_repair_events(space_id: str, limit: int = 20) -> list[dict[str, A
     return summaries[:max_events]
 
 
+def _record_widget_event_progress_event(space_id: str, event_id: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for queued widget events."""
+    sid = validate_space_id(space_id)
+    safe_event_id = str(event_id or "").strip()
+    if not _event_id_is_safe(safe_event_id):
+        safe_event_id = "unknown"
+    run_id = f"widget-event:{safe_event_id}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event(
+            {
+                "event_type": "tool.completed",
+                "run_id": run_id,
+                "space_id": sid,
+            }
+        )
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "space_id": sid,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,
@@ -7953,7 +7983,7 @@ def queue_widget_event(
             prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
             model_route_hint="hint:reasoning",
         )
-    prompt_preview = _payload_text_summary(prompt, 1000)
+    prompt_preview = "[REDACTED]" if _context_value(prompt, 1) else ""
     payload_summary = _payload_summary(payload_data)
     event_details = {
         "widget_id": wid,
@@ -7973,6 +8003,7 @@ def queue_widget_event(
         event_details,
     )
     _auto_ingest_space_widget_event(event_id)
+    progress_event = _record_widget_event_progress_event(sid, event_id)
     response = {
         "queued": True,
         "status": "queued",
@@ -7982,6 +8013,7 @@ def queue_widget_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "progress_event": progress_event,
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)

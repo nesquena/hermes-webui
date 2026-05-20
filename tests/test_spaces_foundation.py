@@ -5181,7 +5181,7 @@ def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_meta
     assert events["events"][0]["widget_id"] == "research-card"
     assert events["events"][0]["event_name"] == "agent.prompt"
     assert events["events"][0]["payload_summary"] == {"query": "Claude Mythos"}
-    assert events["events"][0]["prompt_preview"] == "Summarize this widget safely."
+    assert events["events"][0]["prompt_preview"] == "[REDACTED]"
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
@@ -5338,6 +5338,67 @@ def test_queue_widget_event_records_metadata_only_prompt_preflight_receipt(monke
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "apikey" not in serialized
+
+
+
+def test_queue_widget_event_records_metadata_only_agent_prompt_progress_event(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-progress-agent-prompt-lab", "name": "Widget Progress Agent Prompt Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "research-card",
+        "agent.prompt",
+        {
+            "messageType": "capy:agent:prompt",
+            "query": "Claude Mythos",
+            "raw_prompt": "Queue metadata-only prompt safely.",
+            "promptHash": "Queue metadata-only prompt safely.",
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "source": "SECRET_SOURCE",
+        },
+        prompt="Summarize this widget safely.",
+    )
+    from api.capy_progress import progress_status
+
+    status = progress_status(space_id=created["space_id"])
+    events = spaces.list_widget_events(created["space_id"], "research-card")
+    event_record = json.loads((spaces.events_dir() / f"{queued['event_id']}.json").read_text(encoding="utf-8"))
+    expected_run_id = f"widget-event:{queued['event_id']}"
+    progress_event = queued["progress_event"]
+    serialized = json.dumps(
+        {"queued": queued, "status": status, "events": events, "event_record": event_record},
+        sort_keys=True,
+    ).lower()
+
+    assert progress_event["event_type"] == "tool.completed"
+    assert progress_event["family"] == "tool"
+    assert progress_event["run_id"] == expected_run_id
+    assert progress_event["space_id"] == created["space_id"]
+    assert progress_event["redaction_status"] == "metadata_only"
+    assert progress_event["stored"] is True
+    assert progress_event["queued"] is True
+    assert any(
+        event.get("event_type") == "tool.completed"
+        and event.get("family") == "tool"
+        and event.get("run_id") == expected_run_id
+        and event.get("space_id") == created["space_id"]
+        for event in status["recent_events"]
+    )
+    assert events[0]["event_id"] == queued["event_id"]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert '"api_key"' not in serialized
+    assert "apikey" not in serialized
+    assert "renderer" not in serialized
+    assert '"source"' not in serialized
+    assert '"raw_prompt"' not in serialized
+    assert '"prompthash"' not in serialized
+    assert "queue metadata-only prompt safely" not in serialized
+    assert "summarize this widget safely" not in serialized
+    assert "raw prompt" not in serialized
 
 
 
@@ -16878,7 +16939,7 @@ def test_list_widget_events_and_route_return_safe_newest_first_inbox(monkeypatch
     assert events[1]["widget_id"] == "weather"
     assert events[1]["payload_summary"]["query"] == "forecast"
     assert events[1]["payload_summary"]["note"] == "[REDACTED]"
-    assert events[1]["prompt_preview"] == "Use the safe weather forecast context."
+    assert events[1]["prompt_preview"] == "[REDACTED]"
 
     weather_events = spaces.list_widget_events(created["space_id"], widget_id="weather")
     assert [event["event_id"] for event in weather_events] == [first["event_id"]]
