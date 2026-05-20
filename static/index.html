@@ -394,6 +394,7 @@
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
+        <button class="update-btn" id="btnRebaseUpdate" style="display:none" onclick="rebaseUpdate(this)">Rebase &amp; update</button>
         <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
       </div>
     </div>

@@ -89,15 +89,6 @@ def _restart_blocker_snapshot() -> dict:
     }
 
 
-def _active_stream_count() -> int:
-    """Return the current in-memory chat stream count.
-
-    Kept for compatibility with older tests/helpers; restart safety should use
-    ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
-    """
-    return int(_restart_blocker_snapshot().get('active_streams') or 0)
-
-
 def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
     if isinstance(blocker_snapshot, int):
         blocker_snapshot = {
@@ -1248,6 +1239,71 @@ def apply_force_update(target: str) -> dict:
         return {
             'ok': True,
             'message': f'{target} force-updated to {compare_ref}',
+            'target': target,
+            'restart_scheduled': True,
+        }
+    finally:
+        _apply_lock.release()
+
+
+def apply_rebase_update(target: str) -> dict:
+    """Fetch then rebase local commits on top of the remote branch.
+
+    Preserves local commits while incorporating remote changes, equivalent to:
+      git fetch origin && git rebase origin/<branch>
+
+    Returns diverged/conflict info when the rebase cannot complete cleanly so
+    the caller can surface actionable messages to the user.
+    """
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        if not fetch_ok:
+            return {
+                'ok': False,
+                'message': 'Could not reach the remote repository. Check your connection.',
+            }
+
+        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+        compare_ref = upstream if (ok and upstream) else f'origin/{_detect_default_branch(path)}'
+
+        _, ok = _run_git(['rebase', compare_ref], path)
+        if not ok:
+            _run_git(['rebase', '--abort'], path)
+            return {
+                'ok': False,
+                'message': (
+                    f'Rebase of local {target} commits onto {compare_ref} produced conflicts '
+                    'that could not be resolved automatically. '
+                    'Use "Force update" to discard local commits and reset to the remote version, '
+                    'or resolve the conflicts manually in the terminal.'
+                ),
+                'diverged': True,
+            }
+
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+
+        _schedule_restart()
+
+        return {
+            'ok': True,
+            'message': f'{target} rebased and updated successfully',
             'target': target,
             'restart_scheduled': True,
         }
