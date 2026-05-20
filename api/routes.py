@@ -569,8 +569,6 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
     return text[-limit:]
 
 
-
-
 def _cron_job_for_api(job: dict) -> dict:
     """Return a cron job payload with optional UI settings normalized.
 
@@ -744,6 +742,24 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     if traceback_text:
         logger.error("Manual cron subprocess failed:\n%s", traceback_text)
     raise RuntimeError(message)
+
+
+def _resolve_cron_output_file(job_id: str, filename: str) -> Path:
+    """Resolve one cron output markdown file under the per-job output dir."""
+    if not job_id:
+        raise ValueError("job_id required")
+    if not filename:
+        raise ValueError("file required")
+    safe_name = Path(filename).name
+    if safe_name != filename or Path(safe_name).suffix.lower() != ".md":
+        raise ValueError("invalid file")
+    hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+    out_root = hermes_home / "cron" / "output"
+    out_dir = (out_root / job_id).resolve()
+    target = (out_dir / safe_name).resolve()
+    if os.path.commonpath([str(target), str(out_dir)]) != str(out_dir):
+        raise ValueError("invalid file")
+    return target
 
 
 def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
@@ -4332,6 +4348,9 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_run_detail(handler, parsed)
 
+    if parsed.path == "/api/crons/output/raw":
+        return _handle_cron_output_raw(handler, parsed)
+
     if parsed.path == "/api/crons/recent":
         from api.profiles import cron_profile_context
 
@@ -7600,6 +7619,32 @@ def _handle_cron_output(handler, parsed):
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
+
+
+def _handle_cron_output_raw(handler, parsed):
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    filename = qs.get("file", [""])[0]
+    force_download = qs.get("download", [""])[0] == "1"
+    try:
+        target = _resolve_cron_output_file(job_id, filename)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+    if force_download:
+        return _serve_file_bytes(
+            handler,
+            target,
+            "text/markdown; charset=utf-8",
+            "attachment",
+            "no-store",
+        )
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return bad(handler, "Could not read file", 500)
+    return j(handler, {"job_id": job_id, "filename": target.name, "content": content})
 
 
 def _handle_cron_status(handler, parsed):
