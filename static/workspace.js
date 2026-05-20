@@ -2,39 +2,84 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
-  // Server errors (4xx/5xx) are NOT retried — only connection failures.
+  // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
   for(let attempt=0;attempt<3;attempt++){
+    let controller=null;
+    let timeoutId=null;
+    let didTimeout=false;
+    let upstreamSignal=null;
+    let upstreamAbort=null;
     try{
-      const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
-      if(!res.ok){
-        // 401 means the auth session expired. Redirect to login so the user can
-        // re-authenticate. This is especially important for iOS PWA (standalone mode)
-        // and for subpath mounts like /hermes/, where /login escapes to the site root.
-        if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
-        const text=await res.text();
-        // Parse JSON error body and surface the human-readable message,
-        // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-        let message=text;
-        try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
-        // Attach the raw HTTP context so callers can branch on status (404 stale-session
-        // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
-        const err=new Error(message);
-        err.status=res.status;
-        err.statusText=res.statusText;
-        err.body=text;
-        throw err;
+      const fetchOpts={...opts};
+      delete fetchOpts.timeoutMs;
+      const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
+      if(useTimeout&&typeof AbortController!=='undefined'){
+        controller=new AbortController();
+        upstreamSignal=fetchOpts.signal||null;
+        if(upstreamSignal){
+          upstreamAbort=()=>controller.abort(upstreamSignal.reason);
+          if(upstreamSignal.aborted) upstreamAbort();
+          else upstreamSignal.addEventListener('abort',upstreamAbort,{once:true});
+        }
+        fetchOpts.signal=controller.signal;
       }
-      const ct=res.headers.get('content-type')||'';
-      return ct.includes('application/json')?res.json():res.text();
+      const requestPromise=(async()=>{
+        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        if(!res.ok){
+          // 401 means the auth session expired. Redirect to login so the user can
+          // re-authenticate. This is especially important for iOS PWA (standalone mode)
+          // and for subpath mounts like /hermes/, where /login escapes to the site root.
+          if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+          const text=await res.text();
+          // Parse JSON error body and surface the human-readable message,
+          // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
+          let message=text;
+          try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+          // Attach the raw HTTP context so callers can branch on status (404 stale-session
+          // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
+          const err=new Error(message);
+          err.status=res.status;
+          err.statusText=res.statusText;
+          err.body=text;
+          throw err;
+        }
+        const ct=res.headers.get('content-type')||'';
+        return ct.includes('application/json')?await res.json():await res.text();
+      })();
+      return useTimeout?await Promise.race([
+        requestPromise,
+        new Promise((_,reject)=>{
+          timeoutId=setTimeout(()=>{
+            didTimeout=true;
+            if(controller) controller.abort();
+            const err=new Error('Request timed out. Please try again.');
+            err.name='TimeoutError';
+            err.timeout=true;
+            reject(err);
+          },Number(timeoutMs));
+        })
+      ]):await requestPromise;
     }catch(e){
       lastErr=e;
+      const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
+      if(isTimeout){
+        const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
+        err.name='TimeoutError';
+        err.timeout=true;
+        if(typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        throw err;
+      }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
       if(attempt<2 && e instanceof TypeError) continue;
       throw e;
+    }finally{
+      if(timeoutId) clearTimeout(timeoutId);
+      if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
     }
   }
   throw lastErr;

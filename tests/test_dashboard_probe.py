@@ -132,11 +132,11 @@ def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch
     assert attempts == [("127.0.0.1", 9119, 0.5, "http"), ("localhost", 9119, 0.5, "http")]
 
 
-def test_status_honors_never_and_strict_override(monkeypatch):
+def test_status_honors_never_and_external_browser_link_without_probe(monkeypatch):
     from api import dashboard_probe
 
     def fail_probe(*args, **kwargs):
-        raise AssertionError("disabled dashboard must not probe")
+        raise AssertionError("this status path must not probe a dashboard")
 
     monkeypatch.setattr(dashboard_probe, "probe_official_dashboard", fail_probe)
     assert dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"enabled": "never"}}}) == {
@@ -144,9 +144,13 @@ def test_status_honors_never_and_strict_override(monkeypatch):
         "enabled": "never",
     }
 
-    result = dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"url": "http://example.com:9119"}}})
-    assert result["running"] is False
-    assert "invalid" in result["error"]
+    result = dashboard_probe.get_dashboard_status(config_data={"webui": {"dashboard": {"enabled": "always", "url": "https://dashboard.example.test"}}})
+    assert result == {
+        "running": True,
+        "enabled": "always",
+        "url": "https://dashboard.example.test",
+        "browser_url": "https://dashboard.example.test",
+    }
 
 
 
@@ -203,9 +207,14 @@ def test_dashboard_config_roundtrip_writes_profile_config_yaml(tmp_path, monkeyp
     assert saved == {"enabled": "auto", "url": "http://127.0.0.1:19119"}
     assert "dashboard:" in (tmp_path / "config.yaml").read_text(encoding="utf-8")
 
-    try:
-        save_dashboard_config({"enabled": "auto", "url": "http://example.com:9119"})
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("external dashboard URL override must be rejected")
+    saved = save_dashboard_config({"enabled": "always", "url": "https://dashboard.example.test"})
+    assert saved == {"enabled": "always", "url": "https://dashboard.example.test"}
+    assert get_dashboard_config() == {"enabled": "always", "url": "https://dashboard.example.test"}
+
+    for unsafe_url in ("https://example.com/path", "https://user:pass@example.com", "javascript:alert(1)"):
+        try:
+            save_dashboard_config({"enabled": "auto", "url": unsafe_url})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsafe dashboard URL must be rejected: {unsafe_url}")

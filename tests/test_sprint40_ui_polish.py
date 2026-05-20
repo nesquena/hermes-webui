@@ -41,14 +41,20 @@ class TestActiveSessionTitleThemeColor(unittest.TestCase):
         """
         .session-item.active .session-title must use var(--gold) not a hardcoded hex.
         The light-mode override line (:not(.dark)) is allowed to keep its own
-        hardcoded color; we only check the base/dark rule.
+        hardcoded color; we only check the base/dark rule. Skin-specific
+        overrides (e.g. `:root[data-skin="..."]`) are also allowed to use
+        their own palette values — they bind to a different selector scope.
         """
-        # Find all lines that match the active session title selector
+        # Find all lines that match the active session title selector. Exclude
+        # the :not(.dark) light-mode override and skin-specific overrides like
+        # `:root[data-skin="geist-contrast"] .session-item.active .session-title`
+        # which legitimately use their own palette values.
         lines = STYLE_CSS.splitlines()
         base_rule_lines = [
             line for line in lines
             if ".session-item.active .session-title" in line
             and ':not(.dark)' not in line
+            and ':root[data-skin=' not in line
         ]
 
         self.assertTrue(

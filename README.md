@@ -469,7 +469,7 @@ Production data and real cron jobs are never touched. Current snapshot:
 ### Themes
 - Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin
   (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`,
-  `sienna`, `catppuccin`, `nous`)
+  `sienna`, `catppuccin`, `nous`, `geist-contrast` / Geist Contrast)
 - Switch via Settings -> Appearance (instant live preview) or `/theme <theme-or-skin>`
 - Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
 - Skins use `data-skin` plus CSS variables; dark mode resolves through the

@@ -1,4 +1,9 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+
+function assistantDisplayName(){
+  if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  return window._botName||'Hermes';
+}
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
@@ -396,10 +401,15 @@ function _dashboardIsBrowserLoopback(){
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
 function _dashboardBrowserUrl(status){
-  if(!status||!status.running||!status.port) return '';
+  if(!status||!status.running) return '';
+  if(status.browser_url||status.url){
+    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    catch(_){}
+  }
+  if(!status.port) return '';
   let source;
-  try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
-  catch(_){source=new URL('http://127.0.0.1:'+status.port);}
+  try{source=new URL('http://127.0.0.1:'+status.port);}
+  catch(_){return '';}
   const browserHost=window.location.hostname||source.hostname;
   const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
   return source.protocol+'//'+displayHost+':'+status.port;
@@ -732,6 +742,7 @@ const MODEL_STATE_KEY='hermes-webui-model-state';
 // first colliding entry.
 function _getOptionProviderId(opt){
   if(!opt) return '';
+  if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;
   const group=opt.parentElement;
   if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider){
     return group.dataset.provider;
@@ -1416,6 +1427,8 @@ async function selectModelFromDropdown(value){
     opt.value=value;
     opt.textContent=getModelLabel(value);
     opt.dataset.custom='1';
+    const badge=(window._configuredModelBadges||{})[value];
+    if(badge&&badge.provider) opt.dataset.provider=badge.provider;
     // Remove any previous custom option before adding new one
     sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
     sel.appendChild(opt);
@@ -1914,7 +1927,69 @@ if(typeof document!=='undefined'){
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
 function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
-if (typeof window !== 'undefined') window._resetScrollDirectionTracker = _resetScrollDirectionTracker;
+if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+/* ── Pull-to-refresh for PWA standalone (Android) ── */
+(function(){
+  if(typeof document==='undefined') return;
+  const isStandalone=window.navigator?.standalone||matchMedia('(display-mode:standalone),(display-mode:fullscreen)').matches;
+  if(!isStandalone) return;
+  const el=document.getElementById('messages');
+  if(!el) return;
+  let _ptrState=0; // 0=idle, 1=pulling, 2=ready
+  let _ptrStartY=0;
+  let _ptrCurrentY=0;
+  const THRESHOLD=80;
+  let _indicator=null;
+  function _ptrCreateIndicator(){
+    if(_indicator) return;
+    _indicator=document.createElement('div');
+    _indicator.className='pull-to-refresh-indicator';
+    _indicator.innerHTML='<span class="ptr-icon">↓</span> <span class="ptr-text">Pull to refresh</span>';
+    el.parentNode.insertBefore(_indicator,el);
+  }
+  function _ptrUpdate(progress){
+    _ptrCreateIndicator();
+    const pulling=progress<1;
+    _indicator.classList.toggle('active',progress>0);
+    const icon=_indicator.querySelector('.ptr-icon');
+    const text=_indicator.querySelector('.ptr-text');
+    if(icon) icon.classList.toggle('ready',!pulling);
+    if(text) text.textContent=pulling?'Pull to refresh':'Release to refresh';
+  }
+  function _ptrReset(){
+    _ptrState=0;
+    _ptrStartY=0;
+    _ptrCurrentY=0;
+    if(_indicator) _indicator.classList.remove('active');
+  }
+  el.addEventListener('touchstart',function(e){
+    if(el.scrollTop>0||_ptrState!==0) return;
+    _ptrStartY=e.touches[0].clientY;
+    _ptrState=1;
+  },{passive:true});
+  el.addEventListener('touchmove',function(e){
+    if(_ptrState!==1) return;
+    _ptrCurrentY=e.touches[0].clientY;
+    const pull=_ptrCurrentY-_ptrStartY;
+    if(pull<0){ _ptrReset(); return; }
+    /* If not at the top, smooth-scroll to top first.
+       Next pull gesture will trigger the refresh. */
+    if(el.scrollTop>0){
+      el.scrollTo({top:0,behavior:'smooth'});
+      _ptrReset();
+      return;
+    }
+    const progress=Math.min(pull/THRESHOLD,1);
+    _ptrUpdate(progress);
+    _ptrState=progress>=1?2:1;
+    if(progress>0.3) e.preventDefault();
+  },{passive:false});
+  el.addEventListener('touchend',function(){
+    if(_ptrState===2){ window.location.reload(); return; }
+    _ptrReset();
+  },{passive:true});
+  el.addEventListener('touchcancel',_ptrReset,{passive:true});
+})();
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
@@ -2200,9 +2275,8 @@ function _syncCtxIndicator(usage){
   const compressText=pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):'');
   if(compressWrap) compressWrap.style.display=compressText?'':'none';
   _setCtxCompressButton(compressBtn,compressText);
-  const cacheTotalTok=cacheReadTok+cacheWriteTok;
-  const cacheHitPct=cacheTotalTok?Math.round((cacheReadTok/cacheTotalTok)*100):null;
-  const cacheText=cacheTotalTok?`cache: ${cacheHitPct}% hit (${_fmtTokens(cacheReadTok)} read / ${_fmtTokens(cacheWriteTok)} write)`:'';
+  const cacheHitPct=usage.cache_hit_percent;
+  const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
   let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
@@ -2694,7 +2768,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -2787,7 +2861,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\[([^\]]+)\]\(((?:https?|file):\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -2802,6 +2876,18 @@ function renderMd(raw){
   const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
   function _safeAttrValue(v){
     return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+  }
+  function _markdownHref(raw){
+    const href=String(raw||'').replace(/"/g,'%22');
+    if(/^file:\/\//i.test(href)){
+      try{
+        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+        return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+      }catch(_){
+        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+      }
+    }
+    return href;
   }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
@@ -3204,6 +3290,16 @@ function setBusy(v){
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
+        // Guard: if the user switched away from the drain session during
+        // the 120ms settle window, the queued message must NOT go to the
+        // wrong chat.  Put it back into the original session's queue and
+        // skip sending — it will drain when the user returns to that session
+        // or when its next stream completes while it is the active view.
+        if(S.session&&S.session.session_id!==sid){
+          queueSessionMessage(sid,next);
+          updateQueueBadge(sid);
+          return;
+        }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
         // Restore model from queued item (sent in /api/chat/start payload)
@@ -4331,7 +4427,7 @@ async function showWhatsNewSummary(target){
   }
   _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data,target);
   try{
-    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null})});
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000});
     _rememberGeneratedSummary(target,res,data);
     _renderUpdateSummaryPanel(res,data,target);
     _renderUpdateWhatsNewLinks(data,{mode:'summary'});
@@ -4452,7 +4548,7 @@ async function applyUpdates(){
   if(window._updateData?.agent?.behind>0) targets.push('agent');
   try{
     for(const target of targets){
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -4501,7 +4597,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
@@ -4601,7 +4697,7 @@ async function checkInflightOnBoot(sid) {
 
 function syncTopbar(){
   if(!S.session){
-    document.title=window._botName||'Hermes';
+    document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
@@ -4621,7 +4717,7 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
+  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
@@ -4753,7 +4849,7 @@ function isTpsDisplayEnabled(){
   return window._showTps===true;
 }
 function _assistantRoleHtml(tsTitle='', tpsText=''){
-  const _bn=window._botName||'Hermes';
+  const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
   return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
 }
@@ -5005,9 +5101,10 @@ function _autoCompressionBaseDetail(state){
     : (String(state&&state.message||fallback).trim()||fallback);
 }
 function _autoCompressionPreviewText(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
   const detail=_autoCompressionBaseDetail(state);
-  if(!running) return (String(state&&state.summary?.headline||detail).trim()||detail);
+  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
   const elapsedLabel=_compressionElapsedLabel(state);
   return [detail, elapsedLabel].filter(Boolean).join(' · ');
 }
@@ -5015,16 +5112,20 @@ function _autoCompressionDetailText(state){
   const running=state&&state.phase==='running';
   const base=_autoCompressionBaseDetail(state);
   const elapsedLabel=running?_compressionElapsedLabel(state):'';
-  return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
+  if(running)return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
+  const continuation=String(state&&state.continuationSessionId||'').trim();
+  const handoff=continuation?`Continued in compressed session: ${continuation}`:'';
+  return [base,handoff].filter(Boolean).join('\n');
 }
 function _autoCompressionCardsHtml(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
   const running=state&&state.phase==='running';
   const preview=_autoCompressionPreviewText(state);
   const cardDetail=_autoCompressionDetailText(state);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
-        statusLabel: t('auto_compress_label'),
+        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
         previewText: preview,
         detail: cardDetail,
         icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
@@ -5192,14 +5293,15 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
   return {message:null, rawIdx:-1};
 }
 function _compressionReferenceCardHtml(text, open=false){
+  const copy=_engineAwareCompressionCopy();
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
         <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
           <span class="tool-card-icon">${li('star',13)}</span>
-          <span class="tool-card-name">${esc(t('context_compaction_label'))}</span>
-          <span class="tool-card-preview">${esc(t('reference_only_label'))} · ${esc(preview)}</span>
+          <span class="tool-card-name">${esc(copy.label)}</span>
+          <span class="tool-card-preview">${esc(copy.preview)} · ${esc(preview)}</span>
           <span class="tool-card-toggle">${li('chevron-right',12)}</span>
           <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
@@ -5272,6 +5374,31 @@ function _formatMessageFooterTimestamp(tsVal){
   }
   const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
   return fmt?fmt(date,opts):date.toLocaleString([], opts);
+}
+function _compressionEngineForSession(){
+  return String(
+    (S.session&&(
+      S.session.compression_anchor_engine
+      || S.session.context_engine
+    )) || 'compressor'
+  ).trim().toLowerCase() || 'compressor';
+}
+function _compressionModeForSession(){
+  return String(
+    (S.session&&S.session.compression_anchor_mode) || 'summary_compaction'
+  ).trim().toLowerCase() || 'summary_compaction';
+}
+function _engineAwareCompressionCopy(engine=_compressionEngineForSession(), mode=_compressionModeForSession()){
+  if(engine==='lcm'||mode==='lossless_retrieval'){
+    return {
+      label:t('retrieval_context_label'),
+      preview:t('retrieval_context_preview'),
+    };
+  }
+  return {
+    label:t('context_compaction_label'),
+    preview:t('reference_only_label'),
+  };
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -5852,6 +5979,7 @@ function renderMessages(options){
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
     if(!node) return;
+    if(rawIdx<firstRenderedRawIdx) return;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
       return;
@@ -6133,12 +6261,10 @@ function renderMessages(options){
         const inTok=msg._turnUsage.input_tokens||0;
         const outTok=msg._turnUsage.output_tokens||0;
         const cost=msg._turnUsage.estimated_cost;
-        const cacheRead=msg._turnUsage.cache_read_tokens||0;
-        const cacheWrite=msg._turnUsage.cache_write_tokens||0;
         let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
         if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-        const cacheTotal=cacheRead+cacheWrite;
-        if(cacheTotal) text+=` · cache ${Math.round((cacheRead/cacheTotal)*100)}% hit`;
+        const cacheHitPct=msg._turnUsage.cache_hit_percent;
+        if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
         usage.textContent=text;
         fragments.push(usage);
       }
@@ -7565,6 +7691,13 @@ function _renderTreeItems(container, entries, depth){
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
       el.appendChild(arrow);
+    }else{
+      // Keep file icons aligned with sibling directories that occupy this
+      // slot with the expand/collapse toggle. #2554
+      const spacer=document.createElement('span');
+      spacer.className='file-tree-toggle-placeholder';
+      spacer.setAttribute('aria-hidden','true');
+      el.appendChild(spacer);
     }
 
     // Icon
@@ -7787,6 +7920,23 @@ function _showFileContextMenu(e, item){
     }
   };
   menu.appendChild(copyPathItem);
+
+  // Download as zip — only for directories. Streams the folder contents
+  // through /api/folder/download which builds the zip on the fly.
+  if(item.type==='dir'){
+    const dlItem=document.createElement('div');
+    dlItem.textContent=t('download_folder');
+    dlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    dlItem.onmouseenter=()=>dlItem.style.background='var(--hover-bg)';
+    dlItem.onmouseleave=()=>dlItem.style.background='';
+    dlItem.onclick=()=>{
+      menu.remove();
+      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+              + '&path='+encodeURIComponent(item.path||'');
+      window.location.href=url;
+    };
+    menu.appendChild(dlItem);
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');

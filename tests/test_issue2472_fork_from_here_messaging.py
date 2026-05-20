@@ -49,6 +49,23 @@ def test_messaging_merge_helper_matches_session_get_coordinate_space():
     ]
 
 
+def test_messaging_merge_helper_dedupes_equivalent_timestamp_formats():
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "hi", "timestamp": "10.0"},
+            {"role": "assistant", "content": "same answer", "timestamp": "11.000000"},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "hi", "timestamp": 10},
+        {"role": "assistant", "content": "same answer", "timestamp": 11},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == ["hi", "same answer"]
+
+
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
     branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
     block = ROUTES_PY[branch_idx : branch_idx + 2600]

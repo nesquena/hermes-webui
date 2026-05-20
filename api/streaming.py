@@ -39,6 +39,8 @@ from api.compression_anchor import visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
+from api.usage import prompt_cache_hit_percent
+from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -247,6 +249,13 @@ def _preferred_agent_display_name() -> str:
     return name or 'Hermes'
 
 
+def _preferred_agent_display_name_for_session(session) -> str:
+    profile = str(getattr(session, 'profile', '') or '').strip()
+    if profile and profile != 'default':
+        return profile[:1].upper() + profile[1:]
+    return _preferred_agent_display_name()
+
+
 def _cancelled_turn_hint(agent_name: str | None = None) -> str:
     name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
@@ -398,14 +407,14 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
-def _cancelled_turn_content(message: str = 'Task cancelled.') -> str:
+def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
     """Return cancelled-turn copy matching the verbose provider-error layout."""
     _message = str(message or 'Task cancelled.').strip()
     if not _message.endswith('.'):
         _message += '.'
     return (
         f"**Task cancelled:** {_message}\n\n"
-        f"*{_cancelled_turn_hint()}*"
+        f"*{_cancelled_turn_hint(agent_name)}*"
     )
 
 
@@ -422,9 +431,10 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_attachments = []
     session.pending_started_at = None
     if not _session_has_cancel_marker(session):
+        agent_name = _preferred_agent_display_name_for_session(session)
         session.messages.append({
             'role': 'assistant',
-            'content': _cancelled_turn_content(message),
+            'content': _cancelled_turn_content(message, agent_name),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
@@ -2331,21 +2341,22 @@ def _has_task_resume_compaction_marker(messages):
     return False
 
 
+def _new_turn_context_from_messages(messages, msg_text):
+    """Return provider-facing history for a new user turn from a message list."""
+    history = _drop_checkpointed_current_user_from_context(messages, msg_text)
+    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
+        return []
+    return history
+
+
 def _context_messages_for_new_turn(session, msg_text):
     """Return provider-facing history for a new user turn.
 
     Compacted agent sessions can carry a hidden "resume the active task" summary
-    long after the visible UI looks like normal chat.  A short greeting should
-    not silently reactivate that old task; explicit continuation prompts still
-    keep the full compacted context.
+    in context_messages. If the user starts a fresh casual greeting in that old
+    session, do not feed that stale active-task summary back to the model.
     """
-    history = _drop_checkpointed_current_user_from_context(
-        _session_context_messages(session),
-        msg_text,
-    )
-    if _is_casual_fresh_chat_message(msg_text) and _has_task_resume_compaction_marker(history):
-        return []
-    return history
+    return _new_turn_context_from_messages(_session_context_messages(session), msg_text)
 
 
 def _stream_writeback_is_current(session, stream_id):
@@ -2356,6 +2367,53 @@ def _stream_writeback_is_current(session, stream_id):
     must not later persist its stale result over the newer transcript.
     """
     return bool(stream_id) and getattr(session, 'active_stream_id', None) == stream_id
+
+
+def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
+    """Allow a finishing worker to replace its own stale-repair marker.
+
+    The stale-pending repair path can occasionally run while the original worker
+    is still alive but temporarily missing from the in-memory stream registry. It
+    clears ``active_stream_id`` and appends a "Response interrupted" marker. If
+    the original worker later finishes, treating ``active_stream_id is None`` as
+    stale drops the real answer and leaves the misleading marker visible.
+
+    This is intentionally narrow: only a session with no active/pending turn and
+    whose last visible row is the recovery marker for this exact user prompt may
+    be superseded. If a newer turn has appended anything after the marker, the
+    normal stale-writeback guard still wins.
+    """
+    if getattr(session, 'active_stream_id', None):
+        return False
+    if getattr(session, 'pending_user_message', None):
+        return False
+    if getattr(session, 'pending_attachments', None):
+        return False
+    messages = list(getattr(session, 'messages', None) or [])
+    if len(messages) < 2:
+        return False
+    last = messages[-1]
+    if not isinstance(last, dict) or not last.get('_error'):
+        return False
+    if last.get('type') != 'interrupted':
+        return False
+    content = str(last.get('content') or '')
+    if 'Response interrupted' not in content or 'WebUI process restarted' not in content:
+        return False
+
+    expected = ' '.join(str(msg_text or '').split())
+    if not expected:
+        return False
+    for msg in reversed(messages[:-1]):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error'):
+            continue
+        if msg.get('role') != 'user':
+            continue
+        actual = ' '.join(str(msg.get('content') or '').split())
+        return actual == expected
+    return False
 
 
 def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
@@ -2588,6 +2646,56 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             })
 
     return tool_calls
+
+
+def _partial_message_signature(message: dict) -> tuple:
+    """Return a stable identity for a persisted partial assistant marker."""
+    if not isinstance(message, dict):
+        return ('', '', ())
+    tool_sig = []
+    for tool_call in message.get('_partial_tool_calls') or []:
+        if not isinstance(tool_call, dict):
+            continue
+        try:
+            args_sig = json.dumps(
+                tool_call.get('args') or {},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            args_sig = str(tool_call.get('args') or '')
+        tool_sig.append((
+            str(tool_call.get('name') or ''),
+            args_sig,
+            bool(tool_call.get('done', False)),
+            bool(tool_call.get('is_error', False)),
+            str(tool_call.get('preview') or tool_call.get('snippet') or ''),
+        ))
+    return (
+        str(message.get('content') or '').strip(),
+        str(message.get('reasoning') or '').strip(),
+        tuple(tool_sig),
+    )
+
+
+def _partial_marker_already_present(messages, candidate: dict, *, before_idx: int | None = None) -> bool:
+    """Check for an equivalent partial marker in the current user turn only."""
+    if not isinstance(messages, list) or not isinstance(candidate, dict):
+        return False
+    end = before_idx if isinstance(before_idx, int) else len(messages)
+    end = max(0, min(end, len(messages)))
+    start = 0
+    for idx in range(end - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            start = idx + 1
+            break
+    candidate_sig = _partial_message_signature(candidate)
+    for msg in messages[start:end]:
+        if isinstance(msg, dict) and msg.get('_partial') and _partial_message_signature(msg) == candidate_sig:
+            return True
+    return False
 
 
 def _sse(handler, event, data):
@@ -2988,6 +3096,7 @@ def _run_agent_streaming(
             'estimated_cost': 0,
             'cache_read_tokens': 0,
             'cache_write_tokens': 0,
+            'cache_hit_percent': None,
             'context_length': 0,
             'threshold_tokens': 0,
             'last_prompt_tokens': 0,
@@ -3025,6 +3134,10 @@ def _run_agent_streaming(
                         pass
 
         _real_prompt_tokens = int(_usage.get('last_prompt_tokens') or 0)
+        _usage['cache_hit_percent'] = prompt_cache_hit_percent(
+            _usage.get('cache_read_tokens') or 0,
+            _usage.get('input_tokens') or 0,
+        )
         if _real_prompt_tokens and _real_prompt_tokens != _live_prompt_exact_tokens[0]:
             _live_prompt_exact_tokens[0] = _real_prompt_tokens
             _live_prompt_estimate_tokens[0] = _real_prompt_tokens
@@ -3387,10 +3500,20 @@ def _run_agent_streaming(
             # closes over it) never captures an unbound name even if this
             # block is reordered later (Issue #765).
             _checkpoint_activity = [0]
+            _live_tool_event_start_ids = set()
+            _live_tool_event_complete_ids = set()
+
+            def _tool_args_snapshot(args):
+                args_snap = {}
+                if isinstance(args, dict):
+                    for k, v in list(args.items())[:4]:
+                        s2 = str(v)
+                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
+                return args_snap
 
             def _record_live_tool_start(tool_call_id, name, args):
                 if not tool_call_id or tool_call_id in _live_prompt_estimate_seen_ids:
-                    return
+                    return False
                 _live_prompt_estimate_seen_ids.add(tool_call_id)
                 _tool_call = {
                     'id': tool_call_id,
@@ -3405,10 +3528,11 @@ def _run_agent_streaming(
                     'content': '',
                     'tool_calls': [_tool_call],
                 }])
+                return True
 
             def _record_live_tool_complete(tool_call_id, name, function_result):
                 if not tool_call_id:
-                    return
+                    return False
                 _result_text = _tool_result_snippet(function_result)
                 _bump_live_prompt_estimate([{
                     'role': 'tool',
@@ -3416,6 +3540,7 @@ def _run_agent_streaming(
                     'tool_call_id': tool_call_id,
                     'content': _result_text,
                 }])
+                return True
 
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_text
@@ -3448,11 +3573,14 @@ def _run_agent_streaming(
                         _emit_metering()
                     return
 
-                args_snap = {}
-                if isinstance(args, dict):
-                    for k, v in list(args.items())[:4]:
-                        s2 = str(v)
-                        args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
+                args_snap = _tool_args_snapshot(args)
+
+                # Modern Hermes Agent builds can call both tool_progress_callback
+                # and the structured tool_start/tool_complete callbacks for the
+                # same tool. Prefer the structured path when it is supported so
+                # the browser receives one tid-tagged tool card per real call.
+                if event_type in (None, 'tool.started') and 'tool_start_callback' in _agent_params:
+                    return
 
                 if event_type in (None, 'tool.started'):
                     _live_tool_calls.append({
@@ -3487,6 +3615,9 @@ def _run_agent_streaming(
                                 put('approval', p)
                     except ImportError:
                         pass
+                    return
+
+                if event_type == 'tool.completed' and 'tool_complete_callback' in _agent_params:
                     return
 
                 if event_type == 'tool.completed':
@@ -3528,6 +3659,28 @@ def _run_agent_streaming(
             def on_tool_start(tool_call_id, name, args):
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
+                    if tool_call_id and tool_call_id not in _live_tool_event_start_ids:
+                        _live_tool_event_start_ids.add(tool_call_id)
+                        _live_tool_calls.append({
+                            'name': name,
+                            'args': args if isinstance(args, dict) else {},
+                            'tid': tool_call_id,
+                        })
+                        # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                'name': name,
+                                'args': args if isinstance(args, dict) else {},
+                                'done': False,
+                                'tid': tool_call_id,
+                            })
+                        put('tool', {
+                            'event_type': 'tool.started',
+                            'name': name,
+                            'preview': None,
+                            'args': _tool_args_snapshot(args),
+                            'tid': tool_call_id,
+                        })
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -3538,6 +3691,33 @@ def _run_agent_streaming(
             def on_tool_complete(tool_call_id, name, args, function_result):
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
+                    if tool_call_id and tool_call_id not in _live_tool_event_complete_ids:
+                        _live_tool_event_complete_ids.add(tool_call_id)
+                        result_snippet = _tool_result_snippet(function_result)
+                        for live_tc in reversed(_live_tool_calls):
+                            if live_tc.get('done'):
+                                continue
+                            if live_tc.get('tid') == tool_call_id or (not live_tc.get('tid') and live_tc.get('name') == name):
+                                live_tc['done'] = True
+                                live_tc['snippet'] = result_snippet
+                                break
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                if shared_tc.get('done'):
+                                    continue
+                                if shared_tc.get('tid') == tool_call_id or (not shared_tc.get('tid') and shared_tc.get('name') == name):
+                                    shared_tc['done'] = True
+                                    shared_tc['snippet'] = result_snippet
+                                    break
+                        _checkpoint_activity[0] += 1
+                        put('tool_complete', {
+                            'event_type': 'tool.completed',
+                            'name': name,
+                            'preview': result_snippet,
+                            'args': _tool_args_snapshot(args),
+                            'tid': tool_call_id,
+                            'is_error': False,
+                        })
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -3957,8 +4137,21 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
-            _previous_messages = list(s.messages or [])
-            _previous_context_messages = _context_messages_for_new_turn(s, msg_text)
+            _external_state_messages = get_state_db_session_messages(getattr(s, 'session_id', None))
+            _previous_messages = list(
+                reconciled_state_db_messages_for_session(
+                    s,
+                    state_messages=_external_state_messages,
+                ) or []
+            )
+            _previous_context_messages = _new_turn_context_from_messages(
+                reconciled_state_db_messages_for_session(
+                    s,
+                    prefer_context=True,
+                    state_messages=_external_state_messages,
+                ),
+                msg_text,
+            )
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -4083,13 +4276,20 @@ def _run_agent_streaming(
                 return
             with _agent_lock:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    logger.info(
-                        "Skipping stale stream writeback for session %s stream %s; active_stream_id=%s",
-                        getattr(s, 'session_id', session_id),
-                        stream_id,
-                        getattr(s, 'active_stream_id', None),
-                    )
-                    return
+                    if _stream_writeback_can_supersede_recovery_marker(s, msg_text):
+                        logger.info(
+                            "Superseding stale recovery marker for session %s stream %s",
+                            getattr(s, 'session_id', session_id),
+                            stream_id,
+                        )
+                    else:
+                        logger.info(
+                            "Skipping stale stream writeback for session %s stream %s; active_stream_id=%s",
+                            getattr(s, 'session_id', session_id),
+                            stream_id,
+                            getattr(s, 'active_stream_id', None),
+                        )
+                        return
                 _result_messages = result.get('messages') or _previous_context_messages
                 if cancel_event.is_set():
                     _finalize_cancelled_turn(s, ephemeral=False)
@@ -4345,11 +4545,15 @@ def _run_agent_streaming(
                 # reference stays alive even after the dict entry is removed.
                 # Concurrent readers that already looked up the old ID will still
                 # see the same Lock object until they release it.
+                _compression_origin_session_id = session_id
+                _compression_continuation_session_id = None
                 _agent_sid = getattr(agent, 'session_id', None)
                 _compressed = False
                 if _agent_sid and _agent_sid != session_id:
                     old_sid = session_id
                     new_sid = _agent_sid
+                    _compression_origin_session_id = old_sid
+                    _compression_continuation_session_id = new_sid
                     s.session_id = new_sid
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
@@ -4426,8 +4630,13 @@ def _run_agent_streaming(
                         _compression_summary_from_messages(s.messages)
                         or _compression_summary_from_messages(s.context_messages)
                     )
+                    if _compression_continuation_session_id is None:
+                        _compression_continuation_session_id = s.session_id
                     put('compressed', {
-                        'session_id': s.session_id,
+                        'session_id': _compression_origin_session_id,
+                        'old_session_id': _compression_origin_session_id,
+                        'new_session_id': _compression_continuation_session_id,
+                        'continuation_session_id': _compression_continuation_session_id,
                         'message': 'Context auto-compressed to continue the conversation',
                         'usage': _live_usage_snapshot(),
                     })
@@ -4465,6 +4674,15 @@ def _run_agent_streaming(
                 estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
+                prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
+                prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
+                turn_input_tokens = max(0, input_tokens - prev_input_tokens)
+                turn_cache_read_tokens = max(0, cache_read_tokens - prev_cache_read_tokens)
+                # Per-turn percent is computed server-side from persisted session
+                # counters so the message label uses the same denominator as the
+                # final usage payload even if the browser missed an intermediate event.
+                cache_hit_percent = prompt_cache_hit_percent(cache_read_tokens, input_tokens)
+                turn_cache_hit_percent = prompt_cache_hit_percent(turn_cache_read_tokens, turn_input_tokens)
                 if input_tokens > 0:
                     s.input_tokens = input_tokens
                 if output_tokens > 0:
@@ -4721,6 +4939,8 @@ def _run_agent_streaming(
                 'estimated_cost': estimated_cost,
                 'cache_read_tokens': cache_read_tokens,
                 'cache_write_tokens': cache_write_tokens,
+                'cache_hit_percent': cache_hit_percent,
+                'turn_cache_hit_percent': turn_cache_hit_percent,
                 'duration_seconds': round(_turn_duration_seconds, 3),
             }
             if _turn_tps is not None:
@@ -5495,24 +5715,7 @@ def cancel_stream(stream_id: str) -> bool:
                         if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
                             _cancel_marker_idx = _idx
                             break
-                _partial_already_present = False
-                if _stripped:
-                    for _m in _cs.messages:
-                        # Stage-350 Opus SHOULD-FIX (#2151): only dedup
-                        # against actual prior _partial markers from the
-                        # same stream, with exact content match. The original
-                        # substring check (`_stripped in _existing or
-                        # _existing in _stripped`) was too broad — any short
-                        # prior assistant reply (e.g. "OK", "Here is the
-                        # answer:") becomes a substring of many later partial
-                        # bodies and could silently drop the new partial,
-                        # resurrecting the #893 data-loss bug on long sessions.
-                        if not isinstance(_m, dict) or not _m.get('_partial'):
-                            continue
-                        if str(_m.get('content') or '').strip() == _stripped:
-                            _partial_already_present = True
-                            break
-                if (_stripped or _has_reasoning or _has_tools) and not _partial_already_present:
+                if _stripped or _has_reasoning or _has_tools:
                     _partial_msg: dict = {
                         'role': 'assistant',
                         'content': _stripped,  # may be empty for reasoning/tool-only turns
@@ -5539,14 +5742,26 @@ def cancel_stream(stream_id: str) -> bool:
                         # alongside the regular tool_calls path.
                         # (Opus pre-release review pass 2 of v0.50.251.)
                         _partial_msg['_partial_tool_calls'] = list(_cancel_tool_calls)
-                    _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                    # Deduplicate against the full partial payload, not just
+                    # non-empty content. Tool-only/reasoning-only partials have
+                    # empty content, so a content-gated check can append the same
+                    # failed turn repeatedly during cancel/replay recovery (#2592).
+                    if not _partial_marker_already_present(
+                        _cs.messages,
+                        _partial_msg,
+                        before_idx=_cancel_marker_idx,
+                    ):
+                        _cs.messages.insert(_cancel_marker_idx, _partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
                 if not _cancel_marker_exists:
                     _cs.messages.append({
                         'role': 'assistant',
-                        'content': _cancelled_turn_content('Task cancelled.'),
+                        'content': _cancelled_turn_content(
+                            'Task cancelled.',
+                            _preferred_agent_display_name_for_session(_cs),
+                        ),
                         '_error': True,
                         'provider_details': 'Task cancelled.',
                         'provider_details_label': 'Cancellation details',

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from api.compression_anchor import visible_messages_for_anchor
+from api.models import Session
 from api.streaming import _is_fallback_lifecycle_message
 
 
@@ -160,6 +162,19 @@ def test_auto_compression_running_detail_avoids_duplicate_message_text():
     assert "${base}\\nElapsed:" not in helper
 
 
+def test_auto_compression_done_detail_surfaces_continuation_handoff():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionDetailText")
+    assert start != -1, "auto compression detail helper not found"
+    end = src.find("function _autoCompressionCardsHtml", start)
+    assert end != -1, "auto compression card helper not found after detail helper"
+    helper = src[start:end]
+
+    assert "continuationSessionId" in helper
+    assert "Continued in compressed session" in helper
+    assert "return [base,handoff].filter(Boolean).join('\\n');" in helper
+
+
 def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
     src = _read("static/ui.js")
     start = src.find("function appendLiveCompressionCard")
@@ -204,11 +219,47 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
     block = _compressed_listener_block()
 
-    guard = "if(!S.session||S.session.session_id!==activeSid) return;"
+    guard = "if(!S.session) return;"
     assert guard in block
     assert block.index(guard) < block.index("setCompressionUi")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
-    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const eventMatchesCurrent=" in block
+    event_guard = "if(!eventMatchesCurrent) return;"
+    assert event_guard in block
+    assert block.index("const eventMatchesCurrent=") < block.index(event_guard)
+
+
+def test_auto_compression_done_accepts_rotated_continuation_session_event():
+    block = _compressed_listener_block()
+
+    # Auto-compression can rotate the backend session id before the 'compressed'
+    # event is emitted. The browser stream still belongs to the pre-compression
+    # activeSid, so the listener must correlate on old_session_id and keep the
+    # continuation id as display metadata instead of dropping the event.
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const continuationSid=d.new_session_id||d.continuation_session_id||'';" in block
+    event_guard = "if(!eventMatchesCurrent) return;"
+    assert event_guard in block
+    assert block.index("const eventSid=") < block.index("const eventMatchesCurrent=")
+    assert "continuationSessionId:continuationSid" in block
+
+
+def test_auto_compression_done_accepts_event_after_current_session_rotates():
+    block = _compressed_listener_block()
+
+    # The final compressed event can arrive/replay after another event has already
+    # updated S.session to the continuation session id. Do not drop it just
+    # because the active browser session no longer equals the original activeSid.
+    strict_active_guard = "if(!S.session||S.session.session_id!==activeSid) return;"
+    assert strict_active_guard not in block
+    assert "if(!S.session) return;" in block
+    assert "const currentSid=S.session.session_id;" in block
+    assert "const eventMatchesCurrent=" in block
+    assert "const displaySid=currentSid;" in block
+    assert "sessionId:displaySid" in block
+    assert block.index("const eventSid=") < block.index("const eventMatchesCurrent=")
+    assert block.index("const displaySid=") < block.index("setCompressionUi(state)")
 
 
 def test_auto_compression_done_sse_refreshes_context_indicator_usage():
@@ -228,8 +279,26 @@ def test_auto_compression_done_payload_includes_live_usage_snapshot():
     assert end != -1, "compressed SSE payload end not found"
     block = src[start:end]
 
-    assert "'session_id': s.session_id" in block
+    assert "'session_id': _compression_origin_session_id" in block
+    assert "'old_session_id': _compression_origin_session_id" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
+    assert "'continuation_session_id': _compression_continuation_session_id" in block
     assert "'usage': _live_usage_snapshot()" in block
+
+
+def test_auto_compression_rotation_tracks_origin_and_continuation_ids_for_sse():
+    src = _read("api/streaming.py")
+    rotate_start = src.find("# ── Handle context compression side effects ──")
+    assert rotate_start != -1, "compression side-effect block not found"
+    rotate_end = src.find("# Stamp 'timestamp'", rotate_start)
+    assert rotate_end != -1, "compression side-effect block end not found"
+    block = src[rotate_start:rotate_end]
+
+    assert "_compression_origin_session_id = session_id" in block
+    assert "_compression_continuation_session_id = None" in block
+    assert "_compression_origin_session_id = old_sid" in block
+    assert "_compression_continuation_session_id = new_sid" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
@@ -406,6 +475,76 @@ def test_reference_message_inserted_before_future_assistant_anchor():
     assert "const anchorSeg=assistantSegments.get(anchorRawIdx);" in helper
     assert "blocks.insertBefore(node, anchorSeg);" in helper
     assert helper.index("blocks.insertBefore(node, anchorSeg);") < helper.index("const userRow=userRows.get(anchorRawIdx);")
+
+
+def test_frontend_uses_context_engine_metadata_for_indexed_context_copy():
+    src = _read("static/ui.js")
+    i18n = _read("static/i18n.js")
+
+    assert "function _compressionEngineForSession" in src
+    assert "S.session.compression_anchor_engine" in src
+    assert "S.session.context_engine" in src
+    assert "function _compressionModeForSession" in src
+    assert "S.session.compression_anchor_mode" in src
+    assert "function _engineAwareCompressionCopy" in src
+    assert "mode==='lossless_retrieval'" in src
+    assert "t('retrieval_context_label')" in src
+    assert "t('retrieval_context_preview')" in src
+    assert "retrieval_context_label" in i18n
+    assert "retrieval_context_preview" in i18n
+
+
+def test_session_model_round_trips_context_engine_metadata(tmp_path, monkeypatch):
+    import api.models as models
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+
+    session = Session(
+        session_id="lcm_metadata",
+        workspace=str(tmp_path),
+        context_engine="lcm",
+        compression_anchor_engine="lcm",
+        compression_anchor_mode="lossless_retrieval",
+        compression_anchor_details={"retrieval_tools": ["lcm_grep"]},
+        context_engine_state={"status": "indexed"},
+    )
+    session.save(touch_updated_at=False)
+
+    loaded = Session.load("lcm_metadata")
+    assert loaded.context_engine == "lcm"
+    assert loaded.compression_anchor_engine == "lcm"
+    assert loaded.compression_anchor_mode == "lossless_retrieval"
+    assert loaded.compression_anchor_details == {"retrieval_tools": ["lcm_grep"]}
+    assert loaded.context_engine_state == {"status": "indexed"}
+
+
+def test_backend_auto_anchor_count_excludes_compaction_marker_cards():
+    messages = [
+        {"role": "user", "content": "before compression"},
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+        {"role": "assistant", "content": "after compression"},
+        {"role": "tool", "content": "hidden tool output"},
+        {"role": "user", "content": "[Your active task list was preserved across context compression]"},
+    ]
+
+    visible = visible_messages_for_anchor(messages, auto_compression=True)
+
+    assert [m["content"] for m in visible] == ["before compression", "after compression"]
+
+
+def test_frontend_reference_insertion_skips_when_reference_is_before_render_window():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode=", start)
+    assert end != -1, "raw-index insertion helper end not found"
+    helper = src[start:end]
+
+    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
 
 
 def test_reference_message_selection_prefers_latest_matching_marker():

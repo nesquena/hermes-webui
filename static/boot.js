@@ -1201,9 +1201,10 @@ const _SKINS=[
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
+  {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
-const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
+const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
   solarized:{theme:'dark',skin:'poseidon'},
@@ -1365,30 +1366,25 @@ function _buildSkinPicker(activeSkin){
   if(!grid) return;
   grid.innerHTML='';
   for(const skin of _SKINS){
-    const key=skin.name.toLowerCase();
+    const key=(skin.value||skin.name).toLowerCase();
     const btn=document.createElement('button');
     btn.type='button';
     btn.className='skin-pick-btn';
     btn.dataset.skinVal=key;
     btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
-    btn.onclick=()=>_pickSkin(skin.name);
+    btn.onclick=()=>_pickSkin(key);
     const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
-    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
+    const label=skin.label||skin.name;
+    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${label}</span>`;
     grid.appendChild(btn);
   }
   _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
 
 function applyBotName(){
-  // Prefer profile name over global bot_name for personalised placeholder.
-  // If activeProfile is set and not 'default', use it (capitalised).
-  // Falls back to window._botName (global bot_name setting) or 'Hermes'.
-  let name;
-  if(S.activeProfile && S.activeProfile!=='default'){
-    name=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
-  }else{
-    name=window._botName||'Hermes';
-  }
+  // The saved assistant name applies to the default profile only.
+  // Non-default profiles use their own profile names.
+  const name=assistantDisplayName();
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
@@ -1469,7 +1465,6 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     // TTS: apply enabled state on boot so buttons show/hide correctly (#499)
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }catch(e){
@@ -1497,7 +1492,6 @@ function applyBotName(){
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
-    applyBotName();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
@@ -1509,6 +1503,7 @@ function applyBotName(){
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';

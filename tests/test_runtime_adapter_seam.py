@@ -1,6 +1,8 @@
 import importlib
 import queue
 
+from tests.conftest import requires_agent_modules
+
 
 def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     runtime = importlib.import_module("api.runtime_adapter")
@@ -18,6 +20,7 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     for name in required:
         assert hasattr(runtime.RuntimeAdapter, name)
         assert hasattr(runtime.LegacyJournalRuntimeAdapter, name)
+        assert hasattr(runtime.RunnerRuntimeAdapter, name)
 
     assert runtime.runtime_adapter_mode({}) == "legacy-direct"
     assert runtime.runtime_adapter_enabled({}) is False
@@ -271,6 +274,78 @@ def test_approval_respond_does_not_fallback_to_oldest_when_explicit_id_is_stale(
     assert "queue.pop(0)" not in stale_branch
 
 
+def test_approval_respond_peeks_gateway_queues_when_pending_empty() -> None:
+    """When _pending has no matching entry but _gateway_queues does, the
+    helper should extract pattern_keys from the gateway queue and call
+    approve_session even though pending is None.
+    """
+    routes = importlib.import_module("api.routes")
+    src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+    helper_idx = src.index("def _resolve_approval_legacy")
+    helper_body = src[helper_idx:src.index("def _handle_approval_respond", helper_idx)]
+
+    assert "_gateway_queues" in helper_body, (
+        "_resolve_approval_legacy must reference _gateway_queues "
+        "to read pattern_keys when _pending is empty"
+    )
+    assert "gateway_keys" in helper_body, (
+        "Must extract pattern_keys from _gateway_queues into a gateway_keys variable"
+    )
+    assert "approve_session" in helper_body[helper_body.index("all_keys"):], (
+        "Must call approve_session for keys extracted from _gateway_queues"
+    )
+
+
+@requires_agent_modules
+def test_approval_respond_approves_from_gateway_queues_when_pending_empty() -> None:
+    """Verify _resolve_approval_legacy peeks into _gateway_queues for
+    pattern_keys when _pending has no matching entry, and calls
+    approve_session() even though pending is None (the real streaming case).
+    """
+    import threading
+    from api.routes import _resolve_approval_legacy
+
+    routes = importlib.import_module("api.routes")
+    approval_mod = importlib.import_module("tools.approval")
+
+    test_sid = "__test_gateway_approval_sid__"
+    test_key = "__test_pattern_key__"
+
+    # 1. Ensure _pending is empty for this sid
+    with approval_mod._lock:
+        approval_mod._pending.pop(test_sid, None)
+
+    # 2. Populate _gateway_queues with a real entry
+    entry = approval_mod._ApprovalEntry({
+        "command": "test_cmd",
+        "pattern_key": test_key,
+        "pattern_keys": [test_key],
+        "description": "test dangerous cmd",
+    })
+    with approval_mod._lock:
+        approval_mod._gateway_queues.setdefault(test_sid, []).append(entry)
+
+    try:
+        # 3. Run the helper with empty _pending but populated _gateway_queues
+        result = _resolve_approval_legacy(test_sid, "", "session")
+
+        # 4. Verify approve_session was called (is_approved must return True)
+        assert approval_mod.is_approved(test_sid, test_key), (
+            "approve_session should have been called for the pattern_key "
+            "extracted from _gateway_queues"
+        )
+        assert result is True, (
+            "_resolve_approval_legacy should return True when it finds "
+            "and resolves the gateway entry"
+        )
+    finally:
+        # 5. Cleanup
+        with approval_mod._lock:
+            approval_mod._gateway_queues.pop(test_sid, None)
+            approval_mod._session_approved.pop(test_sid, None)
+            approval_mod._pending.pop(test_sid, None)
+
+
 def test_chat_start_route_selects_adapter_only_when_flag_enabled():
     routes = importlib.import_module("api.routes")
     src = (routes.Path(__file__).parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
@@ -302,3 +377,146 @@ def test_chat_start_adapter_path_preserves_legacy_response_shape():
     assert 'response.setdefault("run_id", result.run_id)' not in adapter_branch
     assert 'response.setdefault("status", result.status)' not in adapter_branch
     assert 'response.setdefault("active_controls", result.active_controls)' not in adapter_branch
+
+
+def test_rfc_distinguishes_goal_routing_from_queue_route_staging():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#2544 shipped the first Slice 3c implementation" in rfc
+    assert "#2560 shipped the queue-staging clarification" in rfc
+    assert "route now uses `RuntimeAdapter.update_goal(...)`" in rfc
+    assert "`queue_message(...)` as a staged protocol method only" in rfc
+    assert "no new server-side queue endpoint" in rfc
+    assert "no server-side queue endpoint or queue\n  scheduler should be added merely for adapter symmetry" in rfc
+
+
+def test_rfc_defines_slice4_runner_contract_before_runner_code():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4a: Runner contract gate" in rfc
+    assert "docs/test contract PR before any\nrunner code lands" in rfc
+    assert "feature-flagged, default-off" in rfc
+    assert "The runner, not the main WebUI request process, owns" in rfc
+    assert "restart only\n   `hermes-webui.service`" in rfc
+    assert "profile,\n   workspace, attachments, model/provider, toolset, and source metadata" in rfc
+    assert "no removal of the legacy in-process backend" in rfc
+    assert "no default-on runner mode" in rfc
+    assert "#### Slice 4b: Runner adapter client facade" in rfc
+    assert "delegates to an injected runner client" in rfc
+    assert "without relying on process-local `STREAMS`" in rfc
+
+
+def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
+    runtime = importlib.import_module("api.runtime_adapter")
+    captured = []
+
+    class FakeRunnerClient:
+        def start_run(self, request):
+            captured.append(request)
+            return {
+                "run_id": "runner-1",
+                "session_id": request.session_id,
+                "stream_id": "runner-1",
+                "status": "running",
+                "active_controls": ["cancel", "approval", "clarify", "goal"],
+            }
+
+    before_terminal_cwd = "existing-cwd"
+    monkeypatch.setenv("TERMINAL_CWD", before_terminal_cwd)
+    adapter = runtime.RunnerRuntimeAdapter(client=FakeRunnerClient())
+    request = runtime.StartRunRequest(
+        session_id="s-runner",
+        message="hello runner",
+        attachments=[{"path": "/tmp/a.png", "mime": "image/png"}],
+        workspace="/workspace/project",
+        profile="research",
+        provider="openai-codex",
+        model="gpt-5.5",
+        toolsets=["terminal", "file"],
+        source="webui",
+        metadata={"route": "/api/chat/start", "csrf_checked": True},
+    )
+
+    result = adapter.start_run(request)
+
+    assert captured == [request]
+    assert captured[0].workspace == "/workspace/project"
+    assert captured[0].profile == "research"
+    assert captured[0].attachments == [{"path": "/tmp/a.png", "mime": "image/png"}]
+    assert captured[0].provider == "openai-codex"
+    assert captured[0].model == "gpt-5.5"
+    assert captured[0].toolsets == ["terminal", "file"]
+    assert result.run_id == "runner-1"
+    assert result.active_controls == ["cancel", "approval", "clarify", "goal"]
+    assert runtime.os.environ["TERMINAL_CWD"] == before_terminal_cwd
+
+
+def test_runner_runtime_adapter_observe_and_get_survive_adapter_recreation():
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    class FakeRunnerClient:
+        def __init__(self):
+            self.events = []
+            self.status = "unknown"
+
+        def start_run(self, request):
+            self.status = "running"
+            self.events.append({"event_id": "runner-1:1", "seq": 1, "type": "token", "data": {"text": "hi"}})
+            self.events.append({"event_id": "runner-1:2", "seq": 2, "type": "done", "data": {"ok": True}})
+            self.status = "completed"
+            return {"run_id": "runner-1", "session_id": request.session_id, "stream_id": "runner-1", "status": "running"}
+
+        def observe_run(self, run_id, *, cursor=None):
+            after = int(cursor or 0)
+            return {"run_id": run_id, "events": [e for e in self.events if e["seq"] > after]}
+
+        def get_run(self, run_id):
+            return {
+                "run_id": run_id,
+                "session_id": "s-runner",
+                "status": self.status,
+                "terminal_state": "completed",
+                "last_event_id": self.events[-1]["event_id"],
+                "active_controls": [],
+            }
+
+    shared_runner = FakeRunnerClient()
+    first_webui_process = runtime.RunnerRuntimeAdapter(client=shared_runner)
+    first_webui_process.start_run(runtime.StartRunRequest(session_id="s-runner", message="hello"))
+
+    restarted_webui_process = runtime.RunnerRuntimeAdapter(client=shared_runner)
+    replay = restarted_webui_process.observe_run("runner-1", cursor="1")
+    status = restarted_webui_process.get_run("runner-1")
+
+    assert [event["type"] for event in replay.events] == ["done"]
+    assert replay.cursor == "2"
+    assert replay.last_event_id == "runner-1:2"
+    assert status.status == "completed"
+    assert status.terminal_state == "completed"
+    assert status.last_event_id == "runner-1:2"
+
+
+def test_runner_runtime_adapter_controls_are_bounded_and_do_not_use_legacy_state():
+    runtime = importlib.import_module("api.runtime_adapter")
+
+    class FakeRunnerClient:
+        def cancel_run(self, run_id):
+            return {"ok": False, "status": "not-active", "message": "Run is not active."}
+
+    adapter = runtime.RunnerRuntimeAdapter(client=FakeRunnerClient())
+
+    cancel = adapter.cancel_run("finished-run")
+    approval = adapter.respond_approval("finished-run", "approval-1", "once")
+    clarify = adapter.respond_clarify("finished-run", "clarify-1", "answer")
+    queued = adapter.queue_message("finished-run", "next")
+    goal = adapter.update_goal("s-runner", "status")
+
+    assert cancel.accepted is False
+    assert cancel.status == "not-active"
+    assert cancel.safe_message == "Run is not active."
+    for result in (approval, clarify, queued, goal):
+        assert result.accepted is False
+        assert result.status == "unsupported"
+        assert "not supported by this runner backend" in (result.safe_message or "")

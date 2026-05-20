@@ -12,6 +12,7 @@
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
+    --file-tree-toggle-width:10px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
@@ -296,6 +297,173 @@
   :root.dark[data-skin="nous"] .mcp-http{color:#7EB6E0;}
   :root.dark[data-skin="nous"] .mcp-status-active{color:#7EB6E0;}
 
+  /* ── Skin: Geist Contrast (Geist-inspired neutral precision) ──
+     Dark mode uses a #FFF175 accent; solid accent controls use black
+     foreground, while selected/navigation states stay neutral and restrained. */
+  :root[data-skin="geist-contrast"]{
+    color-scheme:light;
+    --bg:#ffffff;--sidebar:#fafafa;--surface:#ffffff;--surface-subtle:#fafafa;--surface-subtle-hover:#f5f5f5;
+    --main-bg:#ffffff;--topbar-bg:rgba(255,255,255,.92);
+    --border:#eaeaea;--border2:#d4d4d4;--border-subtle:#ededed;--border-muted:#d4d4d4;
+    --text:#111111;--strong:#000000;--muted:#666666;--em:#444444;
+    --accent:#0070f3;--accent-hover:#005bd1;--accent-bg:rgba(0,112,243,.075);--accent-bg-strong:rgba(0,112,243,.16);--accent-text:#005bd1;
+    --blue:#0070f3;--gold:#111111;--focus-ring:rgba(0,112,243,.28);--focus-glow:rgba(0,112,243,.08);
+    --input-bg:#ffffff;--hover-bg:#f5f5f5;--code-bg:#fafafa;--code-inline-bg:#f5f5f5;--code-text:#111111;--pre-text:#111111;
+    --error:#e5484d;--success:#007a45;--warning:#b45309;--info:#0070f3;
+    --radius-sm:4px;--radius-md:6px;--radius-card:8px;--radius-lg:10px;
+    --font-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  :root.dark[data-skin="geist-contrast"]{
+    color-scheme:dark;
+    --bg:#000000;--sidebar:#050505;--surface:#0a0a0a;--surface-subtle:#111111;--surface-subtle-hover:#171717;
+    --main-bg:#000000;--topbar-bg:rgba(0,0,0,.88);
+    --border:#262626;--border2:#3f3f3f;--border-subtle:#171717;--border-muted:#2a2a2a;
+    --text:#ededed;--strong:#ffffff;--muted:#a1a1a1;--em:#d4d4d4;
+    --accent:#FFF175;--accent-hover:#fff7a8;--accent-bg:rgba(255,241,117,.075);--accent-bg-strong:rgba(255,241,117,.14);--accent-text:#f5e65f;
+    --blue:#FFF175;--gold:#FFF175;--focus-ring:rgba(255,241,117,.34);--focus-glow:rgba(255,241,117,.10);
+    --input-bg:#0a0a0a;--hover-bg:#111111;--code-bg:#0a0a0a;--code-inline-bg:#171717;--code-text:#f5f5f5;--pre-text:#ededed;
+    --error:#ff6369;--success:#3dd68c;--warning:#f5a524;--info:#FFF175;
+  }
+  :root[data-skin="geist-contrast"],
+  :root[data-skin="geist-contrast"] body{font-family:var(--font-ui)!important;letter-spacing:-0.011em;background:var(--bg)!important;}
+  :root[data-skin="geist-contrast"] .app-titlebar,
+  :root[data-skin="geist-contrast"] .rail,
+  :root[data-skin="geist-contrast"] .sidebar,
+  :root[data-skin="geist-contrast"] .rightpanel,
+  :root[data-skin="geist-contrast"] .topbar,
+  :root[data-skin="geist-contrast"] .composer-wrap{background:var(--sidebar)!important;border-color:var(--border)!important;box-shadow:none!important;backdrop-filter:saturate(180%) blur(12px);}
+  :root[data-skin="geist-contrast"] .main,
+  :root[data-skin="geist-contrast"] .chat,
+  :root[data-skin="geist-contrast"] .empty-state,
+  :root[data-skin="geist-contrast"] .panel-view,
+  :root[data-skin="geist-contrast"] .settings-section,
+  :root[data-skin="geist-contrast"] .settings-card,
+  :root[data-skin="geist-contrast"] .model-dropdown,
+  :root[data-skin="geist-contrast"] .profile-menu,
+  :root[data-skin="geist-contrast"] .session-actions-menu,
+  :root[data-skin="geist-contrast"] .app-dialog,
+  :root[data-skin="geist-contrast"] .kanban-modal,
+  :root[data-skin="geist-contrast"] .cron-item,
+  :root[data-skin="geist-contrast"] .tool-card,
+  :root[data-skin="geist-contrast"] .msg-body pre,
+  :root[data-skin="geist-contrast"] .preview-md pre,
+  :root[data-skin="geist-contrast"] .composer-box{background:var(--surface)!important;border-color:var(--border)!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"] .session-item,
+  :root[data-skin="geist-contrast"] .nav-tab,
+  :root[data-skin="geist-contrast"] .rail-btn,
+  :root[data-skin="geist-contrast"] .icon-btn,
+  :root[data-skin="geist-contrast"] .panel-head-btn,
+  :root[data-skin="geist-contrast"] .sm-btn,
+  :root[data-skin="geist-contrast"] .btn,
+  :root[data-skin="geist-contrast"] button,
+  :root[data-skin="geist-contrast"] select,
+  :root[data-skin="geist-contrast"] input,
+  :root[data-skin="geist-contrast"] textarea,
+  :root[data-skin="geist-contrast"] .chip,
+  :root[data-skin="geist-contrast"] .project-chip,
+  :root[data-skin="geist-contrast"] .profile-chip,
+  :root[data-skin="geist-contrast"] .model-chip,
+  :root[data-skin="geist-contrast"] .reasoning-chip,
+  :root[data-skin="geist-contrast"] .app-dialog-btn{border-radius:6px!important;}
+  :root[data-skin="geist-contrast"] .session-item:hover,
+  :root[data-skin="geist-contrast"] .nav-tab:hover,
+  :root[data-skin="geist-contrast"] .rail-btn:hover,
+  :root[data-skin="geist-contrast"] .icon-btn:hover,
+  :root[data-skin="geist-contrast"] .panel-head-btn:hover,
+  :root[data-skin="geist-contrast"] .sm-btn:hover,
+  :root[data-skin="geist-contrast"] .project-chip:hover,
+  :root[data-skin="geist-contrast"] .chip:hover,
+  :root[data-skin="geist-contrast"] .profile-opt:hover,
+  :root[data-skin="geist-contrast"] .ws-opt:hover,
+  :root[data-skin="geist-contrast"] .file-item:hover,
+  :root[data-skin="geist-contrast"] .suggestion:hover{background:var(--hover-bg)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active,
+  :root[data-skin="geist-contrast"] .nav-tab.active,
+  :root[data-skin="geist-contrast"] .rail-btn.active,
+  :root[data-skin="geist-contrast"] .project-chip.active,
+  :root[data-skin="geist-contrast"] .profile-opt.active,
+  :root[data-skin="geist-contrast"] .chip.model,
+  :root[data-skin="geist-contrast"] .side-menu-item.active,
+  :root[data-skin="geist-contrast"] .skin-pick-btn.active,
+  :root[data-skin="geist-contrast"] .theme-pick-btn.active,
+  :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
+  :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
+  :root[data-skin="geist-contrast"] .session-item.active .session-title,
+  :root[data-skin="geist-contrast"] .session-item.active .session-meta,
+  :root[data-skin="geist-contrast"] .session-item.active .session-preview,
+  :root[data-skin="geist-contrast"] .session-item.active *{color:inherit!important;}
+  :root.dark[data-skin="geist-contrast"] .session-item.active,
+  :root.dark[data-skin="geist-contrast"] .session-item.active *{color:var(--text)!important;}
+  :root[data-skin="geist-contrast"] .nav-tab.active,
+  :root[data-skin="geist-contrast"] .rail-btn.active{color:var(--accent-text)!important;}
+  :root.dark[data-skin="geist-contrast"] .nav-tab.active svg,
+  :root.dark[data-skin="geist-contrast"] .rail-btn.active svg,
+  :root.dark[data-skin="geist-contrast"] .nav-tab.active [data-lucide],
+  :root.dark[data-skin="geist-contrast"] .rail-btn.active [data-lucide]{color:var(--accent-text)!important;stroke:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"] .profile-chip,
+  :root[data-skin="geist-contrast"] .model-chip,
+  :root[data-skin="geist-contrast"] .reasoning-chip,
+  :root[data-skin="geist-contrast"] .composer-workspace-chip,
+  :root[data-skin="geist-contrast"] .composer-profile-chip,
+  :root[data-skin="geist-contrast"] .composer-model-chip{color:var(--muted)!important;border-color:transparent!important;background:transparent!important;}
+  :root[data-skin="geist-contrast"] .profile-chip:hover,
+  :root[data-skin="geist-contrast"] .model-chip:hover,
+  :root[data-skin="geist-contrast"] .reasoning-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-workspace-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-profile-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-model-chip:hover{color:var(--text)!important;background:var(--surface-subtle)!important;border-color:var(--border)!important;}
+  :root[data-skin="geist-contrast"] .new-chat-btn,
+  :root[data-skin="geist-contrast"] button.send-btn:not(:disabled),
+  :root[data-skin="geist-contrast"] .btn.primary,
+  :root[data-skin="geist-contrast"] .update-primary,
+  :root[data-skin="geist-contrast"] .app-dialog-btn.confirm,
+  :root[data-skin="geist-contrast"] .approval-btn.once,
+  :root[data-skin="geist-contrast"] .approval-btn.session,
+  :root[data-skin="geist-contrast"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#050505!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"]:not(.dark) .new-chat-btn,
+  :root[data-skin="geist-contrast"]:not(.dark) button.send-btn:not(:disabled),
+  :root[data-skin="geist-contrast"]:not(.dark) .btn.primary,
+  :root[data-skin="geist-contrast"]:not(.dark) .update-primary,
+  :root[data-skin="geist-contrast"]:not(.dark) .app-dialog-btn.confirm,
+  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.once,
+  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.session,
+  :root[data-skin="geist-contrast"]:not(.dark) .clarify-submit{color:#ffffff!important;}
+  :root[data-skin="geist-contrast"] .new-chat-btn:hover,
+  :root[data-skin="geist-contrast"] button.send-btn:not(:disabled):hover,
+  :root[data-skin="geist-contrast"] .btn.primary:hover,
+  :root[data-skin="geist-contrast"] .update-primary:hover,
+  :root[data-skin="geist-contrast"] .app-dialog-btn.confirm:hover,
+  :root[data-skin="geist-contrast"] .approval-btn.once:hover,
+  :root[data-skin="geist-contrast"] .approval-btn.session:hover,
+  :root[data-skin="geist-contrast"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;transform:none!important;}
+  :root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}
+  :root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg,
+  :root.dark[data-skin="geist-contrast"] button.send-btn:disabled [data-lucide]{color:var(--muted)!important;stroke:var(--muted)!important;}
+  :root[data-skin="geist-contrast"] input:focus,
+  :root[data-skin="geist-contrast"] textarea:focus,
+  :root[data-skin="geist-contrast"] select:focus,
+  :root[data-skin="geist-contrast"] .composer-box:focus-within,
+  :root[data-skin="geist-contrast"] .app-dialog-input:focus,
+  :root[data-skin="geist-contrast"] .sidebar-search input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
+  :root[data-skin="geist-contrast"] .logo,
+  :root[data-skin="geist-contrast"] .sidebar-header .logo{background:var(--surface-subtle)!important;color:var(--accent-text)!important;border:1px solid var(--border2)!important;border-radius:8px!important;box-shadow:none!important;font-weight:650!important;}
+  :root[data-skin="geist-contrast"] .app-titlebar-icon rect,
+  :root[data-skin="geist-contrast"] .app-titlebar-icon path,
+  :root[data-skin="geist-contrast"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"] .msg-row[data-role="user"] .msg-body{background:var(--surface-subtle)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
+  :root[data-skin="geist-contrast"] .suggestion{background:var(--surface)!important;border-color:var(--border)!important;color:var(--muted)!important;transition:background .15s ease,border-color .15s ease,color .15s ease!important;}
+  :root[data-skin="geist-contrast"] .suggestion:hover{border-color:var(--border2)!important;color:var(--text)!important;}
+  :root[data-skin="geist-contrast"] .msg-body a,
+  :root[data-skin="geist-contrast"] .preview-md a,
+  :root[data-skin="geist-contrast"] .empty-state a,
+  :root[data-skin="geist-contrast"] .tool-arg-key,
+  :root[data-skin="geist-contrast"] .tool-card-more,
+  :root[data-skin="geist-contrast"] .session-pin-indicator,
+  :root[data-skin="geist-contrast"] .sidebar-date-header.pinned{color:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"]::-webkit-scrollbar-thumb{background:var(--border2)!important;}
+  :root[data-skin="geist-contrast"] ::selection{background:var(--accent-bg-strong);color:var(--strong);}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
@@ -424,6 +592,18 @@
   @supports (padding-top: env(safe-area-inset-top)){
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
+    }
+    /* Pull-to-refresh indicator for PWA standalone mode */
+    .pull-to-refresh-indicator{position:absolute;top:0;left:0;right:0;z-index:100;display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;font-size:13px;color:var(--muted);pointer-events:none;opacity:0;transform:translateY(-100%);transition:opacity .2s,transform .2s;background:var(--bg);border-bottom:1px solid var(--border);}
+    .pull-to-refresh-indicator.active{opacity:1;transform:translateY(0);}
+    .pull-to-refresh-indicator .ptr-icon{display:inline-block;transition:transform .2s;font-size:16px;}
+    .pull-to-refresh-indicator .ptr-icon.ready{transform:rotate(180deg);color:var(--accent);}
+    /* Reload button — visible only in PWA standalone / fullscreen */
+    .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
+    .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
+    @media (display-mode: standalone), (display-mode: fullscreen){
+      :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
+      .app-titlebar-reload{display:inline-flex;}
     }
   }
   html{background:var(--sidebar);}
@@ -1422,7 +1602,8 @@
   .file-item{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--muted);transition:all .12s;min-width:0;}
   .file-item:hover{background:var(--hover-bg);color:var(--text);}
   .file-item.active{background:var(--accent-bg);color:var(--accent-text);}
-  .file-tree-toggle{font-size:10px;color:var(--muted);flex-shrink:0;width:10px;text-align:center;line-height:1;}
+  .file-tree-toggle{font-size:10px;color:var(--muted);flex-shrink:0;width:var(--file-tree-toggle-width);text-align:center;line-height:1;}
+  .file-tree-toggle-placeholder{display:inline-block;flex:0 0 var(--file-tree-toggle-width);width:var(--file-tree-toggle-width);line-height:1;}
   .file-item.file-empty{color:var(--muted);opacity:.5;font-style:italic;cursor:default;font-size:11px;}
   .file-item.file-empty:hover{background:none;color:var(--muted);}
   .preview-area{flex:1;overflow:auto;padding:14px;flex-direction:column;gap:8px;display:none;opacity:0;transition:opacity .15s;}

@@ -4,7 +4,7 @@ Hermes Web UI splits **appearance** into two independent pickers:
 
 - **Theme** — the mode: `System`, `Dark`, or `Light`. Drives the background,
   text, surface, and chrome colors.
-- **Skin** — the accent palette: ten named skins ship built-in. Drives only
+- **Skin** — the accent palette: built-in skins ship as named keys. Drives only
   the `--accent` family (active states, links, focus rings, primary actions).
 
 You pick one of each and they combine, so the look adapts to your environment
@@ -15,13 +15,13 @@ without losing your favorite accent — pure CSS, no Python changes needed.
 ## Switching Appearance
 
 **Settings panel:** Click the gear icon → **Appearance**. The **Theme** card
-toggles Light/Dark/System; the **Skin** grid offers ten accent palettes.
+toggles Light/Dark/System; the **Skin** grid offers the built-in accent palettes.
 Preview is instant — the UI updates as you click.
 
 **Slash command:** Type `/theme <name>` in the composer. The command accepts
 both theme names (`system`, `dark`, `light`) and skin names (`default`, `ares`,
 `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`, `sienna`,
-`catppuccin`, `nous`). It updates the matching axis and leaves the other one
+`catppuccin`, `nous`, `geist-contrast`). It updates the matching axis and leaves the other one
 alone.
 
 **Persistence:** Both choices are stored in `localStorage` for flicker-free
@@ -57,6 +57,7 @@ absent for light. System mode tracks the OS preference at runtime.
 | **Sienna** | Warm clay and sand earth palette. Soft and natural. |
 | **Catppuccin** | Catppuccin Latte/Mocha palette with Mauve accent. |
 | **Nous** | Steel-blue accent with dashed technical surfaces. |
+| **Geist Contrast** (`geist-contrast`) | Geist-inspired monochrome surfaces with a restrained dark-mode `#FFF175` accent. |
 
 Each skin defines paired light + dark variants so it reads cleanly on either
 theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default

@@ -81,10 +81,24 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = draft\n            s.save()")
+    persist_idx = src.find("s.composer_draft = draft\n            # Draft persistence is not conversation activity")
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
     assert marker_idx < persist_idx, (
         "validation block must run before composer_draft persist"
     )
+
+
+def test_draft_save_does_not_touch_session_updated_at():
+    """Autosaving the composer must not look like conversation activity.
+
+    If POST /api/session/draft bumps updated_at, the frontend's active-session
+    external refresh poll treats every keystroke autosave as a remote session
+    update and force-reloads the current chat a few seconds later.
+    """
+    src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
+    persist_idx = src.find("s.composer_draft = draft")
+    assert persist_idx != -1, "could not locate composer draft persist site"
+    save_idx = src.find("s.save(touch_updated_at=False)", persist_idx)
+    assert save_idx != -1, "composer draft save must preserve session updated_at"

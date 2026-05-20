@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,nous:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,nous:1,'geist-contrast':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
@@ -138,6 +138,12 @@
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <button class="app-titlebar-reload" id="btnReload" onclick="window.location.reload()" type="button" aria-label="Reload" title="Reload page">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
@@ -1166,8 +1172,8 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+              <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
@@ -1224,7 +1230,7 @@
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsDashboardMode">Official Hermes Dashboard</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Overrides are restricted to loopback URLs.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
               <select id="settingsDashboardMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto">Auto-detect</option>
                 <option value="always">Always show</option>
