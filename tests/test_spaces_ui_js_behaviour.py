@@ -419,7 +419,14 @@ global.fetch = async function(path, opts = {}) {
         original_chars: 24000,
         compacted_chars: 900,
         redaction_status: 'redacted',
-        rules_applied: ['cap_section_chars', 'preserve_error_blocks', 'redact_unsafe_markers'],
+        rules_applied: ['cap_section_chars', 'preserve_error_blocks', 'redact_unsafe_markers', 'retain_artifact_handles', 'retain_citations', 'unknown_safe_rule'],
+        retained_artifact_handles: [
+          { kind: 'file', handle: 'file:/Users/bschmidy10/private.png', label: 'Private path screenshot' },
+          { kind: 'file', handle: 'artifact:research-summary.md', label: 'Research summary markdown', body: 'SECRET_VALUE_DO_NOT_LEAK', api_key: 'UNTRUSTED_VALUE' },
+        ],
+        retained_citations: [
+          { citation_id: 1, source_type: 'memory', title: 'Release plan excerpt', excerpt: 'source excerpt SECRET_VALUE_DO_NOT_LEAK', url: 'https://user:token@example.test/private' },
+        ],
         text: 'renderer <script>SECRET_VALUE_DO_NOT_LEAK</script> raw prompt api_key bearer placeholder',
         command: 'raw prompt should never render',
       },
@@ -5372,7 +5379,12 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Original output: 24000 chars" in out["rootHtml"]
     assert "Compacted output: 900 chars" in out["rootHtml"]
     assert "Redaction: redacted" in out["rootHtml"]
-    assert "Rules: cap_section_chars, preserve_error_blocks, redact_unsafe_markers" in out["rootHtml"]
+    assert "Rules: cap_section_chars, preserve_error_blocks, redact_unsafe_markers, retain_artifact_handles, retain_citations" in out["rootHtml"]
+    assert "unknown_safe_rule" not in out["rootHtml"]
+    assert "Artifacts: 1" in out["rootHtml"]
+    assert "file · artifact:research-summary.md · Research summary markdown" in out["rootHtml"]
+    assert "Citations: 1" in out["rootHtml"]
+    assert "1 · memory · Release plan excerpt" in out["rootHtml"]
     assert "Context layer status" in out["rootHtml"]
     assert "Memory: 3 sources · 12 chunks · 1 stale · 2 refresh jobs" in out["rootHtml"]
     assert "Autonomy: Semi-autonomous · Preflight: required · Model hints: 6" in out["rootHtml"]
@@ -5389,6 +5401,8 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "SECRET" not in out["rootHtml"]
     assert "UNTRUSTED_VALUE" not in out["rootHtml"]
     assert "UNTRUSTED_SOURCE" not in out["rootHtml"]
+    assert "/Users/" not in out["rootHtml"]
+    assert "file:/" not in out["rootHtml"]
 
 
 def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_path):

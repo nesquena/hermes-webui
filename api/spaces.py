@@ -3243,6 +3243,23 @@ def _space_creator_sanitized_draft(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _space_creator_memory_citations(draft: dict[str, Any]) -> list[dict[str, str]]:
+    memory_assist = draft.get("memory_assist") if isinstance(draft.get("memory_assist"), dict) else None
+    if not memory_assist:
+        return []
+    raw_results = memory_assist.get("results") if isinstance(memory_assist.get("results"), list) else []
+    citations: list[dict[str, str]] = []
+    for hit in raw_results[:5]:
+        if not isinstance(hit, dict):
+            continue
+        source_id = str(hit.get("source_id") or "").strip()
+        source_type = str(hit.get("source_type") or "").strip()
+        if not source_id or not source_type:
+            continue
+        citations.append({"citation_id": source_id, "source_type": source_type, "title": source_type})
+    return citations
+
+
 def _space_creator_preview_gates() -> dict[str, bool]:
     return {
         "sandbox_preview_required": True,
@@ -3300,6 +3317,7 @@ def _space_creator_preview_compaction(draft: dict[str, Any], *, command: str) ->
         command=command,
         exit_status=0,
         max_chars=600,
+        citations=_space_creator_memory_citations(draft),
     )
 
 
@@ -3349,12 +3367,36 @@ def _space_creator_commit_compaction(
     )
     if int(safety.get("omitted_field_count") or 0) > 0 or safety.get("unsafe_prompt_redacted"):
         lines.append("unsafe fields omitted: renderer api_auth api_key raw prompt generated widget body")
+    space_id = str(created.get("space_id") or draft_space.get("space_id") or "")
+    space_label = str(draft_space.get("name") or created.get("name") or "Committed Space")
+    artifact_handles: list[dict[str, str]] = []
+    if space_id:
+        artifact_handles.append({"kind": "space", "handle": f"space:{space_id}", "label": space_label})
+    if revision_event_id and revision_event_id != "none":
+        artifact_handles.append(
+            {"kind": "revision", "handle": f"revision:{revision_event_id}", "label": "Creator commit revision"}
+        )
+    for widget in widgets[:20]:
+        if not isinstance(widget, dict) or not space_id:
+            continue
+        widget_id = widget.get("id") or widget.get("widget_id")
+        if not widget_id:
+            continue
+        artifact_handles.append(
+            {
+                "kind": "widget",
+                "handle": f"widget:{space_id}/{widget_id}",
+                "label": str(widget.get("title") or widget_id),
+            }
+        )
     return compact_output(
         "\n".join(lines),
         tool="capy-spaces-creator-loop",
         command=command,
         exit_status=0,
         max_chars=600,
+        artifact_handles=artifact_handles,
+        citations=_space_creator_memory_citations(draft),
     )
 
 

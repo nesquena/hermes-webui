@@ -635,14 +635,51 @@
     const compactedChars = safeNonNegativeCount(data.compacted_chars);
     const redaction = safeDisplayMetadataText(data.redaction_status || 'none', 'none') || 'none';
     const rules = Array.isArray(data.rules_applied) ? data.rules_applied : [];
+    const allowedCompactionRules = {
+      cap_section_chars: true,
+      preserve_error_blocks: true,
+      preserve_approval_prompts: true,
+      redact_unsafe_markers: true,
+      collapse_paths: true,
+      dedupe_repeated_lines: true,
+      retain_artifact_handles: true,
+      retain_citations: true,
+    };
     const safeRules = rules.slice(0, 8).map(function(rule){
       const text = safeDisplayMetadataText(rule || '', '');
-      return text && text !== '[REDACTED]' && /^[a-z0-9_.:-]{1,80}$/i.test(text) ? text : '';
+      return text && text !== '[REDACTED]' && allowedCompactionRules[text] ? text : '';
     }).filter(Boolean);
-    if (!originalChars && !compactedChars && !safeRules.length && redaction === 'none') return '';
+    const artifacts = Array.isArray(data.retained_artifact_handles) ? data.retained_artifact_handles : [];
+    const unsafeEvidenceText = function(value){
+      return /\/Users\/|\/home\/|\/root\/|\/private\/|\/var\/|\/tmp\/|\/etc\/|~\/|[A-Za-z]:\\|:\/\/|file:\/|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(String(value || ''));
+    };
+    const artifactRows = artifacts.slice(0, 8).map(function(item){
+      const entry = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+      const kind = safeDisplayMetadataText(entry.kind || '', '');
+      const handle = safeDisplayMetadataText(entry.handle || '', '');
+      const label = safeDisplayMetadataText(entry.label || '', '');
+      if (!kind || !handle || !label || kind === '[REDACTED]' || handle === '[REDACTED]' || label === '[REDACTED]') return '';
+      if (unsafeEvidenceText(kind) || unsafeEvidenceText(handle) || unsafeEvidenceText(label)) return '';
+      if (!/^[a-z0-9_.:-]{1,40}$/i.test(kind) || !/^[a-z0-9_.:\/-]{1,160}$/i.test(handle) || handle.indexOf('..') !== -1 || handle.indexOf('//') !== -1 || handle.indexOf('\\') !== -1) return '';
+      return '<div class="capy-spaces-muted">'+escapeHtml(kind+' · '+handle+' · '+label)+'</div>';
+    }).filter(Boolean);
+    const citations = Array.isArray(data.retained_citations) ? data.retained_citations : [];
+    const citationRows = citations.slice(0, 8).map(function(item){
+      const entry = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
+      const citationId = safeDisplayMetadataText(entry.citation_id || '', '');
+      const sourceType = safeDisplayMetadataText(entry.source_type || '', '');
+      const title = safeDisplayMetadataText(entry.title || '', '');
+      if (!citationId || !sourceType || !title || citationId === '[REDACTED]' || sourceType === '[REDACTED]' || title === '[REDACTED]') return '';
+      if (unsafeEvidenceText(citationId) || unsafeEvidenceText(sourceType) || unsafeEvidenceText(title)) return '';
+      if (!/^[a-z0-9_.:-]{1,40}$/i.test(citationId) || !/^[a-z0-9_.:-]{1,40}$/i.test(sourceType)) return '';
+      return '<div class="capy-spaces-muted">'+escapeHtml(citationId+' · '+sourceType+' · '+title)+'</div>';
+    }).filter(Boolean);
+    if (!originalChars && !compactedChars && !safeRules.length && redaction === 'none' && !artifactRows.length && !citationRows.length) return '';
     return '<div class="capy-spaces-card capy-spaces-compaction-evidence"><h4>Compaction evidence</h4>' +
       '<div class="capy-spaces-muted">Original output: '+originalChars+' chars · Compacted output: '+compactedChars+' chars · Redaction: '+escapeHtml(redaction)+'</div>' +
       '<div class="capy-spaces-muted">Rules: '+escapeHtml(safeRules.length ? safeRules.join(', ') : 'none')+'</div>' +
+      (artifactRows.length ? '<div class="capy-spaces-muted">Artifacts: '+artifactRows.length+'</div>'+artifactRows.join('') : '') +
+      (citationRows.length ? '<div class="capy-spaces-muted">Citations: '+citationRows.length+'</div>'+citationRows.join('') : '') +
       '<div class="capy-spaces-muted">Raw output, prompt bodies, widget bodies, and credentials remain omitted from this receipt.</div>' +
       '</div>';
   }

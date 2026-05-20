@@ -2493,6 +2493,64 @@ def test_creator_commit_returns_preview_preflight_and_policy_receipts_metadata_o
         assert "generated_body" not in serialized_blob
 
 
+def test_creator_commit_output_compaction_retains_revision_and_widget_artifact_handles_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "spaceName": "Compaction Artifacts Lab",
+            "widgets": [
+                {"widgetId": "safe-summary", "kind": "markdown", "title": "Safe Summary"},
+                {
+                    "widgetId": "status-panel",
+                    "kind": "status",
+                    "title": "Status Panel",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                },
+            ],
+        },
+    )
+    commit = spaces.run_space_tool(
+        "space.creator.commit",
+        {
+            "preview_id": preview["preview_id"],
+            "sandbox_previewed": True,
+            "visual_qa_passed": True,
+            "approve_commit": True,
+        },
+    )
+
+    receipt = commit["output_compaction"]
+    handles = receipt["retained_artifact_handles"]
+
+    assert {"kind": "space", "handle": "space:compaction-artifacts-lab", "label": "Compaction Artifacts Lab"} in handles
+    assert {
+        "kind": "revision",
+        "handle": f"revision:{commit['revision_event_id']}",
+        "label": "Creator commit revision",
+    } in handles
+    assert {
+        "kind": "widget",
+        "handle": "widget:compaction-artifacts-lab/safe-summary",
+        "label": "Safe Summary",
+    } in handles
+    assert {
+        "kind": "widget",
+        "handle": "widget:compaction-artifacts-lab/status-panel",
+        "label": "Status Panel",
+    } in handles
+    assert "retain_artifact_handles" in receipt["rules_applied"]
+
+    serialized = json.dumps(receipt, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "widget body" not in serialized
+
+
 def test_creator_preview_targets_existing_space_with_revision_diff_without_persistence(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(
@@ -2676,6 +2734,15 @@ def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(m
 
     assert commit["ok"] is True
     assert commit["memory_assist"] == preview["memory_assist"]
+    expected_citation = {
+        "citation_id": memory_record["source_id"],
+        "source_type": "space_manifest",
+        "title": "space_manifest",
+    }
+    assert expected_citation in preview["output_compaction"]["retained_citations"]
+    assert expected_citation in commit["output_compaction"]["retained_citations"]
+    assert "retain_citations" in preview["output_compaction"]["rules_applied"]
+    assert "retain_citations" in commit["output_compaction"]["rules_applied"]
     manifest = json.loads((spaces.manifests_dir() / created["space_id"] / "space.json").read_text(encoding="utf-8"))
     assert "memory_assist" not in manifest
     event_path = spaces.events_dir() / f"{manifest['revision_event_id']}.json"
