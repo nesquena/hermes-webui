@@ -53,3 +53,35 @@ class TestMeetingsStore:
         from api.meetings import finish_meeting
         result = finish_meeting("nonexistent-id")
         assert result is None
+
+
+class TestMeetingsPanelRegistration:
+    """Verify the meetings panel is properly wired in the frontend."""
+
+    def test_panels_js_has_meetings(self):
+        panels_js = (Path(__file__).parent.parent / "static" / "panels.js").read_text()
+        assert "meetings: 'tab_meetings'" in panels_js
+        assert "'meetings'" in panels_js
+        assert "showing-meetings" in panels_js
+
+    def test_index_html_has_meetings_elements(self):
+        index_html = (Path(__file__).parent.parent / "static" / "index.html").read_text()
+        assert 'data-panel="meetings"' in index_html
+        assert 'id="mainMeetings"' in index_html
+        assert 'data-dashboard-action="new_meeting"' in index_html
+
+    def test_i18n_has_meetings_keys(self):
+        i18n_js = (Path(__file__).parent.parent / "static" / "i18n.js").read_text()
+        assert "tab_meetings" in i18n_js
+        assert "meetings_title" in i18n_js
+        assert "action_new_meeting" in i18n_js
+
+    def test_dashboard_handles_new_meeting(self):
+        dashboard_js = (Path(__file__).parent.parent / "static" / "dashboard.js").read_text()
+        assert "new_meeting" in dashboard_js
+
+    def test_style_has_meetings_classes(self):
+        style_css = (Path(__file__).parent.parent / "static" / "style.css").read_text()
+        assert ".meetings-panel" in style_css
+        assert ".meetings-iframe-wrapper" in style_css
+        assert "showing-meetings" in style_css
