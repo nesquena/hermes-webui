@@ -3291,9 +3291,10 @@ function renderSkills(skills) {
     sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
-      el.className = 'skill-item';
+      el.className = 'skill-item' + (skill.disabled ? ' disabled' : '');
       el.style.display = collapsed ? 'none' : '';
-      el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
+      const isDisabled = skill.disabled || false;
+      el.innerHTML = `<span class="skill-toggle${isDisabled ? '' : ' enabled'}" onclick="event.stopPropagation();toggleSkill('${esc(skill.name)}', ${!isDisabled})" title="${isDisabled ? esc(t('skill_disabled')) : esc(t('skill_enabled'))}"></span><span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
@@ -3303,6 +3304,28 @@ function renderSkills(skills) {
 
 function filterSkills() {
   if (_skillsData) renderSkills(_skillsData);
+}
+
+
+async function toggleSkill(name, currentlyEnabled) {
+  const newEnabled = !currentlyEnabled;
+  try {
+    const result = await api('/api/skills/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled: newEnabled })
+    });
+    if (result && result.ok) {
+      if (_skillsData) {
+        const skill = _skillsData.find(s => s.name === name);
+        if (skill) skill.disabled = !newEnabled;
+      }
+      renderSkills(_skillsData || []);
+    } else {
+      setStatus((result && result.error) || t('skill_toggle_failed'));
+    }
+  } catch(e) {
+    setStatus(t('skill_toggle_failed') + e.message);
+  }
 }
 
 // Currently selected skill detail — kept across panel switches so re-entering
