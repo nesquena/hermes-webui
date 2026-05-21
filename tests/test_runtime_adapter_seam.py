@@ -26,7 +26,63 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     assert runtime.runtime_adapter_enabled({}) is False
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) == "legacy-journal"
     assert runtime.runtime_adapter_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) is True
+    assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) == "runner-local"
+    assert runtime.runtime_adapter_runner_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) is True
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "sidecar"}) == "legacy-direct"
+
+
+def test_runtime_adapter_factory_selects_only_explicit_default_off_modes():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    class FakeRunnerClient:
+        pass
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    def runner_factory():
+        calls.append("runner")
+        return FakeRunnerClient()
+
+    assert runtime.build_runtime_adapter(environ={}) is None
+
+    legacy = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(legacy, runtime.LegacyJournalRuntimeAdapter)
+
+    runner = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(runner, runtime.RunnerRuntimeAdapter)
+    assert calls == ["legacy", "runner"]
+
+
+def test_runner_local_factory_requires_injected_client_and_does_not_fallback_to_legacy():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    try:
+        runtime.build_runtime_adapter(
+            environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+            legacy_adapter_factory=legacy_factory,
+        )
+    except NotImplementedError as exc:
+        assert "runner client factory" in str(exc)
+    else:
+        raise AssertionError("runner-local must require an injected runner client factory")
+
+    assert calls == []
 
 
 def test_legacy_journal_adapter_start_run_delegates_without_owning_runtime_state():

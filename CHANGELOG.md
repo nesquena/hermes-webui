@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #TBD** by @Michaelyklam (refs #1925) — Add the RuntimeAdapter Slice 4c default-off runner backend selection point. `HERMES_WEBUI_RUNTIME_ADAPTER=runner-local` now normalizes to an explicit mode and can build a `RunnerRuntimeAdapter` around an injected runner client factory for synthetic restart/reattach harnesses. The default remains `legacy-direct`, `legacy-journal` stays the only routed WebUI adapter path, and live `/api/chat/start` is not switched to a runner backend in this slice.
+
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
