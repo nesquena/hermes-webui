@@ -104,11 +104,29 @@ function _restoreExpandedDirs(){
 }
 
 let _workspacePanelActiveTab = 'files';
+let _renderSessionArtifactsTimer = null;
+
+function _setWorkspacePanelTabDataset(){
+  const panel = document.querySelector('.rightpanel');
+  if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
+}
+
+function scheduleRenderSessionArtifacts(){
+  if(_renderSessionArtifactsTimer) clearTimeout(_renderSessionArtifactsTimer);
+  _renderSessionArtifactsTimer = setTimeout(()=>{
+    _renderSessionArtifactsTimer = null;
+    renderSessionArtifacts();
+  }, 100);
+}
+
+if(typeof document !== 'undefined'){
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _setWorkspacePanelTabDataset, {once:true});
+  else _setWorkspacePanelTabDataset();
+}
 
 function switchWorkspacePanelTab(tab){
   _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
-  const panel = document.querySelector('.rightpanel');
-  if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
+  _setWorkspacePanelTabDataset();
   const filesTab = $('workspaceFilesTab');
   const artifactsTab = $('workspaceArtifactsTab');
   if(filesTab){
@@ -125,6 +143,7 @@ function switchWorkspacePanelTab(tab){
 }
 
 const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
+// Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
 function _normalizeArtifactPath(path){
@@ -136,28 +155,24 @@ function _normalizeArtifactPath(path){
   return path;
 }
 
-function _artifactCandidatesFromText(text, kind='referenced'){
+function _artifactCandidatesFromText(text){
   if(!text || typeof text !== 'string') return [];
   const out = [];
   const seen = new Set();
-  const add = (path, source=kind) => {
+  const add = (path) => {
     path = _normalizeArtifactPath(path);
     if(!path || seen.has(path)) return;
-    seen.add(path); out.push({path, kind:source});
+    seen.add(path); out.push({path, kind:'diff'});
   };
-  const fenced = /```(?:diff|patch)?\n[\s\S]*?```/gi;
+  // Fallback text mining is intentionally narrow: only diff/patch fences imply
+  // the session changed a file. Prose mentions such as "edited package.json" are
+  // too noisy for an Artifacts list that should track write/edit outputs.
+  const fenced = /```(?:diff|patch)\s*\n[\s\S]*?```/gi;
   let m;
   while((m = fenced.exec(text))){
     const block = m[0];
     const fm = block.match(/(?:^|\n)(?:\+\+\+|---)\s+(?:[ab]\/)?([^\n\t]+)/);
-    if(fm) add(fm[1].trim(), 'diff');
-  }
-  const patterns = [
-    /(?:created|wrote|updated|edited|saved|modified)\s+(?:file\s+)?[`"']?([^`"'\n]+?\.[A-Za-z0-9]{1,12})[`"']?(?=$|[\s),.;:])/gi,
-    /(?:MEDIA:)?((?:\/|~\/|\.\.?\/)?[A-Za-z0-9_@~.-][A-Za-z0-9_@~.\/-]*\.[A-Za-z0-9]{1,12})/g
-  ];
-  for(const re of patterns){
-    while((m = re.exec(text))) add(m[1] || m[0]);
+    if(fm) add(fm[1].trim());
   }
   return out;
 }
@@ -178,10 +193,12 @@ function _artifactCandidatesFromToolCall(tc){
     if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
   }
   const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
-  for(const a of _artifactCandidatesFromText(resultText, name || 'tool')) out.push(a);
+  // Tool results may include unified diffs from patch-style tools; scan those
+  // narrowly after structured args so diff headers can still contribute paths.
+  for(const a of _artifactCandidatesFromText(resultText)) out.push(a);
   if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
     const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
-    for(const a of _artifactCandidatesFromText(argsText, name || 'tool')) out.push(a);
+    for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
   }
   return out;
 }
@@ -211,11 +228,11 @@ function renderSessionArtifacts(){
   const items = collectSessionArtifacts();
   if(count) count.textContent = String(items.length);
   if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files mentioned or changed in this session.</div>';
+    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
     return;
   }
   if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created, edited, or referenced during this session will appear here.</div>';
+    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
   root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
