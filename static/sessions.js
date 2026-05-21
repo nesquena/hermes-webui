@@ -1267,10 +1267,21 @@ function _messageComparableText(m){
   return String(m.content||'').trim();
 }
 
+function _stripAttachedFilesMarker(text){
+  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+}
+
 function _sameTranscriptMessage(a,b){
-  return !!(a&&b) &&
-    String(a.role||'')===String(b.role||'') &&
-    _messageComparableText(a)===_messageComparableText(b);
+  if(!(a&&b)) return false;
+  const role=String(a.role||'');
+  if(role!==String(b.role||'')) return false;
+  const aText=_messageComparableText(a);
+  const bText=_messageComparableText(b);
+  if(aText===bText) return true;
+  if(role==='user'){
+    return _stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText);
+  }
+  return false;
 }
 
 function _mergeInflightTailMessages(baseMessages, inflightMessages){

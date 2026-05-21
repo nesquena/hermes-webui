@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Deduplicate uploaded-file user turns when the optimistic browser bubble uses plain text but the server-persisted pending turn includes the `[Attached files: ...]` suffix.
 
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 
