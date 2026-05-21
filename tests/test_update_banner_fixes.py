@@ -438,6 +438,8 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         def fake_run(args, cwd, timeout=10):
             if args[0] == 'fetch':
                 return '', True
+            if args[0] == 'tag':
+                return '', True
             if args[:2] == ['status', '--porcelain']:
                 return '', True   # clean tree
             if args[:2] == ['rev-parse', '--abbrev-ref']:
@@ -457,6 +459,68 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         assert result.get('restart_scheduled') is True, (
             "successful update must set restart_scheduled: True"
         )
+
+    def test_apply_update_pulls_latest_release_tag_when_updates_are_release_based(
+        self, tmp_path, monkeypatch
+    ):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return 'v0.51.106\nv0.51.105\nv0.51.104', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Updating release tag', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_update('webui')
+        assert result['ok'] is True
+        assert ['fetch', 'origin', '--quiet', '--tags'] in ran
+        assert ['pull', '--ff-only', 'origin', 'v0.51.106'] in ran
+        assert ['rev-parse', '--abbrev-ref', '@{upstream}'] not in ran
+
+    def test_apply_update_falls_back_to_tracking_branch_without_release_tags(
+        self, tmp_path, monkeypatch
+    ):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'fork/feature-branch', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is True
+        assert ['pull', '--ff-only', 'fork', 'feature-branch'] in ran
 
 
 class TestApplyForceUpdate:

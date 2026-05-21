@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Self-update now applies the same release target that the update check reports. Release-based update prompts previously could pull the current branch's tracking ref instead; checkouts tracking a fork or local rescue branch would restart successfully without advancing to the newer published release.
 
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 

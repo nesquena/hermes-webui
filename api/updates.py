@@ -329,6 +329,26 @@ def _release_gap(tags, current, latest):
     return 1
 
 
+def _select_apply_compare_ref(path):
+    """Return the same remote ref family that the update check reports.
+
+    The update banner prefers published release tags when they exist. Applying
+    an update must therefore advance to the latest release tag too; otherwise a
+    checkout on a local/fork tracking branch can report release updates, pull a
+    different branch that is already current, restart, and still remain behind.
+    """
+    tags = _release_tags(path)
+    if tags:
+        return tags[0]
+
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        return upstream
+
+    branch = _detect_default_branch(path)
+    return f'origin/{branch}'
+
+
 def _check_repo_release(path, name):
     """Check if a git repo is behind its latest published release tag."""
     tags = _release_tags(path)
@@ -840,19 +860,14 @@ def apply_force_update(target: str) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
                 'message': 'Could not reach the remote repository. Check your connection.',
             }
 
-        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-        if ok and upstream:
-            compare_ref = upstream
-        else:
-            branch = _detect_default_branch(path)
-            compare_ref = f'origin/{branch}'
+        compare_ref = _select_apply_compare_ref(path)
 
         # Discard local modifications then reset to remote HEAD
         _run_git(['checkout', '.'], path)
@@ -901,17 +916,8 @@ def _apply_update_inner(target):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
-    # Use the current branch's upstream for pull, matching the behaviour
-    # of _check_repo. Falls back to default branch if no upstream is set.
-    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-    if ok and upstream:
-        compare_ref = upstream
-    else:
-        branch = _detect_default_branch(path)
-        compare_ref = f'origin/{branch}'
-
     # Fetch before attempting pull, so the remote ref is current.
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
@@ -920,6 +926,8 @@ def _apply_update_inner(target):
                 'Check your internet connection and try again.'
             ),
         }
+
+    compare_ref = _select_apply_compare_ref(path)
 
     # Check for dirty working tree (ignore untracked files — git stash
     # doesn't include them, so stashing on '??' alone leaves nothing to pop)
@@ -956,7 +964,7 @@ def _apply_update_inner(target):
     if remote:
         pull_args.extend([remote, branch])
     else:
-        pull_args.append(compare_ref)
+        pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         if stashed:
