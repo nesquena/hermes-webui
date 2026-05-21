@@ -373,7 +373,7 @@ class Session:
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
                  model_provider=None,
                  messages=None, created_at=None, updated_at=None,
-                 tool_calls=None, pinned: bool=False, archived: bool=False,
+                 tool_calls=None, pinned: bool=False, pinned_messages=None, archived: bool=False,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
@@ -414,6 +414,7 @@ class Session:
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
         self.pinned = bool(pinned)
+        self.pinned_messages = pinned_messages if isinstance(pinned_messages, list) else []
         self.archived = bool(archived)
         self.project_id = project_id or None
         self.profile = profile
@@ -494,7 +495,7 @@ class Session:
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
-            'pinned', 'archived', 'project_id', 'profile',
+            'pinned', 'pinned_messages', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -676,6 +677,7 @@ class Session:
             'updated_at': self.updated_at,
             'last_message_at': last_message_at,
             'pinned': self.pinned,
+            'pinned_messages': self.pinned_messages if isinstance(self.pinned_messages, list) else [],
             'archived': self.archived,
             'project_id': self.project_id,
             'profile': self.profile,

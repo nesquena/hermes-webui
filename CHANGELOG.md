@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2534** by @Michaelyklam (closes #2508) — Add per-message pinning inside WebUI conversations. Message footers now include a pin toggle and transcript rows expose a right-click pin/unpin action; up to three pinned message previews persist on the session and render in the workspace side panel with click-to-jump and inline unpin controls.
 
 ## [v0.51.104] — 2026-05-21 — Release CB (stage-397 — 9-PR batch — i18n zh-CN/zh-TW cron status + geist-contrast skin polish + tablet hardware Enter + stale Codex slash model state + SSE reconnect jitter + cron run inline expansion + inflight send race + new-chat model provider sync + virtualized sidebar scroll-clamp resync + transcript cache invalidation on same-count content)
 
