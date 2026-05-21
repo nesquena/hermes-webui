@@ -36,13 +36,20 @@ class TestCronRefreshButtonHtml:
             "(native title= or custom data-tooltip= per #1775)"
         )
 
-    def test_refresh_button_calls_load_crons_with_animate(self):
+    def test_refresh_button_calls_tasks_panel_with_animate(self):
         html = _read("static/index.html")
         m = re.search(r'<button[^>]*id="cronRefreshBtn"[^>]*>', html)
         assert m
         tag = m.group(0)
-        assert 'loadCrons(true)' in tag, (
-            "#cronRefreshBtn must call loadCrons(true) to enable the dim-while-fetching animation"
+        assert 'loadTasksPanel(true)' in tag, (
+            "#cronRefreshBtn must call loadTasksPanel(true) so refresh remains subtab-aware "
+            "while preserving dim-while-fetching animation"
+        )
+
+    def test_tasks_panel_routes_jobs_refresh_to_load_crons(self):
+        js = _read("static/panels.js")
+        assert "return loadCrons(animate);" in js, (
+            "loadTasksPanel must route the jobs subtab through loadCrons(animate)"
         )
 
     def test_refresh_button_sits_next_to_new_job_button(self):
