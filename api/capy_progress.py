@@ -305,7 +305,10 @@ def progress_status(space_id: str | None = None) -> dict[str, Any]:
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
         "redaction_status": "metadata_only",
     }
-    output_compaction = _progress_output_compaction(events, recent_events)
+    try:
+        output_compaction = _progress_output_compaction(events, recent_events)
+    except Exception:
+        output_compaction = {}
     if output_compaction:
         status["output_compaction"] = output_compaction
     if scoped_space_id:

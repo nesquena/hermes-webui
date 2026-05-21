@@ -10954,6 +10954,77 @@ def test_space_tool_adapter_recovery_module_actions_return_safe_metadata(monkeyp
     assert "<script" not in serialized
 
 
+def test_recovery_module_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-progress-tool",
+            "name": "Module Progress Tool",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.recovery.disable_module",
+        {"module_id": "module-progress-tool", "reason": "renderer api_auth bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    enabled = spaces.run_space_tool("space.recovery.enable_module", {"module_id": "module-progress-tool"})
+    queued = spaces.run_space_tool(
+        "space.recovery.repair_module",
+        {
+            "module_id": "module-progress-tool",
+            "payload": {"action": "repair-module", "renderer": "<script>bad()</script>"},
+            "prompt": "Patch generated source without exposing bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id="recovery-modules")
+    serialized = json.dumps(
+        {"disabled": disabled, "enabled": enabled, "queued": queued, "progress": scoped_progress},
+        sort_keys=True,
+    ).lower()
+
+    assert disabled["progress_event"]["event_type"] == "tool.completed"
+    assert disabled["progress_event"]["family"] == "tool"
+    assert disabled["progress_event"]["run_id"] == "recovery.disable:recovery-modules"
+    assert disabled["progress_event"]["space_id"] == "recovery-modules"
+    assert enabled["progress_event"]["event_type"] == "tool.completed"
+    assert enabled["progress_event"]["family"] == "tool"
+    assert enabled["progress_event"]["run_id"] == "recovery.enable:recovery-modules"
+    assert enabled["progress_event"]["space_id"] == "recovery-modules"
+    assert queued["progress_event"]["event_type"] == "tool.completed"
+    assert queued["progress_event"]["family"] == "tool"
+    assert queued["progress_event"]["run_id"] == "repair:recovery-modules"
+    assert queued["progress_event"]["space_id"] == "recovery-modules"
+    assert len(
+        {
+            disabled["progress_event"].get("event_id"),
+            enabled["progress_event"].get("event_id"),
+            queued["progress_event"].get("event_id"),
+        }
+    ) == 3
+    assert scoped_progress["recent_event_count"] == 3
+    assert scoped_progress["recent_family_counts"] == {"tool": 3}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "repair:recovery-modules",
+        "recovery.enable:recovery-modules",
+        "recovery.disable:recovery-modules",
+    ]
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer" not in serialized
+    assert "api_auth" not in serialized
+    assert "<script" not in serialized
+
+
 def test_space_tool_adapter_safe_mode_module_aliases_return_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(

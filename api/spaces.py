@@ -88,6 +88,7 @@ _SOURCE_SPACES_ROOT_PATH = "~/spaces/"
 _SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
 _SOURCE_SPACE_WIDGETS_DIR = "widgets/"
 _RECOVERY_MODULE_EVENT_SPACE_ID = "__capy_recovery_modules__"
+_RECOVERY_MODULE_PROGRESS_SPACE_ID = "recovery-modules"
 _RECOVERY_MODULE_SUMMARY_LIMIT = 20
 _SOURCE_SPACE_WIDGET_FILE_EXTENSION = ".yaml"
 _SOURCE_SPACE_DATA_DIR = "data/"
@@ -7920,7 +7921,12 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     )
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
-    return _module_summary(module)
+    summary = _module_summary(module)
+    summary["progress_event"] = _record_space_recovery_progress_event(
+        _RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        action="disable",
+    )
+    return summary
 
 
 def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
@@ -7941,7 +7947,12 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     )
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
-    return _module_summary(module)
+    summary = _module_summary(module)
+    summary["progress_event"] = _record_space_recovery_progress_event(
+        _RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        action="enable",
+    )
+    return summary
 
 
 def _module_repair_event_summary(event: dict[str, Any], module_id: str | None = None) -> dict[str, Any] | None:
@@ -8023,6 +8034,7 @@ def queue_recovery_module_repair_event(
         },
         snapshot=_module_summary(module),
     )
+    progress_event = _record_space_repair_progress_event(_RECOVERY_MODULE_PROGRESS_SPACE_ID)
     return {
         "queued": True,
         "status": "queued",
@@ -8031,6 +8043,7 @@ def queue_recovery_module_repair_event(
         "event_id": event_id,
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
+        "progress_event": progress_event,
     }
 
 
