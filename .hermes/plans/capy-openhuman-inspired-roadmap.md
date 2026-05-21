@@ -125,6 +125,7 @@ Delivered:
 - Shared data slot set/delete tool actions now emit metadata-only `tool.completed` progress events using safe `shared-slot.*` run ids, so Space cooperation/data handoff activity appears in Space-scoped progress without exposing slot values, renderer/source fields, API-auth fields, prompts, or credentials.
 - Source-style widget upsert tool actions now emit metadata-only `tool.completed` progress events with safe `widget.upsert:<space_id>` run ids, so agent-driven Space construction appears in Space-scoped progress without storing widget bodies, renderer/source/API-auth fields, prompts, scripts, or credentials.
 - Recovery widget quarantine/enable tool actions now emit metadata-only `tool.completed` progress events with safe `recovery.widget.*:<space_id>` run ids, so Space-scoped progress reflects recovery admin widget toggles without exposing disabled widget bodies, renderer/source fields, prompts, scripts, or credentials.
+- Space Agent package import/export boundaries now emit metadata-only `tool.completed` progress events with safe `package.import:<space_id>` and `package.export:<space_id>` run ids after successful sanitized package operations, without storing package YAML, widget bodies, renderer/source/API-auth fields, prompts, scripts, or credentials; unsupported export formats fail before recording false completion telemetry.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.
@@ -215,7 +216,7 @@ The first roadmap pass has now delivered the Memory Tree module, source/job sche
 - **Compaction execution path:** `api/capy_compaction.py` now backs run-all, individual-demo, creator preview/commit, active-context, and scoped-progress receipts; remaining long tool/subagent/browser/development/recovery outputs still need product-visible compaction integration where useful.
 - **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduler/cron coverage and source-specific fetchers around the existing manual trigger path.
 - **Per-action policy/preflight:** Product-home policy visibility exists, and creator/context/repair/runtime/source-refresh boundaries have initial pass/warn/block receipts; remaining high-risk browser/development/recovery/tool boundaries need equivalent action-policy evidence.
-- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, source-style layout-repair events, shared-data/widget-upsert actions, and recovery widget toggles now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
+- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, source-style layout-repair events, shared-data/widget-upsert actions, recovery widget toggles, and Space Agent package import/export operations now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
 
 ---
 

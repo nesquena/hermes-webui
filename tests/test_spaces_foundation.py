@@ -11859,6 +11859,82 @@ layout:
     assert "untrusted_artifact" not in json.dumps(spaces.read_space_detail("unsafe-demo"))
 
 
+def test_space_agent_package_import_export_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.import_space_agent_package(
+        {
+            "space_yaml": """
+id: package-progress-lab
+name: Package Progress Lab
+description: Imported through Space Agent package boundary
+instructions: Use safe typed APIs only.
+""",
+            "widgets": {
+                "widgets/panel.yaml": """
+id: progress-panel
+title: Progress Panel
+type: html
+renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>"
+data:
+  api_key: SECRET_VALUE_DO_NOT_LEAK
+layout:
+  x: 1
+  y: 2
+  w: 5
+  h: 4
+""",
+            },
+        }
+    )
+    exported = spaces.export_space_agent_package("package-progress-lab", format="yaml")
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id="package-progress-lab")
+    serialized = json.dumps({"imported": imported, "exported": exported, "progress": scoped_progress}, sort_keys=True).lower()
+
+    assert imported["progress_event"]["event_type"] == "tool.completed"
+    assert imported["progress_event"]["family"] == "tool"
+    assert imported["progress_event"]["run_id"] == "package.import:package-progress-lab"
+    assert imported["progress_event"]["space_id"] == "package-progress-lab"
+    assert imported["progress_event"]["redaction_status"] == "metadata_only"
+
+    assert exported["progress_event"]["event_type"] == "tool.completed"
+    assert exported["progress_event"]["family"] == "tool"
+    assert exported["progress_event"]["run_id"] == "package.export:package-progress-lab"
+    assert exported["progress_event"]["space_id"] == "package-progress-lab"
+    assert exported["progress_event"]["redaction_status"] == "metadata_only"
+    assert imported["progress_event"].get("event_id") != exported["progress_event"].get("event_id")
+
+    assert scoped_progress["recent_event_count"] == 2
+    assert scoped_progress["recent_family_counts"] == {"tool": 2}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "package.export:package-progress-lab",
+        "package.import:package-progress-lab",
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_space_agent_package_export_does_not_record_progress_for_invalid_format(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "bad-export-progress-lab", "name": "Bad Export Progress Lab"})
+
+    with pytest.raises(ValueError, match="Unsupported export format"):
+        spaces.export_space_agent_package(created["space_id"], format="unsupported")
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
+    serialized = json.dumps(scoped_progress, sort_keys=True).lower()
+    assert scoped_progress["recent_event_count"] == 0
+    assert scoped_progress["recent_events"] == []
+    assert "package.export:bad-export-progress-lab" not in serialized
+
+
 def test_import_space_agent_yaml_redacts_unsafe_widget_ids_titles_and_kinds(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

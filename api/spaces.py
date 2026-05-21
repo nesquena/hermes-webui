@@ -6411,6 +6411,7 @@ def import_space_agent_package(
         "space.imported.space_agent",
         {"format": source_label, "widget_count": len(imported_widgets), "status": "metadata-only"},
     )
+    progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="package.import")
     response = {
         "imported": True,
         "source": source_label,
@@ -6418,6 +6419,7 @@ def import_space_agent_package(
         "imported_widgets": imported_widgets,
         "warnings": warnings,
         "autonomy_policy": autonomy_policy_receipt,
+        "progress_event": progress_event,
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
@@ -6530,23 +6532,26 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
     space_yaml, widgets, export_space_id = _space_agent_yaml_export(space)
     normalized_format = str(format or "yaml").strip().lower()
     if normalized_format in {"zip", "space-agent-zip"}:
-        return {
+        response = {
             "source": "capy-space",
             "format": "space-agent-zip",
             "space_id": export_space_id,
             "archive_b64": _space_agent_zip_b64(space_yaml, widgets),
             "widget_count": len(widgets),
         }
-    if normalized_format not in {"yaml", "space-agent-yaml"}:
+    elif normalized_format in {"yaml", "space-agent-yaml"}:
+        response = {
+            "source": "capy-space",
+            "format": "space-agent-yaml",
+            "space_id": export_space_id,
+            "space_yaml": space_yaml,
+            "widgets": widgets,
+            "widget_count": len(widgets),
+        }
+    else:
         raise ValueError("Unsupported export format")
-    return {
-        "source": "capy-space",
-        "format": "space-agent-yaml",
-        "space_id": export_space_id,
-        "space_yaml": space_yaml,
-        "widgets": widgets,
-        "widget_count": len(widgets),
-    }
+    response["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="package.export")
+    return response
 
 
 def _widget_index(space: dict[str, Any], widget_id: str) -> int:
@@ -8500,6 +8505,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     safe_prefix = str(run_prefix or "tool").strip().lower()
     if safe_prefix not in {
         "context",
+        "package.export",
+        "package.import",
         "repair",
         "recovery.disable",
         "recovery.enable",
