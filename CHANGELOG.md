@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2687** by @Michaelyklam (closes #2679) — Add a Settings → Preferences toggle backed by `hide_empty_state_suggestions` to hide the three default new-chat suggestion buttons. The empty-state copy stays visible, but the suggestion grid can now be removed from fresh chats to avoid accidental mobile taps.
+
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
