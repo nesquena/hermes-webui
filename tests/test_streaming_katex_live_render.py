@@ -27,7 +27,10 @@ def test_streaming_katex_timer_is_cleared_when_smd_parser_ends():
     assert "if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}" in end_block
 
 
-def test_katex_renderer_still_scans_only_unrendered_nodes_under_container():
+def test_katex_renderer_scans_live_and_settled_unrendered_nodes_under_container():
     assert "function renderKatexBlocks(container){" in UI_JS
     assert "const root=container||document;" in UI_JS
-    assert "root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])')" in UI_JS
+    assert ".katex-block:not([data-rendered]),.katex-inline:not([data-rendered])," in UI_JS
+    assert "equation-block:not([data-rendered]),equation-inline:not([data-rendered])" in UI_JS
+    assert "const tagName=(el.tagName||'').toLowerCase();" in UI_JS
+    assert "const displayMode=el.dataset.katex==='display'||tagName==='equation-block';" in UI_JS

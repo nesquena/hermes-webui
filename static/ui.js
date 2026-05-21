@@ -7228,7 +7228,10 @@ let _katexReady=false;
 
 function renderKatexBlocks(container){
   const root=container||document;
-  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+  const blocks=root.querySelectorAll(
+    '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
+    'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
+  );
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
@@ -7250,7 +7253,8 @@ function renderKatexBlocks(container){
   blocks.forEach(el=>{
     el.dataset.rendered='true';
     const src=el.textContent||'';
-    const displayMode=el.dataset.katex==='display';
+    const tagName=(el.tagName||'').toLowerCase();
+    const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
     try{
       katex.render(src,el,{
         displayMode,
