@@ -1049,6 +1049,9 @@
   .panel-view{display:none;flex:1;overflow:hidden;flex-direction:column;}
   .panel-view.active{display:flex;}
   /* Cron panel */
+  .task-subtabs{display:flex;gap:6px;padding:8px 12px 0;border-bottom:1px solid var(--border);}
+  .task-subtab{flex:1;border:1px solid var(--border);background:var(--surface-subtle);color:var(--muted);border-radius:8px 8px 0 0;padding:6px 8px;font-size:11px;font-weight:650;cursor:pointer;}
+  .task-subtab.active{background:var(--surface);color:var(--accent-text);border-color:var(--border2);}
   .cron-list{flex:1;overflow-y:auto;padding:8px;}
   .cron-item{width:100%;min-width:0;box-sizing:border-box;border-radius:10px;border:1px solid var(--border);margin-bottom:6px;overflow:hidden;transition:border-color .15s,background .15s;background:rgba(255,255,255,.02);cursor:pointer;}
   .cron-item:hover{border-color:var(--border2);}
@@ -1061,6 +1064,9 @@
   .cron-status.disabled{background:rgba(255,255,255,.07);color:var(--muted);}
   .cron-status.error{background:rgba(239,83,80,.12);color:var(--error);}
   .cron-status.attention{background:rgba(245,158,11,.16);color:rgba(245,158,11,.95);}
+  .script-item-desc{padding:0 12px 10px;color:var(--muted);font-size:11px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+  .script-source{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;color:var(--pre-text);font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.55;margin:0;max-height:520px;overflow:auto;padding:12px;white-space:pre;}
+  .script-source code{background:transparent;color:inherit;padding:0;}
   .cron-body{display:none;padding:0 12px 10px;border-top:1px solid var(--border);overflow:hidden;}
   .cron-body.open{display:block;}
   .cron-schedule{font-size:11px;color:var(--muted);margin:8px 0 6px;}

@@ -24,6 +24,9 @@ let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _tasksSubtab = 'jobs'; // 'jobs' | 'scripts'
+let _scriptsList = null; // cached read-only script browser entries
+let _currentScriptDetail = null;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -230,7 +233,7 @@ async function switchPanel(name, opts = {}) {
     });
   }
   // Lazy-load panel data
-  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'tasks') await loadTasksPanel();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -256,6 +259,31 @@ async function switchPanel(name, opts = {}) {
 }
 
 // ── Cron panel ──
+async function loadTasksPanel(animate) {
+  _syncTasksSubtabChrome();
+  if (_tasksSubtab === 'scripts') return loadScripts(animate);
+  return loadCrons(animate);
+}
+
+function switchTasksSubtab(tab) {
+  _tasksSubtab = tab === 'scripts' ? 'scripts' : 'jobs';
+  _clearCronDetail();
+  _currentScriptDetail = null;
+  _syncTasksSubtabChrome();
+  loadTasksPanel(true);
+}
+
+function _syncTasksSubtabChrome() {
+  const jobsBtn = $('taskSubtabJobs');
+  const scriptsBtn = $('taskSubtabScripts');
+  if (jobsBtn) jobsBtn.classList.toggle('active', _tasksSubtab === 'jobs');
+  if (scriptsBtn) scriptsBtn.classList.toggle('active', _tasksSubtab === 'scripts');
+  const newBtn = $('cronNewJobBtn');
+  if (newBtn) newBtn.style.display = _tasksSubtab === 'jobs' ? '' : 'none';
+  const refreshBtn = $('cronRefreshBtn');
+  if (refreshBtn) refreshBtn.setAttribute('onclick', 'loadTasksPanel(true)');
+}
+
 function _isRecurringCronJob(job) {
   const kind = job && job.schedule && job.schedule.kind;
   return kind === 'cron' || kind === 'interval';
@@ -460,6 +488,117 @@ async function loadCrons(animate) {
       refreshBtn.disabled = false;
     }
   }
+}
+
+async function loadScripts(animate) {
+  const box = $('cronList');
+  const refreshBtn = $('cronRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    const data = await api('/api/scripts/list');
+    _scriptsList = Array.isArray(data.scripts) ? data.scripts : [];
+    if (!_scriptsList.length) {
+      box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('scripts_no_scripts') || 'No scripts found in ~/.hermes/scripts or the active profile scripts directory.')}</div>`;
+      _clearScriptDetail();
+      return;
+    }
+    box.innerHTML = '';
+    for (const script of _scriptsList) {
+      const item = document.createElement('div');
+      item.className = 'cron-item script-item';
+      item.id = 'script-' + encodeURIComponent(script.id || script.relative_path || script.name);
+      const scopeLabel = script.scope === 'profile' ? (t('scripts_scope_profile') || 'profile') : (t('scripts_scope_global') || 'global');
+      item.innerHTML = `
+        <div class="cron-header">
+          <span class="cron-agent-badge" title="${esc(t('scripts_subtab') || 'Scripts')}">⌘</span>
+          <span class="cron-name" title="${esc(script.path || script.relative_path || script.name)}">${esc(script.name || script.relative_path)}</span>
+          <span class="cron-profile-badge" title="${esc(script.path || '')}">${esc(scopeLabel)}</span>
+        </div>
+        ${script.description ? `<div class="script-item-desc">${esc(script.description)}</div>` : ''}`;
+      item.onclick = () => openScriptDetail(script.id, item);
+      if (_currentScriptDetail && _currentScriptDetail.id === script.id) item.classList.add('active');
+      box.appendChild(item);
+    }
+    if (_currentScriptDetail) {
+      const refreshed = _scriptsList.find(s => s.id === _currentScriptDetail.id);
+      if (refreshed) _renderScriptDetail(refreshed);
+      else _clearScriptDetail();
+    }
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  } finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+function _clearScriptDetail(){
+  _currentScriptDetail = null;
+  const title = $('taskDetailTitle');
+  const body = $('taskDetailBody');
+  const empty = $('taskDetailEmpty');
+  if (title) title.textContent = '';
+  if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+  if (empty) {
+    empty.style.display = '';
+    const titleEl = empty.querySelector('.main-view-empty-title');
+    if (titleEl) titleEl.textContent = t('scripts_empty_title') || 'Select a script';
+  }
+  _setCronHeaderButtons('empty');
+}
+
+function _renderScriptDetail(script){
+  _currentScriptDetail = script;
+  const title = $('taskDetailTitle');
+  const body = $('taskDetailBody');
+  const empty = $('taskDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = script.name || script.relative_path || (t('scripts_subtab') || 'Script');
+  const scopeLabel = script.scope === 'profile' ? (t('scripts_scope_profile') || 'profile') : (t('scripts_scope_global') || 'global');
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card">
+        <div class="detail-card-title">${esc(t('scripts_detail_title') || 'Script')}</div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('scripts_path_label') || 'Path')}</div><div class="detail-row-value"><code>${esc(script.path || '')}</code></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('scripts_scope_label') || 'Scope')}</div><div class="detail-row-value"><span class="detail-badge active">${esc(scopeLabel)}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('scripts_description_label') || 'Description')}</div><div class="detail-row-value">${esc(script.description || '—')}</div></div>
+      </div>
+      <div class="detail-card" id="scriptDetailSource">
+        <div class="detail-card-title">${esc(t('scripts_source_label') || 'Script')}</div>
+        <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
+      </div>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _setCronHeaderButtons('empty');
+  _loadScriptContent(script);
+}
+
+async function _loadScriptContent(script){
+  const card = $('scriptDetailSource');
+  if (!card || !script) return;
+  try {
+    const data = await api(`/api/scripts/raw?scope=${encodeURIComponent(script.scope)}&path=${encodeURIComponent(script.relative_path)}`);
+    if (!_currentScriptDetail || _currentScriptDetail.id !== script.id) return;
+    const content = data && data.script ? (data.script.content || '') : '';
+    card.innerHTML = `<div class="detail-card-title">${esc(t('scripts_source_label') || 'Script')}</div><pre class="script-source"><code>${esc(content)}</code></pre>`;
+  } catch(e) {
+    card.innerHTML = `<div class="detail-card-title">${esc(t('scripts_source_label') || 'Script')}</div><div style="color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
+}
+
+function openScriptDetail(id, el){
+  const script = _scriptsList ? _scriptsList.find(s => s.id === id) : null;
+  if (!script) return;
+  document.querySelectorAll('.script-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+  _renderScriptDetail(script);
 }
 
 function _cronPanelExpandKey(jobId, suffix){

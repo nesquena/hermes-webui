@@ -597,6 +597,120 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
+_SCRIPT_BROWSER_EXTENSIONS = {".py", ".sh"}
+_SCRIPT_BROWSER_MAX_BYTES = 512 * 1024
+
+
+def _script_browser_roots() -> dict[str, Path]:
+    """Return script roots exposed by the read-only Tasks > Scripts browser."""
+    from api.profiles import get_active_hermes_home
+
+    active_home = Path(get_active_hermes_home()).expanduser().resolve()
+    base_home = active_home.parent.parent if active_home.parent.name == "profiles" else active_home
+    roots: dict[str, Path] = {"global": (base_home / "scripts").resolve()}
+    if active_home != base_home:
+        roots["profile"] = (active_home / "scripts").resolve()
+    return roots
+
+
+def _script_browser_description(path: Path, text: str) -> str:
+    """Extract a short, display-safe description from a Python or shell script."""
+    if path.suffix == ".py":
+        try:
+            import ast
+
+            doc = ast.get_docstring(ast.parse(text))
+            if doc:
+                return " ".join(doc.strip().split())[:240]
+        except Exception:
+            pass
+    lines: list[str] = []
+    for raw in text.splitlines()[:20]:
+        stripped = raw.strip()
+        if not stripped:
+            if lines:
+                break
+            continue
+        if stripped.startswith("#!"):
+            continue
+        if stripped.startswith("#"):
+            lines.append(stripped.lstrip("#").strip())
+            continue
+        break
+    return " ".join(part for part in lines if part)[:240]
+
+
+def _script_browser_entry(root_key: str, root: Path, path: Path, include_content: bool = False) -> dict:
+    text = ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        text = ""
+    rel = path.relative_to(root).as_posix()
+    entry = {
+        "id": f"{root_key}:{rel}",
+        "scope": root_key,
+        "name": path.name,
+        "relative_path": rel,
+        "path": str(path),
+        "extension": path.suffix,
+        "size": path.stat().st_size,
+        "modified": path.stat().st_mtime,
+        "description": _script_browser_description(path, text),
+    }
+    if include_content:
+        entry["content"] = text
+    return entry
+
+
+def _resolve_script_browser_path(scope: str, relative_path: str) -> tuple[str, Path, Path] | None:
+    roots = _script_browser_roots()
+    root = roots.get(scope)
+    if not root:
+        return None
+    rel = str(relative_path or "").replace("\\", "/").lstrip("/")
+    target = (root / rel).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    if target.suffix not in _SCRIPT_BROWSER_EXTENSIONS or not target.exists() or not target.is_file():
+        return None
+    if target.stat().st_size > _SCRIPT_BROWSER_MAX_BYTES:
+        return None
+    return scope, root, target
+
+
+def _handle_scripts_list(handler):
+    scripts: list[dict] = []
+    for scope, root in _script_browser_roots().items():
+        if not root.exists() or not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix not in _SCRIPT_BROWSER_EXTENSIONS:
+                continue
+            try:
+                path.resolve().relative_to(root)
+            except ValueError:
+                continue
+            if path.stat().st_size > _SCRIPT_BROWSER_MAX_BYTES:
+                continue
+            scripts.append(_script_browser_entry(scope, root, path))
+    scripts.sort(key=lambda item: (item["scope"], item["relative_path"].lower()))
+    return j(handler, {"scripts": scripts, "roots": {k: str(v) for k, v in _script_browser_roots().items()}})
+
+
+def _handle_scripts_raw(handler, parsed):
+    qs = parse_qs(parsed.query)
+    scope = qs.get("scope", [""])[0]
+    rel = qs.get("path", [""])[0]
+    resolved = _resolve_script_browser_path(scope, rel)
+    if not resolved:
+        return bad(handler, "Script not found", 404)
+    root_key, root, target = resolved
+    return j(handler, {"script": _script_browser_entry(root_key, root, target, include_content=True)})
+
+
 def _available_cron_profile_names() -> set[str]:
     from api.profiles import list_profiles_api
 
@@ -4396,6 +4510,12 @@ def handle_get(handler, parsed) -> bool:
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
+
+    if parsed.path == "/api/scripts/list":
+        return _handle_scripts_list(handler)
+
+    if parsed.path == "/api/scripts/raw":
+        return _handle_scripts_raw(handler, parsed)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":

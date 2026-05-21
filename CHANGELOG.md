@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2675** by @Michaelyklam (refs #2316) — Add a read-only Scripts subtab to the Tasks panel. The first slice lists `.py` and `.sh` scripts from `~/.hermes/scripts` and the active profile scripts directory, shows docstring/comment-derived descriptions, and opens a source preview behind traversal-safe `/api/scripts/list` and `/api/scripts/raw` endpoints. Edit/run controls remain follow-up scope.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
