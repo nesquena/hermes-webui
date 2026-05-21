@@ -68,6 +68,27 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
     assert "await populateModelDropdown()" not in src
 
 
+def test_boot_primes_model_catalog_without_awaiting_it():
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+
+    ensure_pos = src.index("window._ensureModelDropdownReady=_startBootModelDropdown;")
+    prime_pos = src.index("Promise.resolve(_startBootModelDropdown()).catch(()=>{});", ensure_pos)
+    session_restore_pos = src.index("await renderSessionList();", prime_pos)
+
+    assert ensure_pos < prime_pos < session_restore_pos
+    assert "await _startBootModelDropdown()" not in src
+
+
+def test_failed_boot_model_catalog_prime_is_retryable():
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    start = src.index("const _hydrateBootModelDropdown=()=>populateModelDropdown().then")
+    end = src.index("const _startBootModelDropdown=()=>", start)
+    block = src[start:end]
+
+    assert "window._modelDropdownReady=null;" in block
+    assert "throw e;" in block
+
+
 def test_boot_primes_visible_default_model_without_catalog_fetch():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     default_block_start = src.index("if(s.default_model){")

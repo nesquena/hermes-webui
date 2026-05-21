@@ -1623,7 +1623,10 @@ function applyBotName(){
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
-  }).catch(()=>{});
+  }).catch(e=>{
+    window._modelDropdownReady=null;
+    throw e;
+  });
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
@@ -1633,6 +1636,9 @@ function applyBotName(){
   };
   window._modelDropdownReady=null;
   window._ensureModelDropdownReady=_startBootModelDropdown;
+  setTimeout(()=>{
+    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  },0);
   // Start independent boot fetches without holding the conversation list behind
   // them. The sidebar can render from /api/sessions while workspace/onboarding
   // metadata settles in parallel.

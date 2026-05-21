@@ -6527,10 +6527,13 @@ function _refreshModelDropdownsAfterProviderChange(){
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
     }
-    if(typeof populateModelDropdown==='function'){
-      // Fire-and-forget: don't block the providers panel refresh on a
-      // dropdown rebuild. The composer/Settings dropdowns will catch up
-      // on the very next paint frame.
+    // Fire-and-forget: don't block the providers panel refresh on a
+    // dropdown rebuild. The composer/Settings dropdowns will catch up
+    // on the very next paint frame.
+    if(typeof window._ensureModelDropdownReady==='function'){
+      window._modelDropdownReady=null;
+      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+    }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown()).catch(()=>{});
     }
   }catch(_e){
