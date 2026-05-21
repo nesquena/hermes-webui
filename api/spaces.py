@@ -1913,12 +1913,14 @@ def _restore_diff_summary(target_snapshot: dict[str, Any], current_snapshot: dic
     }
 
 
-def build_agent_context(space_id: str | None) -> str:
-    """Build compact active-space context for Hermes agent prompts.
+def _build_agent_context_unchecked(space_id: str | None) -> str:
+    """Build compact active-space context before prompt-injection preflight.
 
     This intentionally exposes metadata only. Widget renderer/html/script/data
     bodies can contain generated code or sensitive payloads and must stay out of
     chat/system prompts unless a later sandboxed viewer explicitly asks for them.
+    Callers that expose this context to an agent must run the memory-context
+    prompt preflight before returning/injecting it.
     """
     if not space_id or not spaces_enabled():
         return ""
@@ -2040,6 +2042,68 @@ def build_agent_context(space_id: str | None) -> str:
         "do not infer or expose generated widget bodies from this compact context."
     )
     return "\n".join(lines)
+
+
+def _space_current_context_prompt_preflight_receipt(context: str) -> dict[str, Any] | None:
+    """Return metadata-only preflight evidence for active Space context."""
+    if not str(context or "").strip():
+        return None
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight(context, boundary="memory_context")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+def _space_current_context_withheld_context(space_id: str, preflight_receipt: dict[str, Any] | None) -> str:
+    categories: list[str] = []
+    if isinstance(preflight_receipt, dict):
+        for category in preflight_receipt.get("categories") or []:
+            text = str(category or "").strip().lower()
+            if text and re.fullmatch(r"[a-z0-9_:-]{1,80}", text) and text not in categories:
+                categories.append(text)
+    category_text = ", ".join(categories) if categories else "policy"
+    return "\n".join(
+        [
+            "## Active Capy Space",
+            f"id: {validate_space_id(space_id)}",
+            "status: context withheld",
+            f"prompt preflight: blocked memory_context advisory injection ({category_text})",
+            "Use Capy read/list/recovery APIs for metadata inspection before any mutation; raw active-space instructions were not injected.",
+        ]
+    )
+
+
+def _space_current_context_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit", "generated_widget_execution"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:reasoning",
+    )
+
+
+def _space_current_context_after_preflight(space_id: str, context: str, preflight_receipt: dict[str, Any] | None) -> str:
+    if isinstance(preflight_receipt, dict) and preflight_receipt.get("status") != "pass":
+        return _space_current_context_withheld_context(space_id, preflight_receipt)
+    return context
+
+
+def build_agent_context(space_id: str | None) -> str:
+    """Build compact active-space context for Hermes agent prompts after preflight."""
+    if not space_id:
+        return ""
+    context = _build_agent_context_unchecked(space_id)
+    if not context:
+        return ""
+    sid = validate_space_id(space_id)
+    preflight_receipt = _space_current_context_prompt_preflight_receipt(context)
+    return _space_current_context_after_preflight(sid, context, preflight_receipt)
 
 
 def _unique_space_id(base: str) -> str:
@@ -4655,13 +4719,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "context_status": context_status,
             }
         space_id = validate_space_id(current_id)
-        context = build_agent_context(space_id)
+        unchecked_context = _build_agent_context_unchecked(space_id)
+        prompt_preflight = _space_current_context_prompt_preflight_receipt(unchecked_context)
+        context = _space_current_context_after_preflight(space_id, unchecked_context, prompt_preflight)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="context")
         return {
             "ok": True,
             "action": name,
             "active_space_id": space_id,
             "context": context,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_current_context_action_policy_receipt(name, prompt_preflight),
             "output_compaction": _space_current_context_output_compaction(context),
             "context_status": context_status,
             "progress_event": progress_event,
