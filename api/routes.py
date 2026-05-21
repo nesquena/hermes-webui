@@ -3609,6 +3609,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    # ── Auxiliary models (GET/POST) ──
+    if parsed.path == "/api/model/auxiliary":
+        from api.config import get_auxiliary_models
+        return j(handler, get_auxiliary_models())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -4778,6 +4783,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Auxiliary model set (POST) ──
+    if parsed.path == "/api/model/set":
+        scope = str(body.get("scope") or "").strip()
+        task = str(body.get("task") or "").strip()
+        provider = str(body.get("provider") or "auto").strip()
+        model = str(body.get("model") or "").strip()
+        if scope == "auxiliary":
+            from api.config import set_auxiliary_model
+            try:
+                return j(handler, set_auxiliary_model(task, provider, model))
+            except Exception as exc:
+                return bad(handler, str(exc), status=400)
+        if scope == "main":
+            try:
+                return j(handler, set_hermes_default_model(model))
+            except ValueError as exc:
+                return bad(handler, str(exc), status=400)
+        return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":

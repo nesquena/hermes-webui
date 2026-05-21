@@ -992,19 +992,28 @@
               </div>
             </div>
             <div class="settings-field">
-              <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
-              <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
+                <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
+                <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
             <div class="settings-field">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="settingsHideSuggestions" style="width:15px;height:15px;accent-color:var(--accent)">
-                <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
-              </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="settingsHideSuggestions" style="width:15px;height:15px;accent-color:var(--accent)">
+                    <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
+                </label>
+                <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
+                <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>
+                <div style="font-size:11px;color:var(--muted);margin-bottom:10px" data-i18n="settings_desc_auxiliary_models">Side-task routing for vision, compression, title generation, etc. "Auto" uses your main chat model.</div>
+                <div id="auxModelsContainer"></div>
+                <div style="margin-top:8px;display:flex;gap:8px">
+                    <button type="button" id="btnResetAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px" data-i18n="settings_btn_reset_aux_models">Reset all to auto</button>
+                    <button type="button" id="btnApplyAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px;display:none" data-i18n="settings_btn_apply_aux_models">Apply changes</button>
+                </div>
+            </div>
+            <div class="settings-field">
+                <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
               <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="enter">Enter (Shift+Enter for newline)</option>
                 <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>

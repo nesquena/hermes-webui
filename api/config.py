@@ -2174,6 +2174,105 @@ def set_hermes_default_model(model_id: str) -> dict:
     return {"ok": True, "model": persisted_model}
 
 
+# ── Auxiliary model configuration ──────────────────────────────────────────
+
+# Canonical auxiliary task slots. Keep in sync with hermes_cli/config.py
+# DEFAULT_CONFIG["auxiliary"] and hermes_cli/web_server.py _AUX_TASK_SLOTS.
+AUX_TASK_SLOTS: tuple[str, ...] = (
+ "vision",
+ "web_extract",
+ "compression",
+ "session_search",
+ "skills_hub",
+ "approval",
+ "mcp",
+ "title_generation",
+ "curator",
+)
+
+
+def get_auxiliary_models() -> dict:
+    """Return current auxiliary task assignments from config.yaml.
+
+    Shape:
+    {
+        "tasks": [
+            {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
+            ...
+        ],
+        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
+    }
+    """
+    reload_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    main_provider = str(model_cfg.get("provider") or "").strip()
+    main_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+
+    aux_cfg = cfg.get("auxiliary", {})
+    if not isinstance(aux_cfg, dict):
+        aux_cfg = {}
+
+    tasks = []
+    for slot in AUX_TASK_SLOTS:
+        entry = aux_cfg.get(slot, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        tasks.append({
+            "task": slot,
+            "provider": str(entry.get("provider") or "auto").strip(),
+            "model": str(entry.get("model") or "").strip(),
+            "base_url": str(entry.get("base_url") or "").strip(),
+        })
+
+    return {
+        "tasks": tasks,
+        "main": {"provider": main_provider, "model": main_model},
+    }
+
+
+def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
+    """Persist an auxiliary model assignment in config.yaml.
+
+    Special case: task='__reset__' clears all auxiliary slots.
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+
+        if task == "__reset__":
+            # Clear all auxiliary slots
+            config_data.pop("auxiliary", None)
+        else:
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            entry = {"provider": provider or "auto", "model": model or ""}
+            if provider and provider != "auto":
+                # Try to resolve base_url from provider info
+                try:
+                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+                        model
+                    )
+                    entry["model"] = str(resolved_model or model).strip()
+                    entry["provider"] = str(resolved_provider or provider).strip()
+                    if resolved_base_url:
+                        entry["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                    else:
+                        entry["base_url"] = ""
+                except Exception:
+                    entry["provider"] = provider
+                    entry["base_url"] = ""
+            aux_cfg[task] = entry
+            config_data["auxiliary"] = aux_cfg
+
+        _save_yaml_config_file(config_path, config_data)
+
+    reload_config()
+    return {"ok": True, "task": task, "provider": provider, "model": model}
+
+
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
