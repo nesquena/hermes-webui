@@ -6076,6 +6076,13 @@ function renderMessages(options){
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
+  const toolCallAssistantIdxs=new Set();
+  if(Array.isArray(S.toolCalls)){
+    for(const tc of S.toolCalls){
+      if(!tc) continue;
+      toolCallAssistantIdxs.add(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1);
+    }
+  }
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -6501,7 +6508,7 @@ function renderMessages(options){
       const hasTurnUsage=!!msg._turnUsage;
       const compactActivityForMessage=isSimplifiedToolCalling()&&(
         assistantThinking.has(mi)||
-        (S.toolCalls||[]).some(tc=>tc&&(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1)===mi)
+        toolCallAssistantIdxs.has(mi)
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
