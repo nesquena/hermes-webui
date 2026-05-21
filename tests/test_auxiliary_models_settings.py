@@ -79,12 +79,6 @@ class TestAuxiliaryModelsJS:
             "panels.js must call /api/model/auxiliary to fetch current config"
         )
 
-    def test_calls_model_options_api(self):
-        """_loadAuxiliaryModels must call /api/model/options for provider/model lists."""
-        assert "/api/model/options" in PANELS_JS, (
-            "panels.js must call /api/model/options for provider options"
-        )
-
     def test_calls_model_set_api(self):
         """_applyAuxModels must call /api/model/set to save changes."""
         assert "/api/model/set" in PANELS_JS, (

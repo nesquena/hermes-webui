@@ -5711,11 +5711,11 @@ async function loadSettingsPanel(){
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }
- modelSel.addEventListener('change',_markSettingsDirty,{once:false});
- }
- // Auxiliary models — load task assignments and provider/model options
- _loadAuxiliaryModels();
- // Send key preference
+      modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
+    // Auxiliary models — load task assignments and provider/model options
+    _loadAuxiliaryModels();
+    // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // Language preference — populate from LOCALES bundle

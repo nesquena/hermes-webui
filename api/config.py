@@ -2242,28 +2242,33 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
         config_data = _load_yaml_config_file(config_path)
 
         if task == "__reset__":
-            # Clear all auxiliary slots
-            config_data.pop("auxiliary", None)
+            # Per-slot reset: set each slot to auto, preserving extra fields
+            # (timeout, extra_body, api_key, base_url, download_timeout, etc.)
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            for slot in AUX_TASK_SLOTS:
+                slot_cfg = aux_cfg.get(slot, {})
+                if not isinstance(slot_cfg, dict):
+                    slot_cfg = {}
+                slot_cfg["provider"] = "auto"
+                slot_cfg["model"] = ""
+                aux_cfg[slot] = slot_cfg
+            config_data["auxiliary"] = aux_cfg
         else:
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
             entry = {"provider": provider or "auto", "model": model or ""}
-            if provider and provider != "auto":
-                # Try to resolve base_url from provider info
+            if provider and (provider.startswith("custom:") or provider == "custom"):
+                # Resolve base_url only for custom providers — never silently
+                # rewrite the user's chosen provider from the dropdown.
                 try:
-                    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
-                        model
-                    )
-                    entry["model"] = str(resolved_model or model).strip()
-                    entry["provider"] = str(resolved_provider or provider).strip()
+                    _, _, resolved_base_url = resolve_model_provider(model)
                     if resolved_base_url:
                         entry["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                    else:
-                        entry["base_url"] = ""
                 except Exception:
-                    entry["provider"] = provider
-                    entry["base_url"] = ""
+                    pass
             aux_cfg[task] = entry
             config_data["auxiliary"] = aux_cfg
 
