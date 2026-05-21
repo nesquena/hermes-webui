@@ -8009,12 +8009,13 @@ def _module_repair_event_summary(event: dict[str, Any], module_id: str | None = 
         return None
     if _context_value(event.get("event_type"), 120) != "module.repair.queued":
         return None
-    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    raw_details = event.get("details")
+    details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
     mid = _public_module_id_summary(details.get("module_id"))
     if not mid or mid == "[REDACTED]" or (module_id and mid != module_id):
         return None
     payload_summary = _space_repair_payload_summary(details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}, max_depth=0)
-    return {
+    summary = {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "module_id": mid,
@@ -8024,6 +8025,15 @@ def _module_repair_event_summary(event: dict[str, Any], module_id: str | None = 
         "payload_summary": payload_summary,
         "created_at": _space_repair_created_at(event.get("created_at")),
     }
+    raw_prompt_preflight = details.get("prompt_preflight")
+    prompt_preflight = raw_prompt_preflight if isinstance(raw_prompt_preflight, dict) else None
+    if prompt_preflight:
+        summary["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(prompt_preflight)
+    raw_autonomy_policy = details.get("autonomy_policy")
+    autonomy_policy = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else None
+    if autonomy_policy:
+        summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
+    return summary
 
 
 def list_recovery_module_repair_events(module_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -8067,23 +8077,30 @@ def queue_recovery_module_repair_event(
         raise ValueError("payload must be an object")
     module = read_recovery_module(mid)
     name = "agent.repair"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Module repair")
+    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.module.repair.queue", preflight_receipt)
     prompt_preview = _space_repair_text_summary(prompt, 1000)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
+    event_details = {
+        "module_id": _public_module_id_summary(mid),
+        "event_name": name,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
+        "session_id": _space_repair_text_summary(session_id, 120),
+        "status": "queued",
+    }
+    if preflight_receipt:
+        event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        event_details["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
     event_id = _record_event(
         _RECOVERY_MODULE_EVENT_SPACE_ID,
         "module.repair.queued",
-        {
-            "module_id": _public_module_id_summary(mid),
-            "event_name": name,
-            "prompt_preview": prompt_preview,
-            "payload_summary": payload_summary,
-            "session_id": _space_repair_text_summary(session_id, 120),
-            "status": "queued",
-        },
+        event_details,
         snapshot=_module_summary(module),
     )
     progress_event = _record_space_repair_progress_event(_RECOVERY_MODULE_PROGRESS_SPACE_ID)
-    return {
+    response = {
         "queued": True,
         "status": "queued",
         "module_id": _public_module_id_summary(mid),
@@ -8093,6 +8110,11 @@ def queue_recovery_module_repair_event(
         "payload_summary": payload_summary,
         "progress_event": progress_event,
     }
+    if preflight_receipt:
+        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    if autonomy_policy_receipt:
+        response["autonomy_policy"] = copy.deepcopy(autonomy_policy_receipt)
+    return response
 
 
 def _prompt_preflight_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str, Any]:
