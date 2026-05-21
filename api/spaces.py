@@ -6286,6 +6286,31 @@ def _space_agent_import_widget_ids(widget_files: dict[str, str]) -> dict[str, st
     return assigned
 
 
+def _space_agent_import_prompt_preflight_receipt(instructions: str) -> dict[str, Any] | None:
+    """Preflight imported active-Space instructions before persistence."""
+
+    text = str(instructions or "").strip()
+    if not text or text == "[REDACTED]":
+        return None
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight(text, boundary="active_space_instructions")
+    if receipt.get("status") != "pass":
+        raise ValueError("Space Agent import prompt preflight blocked")
+    return receipt
+
+
+def _space_agent_import_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit", "generated_widget_execution"],
+        prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "pass",
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -6316,7 +6341,12 @@ def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) 
     return warnings
 
 
-def import_space_agent_package(package: dict[str, Any], *, space_id: str | None = None) -> dict[str, Any]:
+def import_space_agent_package(
+    package: dict[str, Any],
+    *,
+    space_id: str | None = None,
+    action: str = "space.agent.import",
+) -> dict[str, Any]:
     """Import a Space Agent space.yaml/widgets YAML or ZIP package safely.
 
     This compatibility slice intentionally imports only metadata and quarantine
@@ -6339,6 +6369,8 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
         space_doc.get("agent_instructions") or space_doc.get("instructions") or space_doc.get("prompt") or "",
         package_tokens=True,
     )
+    preflight_receipt = _space_agent_import_prompt_preflight_receipt(instructions)
+    autonomy_policy_receipt = _space_agent_import_action_policy_receipt(action, preflight_receipt)
     base_id = _space_agent_export_identifier(space_doc.get("space_id") or space_doc.get("id") or name, "imported-space-agent-space")
     if space_id:
         base_id = _space_agent_export_identifier(space_id, "imported-space-agent-space")
@@ -6368,13 +6400,17 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
         "space.imported.space_agent",
         {"format": source_label, "widget_count": len(imported_widgets), "status": "metadata-only"},
     )
-    return {
+    response = {
         "imported": True,
         "source": source_label,
         "space": read_space_detail(created["space_id"]),
         "imported_widgets": imported_widgets,
         "warnings": warnings,
+        "autonomy_policy": autonomy_policy_receipt,
     }
+    if preflight_receipt:
+        response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
+    return response
 
 
 def _dump_yaml_mapping(payload: dict[str, Any]) -> str:

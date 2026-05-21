@@ -735,17 +735,20 @@ Recent completed slices:
 - `feat(spaces): use active space for revision tool aliases`
   - Added `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` aliases so Hermes-style tool calls can list and restore revision snapshots from the active Space without raw generated bodies.
   - Validation at completion: focused active-space rollback adapter test passed, full Spaces foundation suite passed (`96 passed`), `py_compile` and `git diff --check` passed.
+- `feat: preflight Space Agent imports`
+  - Added active Space instruction prompt-preflight to Space Agent YAML/ZIP imports so role-override/system-prompt-exfiltration instructions are blocked before any Space/widget persistence.
+  - Added metadata-only prompt-preflight and action-policy receipts for successful imports, including creator-commit/generated-widget-execution gates and `hint:reasoning` routing evidence without echoing raw active instructions.
 
 Last known validation bundle:
 
-- RED check for source positional helper args: new regression failed as expected before implementation with `Invalid space_id` because source-style positional `args` were not resolved.
-- Focused source positional helper regression: passed (`1 passed`).
-- Focused adapter regression set: passed (`3 passed`).
-- Full Spaces foundation suite: passed (`134 passed`).
-- `py_compile api/spaces.py tests/test_spaces_foundation.py`: passed.
+- RED check for hostile Space Agent import instructions: new regression failed as expected before implementation with `DID NOT RAISE <class 'ValueError'>` because imports persisted active instructions without preflight.
+- Focused hostile-import regression and safe import receipt regression: passed (`2 passed`).
+- Focused Space Agent import regression set: passed (`10 passed, 494 deselected`).
+- Full Spaces foundation suite: passed (`504 passed`).
+- `py_compile api/spaces.py`: passed.
 - `git diff --check`: passed.
-- Browser QA: mock/status screenshot page rendered the positional helper slice and validation status, `window.__harnessErrors` was empty, and the visible leak check was clean. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c9cf074201a24679aeb9a7a01f8dc01e.png`.
-- WebUI local/tailnet health: local `/health` returned OK on attempt 2 after LaunchAgent restart, tailnet `/health` returned OK, gateway service was loaded/running, and Tailscale Serve still points `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787`.
+- Browser/Visual QA: file-harness rendered metadata-only Space Agent import policy receipts using the checked-out Spaces CSS, showed balanced hierarchy/spacing/alignment, and visible leak checks found no raw prompt, hostile instruction, secret, renderer, API auth, or script markers. Screenshot artifact: `/tmp/capy-space-agent-import-policy-qa.png`.
+- WebUI local/tailnet health: local `/health` returned OK after LaunchAgent restart, tailnet `/health` returned OK, Hermes gateway service `ai.hermes.gateway` was loaded/running, and Tailscale Serve still points `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787`.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 
