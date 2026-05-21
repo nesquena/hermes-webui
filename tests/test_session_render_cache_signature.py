@@ -23,9 +23,12 @@ def _function_body(src: str, name: str) -> str:
 
 def test_session_html_cache_uses_message_signature_not_count_only():
     render = _function_body(UI_JS, "renderMessages")
-    assert "const cacheSignature=_messageRenderCacheSignature(S.messages, renderWindowSize);" in render
+    assert "const cacheEligible=!!(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi);" in render
+    assert "const cacheSignature=cacheEligible?_messageRenderCacheSignature(S.messages, renderWindowSize):null;" in render
+    assert "if(cacheEligible)" in render
     assert "cached.signature===cacheSignature" in render
     assert "signature:cacheSignature" in render
+    assert "if(sid&&!hasTransientTranscriptUi&&cacheSignature)" in render
     assert "cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize)" not in render
 
 

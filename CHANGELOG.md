@@ -8,6 +8,8 @@
 - Prevent stale chat HTML from being reused after session switches when the
   message count stays the same but the visible transcript content or compression
   anchor changes.
+- Avoid recomputing the session HTML cache signature during in-session renders
+  where the cache cannot be used, reducing long-transcript chat UI stalls.
 
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)

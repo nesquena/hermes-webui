@@ -5755,7 +5755,8 @@ function renderMessages(options){
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
   );
-  const cacheSignature=_messageRenderCacheSignature(S.messages, renderWindowSize);
+  const cacheEligible=!!(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi);
+  const cacheSignature=cacheEligible?_messageRenderCacheSignature(S.messages, renderWindowSize):null;
 
   // Fast path: switching back to a previously rendered session with same count.
   // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
@@ -5765,7 +5766,7 @@ function renderMessages(options){
   // Also skip cache for transient transcript cards such as /compress and
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+  if(cacheEligible){
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===cacheSignature){
       inner.innerHTML=cached.html;
@@ -6374,7 +6375,7 @@ function renderMessages(options){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid&&!hasTransientTranscriptUi){
+  if(sid&&!hasTransientTranscriptUi&&cacheSignature){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
