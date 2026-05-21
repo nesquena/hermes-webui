@@ -10951,6 +10951,13 @@ def _handle_skill_toggle(handler, body):
     name = body["name"].strip()
     enabled = bool(body["enabled"])
 
+    # Validate the skill exists in the filesystem
+    skills_dir = _active_skills_dir()
+    search_dirs = _active_skill_search_dirs(skills_dir)
+    skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
+    if not skill_md:
+        return bad(handler, f"Skill '{name}' not found", 404)
+
     from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file, reload_config
 
     config_path = _get_config_path()
