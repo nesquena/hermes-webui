@@ -2462,6 +2462,62 @@ def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_even
     assert "renderer" not in serialized
 
 
+def test_recovery_enable_disable_primitives_return_metadata_only_action_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "recovery-policy-lab", "name": "Recovery Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-panel",
+            "kind": "html",
+            "title": "Broken Panel",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "broken-module",
+            "name": "Broken Module",
+            "source": "SECRET_VALUE_DO_NOT_LEAK",
+            "html": "<script>stored()</script>",
+        }
+    )
+
+    results = [
+        (spaces.disable_space_for_recovery(created["space_id"], reason="renderer SECRET_VALUE_DO_NOT_LEAK"), "space.recovery.disable"),
+        (spaces.enable_space_for_recovery(created["space_id"], reason="safe after renderer cleanup"), "space.recovery.enable"),
+        (spaces.disable_widget_for_recovery(created["space_id"], "broken-panel", reason="renderer SECRET_VALUE_DO_NOT_LEAK"), "space.widget.recovery.disable"),
+        (spaces.enable_widget_for_recovery(created["space_id"], "broken-panel", reason="safe after renderer cleanup"), "space.widget.recovery.enable"),
+        (spaces.disable_module_for_recovery("broken-module", reason="renderer SECRET_VALUE_DO_NOT_LEAK"), "space.module.recovery.disable"),
+        (spaces.enable_module_for_recovery("broken-module", reason="safe after renderer cleanup"), "space.module.recovery.enable"),
+    ]
+    serialized = json.dumps([result for result, _ in results], sort_keys=True).lower()
+
+    for result, action in results:
+        policy = result["autonomy_policy"]
+        assert policy["action"] == action
+        assert policy["approval_required"] is True
+        assert policy["approval_gates"] == ["generated_widget_execution"]
+        assert policy["prompt_preflight_status"] == "required"
+        assert policy["model_route_hint"] == "hint:reasoning"
+        assert policy["metadata_only"] is True
+        assert policy["local_only"] is True
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert '"source":' not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert '"body":' not in serialized
+    assert '"raw_prompt":' not in serialized
+    assert '"token":' not in serialized
+    assert '"auth":' not in serialized
+    assert "bearer" not in serialized
+    assert "credential" not in serialized
+
+
 def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-toggle-widgets-lab", "name": "Source Toggle Widgets Lab"})

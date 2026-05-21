@@ -513,6 +513,17 @@ def _space_repair_action_policy_receipt(action: str, preflight_receipt: dict[str
     )
 
 
+def _recovery_toggle_action_policy_receipt(action: str) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["generated_widget_execution"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -7791,6 +7802,7 @@ def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, 
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
         "progress_event": progress_event,
+        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.recovery.disable"),
     }
 
 
@@ -7813,6 +7825,7 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
         "progress_event": progress_event,
+        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.recovery.enable"),
     }
 
 
@@ -7846,6 +7859,7 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
         "progress_event": progress_event,
+        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.widget.recovery.disable"),
     }
 
 
@@ -7874,6 +7888,7 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
         "progress_event": progress_event,
+        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.widget.recovery.enable"),
     }
 
 
@@ -8016,6 +8031,7 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="disable",
     )
+    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt("space.module.recovery.disable")
     return summary
 
 
@@ -8042,6 +8058,7 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="enable",
     )
+    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt("space.module.recovery.enable")
     return summary
 
 
