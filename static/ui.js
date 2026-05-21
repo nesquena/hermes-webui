@@ -5984,6 +5984,18 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
+  const vis=S.messages.filter(m=>{
+    if(!m||!m.role||m.role==='tool')return false;
+    if(_isContextCompactionMessage(m)) return false;
+    if(_isPreservedCompressionTaskListMessage(m)) return false;
+    if(m.role==='assistant'){
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+    }
+    return m._statusCard||msgContent(m)||m.attachments?.length;
+  });
+  $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
@@ -6008,7 +6020,6 @@ function renderMessages(options){
     if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
-  $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
   // Show a top affordance when earlier transcript content exists either in
   // memory (DOM windowing) or on the server (paginated session fetch).
   // Prefer expanding the local render window first so a fully loaded long
