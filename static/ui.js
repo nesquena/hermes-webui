@@ -6901,20 +6901,16 @@ async function regenerateResponse(btn) {
 }
 
 function postProcessRenderedMessages(container) {
-  const root=container||$('msgInner')||document;
-  if(!root||!root.querySelector) return;
-  if(root.querySelector('pre > code')){
-    highlightCode(root);
-    addCopyButtons(root);
-  }
-  if(root.querySelector('.diff-inline-load:not([data-loaded])')) loadDiffInline(root);
-  if(root.querySelector('.csv-inline-load:not([data-loaded])')) loadCsvInline(root);
-  if(root.querySelector('.excalidraw-inline-load:not([data-loaded])')) loadExcalidrawInline(root);
-  if(root.querySelector('.pdf-preview-load:not([data-loaded])')) loadPdfInline(root);
-  if(root.querySelector('.html-preview-load:not([data-loaded])')) loadHtmlInline(root);
-  if(root.querySelector('.mermaid-block:not([data-rendered])')) renderMermaidBlocks(root);
-  if(root.querySelector('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])')) renderKatexBlocks(root);
-  if(root.querySelector('.code-tree-wrap:not([data-tree-init])')) initTreeViews(root);
+  highlightCode(container);
+  addCopyButtons(container);
+  loadDiffInline(container);
+  loadCsvInline(container);
+  loadExcalidrawInline(container);
+  loadPdfInline(container);
+  loadHtmlInline(container);
+  renderMermaidBlocks(container);
+  renderKatexBlocks(container);
+  initTreeViews(container);
 }
 
 function highlightCode(container) {
