@@ -940,6 +940,11 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    _get_config_path,
+    _load_yaml_config_file,
+    _save_yaml_config_file,
+    reload_config,
+    _cfg_lock,
 )
 from api.helpers import (
     require,
@@ -10963,8 +10968,6 @@ def _handle_skill_toggle(handler, body):
     skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
-
-    from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file, reload_config, _cfg_lock
 
     config_path = _get_config_path()
     with _cfg_lock:
