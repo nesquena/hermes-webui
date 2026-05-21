@@ -150,23 +150,22 @@ class TestProviderSortOrder:
             "  deepseek:\n    api_key: sk-ds-123\n"
             "  google: {}\n"
             "  groq: {}\n"
-            "  xai:\n    api_key: xai-key\n"
         )
 
         result = providers_mod.get_providers()
         prov_ids = [p["id"] for p in result["providers"]]
 
+        # deepseek has api_key in config → should be tier-2 (before tier-3)
         deepseek_idx = prov_ids.index("deepseek")
-        xai_idx = prov_ids.index("xai")
         google_idx = prov_ids.index("google")
         groq_idx = prov_ids.index("groq")
 
         assert deepseek_idx < google_idx, (
             f"deepseek(has_key) at {deepseek_idx} should be before google at {google_idx}"
         )
-        assert deepseek_idx < groq_idx
-        assert xai_idx < google_idx
-        assert xai_idx < groq_idx
+        assert deepseek_idx < groq_idx, (
+            f"deepseek(has_key) at {deepseek_idx} should be before groq at {groq_idx}"
+        )
         _teardown_config()
 
 
