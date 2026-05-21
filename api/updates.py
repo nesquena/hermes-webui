@@ -435,9 +435,23 @@ def _check_repo(path, name):
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags'], path, timeout=15)
     if not fetch_ok:
-        return {'name': name, 'behind': 0, 'error': 'fetch failed'}
+        release_info = _check_repo_release(path, name)
+        message = 'fetch failed'
+        if fetch_out:
+            message = f'{message}: {fetch_out}'
+        if release_info is not None:
+            release_info = dict(release_info)
+            release_info['error'] = message
+            release_info['stale_check'] = True
+            return release_info
+        return {
+            'name': name,
+            'behind': None,
+            'error': message,
+            'stale_check': True,
+        }
 
     release_info = _check_repo_release(path, name)
     if release_info is not None:

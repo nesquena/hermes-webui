@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Manual and background update checks no longer report “Up to date” when the underlying git fetch fails. The WebUI now surfaces the fetch error, keeps any locally-known release gap visible when tags are already present, and marks the result as stale so operators know the check could not fully refresh upstream refs.
 
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 

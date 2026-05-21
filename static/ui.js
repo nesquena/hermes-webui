@@ -4295,6 +4295,11 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _formatUpdateCheckError(label,info){
+  if(!info||!info.error) return null;
+  const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
+  return detail ? `${label}: ${detail}` : label;
+}
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
   try{

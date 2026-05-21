@@ -6568,6 +6568,14 @@ async function checkUpdatesNow(){
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
+      const errorParts=[];
+      const formatUpdateError=(typeof _formatUpdateCheckError==='function')
+        ? _formatUpdateCheckError
+        : ((label,info)=>info&&info.error?label:null);
+      const webuiError=formatUpdateError('WebUI',data.webui);
+      const agentError=formatUpdateError('Agent',data.agent);
+      if(webuiError) errorParts.push(webuiError);
+      if(agentError) errorParts.push(agentError);
       const parts=[];
       const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
         ? _formatUpdateTargetStatus
@@ -6580,6 +6588,8 @@ async function checkUpdatesNow(){
         if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else if(errorParts.length){
+        if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
