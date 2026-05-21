@@ -6539,6 +6539,92 @@ def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_data_set_tool_records_metadata_only_progress_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-progress", "name": "Shared Data Progress"})
+
+    result = spaces.run_space_tool(
+        "space.data.set",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "value": {
+                "title": "Safe shared data",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "metadata": {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    status = progress_status(space_id=created["space_id"])
+    stored = progress_events_log_path().read_text(encoding="utf-8").lower()
+    serialized = json.dumps({"result": result, "status": status}, sort_keys=True).lower()
+
+    assert result["progress_event"]["stored"] is True
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "shared-slot.set:shared-data-progress"
+    assert result["progress_event"]["space_id"] == created["space_id"]
+    assert status["recent_event_count"] == 1
+    assert status["recent_family_counts"] == {"tool": 1}
+    assert status["recent_events"][0]["run_id"] == "shared-slot.set:shared-data-progress"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
+def test_space_data_delete_tool_records_metadata_only_progress_event(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-delete-progress", "name": "Shared Data Delete Progress"})
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {"title": "Safe shared data", "renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    result = spaces.run_space_tool(
+        "space.data.delete",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "renderer": "<script>deleteBad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    from api.capy_progress import progress_events_log_path, progress_status
+
+    status = progress_status(space_id=created["space_id"])
+    stored = progress_events_log_path().read_text(encoding="utf-8").lower()
+    serialized = json.dumps({"result": result, "status": status}, sort_keys=True).lower()
+
+    assert result["progress_event"]["stored"] is True
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "shared-slot.delete:shared-data-delete-progress"
+    assert result["progress_event"]["space_id"] == created["space_id"]
+    assert status["recent_event_count"] == 1
+    assert status["recent_family_counts"] == {"tool": 1}
+    assert status["recent_events"][0]["run_id"] == "shared-slot.delete:shared-data-delete-progress"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
 def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-lab", "name": "Shared Data Lab"})

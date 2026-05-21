@@ -117,6 +117,7 @@ Delivered:
 - Individual Browser Surface demo smoke runs now emit metadata-only `run.started` / `run.completed` / `run.failed` progress events under safe `space-demo:<demo>` run ids, so the product progress stream reflects targeted browser parity smokes without storing raw browser output, prompts, widget bodies, renderer/source fields, exception text, or credentials.
 - Source-style `space.spaces.repairLayout` now emits metadata-only `tool.completed` progress events with Space-scoped run ids and fallback-safe receipts, giving the progress stream its first direct layout-repair producer without exposing renderer/source/API-auth fields, prompts, script markers, or exception text.
 - Creator-loop sandbox previews now emit metadata-only `tool.completed` progress events keyed by their opaque preview receipt ids, so the product progress stream reflects creator preview activity before commit without storing raw prompts, generated widget bodies, renderer/source fields, API-auth data, script markers, or credentials.
+- Shared data slot set/delete tool actions now emit metadata-only `tool.completed` progress events using safe `shared-slot.*` run ids, so Space cooperation/data handoff activity appears in Space-scoped progress without exposing slot values, renderer/source fields, API-auth fields, prompts, or credentials.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.

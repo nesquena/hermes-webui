@@ -5150,7 +5150,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
-        return {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.set")
+        return {"ok": True, "action": name, **result, "progress_event": progress_event}
     if name in {"space.data.list", "space.current.data.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "items": list_shared_data_slots(space_id)}
@@ -5161,7 +5162,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.data.delete", "space.current.data.delete"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_shared_data_slot(space_id, data.get("key"))
-        return {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.delete")
+        return {"ok": True, "action": name, **result, "progress_event": progress_event}
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
@@ -8337,7 +8339,16 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     """Best-effort metadata-only progress producer for Space tool receipts."""
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
-    if safe_prefix not in {"context", "repair", "recovery.disable", "recovery.enable", "save-meta", "save-layout"}:
+    if safe_prefix not in {
+        "context",
+        "repair",
+        "recovery.disable",
+        "recovery.enable",
+        "save-meta",
+        "save-layout",
+        "shared-slot.set",
+        "shared-slot.delete",
+    }:
         safe_prefix = "tool"
     run_id = f"{safe_prefix}:{sid}"
     try:

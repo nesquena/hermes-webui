@@ -88,7 +88,7 @@ Next checkpoint emphasis:
 1. Prompt-preflight + advisory relevant-memory injection into source/context/agent boundaries; creator preview/commit now have metadata-only receipts.
 2. Broader compaction producers beyond the run-all demo receipt for long creator/tool/subagent/browser outputs.
 3. Broader source-refresh scheduling/fetcher coverage after the metadata-only local knowledge bridge.
-4. Broader structured progress producers for real long-running browser/development/repair flows; Research Harness progress updates, creator preview receipts, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, demo-suite run events, individual Browser Surface smoke events, and source-style layout-repair actions now emit the first workflow/gate/ingest/run/browser/repair progress events and Space detail can inspect Space-scoped streams.
+4. Broader structured progress producers for real long-running browser/development/repair flows; Research Harness progress updates, creator preview receipts, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, demo-suite run events, individual Browser Surface smoke events, source-style layout-repair actions, and shared data slot set/delete actions now emit the first workflow/gate/ingest/run/browser/repair/cooperation progress events and Space detail can inspect Space-scoped streams.
 5. Safe admin/recovery, rollback/time-travel, and sandbox/postMessage contracts remain blockers before richer generated widgets expand.
 6. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, security, and context-layer status.
 
