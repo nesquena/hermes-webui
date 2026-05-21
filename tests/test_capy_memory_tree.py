@@ -18,6 +18,7 @@ from api.capy_memory import (
     memory_tree_db_path,
     relevant_memory_for_space,
     register_source_reference,
+    queue_due_source_refresh_jobs,
     run_source_refresh_jobs,
     search_memory,
 )
@@ -1052,6 +1053,209 @@ def test_run_source_refresh_jobs_default_fetcher_ignores_meta_like_tags_inside_u
     assert "raw script body" not in serialized
     assert "metadata summary" not in serialized
 
+
+
+def test_queue_due_source_refresh_jobs_requeues_completed_stale_sources_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "stale-remote-docs",
+        "title": "Stale Remote Docs",
+        "origin_uri": "https://example.test/docs/stale?api_key=***#raw-prompt",
+        "refresh_interval_seconds": 60,
+        "source": "renderer body should not be stored",
+    })
+    stale_checked_at = "2026-05-20T10:00:00+00:00"
+    fresh_now = "2026-05-20T10:02:30+00:00"
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'completed', attempts = 2, leased_until = ?, last_error = ?, updated_at = ? WHERE job_id = ?",
+            ("SECRET_VALUE_DO_NOT_LEAK", "https://user:pass@example.test/raw-prompt", stale_checked_at, receipt["job_id"]),
+        )
+        conn.execute(
+            "UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, last_error = ?, updated_at = ? WHERE source_id = ?",
+            (stale_checked_at, "SECRET_VALUE_DO_NOT_LEAK raw prompt", stale_checked_at, "stale-remote-docs"),
+        )
+
+    queued = queue_due_source_refresh_jobs(limit=5, now=fresh_now)
+    jobs = list_source_refresh_jobs(limit=5)
+    status = memory_status()
+    serialized = json.dumps({"queued": queued, "jobs": jobs, "status": status}, sort_keys=True).lower()
+
+    assert queued == {
+        "local_only": True,
+        "metadata_only": True,
+        "limit": 5,
+        "queued": 1,
+        "jobs": [
+            {
+                "job_id": receipt["job_id"],
+                "source_id": "stale-remote-docs",
+                "status": "pending",
+                "origin_uri": "https://example.test/docs/stale",
+                "refresh_interval_seconds": 60,
+                "due": True,
+            }
+        ],
+    }
+    assert jobs["jobs"][0]["status"] == "pending"
+    assert status["refresh_job_count"] == 1
+    assert status["stale_source_count"] == 1
+    for unsafe in ("secret_value_do_not_leak", "api_key", "raw-prompt", "user:pass", "renderer"):
+        assert unsafe not in serialized
+
+
+def test_run_source_refresh_jobs_auto_queues_due_completed_sources_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "due-refresh-docs",
+        "title": "Due Refresh Docs",
+        "origin_uri": "https://example.test/docs/due?api_key=***#raw-prompt",
+        "refresh_interval_seconds": 60,
+    })
+    stale_checked_at = "2026-05-20T10:00:00+00:00"
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'completed', attempts = 1, updated_at = ? WHERE job_id = ?",
+            (stale_checked_at, receipt["job_id"]),
+        )
+        conn.execute(
+            "UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, updated_at = ? WHERE source_id = ?",
+            (stale_checked_at, stale_checked_at, "due-refresh-docs"),
+        )
+    calls = []
+
+    def fetcher(**payload):
+        calls.append(payload)
+        return {
+            "metadata_only": True,
+            "title": "Due Refresh Docs",
+            "summary": "Safe advisory due refresh summary for scheduled Memory Tree freshness.",
+        }
+
+    monkeypatch.setattr(capy_memory, "_now_iso", lambda: "2026-05-20T10:02:30+00:00")
+
+    result = run_source_refresh_jobs(limit=1, fetcher=fetcher)
+    search = search_memory("scheduled Memory Tree freshness", limit=5)
+
+    assert calls == [{"source_id": "due-refresh-docs", "origin_uri": "https://example.test/docs/due"}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["source_id"] == "due-refresh-docs"
+
+
+def test_queue_due_source_refresh_jobs_scans_past_fresh_terminal_rows_to_limit_due_jobs(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    weekly = register_source_reference({
+        "source_id": "weekly-docs",
+        "title": "Weekly Docs",
+        "origin_uri": "https://example.test/docs/weekly",
+        "refresh_interval_seconds": 604800,
+    })
+    minutely = register_source_reference({
+        "source_id": "minutely-docs",
+        "title": "Minutely Docs",
+        "origin_uri": "https://example.test/docs/minutely",
+        "refresh_interval_seconds": 60,
+    })
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute("UPDATE jobs SET status = 'completed', updated_at = ? WHERE job_id = ?", ("2026-05-20T09:00:00+00:00", weekly["job_id"]))
+        conn.execute("UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, updated_at = ? WHERE source_id = ?", ("2026-05-20T09:00:00+00:00", "2026-05-20T09:00:00+00:00", "weekly-docs"))
+        conn.execute("UPDATE jobs SET status = 'completed', updated_at = ? WHERE job_id = ?", ("2026-05-20T10:08:00+00:00", minutely["job_id"]))
+        conn.execute("UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, updated_at = ? WHERE source_id = ?", ("2026-05-20T10:08:00+00:00", "2026-05-20T10:08:00+00:00", "minutely-docs"))
+
+    queued = queue_due_source_refresh_jobs(limit=1, now="2026-05-20T10:10:00+00:00")
+
+    assert queued["queued"] == 1
+    assert queued["jobs"][0]["source_id"] == "minutely-docs"
+
+
+def test_queue_due_source_refresh_jobs_uses_authoritative_source_row_and_sanitizes_origin_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "host-marker-docs",
+        "title": "Host Marker Docs",
+        "origin_uri": "https://api-key-renderer.example/docs?api_key=***#raw-prompt",
+        "refresh_interval_seconds": 60,
+    })
+    stale_checked_at = "2026-05-20T10:00:00+00:00"
+    corrupt_payload = {
+        "source_id": "wrong-secret-source",
+        "origin_uri": "https://wrong-renderer.example/raw-prompt?api_key=***",
+        "refresh_interval_seconds": 60,
+    }
+    with sqlite3.connect(memory_tree_db_path()) as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'completed', payload_json = ?, updated_at = ? WHERE job_id = ?",
+            (json.dumps(corrupt_payload), stale_checked_at, receipt["job_id"]),
+        )
+        conn.execute(
+            "UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, updated_at = ? WHERE source_id = ?",
+            (stale_checked_at, stale_checked_at, "host-marker-docs"),
+        )
+
+    queued = queue_due_source_refresh_jobs(limit=1, now="2026-05-20T10:02:30+00:00")
+    serialized = json.dumps(queued, sort_keys=True).lower()
+
+    assert queued["queued"] == 1
+    assert queued["jobs"][0]["source_id"] == "host-marker-docs"
+    assert queued["jobs"][0]["origin_uri"] == "capy-memory://host-marker-docs"
+    assert "wrong-secret-source" not in serialized
+    for unsafe in ("api_key", "api-key", "renderer", "raw-prompt", "secret"):
+        assert unsafe not in serialized
+
+
+def test_queue_due_source_refresh_jobs_queues_due_jobs_across_large_candidate_batches(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+    receipts = []
+    for idx in range(102):
+        interval = 60 if idx in {1, 101} else 604800
+        checked_at = "2026-05-20T09:00:00+00:00" if idx < 101 else "2026-05-20T10:08:00+00:00"
+        source_id = f"batch-docs-{idx:03d}"
+        receipt = register_source_reference({
+            "source_id": source_id,
+            "title": f"Batch Docs {idx}",
+            "origin_uri": f"https://example.test/docs/batch-{idx}",
+            "refresh_interval_seconds": interval,
+        })
+        receipts.append(receipt)
+        with sqlite3.connect(memory_tree_db_path()) as conn:
+            conn.execute("UPDATE jobs SET status = 'completed', updated_at = ? WHERE job_id = ?", (checked_at, receipt["job_id"]))
+            conn.execute("UPDATE sources SET freshness_status = 'ok', last_checked_at = ?, updated_at = ? WHERE source_id = ?", (checked_at, checked_at, source_id))
+
+    queued = queue_due_source_refresh_jobs(limit=2, now="2026-05-20T10:10:00+00:00")
+
+    assert queued["queued"] == 2
+    assert [job["source_id"] for job in queued["jobs"]] == ["batch-docs-001", "batch-docs-101"]
+
+
+def test_register_source_reference_sanitizes_non_http_credentials(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "ssh-docs",
+        "title": "SSH Docs",
+        "origin_uri": "ssh://user:pass@example.test/private?api_key=***#raw-prompt",
+    })
+    jobs = list_source_refresh_jobs(limit=5)
+    serialized = json.dumps({"receipt": receipt, "jobs": jobs}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://ssh-docs"
+    assert jobs["jobs"][0]["origin_uri"] == "capy-memory://ssh-docs"
+    for unsafe in ("user:pass", "api_key", "raw-prompt", "password"):
+        assert unsafe not in serialized
 
 
 def test_run_source_refresh_jobs_consumes_job_and_persists_sanitized_summary(tmp_path, monkeypatch):

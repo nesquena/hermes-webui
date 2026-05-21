@@ -279,6 +279,8 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
         parts = urlsplit(raw)
     except ValueError:
         return f"capy-memory://{source_id}"
+    if parts.scheme and parts.netloc and parts.scheme not in {"http", "https"} and (parts.username or parts.password or "@" in parts.netloc):
+        return f"capy-memory://{source_id}"
     if parts.scheme in {"http", "https"} and parts.netloc:
         safe_path = _safe_text(parts.path or "/", limit=240) or "/"
         normalized_path = re.sub(r"[^a-z0-9]+", " ", unquote(safe_path).lower()).strip()
@@ -289,7 +291,7 @@ def _safe_origin_uri(value: Any, *, source_id: str) -> str:
         except ValueError:
             port = None
         host = _safe_text(parts.hostname or "", limit=200)
-        if not host:
+        if not host or _UNSAFE_PUBLIC_VALUE_RE.search(host):
             return f"capy-memory://{source_id}"
         netloc = host
         if port is not None:
@@ -1044,6 +1046,100 @@ def _record_source_refresh_progress(event_type: str, *, source_id: str, job_id: 
         return
 
 
+def _refresh_due_at(last_checked_at: Any, refresh_interval_seconds: Any, *, now: str) -> bool:
+    safe_checked_at = _safe_iso_timestamp(last_checked_at)
+    if not safe_checked_at:
+        return True
+    try:
+        checked = datetime.fromisoformat(safe_checked_at.replace("Z", "+00:00"))
+        current = datetime.fromisoformat(_safe_iso_timestamp(now).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return checked + timedelta(seconds=_safe_refresh_interval(refresh_interval_seconds)) <= current
+
+
+def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) -> dict[str, Any]:
+    """Requeue terminal source.refresh jobs whose sanitized source metadata is due."""
+    limit = max(1, min(int(limit or 25), 25))
+    init_memory_tree()
+    checked_now = _safe_iso_timestamp(now) if now is not None else _now_iso()
+    if not checked_now:
+        checked_now = _now_iso()
+    queued_jobs: list[dict[str, Any]] = []
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            """
+            SELECT jobs.job_id, jobs.payload_json, sources.source_id, sources.origin_uri,
+                   sources.freshness_status, sources.last_checked_at
+            FROM jobs
+            JOIN sources ON sources.source_id = jobs.dedupe_key
+            WHERE jobs.kind = 'source.refresh'
+              AND jobs.status IN ('completed', 'failed')
+              AND sources.origin_kind IN ('auto_fetch', 'metadata_only')
+            ORDER BY sources.last_checked_at ASC NULLS FIRST, jobs.updated_at ASC, jobs.job_id ASC
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            source_id = _safe_public_id(row["source_id"], fallback="source")
+            origin_uri = _safe_origin_uri(row["origin_uri"], source_id=source_id)
+            interval = _safe_refresh_interval(payload.get("refresh_interval_seconds"))
+            stale = str(row["freshness_status"] or "") == "stale"
+            if not stale and not _refresh_due_at(row["last_checked_at"], interval, now=checked_now):
+                continue
+            job_id = _safe_public_id(row["job_id"], fallback="")
+            updated_payload = {
+                "source_id": source_id,
+                "origin_uri": origin_uri,
+                "refresh_interval_seconds": interval,
+            }
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET payload_json = ?, status = 'pending', attempts = 0,
+                    leased_until = NULL, last_error = NULL, updated_at = ?
+                WHERE job_id = ? AND kind = 'source.refresh' AND status IN ('completed', 'failed')
+                """,
+                (json.dumps(updated_payload, sort_keys=True, separators=(",", ":")), checked_now, row["job_id"]),
+            )
+            if cursor.rowcount != 1:
+                continue
+            conn.execute(
+                """
+                UPDATE sources
+                SET freshness_status = 'stale', last_error = NULL, updated_at = ?
+                WHERE source_id = ?
+                """,
+                (checked_now, row["source_id"]),
+            )
+            queued_jobs.append({
+                "job_id": job_id,
+                "source_id": source_id,
+                "status": "pending",
+                "origin_uri": origin_uri,
+                "refresh_interval_seconds": interval,
+                "due": True,
+            })
+            if len(queued_jobs) >= limit:
+                break
+    return {
+        "local_only": True,
+        "metadata_only": True,
+        "limit": limit,
+        "queued": len(queued_jobs),
+        "jobs": queued_jobs,
+    }
+
+
 def _refresh_lease_owned(job_id: str, lease_marker: str) -> bool:
     with _connect() as conn:
         return conn.execute(
@@ -1075,6 +1171,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
     limit = max(1, min(int(limit or 5), 25))
     init_memory_tree()
     fetch = fetcher or _default_source_refresh_fetcher
+    queue_due_source_refresh_jobs(limit=limit)
     now = _now_iso()
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
@@ -1834,6 +1931,7 @@ __all__ = [
     "memory_tree_vault_path",
     "register_local_knowledge_sources",
     "register_source_reference",
+    "queue_due_source_refresh_jobs",
     "relevant_memory_for_space",
     "run_source_refresh_jobs",
     "search_memory",
