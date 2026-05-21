@@ -141,3 +141,20 @@ Key invariant for upstream:
 If context_messages exists, it is the authoritative model-facing prefix.
 State/db/display histories may be fuller/noisier and should only contribute messages that are demonstrably newer than that prefix.
 ```
+
+
+## F. Live metering over-counts large in-flight tool results after cancel/retry
+
+Observed after deploying the reconciliation fix and retrying `continue` in session `20260521_060755_294aed`:
+
+```text
+persisted sidecar context: 69 messages, ~49,993 rough content tokens
+state.db messages: 90 messages
+state delta after context: 21 messages, ~21,226 rough content tokens
+turn-start context after fix: 90 messages, ~71,219 rough content tokens
+last_prompt_tokens persisted: 86,723 (~33.9%)
+```
+
+The previous full-transcript turn-start replay was gone, but the ring still jumped during the run. The new jump came from live metering, not persisted context reconciliation. The run executed several large `read_file` tool calls (5k / 17k / 13k chars). `_record_live_tool_complete()` fed each bounded preview into `_bump_live_prompt_estimate()`, which added the full rough tool-result tokens to `last_prompt_tokens` before any exact next-prompt accounting was available. Repeated cancel/retry makes this look like context replay even when final sidecar context remains clean.
+
+Regression target: live tool metering should be a conservative UI hint and must not inflate `last_prompt_tokens` by the full content of large in-flight tool results. Exact provider/compressor prompt accounting should still win when available.

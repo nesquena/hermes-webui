@@ -2744,6 +2744,50 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
 _TOOL_RESULT_SNIPPET_MAX = 4000
 
 
+_LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
+
+
+def _bounded_live_tool_prompt_delta(messages, *, cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX) -> int:
+    """Return a bounded rough token delta for live tool metering.
+
+    Tool-result callbacks can fire before the agent's next exact prompt accounting
+    is available. The live usage ring should show a conservative in-flight hint,
+    not replay a full large tool payload into `last_prompt_tokens`.
+    """
+    if not messages:
+        return 0
+    try:
+        from agent.model_metadata import estimate_messages_tokens_rough
+        delta = int(estimate_messages_tokens_rough(messages) or 0)
+    except Exception:
+        delta = 0
+    if delta <= 0:
+        return 0
+    return min(delta, int(cap or 0))
+
+
+def live_usage_prompt_estimate_after_tool_delta(
+    *,
+    base_prompt_tokens: int,
+    exact_prompt_tokens: int = 0,
+    messages=None,
+    cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX,
+) -> dict:
+    """Compute the live `last_prompt_tokens` estimate after a tool update.
+
+    Exact compressor/provider prompt accounting wins. When no newer exact prompt
+    is available, add only a bounded live tool delta to the persisted base.
+    """
+    base = int(base_prompt_tokens or 0)
+    exact = int(exact_prompt_tokens or 0)
+    if exact and exact != base:
+        return {'last_prompt_tokens': exact, 'estimated': False}
+    return {
+        'last_prompt_tokens': base + _bounded_live_tool_prompt_delta(messages, cap=cap),
+        'estimated': True,
+    }
+
+
 def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     """Extract a bounded result preview from a stored tool message payload."""
     if limit <= 0:
@@ -3275,11 +3319,7 @@ def _run_agent_streaming(
         """Increment a rough next-prompt estimate from live tool activity."""
         if not messages:
             return _live_prompt_estimate_tokens[0]
-        try:
-            from agent.model_metadata import estimate_messages_tokens_rough
-            _delta = int(estimate_messages_tokens_rough(messages) or 0)
-        except Exception:
-            _delta = 0
+        _delta = _bounded_live_tool_prompt_delta(messages)
         if _delta > 0:
             _seed_live_prompt_estimate()
             _live_prompt_estimate_tokens[0] += _delta
