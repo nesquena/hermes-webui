@@ -992,8 +992,10 @@ async function populateModelDropdown(){
       }
       sel.appendChild(og);
     }
-    // Set default model from server if no localStorage preference
-    if(data.default_model && !(typeof _readPersistedModelState==='function'&&_readPersistedModelState()) && !localStorage.getItem('hermes-webui-model')){
+    // Set default model from server on fresh/blank boot. Loaded sessions keep
+    // their own persisted model and apply it via loadSession(). Do not let stale
+    // browser localStorage suppress the profile default.
+    if(data.default_model && !(S.session&&S.session.model)){
       _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();

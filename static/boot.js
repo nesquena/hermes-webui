@@ -1459,10 +1459,15 @@ function applyBotName(){
     if(s.default_model){
       window._defaultModel=s.default_model;
       const sel=$('modelSelect');
-      const savedState=(typeof _readPersistedModelState==='function')
-        ? _readPersistedModelState()
-        : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-      if(sel&&!savedState&&typeof _applyModelToDropdown==='function'){
+      if(sel&&typeof _applyModelToDropdown==='function'){
+        // Fresh page boot must prefer the profile/server default over stale
+        // browser-persisted model state. A restored session can still apply its
+        // own persisted model later through loadSession().
+        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
         const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
         if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
           existingDefaultOpt.dataset.provider=window._activeProvider;
@@ -1575,7 +1580,10 @@ function applyBotName(){
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
     const savedModel=savedState&&savedState.model;
-    if(savedModel && $('modelSelect')){
+    // Guardrail: prefer profile/server default on boot when available.
+    // Persisted browser model state should not override a valid default model.
+    const allowBootSavedModelOverride=!window._defaultModel;
+    if(savedModel && $('modelSelect') && allowBootSavedModelOverride){
       const applied=(typeof _applyModelToDropdown==='function')
         ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
         : null;
@@ -1583,7 +1591,10 @@ function applyBotName(){
       // If the value didn't take (model not in list), clear the bad pref
       if(!applied&&$('modelSelect').value!==savedModel){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else localStorage.removeItem('hermes-webui-model');
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
       }
       else if(typeof syncModelChip==='function') syncModelChip();
     }
