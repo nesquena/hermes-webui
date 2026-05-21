@@ -474,11 +474,22 @@ async function newSession(flash, options={}){
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
     _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
-    // Sync chat-header dropdown to the session's model so the UI reflects
-    // the default model the server actually used (#872).
-    if(S.session.model && S.session.model!==$('modelSelect').value && typeof _applyModelToDropdown==='function'){
-      _applyModelToDropdown(S.session.model,$('modelSelect'),S.session.model_provider||null);
-      if(typeof syncModelChip==='function') syncModelChip();
+    // Sync chat-header dropdown to the session's model/provider so the UI reflects
+    // the default route the server actually used (#872). Compare provider state too:
+    // duplicate model ids can exist under several providers, and a stale persisted
+    // picker selection with the same model id should not mask the new session's
+    // configured default provider.
+    const modelSel=$('modelSelect');
+    if(S.session.model && modelSel && typeof _applyModelToDropdown==='function'){
+      const currentModelState=(typeof _modelStateForSelect==='function')
+        ? _modelStateForSelect(modelSel,modelSel.value)
+        : {model:modelSel.value,model_provider:null};
+      const sessionProvider=S.session.model_provider||null;
+      const currentProvider=currentModelState.model_provider||null;
+      if(S.session.model!==modelSel.value || sessionProvider !== currentProvider){
+        _applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+        if(typeof syncModelChip==='function') syncModelChip();
+      }
     }
     // Reset per-session visual state: a fresh chat is idle even if another
     // conversation is still streaming in the background.

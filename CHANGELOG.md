@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- New conversations now resync the model picker when the default model provider changes but the model id matches a stale previous selection, so fresh chats visibly use the configured default model provider.
+
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
