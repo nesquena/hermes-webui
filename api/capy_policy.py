@@ -53,6 +53,7 @@ _PROTECTED_BOUNDARIES = [
     "space_repair_prompt",
     "auto_fetched_source",
     "memory_context",
+    "active_space_instructions",
 ]
 
 _MODEL_HINT_ORDER = [

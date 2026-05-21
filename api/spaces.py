@@ -2089,6 +2089,45 @@ def _space_current_context_action_policy_receipt(action: str, preflight_receipt:
     )
 
 
+def _space_current_instruction_prompt_preflight_receipt(instructions: str) -> dict[str, Any]:
+    """Return metadata-only preflight evidence before direct instruction injection."""
+    text = str(instructions or "")
+    from api.capy_policy import prompt_preflight
+
+    if not text.strip():
+        receipt = prompt_preflight("empty active-space instructions", boundary="active_space_instructions")
+        receipt["empty_instruction"] = True
+    else:
+        receipt = prompt_preflight(text, boundary="active_space_instructions")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+def _space_current_instruction_after_preflight(
+    space_id: str,
+    instructions: str,
+    preflight_receipt: dict[str, Any] | None,
+) -> str:
+    if not instructions.strip():
+        return ""
+    if not isinstance(preflight_receipt, dict) or preflight_receipt.get("status") == "pass":
+        return instructions
+    categories: list[str] = []
+    for category in preflight_receipt.get("categories") or []:
+        text = str(category or "").strip().lower()
+        if text and re.fullmatch(r"[a-z0-9_:-]{1,80}", text) and text not in categories:
+            categories.append(text)
+    category_text = ", ".join(categories) if categories else "policy"
+    return (
+        f"Instructions withheld for {validate_space_id(space_id)}: "
+        f"prompt preflight blocked active-space instructions ({category_text})."
+    )
+
+
+def _space_current_instruction_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    return _space_current_context_action_policy_receipt(action, preflight_receipt)
+
+
 def _space_current_context_after_preflight(space_id: str, context: str, preflight_receipt: dict[str, Any] | None) -> str:
     if isinstance(preflight_receipt, dict) and preflight_receipt.get("status") != "pass":
         return _space_current_context_withheld_context(space_id, preflight_receipt)
@@ -4744,9 +4783,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets_by_id": {widget["id"]: widget for widget in widgets}}
     if name in {"space.current.agentinstructions", "space.current.specialinstructions"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        instructions = read_space_detail(space_id).get("agent_instructions", "")
+        instructions = str(read_space(space_id).get("agent_instructions", ""))
+        preflight = _space_current_instruction_prompt_preflight_receipt(instructions)
+        safe_instructions = _space_current_instruction_after_preflight(space_id, instructions, preflight)
         key = "agent_instructions" if name.endswith("agentinstructions") else "special_instructions"
-        return {"ok": True, "action": name, "active_space_id": space_id, key: instructions}
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            key: safe_instructions,
+            "prompt_preflight": preflight,
+            "autonomy_policy": _space_current_instruction_action_policy_receipt(name, preflight),
+        }
     if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "widgets": list_widgets(space_id)}
