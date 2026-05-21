@@ -10,10 +10,13 @@ Skips repos that are not git checkouts (e.g. Docker baked images where
 """
 import hashlib
 import json
+import os
 import re
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -142,30 +145,104 @@ def _detect_webui_version() -> str:
     return 'unknown'
 
 
+def _read_agent_source_version(agent_dir: Path) -> str | None:
+    """Read Hermes Agent's package version from a copied source tree."""
+    init_file = agent_dir / 'hermes_cli' / '__init__.py'
+    try:
+        text = init_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.search(r"""__version__\s*=\s*['"]([^'"]+)['"]""", text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return None
+
+
+def _gateway_health_base_url() -> str:
+    """Return the configured/default Hermes Agent gateway base URL."""
+    raw = (
+        os.environ.get('GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or 'http://hermes-agent:8642'
+    ).strip()
+    if raw.endswith('/health/detailed'):
+        raw = raw[: -len('/health/detailed')]
+    elif raw.endswith('/health'):
+        raw = raw[: -len('/health')]
+    return raw.rstrip('/')
+
+
+def _version_from_gateway_health_payload(payload: object) -> str | None:
+    """Extract a version string from a Hermes Agent gateway health payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ('version', 'agent_version', 'hermes_version'):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = payload.get('agent')
+    if isinstance(nested, dict):
+        value = nested.get('version')
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
+    """Best-effort cross-container gateway API fallback for Agent version."""
+    base = _gateway_health_base_url()
+    if not base:
+        return None
+    parsed = urlparse(base)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return None
+    for path in ('/health', '/health/detailed'):
+        try:
+            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        version = _version_from_gateway_health_payload(payload)
+        if version:
+            return version
+    return None
+
+
 def _detect_agent_version() -> str:
     """Detect the running Hermes Agent version for UI display."""
-    if _AGENT_DIR is None:
-        return 'not detected'
+    agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
 
-    version_file = Path(_AGENT_DIR) / "VERSION"
-    try:
-        if version_file.exists():
-            text = version_file.read_text(encoding='utf-8').strip()
-            if text:
-                return text
-    except Exception:
-        pass
+    if agent_dir is not None:
+        version_file = agent_dir / "VERSION"
+        try:
+            if version_file.exists():
+                text = version_file.read_text(encoding='utf-8').strip()
+                if text:
+                    return text
+        except Exception:
+            pass
 
-    # Fallback: infer from git describe when the checkout exists but no VERSION
-    # file is available (common in source checkouts and developer environments).
-    if not Path(_AGENT_DIR).exists():
-        return 'not detected'
-    # Symmetric with _detect_webui_version() above — `--dirty` flags a
-    # locally-modified checkout so operators can see when their agent has
-    # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
-    out = _describe_git_version(Path(_AGENT_DIR))
-    if out:
-        return out
+        # Fallback: infer from git describe when the checkout exists but no VERSION
+        # file is available (common in source checkouts and developer environments).
+        if agent_dir.exists():
+            # Symmetric with _detect_webui_version() above — `--dirty` flags a
+            # locally-modified checkout so operators can see when their agent has
+            # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
+            out = _describe_git_version(agent_dir)
+            if out:
+                return out
+
+            # Docker two-container deployments often mount a copied agent source
+            # tree without .git metadata or a VERSION file.  The package version
+            # still lives in hermes_cli/__init__.py, so prefer that before giving
+            # up or relying on a live gateway probe.
+            source_version = _read_agent_source_version(agent_dir)
+            if source_version:
+                return source_version
+
+    gateway_version = _detect_agent_version_from_gateway_health()
+    if gateway_version:
+        return gateway_version
 
     return 'not detected'
 

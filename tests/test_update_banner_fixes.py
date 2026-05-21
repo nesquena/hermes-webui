@@ -237,6 +237,46 @@ class TestUpdateChecker:
         assert result['behind'] == 1
         assert result['branch'] == 'v0.51.35'
 
+    def test_detect_agent_version_reads_copied_source_tree(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        agent_dir = tmp_path / 'hermes-agent'
+        package_dir = agent_dir / 'hermes_cli'
+        package_dir.mkdir(parents=True)
+        (package_dir / '__init__.py').write_text('__version__ = "0.14.0"\n', encoding='utf-8')
+
+        monkeypatch.setattr(upd, '_AGENT_DIR', str(agent_dir))
+        monkeypatch.setattr(upd, '_describe_git_version', lambda path: None)
+        monkeypatch.setattr(upd, '_detect_agent_version_from_gateway_health', lambda: None)
+
+        assert upd._detect_agent_version() == '0.14.0'
+
+    def test_detect_agent_version_falls_back_to_gateway_health(self, monkeypatch):
+        import api.updates as upd
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":"ok","platform":"hermes-agent","version":"0.14.1"}'
+
+        seen = []
+
+        def fake_urlopen(url, timeout=0):
+            seen.append((url, timeout))
+            return FakeResponse()
+
+        monkeypatch.setattr(upd, '_AGENT_DIR', None)
+        monkeypatch.setenv('GATEWAY_HEALTH_URL', 'http://hermes-agent:8642/health')
+        monkeypatch.setattr(upd.urllib.request, 'urlopen', fake_urlopen)
+
+        assert upd._detect_agent_version() == '0.14.1'
+        assert seen == [('http://hermes-agent:8642/health', 0.75)]
+
 
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""

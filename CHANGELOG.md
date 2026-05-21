@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2703** by @Michaelyklam (closes #2691) — Agent version detection now works in two-container Docker deployments where the mounted Hermes Agent source tree has no `VERSION` file or `.git` metadata. The WebUI reads `hermes_cli.__version__` from copied agent source and falls back to a gateway health version probe before showing `not detected`, so the System panel can report the running Agent version instead of requiring a hand-written VERSION file.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
