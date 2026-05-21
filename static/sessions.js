@@ -788,7 +788,10 @@ async function loadSession(sid){
       syncTopbar();renderMessages();
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       const _dirP=loadDir('.');
-      await _dirP;
+      // Workspace refresh is guarded by session id inside loadDir(); do not
+      // block session-load completion, draft restore, or model resolution on
+      // file-tree IO for users focused on the chat.
+      if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
     }
   }
 

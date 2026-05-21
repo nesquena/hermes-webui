@@ -105,13 +105,15 @@ function _restoreExpandedDirs(){
 
 async function loadDir(path){
   if(!S.session)return;
+  const sessionId=S.session.session_id;
   try{
     if(!path||path==='.'){
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state on root load
     }
     S.currentDir=path||'.';
-    const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+    const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
@@ -120,10 +122,11 @@ async function loadDir(path){
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
-          api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`)
+          api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`)
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
+        if(!S.session||S.session.session_id!==sessionId)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
@@ -143,8 +146,10 @@ async function loadDir(path){
 async function _refreshGitBadge(){
   const badge=$('gitBadge');
   if(!badge||!S.session)return;
+  const sessionId=S.session.session_id;
   try{
-    const data=await api(`/api/git-info?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     if(data.git&&data.git.is_git){
       const g=data.git;
       let text=g.branch||'git';
@@ -158,7 +163,10 @@ async function _refreshGitBadge(){
       badge.style.display='none';
       badge.textContent='';
     }
-  }catch(e){badge.style.display='none';}
+  }catch(e){
+    if(!S.session||S.session.session_id!==sessionId)return;
+    badge.style.display='none';
+  }
 }
 
 function navigateUp(){
