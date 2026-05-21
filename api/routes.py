@@ -8608,49 +8608,49 @@ def _handle_chat_sync(handler, body):
                     _api_key = _cp_key
                 if not _base_url and _cp_base:
                     _base_url = _cp_base
-            agent = AIAgent(
-                model=_model,
-                provider=_provider,
-                base_url=_base_url,
-                api_key=_api_key,
-                # Identify browser-originated sessions as WebUI so Hermes Agent
-                # does not inject CLI-specific terminal/output guidance.
-                platform="webui",
-                quiet_mode=True,
-                enabled_toolsets=_resolve_cli_toolsets(),
-                session_id=s.session_id,
-            )
-            from api.streaming import (
-                _merge_display_messages_after_agent_result,
-                _restore_display_reasoning_metadata,
-                _restore_reasoning_metadata,
-                _sanitize_messages_for_api,
-                _context_messages_for_new_turn,
-                _workspace_context_prefix,
-            )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+        agent = AIAgent(
+            model=_model,
+            provider=_provider,
+            base_url=_base_url,
+            api_key=_api_key,
+            # Identify browser-originated sessions as WebUI so Hermes Agent
+            # does not inject CLI-specific terminal/output guidance.
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=_resolve_cli_toolsets(),
+            session_id=s.session_id,
+        )
+        from api.streaming import (
+            _merge_display_messages_after_agent_result,
+            _restore_display_reasoning_metadata,
+            _restore_reasoning_metadata,
+            _sanitize_messages_for_api,
+            _context_messages_for_new_turn,
+            _workspace_context_prefix,
+        )
+        workspace_ctx = _workspace_context_prefix(str(s.workspace))
+        workspace_system_msg = (
+            f"Active workspace at session start: {s.workspace}\n"
+            "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
+            "workspace the user has selected in the web UI at the time they sent that message. "
+            "This tag is the single authoritative source of the active workspace and updates "
+            "with every message. It overrides any prior workspace mentioned in this system "
+            "prompt, memory, or conversation history. Always use the value from the most recent "
+            "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+            "write_file, read_file, search_files, terminal workdir, and patch. "
+            "Never fall back to a hardcoded path when this tag is present."
+        )
 
-            _previous_messages = list(s.messages or [])
-            _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+        _previous_messages = list(s.messages or [])
+        _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
 
-            result = agent.run_conversation(
-                user_message=workspace_ctx + msg,
-                system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
-                task_id=s.session_id,
-                persist_user_message=msg,
-            )
+        result = agent.run_conversation(
+            user_message=workspace_ctx + msg,
+            system_message=workspace_system_msg,
+            conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config()),
+            task_id=s.session_id,
+            persist_user_message=msg,
+        )
     finally:
         with _ENV_LOCK:
             if old_cwd is None:

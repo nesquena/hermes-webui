@@ -3011,6 +3011,11 @@ function startBackgroundPolling(parentSid, taskId, prompt){
   if(_bgPollTimers[taskId]) return;
   async function _poll(){
     try{
+      if(typeof document !== 'undefined' && document.hidden){
+        // defer while tab is backgrounded and retry later
+        _bgPollTimers[taskId]=setTimeout(_poll,15000);
+        return;
+      }
       const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
       if(r&&r.results){
         for(const res of r.results){

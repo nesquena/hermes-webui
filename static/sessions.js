@@ -2118,6 +2118,7 @@ let _sessionListRefreshPendingReason = '';
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
+    if(typeof document !== 'undefined' && document.hidden) return;
     void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
 }
@@ -2131,6 +2132,7 @@ function stopStreamingPoll(){
 function ensureSessionTimeRefreshPoll(){
   if(_sessionTimeRefreshTimer) return;
   _sessionTimeRefreshTimer = setInterval(() => {
+    if(typeof document !== 'undefined' && document.hidden) return;
     renderSessionListFromCache();
   }, _sessionTimeRefreshMs);
 }
