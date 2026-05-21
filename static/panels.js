@@ -6485,11 +6485,11 @@ function _onAuxProviderChange(taskKey,providers){
  _markAuxDirty();
 }
 
-function _onAuxModelChange(taskKey){
+async function _onAuxModelChange(taskKey){
  const modelSel=$('aux-model-'+taskKey);
  if(!modelSel) return;
  if(modelSel.value==='__custom__'){
-  const customModel=prompt(t('settings_aux_model_custom_prompt')||'Enter model ID:');
+  const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
   if(customModel&&customModel.trim()){
    // Insert custom model option before the __custom__ option
    const opt=document.createElement('option');
