@@ -10943,6 +10943,12 @@ def _handle_skill_delete(handler, body):
 
 
 def _handle_skill_toggle(handler, body):
+    """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
+
+    Note: this only affects the global ``skills.disabled`` list. Per-platform
+    overrides (``skills.platform_disabled.<platform>``) are not managed here
+    and must be edited directly in config.yaml.
+    """
     try:
         require(body, "name", "enabled")
     except ValueError as e:
@@ -10958,39 +10964,41 @@ def _handle_skill_toggle(handler, body):
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
 
-    from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file, reload_config
+    from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file, reload_config, _cfg_lock
 
     config_path = _get_config_path()
-    cfg = _load_yaml_config_file(config_path)
+    with _cfg_lock:
+        cfg = _load_yaml_config_file(config_path)
 
-    # Ensure skills section exists as a dict
-    if "skills" not in cfg or not isinstance(cfg["skills"], dict):
-        cfg["skills"] = {}
-    skills_cfg = cfg["skills"]
+        # Ensure skills section exists as a dict
+        if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+            cfg["skills"] = {}
+        skills_cfg = cfg["skills"]
 
-    # Normalize the disabled list
-    disabled = skills_cfg.get("disabled")
-    if disabled is None:
-        disabled = []
-    elif isinstance(disabled, str):
-        disabled = [disabled]
-    elif not isinstance(disabled, list):
-        disabled = list(disabled) if disabled else []
-    disabled = [str(d).strip() for d in disabled if str(d).strip()]
+        # Normalize the disabled list
+        disabled = skills_cfg.get("disabled")
+        if disabled is None:
+            disabled = []
+        elif isinstance(disabled, str):
+            disabled = [disabled]
+        elif not isinstance(disabled, list):
+            disabled = list(disabled) if disabled else []
+        disabled = [str(d).strip() for d in disabled if str(d).strip()]
 
-    if enabled:
-        # Remove from disabled list
-        disabled = [d for d in disabled if d != name]
-    else:
-        # Add to disabled list (if not already there)
-        if name not in disabled:
-            disabled.append(name)
+        if enabled:
+            # Remove from disabled list
+            disabled = [d for d in disabled if d != name]
+        else:
+            # Add to disabled list (if not already there)
+            if name not in disabled:
+                disabled.append(name)
 
-    # Write back
-    skills_cfg["disabled"] = disabled
-    cfg["skills"] = skills_cfg
-    _save_yaml_config_file(config_path, cfg)
-    reload_config()
+        # Write back
+        skills_cfg["disabled"] = disabled
+        cfg["skills"] = skills_cfg
+        _save_yaml_config_file(config_path, cfg)
+
+    reload_config()  # outside with block — reload_config() acquires the lock itself
 
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
