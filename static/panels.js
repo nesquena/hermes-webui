@@ -4529,10 +4529,11 @@ function refreshQuickProfileSelect(data){
     ? S.activeProfile
     : (data.active || 'default');
   sel.innerHTML = '';
+  const defaultSuffix = (typeof t === 'function') ? t('quick_profile_default_suffix') : '(default)';
   for(const p of profiles){
     const opt = document.createElement('option');
     opt.value = p.name;
-    opt.textContent = p.is_default ? `${p.name} (default)` : p.name;
+    opt.textContent = p.is_default ? `${p.name} ${defaultSuffix}` : p.name;
     sel.appendChild(opt);
   }
   if(!profiles.some(p => p.name === active)){
@@ -4543,6 +4544,11 @@ function refreshQuickProfileSelect(data){
   }
   sel.value = active;
   sel.disabled = profiles.length <= 1;
+  const titleKey = sel.disabled ? 'quick_profile_disabled_title' : 'quick_profile_switch_title';
+  const titleText = (typeof t === 'function') ? t(titleKey) : (sel.disabled ? 'Create another profile in the Profiles panel to switch.' : 'Switch agent profile');
+  sel.title = titleText;
+  sel.setAttribute('data-tooltip', titleText);
+  sel.setAttribute('data-i18n-title', titleKey);
 }
 
 function refreshQuickProfileSelectFromApi(){

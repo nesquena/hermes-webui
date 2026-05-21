@@ -193,9 +193,9 @@
           </button>
         </div>
       </div>
-      <div class="sidebar-profile-quick" aria-label="Quick profile switcher">
-        <label for="sidebarProfileSelect">Profile</label>
-        <select id="sidebarProfileSelect" onchange="switchToProfile(this.value)" title="Switch agent profile"></select>
+      <div class="sidebar-profile-quick">
+        <label for="sidebarProfileSelect" data-i18n="quick_profile_label">Profile</label>
+        <select id="sidebarProfileSelect" onchange="switchToProfile(this.value)" data-i18n-title="quick_profile_switch_title" title="Switch agent profile"></select>
       </div>
       <div class="session-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"></div>
       <div class="session-list" id="sessionList"></div>

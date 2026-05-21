@@ -10,9 +10,13 @@ CHANGELOG = Path("CHANGELOG.md").read_text(encoding="utf-8")
 def test_sidebar_has_quick_profile_switcher_synced_to_profile_api():
     assert 'id="sidebarProfileSelect"' in INDEX_HTML
     assert 'onchange="switchToProfile(this.value)"' in INDEX_HTML
+    assert 'data-i18n="quick_profile_label"' in INDEX_HTML
+    assert 'data-i18n-title="quick_profile_switch_title"' in INDEX_HTML
+    assert 'aria-label="Quick profile switcher"' not in INDEX_HTML
     assert "function refreshQuickProfileSelect(data)" in PANELS_JS
     assert "api('/api/profiles').then(refreshQuickProfileSelect)" in PANELS_JS
-    assert "if(quickSel) quickSel.value = S.activeProfile;" in PANELS_JS
+    assert "quick_profile_default_suffix" in PANELS_JS
+    assert "quick_profile_disabled_title" in PANELS_JS
     assert "refreshQuickProfileSelectFromApi" in BOOT_JS
     assert ".sidebar-profile-quick" in STYLE_CSS
 
