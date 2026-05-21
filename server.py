@@ -114,6 +114,7 @@ logger = logging.getLogger(__name__)
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
+from api.profile_policy import request_profile
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -241,8 +242,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
-        cookie_profile = get_profile_cookie(self)
+        # Per-request profile context; auth-bound profiles win over cookies.
+        cookie_profile = request_profile(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
@@ -259,8 +260,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
-        cookie_profile = get_profile_cookie(self)
+        # Per-request profile context; auth-bound profiles win over cookies.
+        cookie_profile = request_profile(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:

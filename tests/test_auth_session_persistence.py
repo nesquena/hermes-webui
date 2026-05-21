@@ -57,6 +57,14 @@ class TestSessionPersistence(unittest.TestCase):
         self.assertTrue(auth.verify_session(cookie),
                         "Session must survive process restart via persisted .sessions.json")
 
+    def test_session_identity_survives_restart(self) -> None:
+        """Bound user/profile metadata must survive module reload."""
+        cookie = auth.create_session(username="alice", profile="alice")
+        self._simulate_restart()
+        self.assertTrue(auth.verify_session(cookie))
+        self.assertEqual(auth.session_identity(cookie), {"user": "alice", "profile": "alice"})
+        self.assertEqual(auth.session_profile(cookie), "alice")
+
     def test_invalidated_session_does_not_survive_restart(self) -> None:
         """Invalidating a session must be reflected after reload."""
         cookie = auth.create_session()
@@ -73,10 +81,25 @@ class TestSessionPersistence(unittest.TestCase):
         sessions_file.write_text(json.dumps({
             "expired_token": now - 10,
             "valid_token": now + 3600,
+            "valid_bound_token": {"exp": now + 3600, "user": "alice", "profile": "alice"},
         }))
         self._simulate_restart()
         self.assertNotIn("expired_token", auth._sessions)
         self.assertIn("valid_token", auth._sessions)
+        self.assertIn("valid_bound_token", auth._sessions)
+
+    def test_invalid_session_metadata_is_sanitized_on_load(self) -> None:
+        """Invalid persisted identity metadata must not become trusted."""
+        sessions_file = _TEST_STATE / '.sessions.json'
+        sessions_file.write_text(json.dumps({
+            "token": {
+                "exp": time.time() + 3600,
+                "user": "bad\nuser",
+                "profile": "../default",
+            },
+        }))
+        self._simulate_restart()
+        self.assertEqual(set(auth._sessions["token"].keys()), {"exp"})
 
     def test_sessions_file_permissions(self) -> None:
         """Sessions file must be owner-read-only (0600)."""

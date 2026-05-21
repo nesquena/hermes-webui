@@ -33,16 +33,36 @@ class TestSessionPruning(unittest.TestCase):
         token = auth.create_session()
         self.assertTrue(auth.verify_session(token))
 
+    def test_session_identity_metadata_roundtrip(self):
+        """A session can carry server-side user/profile metadata."""
+        cookie = auth.create_session(username="alice", profile="alice")
+
+        self.assertTrue(auth.verify_session(cookie))
+        self.assertEqual(
+            auth.session_identity(cookie),
+            {"user": "alice", "profile": "alice"},
+        )
+        self.assertEqual(auth.session_profile(cookie), "alice")
+
+    def test_session_identity_ignores_legacy_float_records(self):
+        """Legacy token -> expiry records remain valid but unbound."""
+        cookie = auth.create_session()
+
+        self.assertTrue(auth.verify_session(cookie))
+        self.assertEqual(auth.session_identity(cookie), {})
+        self.assertIsNone(auth.session_profile(cookie))
+
     def test_expired_session_pruned(self):
         """Manually inserting an expired entry should be pruned on next verify_session call."""
         # Insert sessions that have already expired
         auth._sessions["fake_token"] = time.time() - 100
         auth._sessions["another_fake"] = time.time() - 50
+        auth._sessions["expired_metadata"] = {"exp": time.time() - 10, "profile": "alice"}
         # Insert one valid session (far future)
-        auth._sessions["good_token"] = time.time() + 3600
+        auth._sessions["good_token"] = {"exp": time.time() + 3600, "profile": "alice"}
 
-        # _sessions has 3 entries, 2 expired
-        self.assertEqual(len(auth._sessions), 3)
+        # _sessions has 4 entries, 3 expired
+        self.assertEqual(len(auth._sessions), 4)
 
         # Call verify_session — this triggers _prune_expired_sessions()
         # Cookie format is token.signature, so we need a dot to pass the early check
@@ -53,6 +73,7 @@ class TestSessionPruning(unittest.TestCase):
         self.assertIn("good_token", auth._sessions)
         self.assertNotIn("fake_token", auth._sessions)
         self.assertNotIn("another_fake", auth._sessions)
+        self.assertNotIn("expired_metadata", auth._sessions)
 
     def test_prune_does_not_remove_valid_sessions(self):
         """_prune_expired_sessions should never remove sessions that are still active."""

@@ -2587,7 +2587,8 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    {{LOGIN_USERNAME_INPUT}}
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autocomplete="current-password" {{LOGIN_PASSWORD_AUTOFOCUS}}>
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
   <div class="err" id="err"></div>
@@ -3497,12 +3498,23 @@ def handle_get(handler, parsed) -> bool:
             _resolve_login_locale_key(_lang)
         ]
         from urllib.parse import quote
+        from api.auth import login_uses_username
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        username_input = ""
+        password_autofocus = "autofocus"
+        if login_uses_username():
+            username_input = (
+                '<input type="text" id="username" placeholder="Username" '
+                'autocomplete="username" autocapitalize="none" spellcheck="false" autofocus>'
+            )
+            password_autofocus = ""
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
             .replace("{{WEBUI_VERSION}}", version_token)
+            .replace("{{LOGIN_USERNAME_INPUT}}", username_input)
+            .replace("{{LOGIN_PASSWORD_AUTOFOCUS}}", password_autofocus)
             .replace("{{LANG}}", _html.escape(_login_strings["lang"]))
             .replace("{{LOGIN_TITLE}}", _html.escape(_login_strings["title"]))
             .replace("{{LOGIN_SUBTITLE}}", _html.escape(_login_strings["subtitle"]))
@@ -3518,13 +3530,31 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import (
+            is_auth_enabled,
+            login_uses_username,
+            parse_cookie,
+            session_identity,
+            verify_session,
+        )
 
         logged_in = False
+        identity = {}
         if is_auth_enabled():
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+            if logged_in:
+                identity = session_identity(cv)
+        return j(
+            handler,
+            {
+                "auth_enabled": is_auth_enabled(),
+                "logged_in": logged_in,
+                "login_uses_username": login_uses_username(),
+                "user": identity.get("user"),
+                "profile": identity.get("profile"),
+            },
+        )
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -5495,8 +5525,10 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.profile_policy import ProfileBoundError, require_unbound_or_profile
             from api.profiles import switch_profile, _validate_profile_name
             from api.helpers import build_profile_cookie
+            require_unbound_or_profile(handler, name, action="switch")
             if name != 'default':
                 _validate_profile_name(name)
             # process_wide=False: don't mutate the process-global _active_profile.
@@ -5510,6 +5542,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name),
             })
+        except ProfileBoundError as e:
+            return bad(handler, str(e), e.status)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:
@@ -5519,6 +5553,11 @@ def handle_post(handler, parsed) -> bool:
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
+        try:
+            from api.profile_policy import ProfileBoundError, require_unbound_or_profile
+            require_unbound_or_profile(handler, name, action="create")
+        except ProfileBoundError as e:
+            return bad(handler, str(e), e.status)
         import re as _re
 
         if not _re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", name):
@@ -5558,11 +5597,15 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
+            from api.profile_policy import ProfileBoundError, require_unbound_or_profile
             from api.profiles import delete_profile_api, _validate_profile_name
 
+            require_unbound_or_profile(handler, name, action="delete")
             _validate_profile_name(name)
             result = delete_profile_api(name)
             return j(handler, result)
+        except ProfileBoundError as e:
+            return bad(handler, str(e), e.status)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
@@ -6105,12 +6148,13 @@ def handle_post(handler, parsed) -> bool:
     # ── Auth endpoints (POST) ──
     if parsed.path == "/api/auth/login":
         from api.auth import (
-            verify_password,
+            verify_login,
             create_session,
             set_auth_cookie,
             is_auth_enabled,
         )
         from api.auth import _check_login_rate, _record_login_attempt
+        from api.helpers import build_profile_cookie
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
@@ -6121,18 +6165,41 @@ def handle_post(handler, parsed) -> bool:
                 {"error": "Too many attempts. Try again in a minute."},
                 status=429,
             )
+        username = body.get("username", "")
         password = body.get("password", "")
-        if not verify_password(password):
+        identity = verify_login(username, password)
+        if identity is None:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
-        cookie_val = create_session()
+        profile = identity.get("profile") if isinstance(identity, dict) else None
+        if profile:
+            try:
+                from api.profile_policy import ensure_profile_exists
+
+                ensure_profile_exists(profile)
+            except Exception as e:
+                return bad(handler, f"Could not prepare profile: {_sanitize_error(e)}", 500)
+        cookie_val = create_session(
+            username=identity.get("user") if isinstance(identity, dict) else None,
+            profile=profile,
+        )
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
+        if profile:
+            handler.send_header("Set-Cookie", build_profile_cookie(profile))
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(
+            json.dumps(
+                {
+                    "ok": True,
+                    "user": identity.get("user") if isinstance(identity, dict) else None,
+                    "profile": profile,
+                }
+            ).encode()
+        )
         return True
 
     if parsed.path == "/api/auth/logout":
