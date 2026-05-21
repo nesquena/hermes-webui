@@ -4549,13 +4549,24 @@ def save_space_meta_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     if "description" in payload:
         description = _payload_text_summary(payload.get("description"), 500)
         space["description"] = "" if description == "[REDACTED]" else description
-    instructions_raw = (
-        payload.get("agent_instructions")
-        or payload.get("agentInstructions")
-        or payload.get("specialInstructions")
-        or payload.get("instructions")
-    )
-    if instructions_raw is not None:
+    instructions_raw: Any = None
+    instructions_provided = False
+    for instructions_key in ("agent_instructions", "agentInstructions", "specialInstructions", "instructions"):
+        if instructions_key in payload:
+            instructions_raw = payload.get(instructions_key)
+            instructions_provided = True
+            break
+    prompt_preflight: dict[str, Any] | None = None
+    if instructions_provided:
+        prompt_preflight = _space_current_instruction_prompt_preflight_receipt(str(instructions_raw or ""))
+        if prompt_preflight.get("status") != "pass":
+            categories: list[str] = []
+            for category in prompt_preflight.get("categories") or []:
+                text = str(category or "").strip().lower()
+                if text and re.fullmatch(r"[a-z0-9_:-]{1,80}", text) and text not in categories:
+                    categories.append(text)
+            suffix = f" ({', '.join(categories)})" if categories else ""
+            raise ValueError(f"Space meta prompt preflight blocked{suffix}")
         instructions = _payload_text_summary(instructions_raw, 800)
         space["agent_instructions"] = "" if instructions == "[REDACTED]" else instructions
     icon = _payload_text_summary(payload.get("icon"), 40)
@@ -4570,7 +4581,10 @@ def save_space_meta_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
         "space.meta.updated",
         {"fields": [key for key in ("name", "description", "agent_instructions", "icon", "icon_color") if key in space]},
     )
-    return {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
+    result = {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
+    if prompt_preflight is not None:
+        result["prompt_preflight"] = prompt_preflight
+    return result
 
 
 def save_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4968,6 +4982,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = save_space_meta_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-meta")
         response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        if isinstance(result.get("prompt_preflight"), dict):
+            response["autonomy_policy"] = _space_current_instruction_action_policy_receipt(
+                name,
+                result["prompt_preflight"],
+            )
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
