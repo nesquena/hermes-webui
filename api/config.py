@@ -4003,6 +4003,36 @@ def get_available_models() -> dict:
             or (g.get("provider_id") or "").startswith("custom:")
         ]
 
+        # Sort groups: active provider first, then custom:* providers,
+        # then providers with configured keys, then the rest alphabetically.
+        _providers_with_keys: set[str] = set()
+        try:
+            _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+            if isinstance(_pool, dict):
+                for _pid in _pool:
+                    _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
+        except Exception:
+            pass
+        try:
+            _cfg_providers = cfg.get("providers", {})
+            if isinstance(_cfg_providers, dict):
+                for _pk, _pv in _cfg_providers.items():
+                    if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
+                        _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
+        except Exception:
+            pass
+
+        def _group_sort_key(g):
+            pid = g.get("provider_id") or ""
+            if pid == active_provider:
+                return (0, pid)
+            if pid.startswith("custom:"):
+                return (1, pid)
+            if pid in _providers_with_keys:
+                return (2, pid)
+            return (3, pid)
+        groups.sort(key=_group_sort_key)
+
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases: dict[str, str] = {}
         try:
