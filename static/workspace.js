@@ -103,6 +103,102 @@ function _restoreExpandedDirs(){
   }catch(e){S._expandedDirs=new Set();}
 }
 
+let _workspacePanelActiveTab = 'files';
+
+function switchWorkspacePanelTab(tab){
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  const panel = document.querySelector('.rightpanel');
+  if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
+  const filesTab = $('workspaceFilesTab');
+  const artifactsTab = $('workspaceArtifactsTab');
+  if(filesTab){
+    filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
+    filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
+  }
+  if(artifactsTab){
+    artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
+    artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
+  }
+  const artifacts = $('workspaceArtifacts');
+  if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+}
+
+function _artifactCandidatesFromText(text){
+  if(!text || typeof text !== 'string') return [];
+  const out = [];
+  const seen = new Set();
+  const add = (path, kind='referenced') => {
+    if(!path) return;
+    path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+    if(!path || path.length > 240 || path.includes('://')) return;
+    if(!/[./]/.test(path)) return;
+    if(seen.has(path)) return;
+    seen.add(path); out.push({path, kind});
+  };
+  const fenced = /```(?:diff|patch)?\n[\s\S]*?```/gi;
+  let m;
+  while((m = fenced.exec(text))){
+    const block = m[0];
+    const fm = block.match(/(?:^|\n)(?:\+\+\+|---)\s+(?:[ab]\/)?([^\n\t]+)/);
+    if(fm) add(fm[1].trim(), 'diff');
+  }
+  const patterns = [
+    /(?:created|wrote|updated|edited|saved|modified)\s+(?:file\s+)?[`"']?([^`"'\n]+?\.[A-Za-z0-9]{1,12})[`"']?(?=$|[\s),.;:])/gi,
+    /(?:MEDIA:)?((?:\/|~\/|\.\.?\/)?[A-Za-z0-9_@~.-][A-Za-z0-9_@~.\/-]*\.[A-Za-z0-9]{1,12})/g
+  ];
+  for(const re of patterns){
+    while((m = re.exec(text))) add(m[1] || m[0]);
+  }
+  return out;
+}
+
+function collectSessionArtifacts(){
+  const items = [];
+  const seen = new Set();
+  const push = (path, source) => {
+    if(!path || seen.has(path)) return;
+    seen.add(path); items.push({path, source});
+  };
+  for(const msg of (S.messages || [])){
+    const text = msg && (msg.content || msg.text || msg.message || '');
+    for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+  }
+  for(const tc of (S.toolCalls || [])){
+    const args = tc && (tc.arguments || tc.args || tc.input);
+    const result = tc && (tc.result || tc.output || '');
+    for(const source of [args, result]){
+      const text = typeof source === 'string' ? source : (source ? JSON.stringify(source) : '');
+      for(const a of _artifactCandidatesFromText(text)) push(a.path, tc.name || a.kind);
+    }
+  }
+  return items.slice(0, 50);
+}
+
+function renderSessionArtifacts(){
+  const root = $('workspaceArtifacts');
+  const count = $('workspaceArtifactsCount');
+  if(!root) return;
+  const items = collectSessionArtifacts();
+  if(count) count.textContent = String(items.length);
+  if(!S.session){
+    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files mentioned or changed in this session.</div>';
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created, edited, or referenced during this session will appear here.</div>';
+    return;
+  }
+  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+}
+
+function openArtifactPath(path){
+  if(!path) return;
+  switchWorkspacePanelTab('files');
+  const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  openFile(rel);
+}
+
 async function loadDir(path){
   if(!S.session)return;
   try{
@@ -112,7 +208,7 @@ async function loadDir(path){
     }
     S.currentDir=path||'.';
     const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){

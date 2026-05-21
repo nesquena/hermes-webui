@@ -795,6 +795,8 @@ async function loadSession(sid){
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
 
+  if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+
   // ── Cross-channel handoff hint ──
   // After session fully loaded, check if this is a messaging session with
   // enough conversation rounds to warrant a handoff hint bar.
