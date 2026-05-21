@@ -3,7 +3,9 @@
 
 ## [Unreleased]
 
+### Added
 
+- Skills panel now shows ALL installed skills, including disabled ones, with a toggle switch to enable/disable each skill for the current profile. Disabled skills are excluded from the agent's loaded skill set via `skills.disabled` in config.yaml. New `POST /api/skills/toggle` endpoint. `GET /api/skills` now returns a `disabled` boolean per skill instead of filtering out disabled skills silently. (PR # — feat/skills-toggle-ui)
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
 ### Fixed
