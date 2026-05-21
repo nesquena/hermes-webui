@@ -5940,7 +5940,7 @@ function renderMessages(options){
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
-  const renderSignature=_messageRenderCacheSignature();
+  let renderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
@@ -5955,6 +5955,7 @@ function renderMessages(options){
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+    renderSignature=_messageRenderCacheSignature();
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
@@ -6564,10 +6565,11 @@ function renderMessages(options){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid&&!hasTransientTranscriptUi){
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
+      if(renderSignature===null) renderSignature=_messageRenderCacheSignature();
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
