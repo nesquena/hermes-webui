@@ -231,7 +231,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 if not skill_matches_platform(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_dir.name)[:64]
-                if name in seen_names or name in disabled:
+                if name in seen_names:
                     continue
                 description = frontmatter.get("description", "")
                 if not description:
@@ -248,6 +248,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                         "name": name,
                         "description": description,
                         "category": _skill_category_from_path(skill_md, search_dirs),
+                        "disabled": name in disabled,
                     }
                 )
             except (UnicodeDecodeError, PermissionError) as e:
@@ -5472,6 +5473,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/skills/delete":
         return _handle_skill_delete(handler, body)
+
+    if parsed.path == "/api/skills/toggle":
+        return _handle_skill_toggle(handler, body)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
@@ -10936,6 +10940,52 @@ def _handle_skill_delete(handler, body):
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
     return j(handler, {"ok": True, "name": body["name"]})
+
+
+def _handle_skill_toggle(handler, body):
+    try:
+        require(body, "name", "enabled")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    name = body["name"].strip()
+    enabled = bool(body["enabled"])
+
+    from api.config import _get_config_path, _load_yaml_config_file, _save_yaml_config_file, reload_config
+
+    config_path = _get_config_path()
+    cfg = _load_yaml_config_file(config_path)
+
+    # Ensure skills section exists as a dict
+    if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+        cfg["skills"] = {}
+    skills_cfg = cfg["skills"]
+
+    # Normalize the disabled list
+    disabled = skills_cfg.get("disabled")
+    if disabled is None:
+        disabled = []
+    elif isinstance(disabled, str):
+        disabled = [disabled]
+    elif not isinstance(disabled, list):
+        disabled = list(disabled) if disabled else []
+    disabled = [str(d).strip() for d in disabled if str(d).strip()]
+
+    if enabled:
+        # Remove from disabled list
+        disabled = [d for d in disabled if d != name]
+    else:
+        # Add to disabled list (if not already there)
+        if name not in disabled:
+            disabled.append(name)
+
+    # Write back
+    skills_cfg["disabled"] = disabled
+    cfg["skills"] = skills_cfg
+    _save_yaml_config_file(config_path, cfg)
+    reload_config()
+
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 def _handle_memory_write(handler, body):
