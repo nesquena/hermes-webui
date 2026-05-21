@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resync the virtualized session sidebar when the browser rejects a restored scroll position after layout/navigation changes, preventing date-group headers from rendering without session rows until the next manual scroll.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
