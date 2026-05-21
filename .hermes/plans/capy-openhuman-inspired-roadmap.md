@@ -50,46 +50,49 @@ Remaining:
 
 ### Phase 2 — TokenJuice-style output compaction
 
-Status: **backend helper and run-all demo receipt implemented; broader execution-path integration remains**.
+Status: **backend helper and product-visible metadata receipts implemented for the first creator/context/demo/progress boundaries; broader high-volume tool/subagent/browser/development integration remains**.
 
 Delivered:
 - `api/capy_compaction.py` implements `compact_output(...)` with bounded receipts, unsafe-marker redaction, path collapsing, repeated-line dedupe, approval-prompt preservation, error-block preservation, invalid-cap rejection, and `rules_applied` metadata.
 - `tests/test_capy_output_compaction.py` verifies size accounting, error/approval preservation, redaction status, cap enforcement, and unsafe-marker omission.
 - `space_demo_run_all()` now emits a metadata-only `output_compaction` receipt built from allow-listed demo-suite summary lines, so the existing Spaces UI can show original/compacted character counts, redaction status, and allow-listed rules without rendering raw output, prompts, widget bodies, or credentials.
+- Individual demo smokes, creator preview/commit receipts, active-space context receipts, and scoped progress status receipts now reuse the same product-visible compaction evidence pattern without rendering raw prompts, generated bodies, renderer/source/API-auth fields, scripts, credentials, or exception text.
 
 Remaining:
-- Extend compaction receipts beyond the run-all demo suite to individual long creator/tool/subagent/browser-output boundaries where they add product value.
+- Extend compaction receipts to remaining long external tool/subagent/browser/development/recovery-output boundaries where they add product value.
 - Preserve safety-relevant prompts, failures, approval prompts, and artifact handles/citations when broader execution paths adopt compaction.
 
 ### Phase 3 — Auto-fetch source registry and freshness
 
-Status: **source registry/status UI and local-knowledge bridge implemented; broader refresh scheduling/fetchers remain**.
+Status: **source registry/status UI, local-knowledge bridge, source-refresh job queueing, and safe metadata-only refresh worker implemented; broader autonomous scheduling/trigger coverage and source-specific fetcher breadth remain**.
 
 Delivered:
 - `api/capy_memory.py` registers source references idempotently, queues metadata-only `source.refresh` jobs, strips credential/query/fragment markers from public `origin_uri`, requeues terminal jobs, and preserves active leased payloads.
+- `run_source_refresh_jobs(...)` leases queued source-refresh jobs, enforces allow-listed HTTP(S) origins, runs `auto_fetched_source` prompt preflight, persists only sanitized advisory summaries, and emits metadata-only `memory.ingest.*` progress events.
 - `GET /api/capy-memory/status` returns local-only source/chunk/stale/error/refresh-job counts.
 - `static/spaces.js` renders the product-home Memory freshness card from `api/capy-memory/status` with hostile fields ignored/redacted.
 - `api/knowledge.py` / Memory Tree bridge registers local knowledge sources as metadata-only Memory Tree source records with local provenance/freshness status.
 
 Remaining:
-- Implement a safe refresh worker that consumes queued jobs, fetches selected sources under allow-listed policy, writes only sanitized summaries, and updates freshness/error metadata.
+- Broaden scheduler/cron coverage for due refresh jobs and source-specific fetchers while keeping existing manual-trigger receipts and all public UI metadata-only.
 
 ### Phase 4 — Spaces-aware memory integration
 
-Status: **Space detail, creator preview, and production artifact auto-ingest surfaces implemented; deeper advisory context wiring remains**.
+Status: **Space detail, creator preview, production artifact auto-ingest, and active-space context advisory/preflight surfaces implemented; broader advisory enforcement remains**.
 
 Delivered:
 - `GET /api/spaces/memory?space_id=...` returns bounded relevant Memory Tree slices with metadata-only snippets.
 - `static/spaces.js` renders a Space detail `Memory Tree context` card and creator-preview `Memory assist` evidence without leaking renderer/source/API-auth/raw-prompt markers.
 - New artifact canonicalizers cover Space manifests, revision events, widget events, and visual/UI QA reports as searchable local artifacts.
 - Production boundaries now call the canonicalizers automatically for Space manifest/revision writes (including rollback/restore anchors), widget events, recovery/repair events, and creator visual-QA commit reports.
+- Active-space context now includes cited advisory relevant-memory slices only through a prompt-preflighted, metadata-only envelope with compaction, context status, progress-event, and action-policy evidence.
 
 Remaining:
-- Inject cited relevant memory into active-space/creator context only after prompt-injection preflight and with explicit redaction/provenance labels.
+- Extend the same preflighted advisory-memory envelope to remaining source/tool/browser/development boundaries where memory can influence actions.
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface plus creator preview/commit per-action receipts implemented; broader per-action enforcement remains**.
+Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, and source-refresh preflight receipts implemented; broader per-action enforcement and actual model-routing decisions remain**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
@@ -97,9 +100,10 @@ Delivered:
 - Creator preview responses now include a metadata-only `autonomy_policy` receipt with approval gates, prompt-preflight status, and model-route hint evidence, and the creator-preview UI renders this Action policy card without exposing raw prompts, generated bodies, renderer/source fields, API-auth fields, or credentials.
 - Creator commit responses now carry forward the preview prompt-preflight receipt and add a commit-scoped `autonomy_policy` receipt after the sandbox preview, visual-QA, and explicit approval gates pass, giving the revisioned-commit result metadata-only policy evidence without persisting raw prompts, generated bodies, renderer/source fields, API-auth fields, credentials, or unsafe screenshot paths.
 - Direct active-space instruction aliases (`space.current.agentInstructions` / `space.current.specialInstructions`) now run `active_space_instructions` prompt preflight, return metadata-only action-policy receipts, and withhold hostile instruction text before it can be injected into agent context.
+- Active-space context receipts, repair prompts, widget-runtime prompts, and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
 
 Remaining:
-- Extend pass/warn/block preflight and action-policy receipts to additional high-risk source/tool boundaries beyond the creator preview/commit path.
+- Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/source-refresh coverage.
 - Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events
@@ -135,16 +139,16 @@ Only after the remaining Phase 1-6 integration items are working:
 
 ## Next implementation slices for autonomous sprints
 
-1. **Prompt-preflight + memory/context enforcement**
-   - Add per-action pass/warn/block receipts for source/context boundaries before memory can influence agent actions; creator preview/commit and direct active-space instruction aliases now have metadata-only receipts.
-   - Treat Memory Tree content as untrusted advisory context.
+1. **Remaining prompt-preflight + memory/context enforcement**
+   - Extend pass/warn/block receipts from the implemented creator preview/commit, active-space instruction/context, repair prompt, widget-runtime prompt, and source-refresh paths to remaining high-risk browser/development/recovery/tool boundaries.
+   - Keep Memory Tree content untrusted advisory context that cannot bypass creator gates, approval gates, sandbox preview, visual QA, or rollback/recovery controls.
 
 2. **Broader compaction producers**
-   - Extend the run-all `output_compaction` receipt pattern to individual long creator/tool/subagent/browser-output boundaries where it adds product value.
+   - Extend the implemented run-all, individual-demo, creator preview/commit, active-context, and scoped-progress `output_compaction` receipt pattern to remaining long tool/subagent/browser/development/recovery-output boundaries where it adds product value.
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 3. **Broader source-refresh scheduling/fetcher coverage**
-   - Expand safe source refresh worker scheduling/trigger coverage and source-specific fetchers while keeping raw fetched content out of public receipts/UI.
+   - Expand due-job scheduler/cron coverage and source-specific fetchers now that the safe metadata-only refresh worker and manual trigger path exist; keep raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
    - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, individual Browser Surface demo smokes, and source-style layout-repair actions now cover the first workflow/gate/ingest/run/browser/repair producers.
@@ -201,14 +205,14 @@ Only after the remaining Phase 1-6 integration items are working:
 
 ### Gaps to close / next integration targets
 
-The first roadmap pass has now delivered the Memory Tree module, source/job schema, compaction helper, memory freshness card, relevant-memory UI, policy card, and product-home plus Space-detail progress cards. Current remaining work is narrower:
+The first roadmap pass has now delivered the Memory Tree module, source/job schema, safe refresh worker, compaction helper, memory freshness card, relevant-memory UI, policy card, active-context advisory/preflight receipts, and product-home plus Space-detail progress cards. Current remaining work is narrower:
 
 - **Automated artifact ingestion:** Core Space manifest/revision, rollback/restore anchor, repair, widget-event, and visual-QA production boundaries now auto-ingest metadata-only Memory Tree records; keep future artifact producers on the same canonicalizer path.
 - **Local knowledge bridge:** Local knowledge now registers metadata-only Memory Tree source records with freshness/provenance rather than copying raw files wholesale into prompts; next work is safe refresh scheduling/fetcher breadth.
-- **Advisory active context:** Active-Space context has display-side relevant memory and compact summaries, but agent/creator context injection should add cited Memory Tree snippets only after prompt-injection preflight.
-- **Compaction execution path:** `api/capy_compaction.py` exists, but long tool/subagent/browser-output boundaries still need product-visible compaction receipts and integration.
-- **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduling/trigger coverage and source-specific fetchers.
-- **Per-action policy/preflight:** Product-home policy visibility exists; creator/source/runtime boundaries still need explicit pass/warn/block receipts where high-risk context can influence actions.
+- **Advisory active context:** Active-Space context and creator preview now use cited, redacted Memory Tree snippets through metadata-only/preflighted envelopes; remaining source/tool/browser/development boundaries should use the same pattern before memory can influence actions.
+- **Compaction execution path:** `api/capy_compaction.py` now backs run-all, individual-demo, creator preview/commit, active-context, and scoped-progress receipts; remaining long tool/subagent/browser/development/recovery outputs still need product-visible compaction integration where useful.
+- **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduler/cron coverage and source-specific fetchers around the existing manual trigger path.
+- **Per-action policy/preflight:** Product-home policy visibility exists, and creator/context/repair/runtime/source-refresh boundaries have initial pass/warn/block receipts; remaining high-risk browser/development/recovery/tool boundaries need equivalent action-policy evidence.
 - **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, and source-style layout-repair events now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
 
 ---

@@ -26,11 +26,11 @@ Decision summary:
 
 Roadmap priority for upcoming autonomous sprints:
 
-1. Prompt-preflight + advisory relevant-memory injection into creator/agent context.
-2. Product-visible compaction evidence for long tool/subagent/browser/demo outputs.
-3. Broaden safe source refresh worker scheduling/trigger coverage and source-specific fetchers after the local knowledge bridge.
+1. Remaining prompt-preflight + advisory memory enforcement for high-risk browser/development/recovery/tool boundaries; creator preview/commit, active-space instruction/context, repair prompt, widget-runtime prompt, and source-refresh paths now have initial metadata-only receipts.
+2. Product-visible compaction evidence for remaining long tool/subagent/browser/development/recovery outputs; run-all, individual demos, creator preview/commit, active context, and scoped progress already use the first receipt pattern.
+3. Broaden safe source-refresh scheduler/cron coverage and source-specific fetchers now that the metadata-only refresh worker, manual trigger path, and local knowledge bridge exist.
 4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair actions, active-context tool calls, and shared data slot set/delete actions now emit the first workflow/gate/ingest/run/repair/browser/cooperation events, and Space detail can inspect Space-scoped streams.
-5. Model-routing hint execution path and remaining per-action policy receipts for source/tool boundaries; creator preview and creator commit now have the first metadata-only action-policy receipts.
+5. Model-routing hint execution path and remaining per-action policy receipts for high-risk source/tool/browser/development boundaries; creator preview/commit and active context/instruction paths now have the first metadata-only action-policy receipts.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
