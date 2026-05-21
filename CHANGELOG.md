@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Treat `ACTIVE_RUNS` as live worker state during stale-pending session repair so a detached SSE stream does not get misdiagnosed as a WebUI restart while the backend agent turn is still running.
 
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 
