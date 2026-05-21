@@ -1022,6 +1022,11 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
+function _isVirtualKeyboardLikelyOpen(){
+  const vv=window.visualViewport;
+  if(!vv||!window.innerHeight)return true;
+  return window.innerHeight-vv.height>120;
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -1039,13 +1044,14 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices (software keyboard), default to Enter = newline
-  // since there's no physical Shift key. Users send via the Send button.
+  // On touch-primary devices with the software keyboard open, default to
+  // Enter = newline since there's no physical Shift key. Hardware keyboards on
+  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter'&&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
