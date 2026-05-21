@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve optimistic in-flight chat messages across the `/api/chat/start` await window so a sidebar/session-list refresh cannot prune the active send and make the browser render `Cannot read properties of undefined (reading 'messages')` while the backend stream is still running.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
