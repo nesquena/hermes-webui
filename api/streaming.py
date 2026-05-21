@@ -2097,6 +2097,26 @@ def _api_safe_message_positions(messages):
     return out
 
 
+def _deduplicate_context_messages(messages):
+    """Remove duplicate messages from context by identity, keeping first occurrence.
+
+    Prevents the agent from seeing the same message twice in conversation_history
+    when result_messages contain duplicates that weren't caught by display-merge.
+    """
+    if not messages:
+        return messages
+    seen = set()
+    deduped = []
+    for msg in messages:
+        key = _message_identity(msg)
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        deduped.append(msg)
+    return deduped
+
+
 def _restore_reasoning_metadata(previous_messages, updated_messages):
     """Carry forward display-only metadata lost during API-safe history sanitization.
 
@@ -2514,6 +2534,11 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             # message twice in the current delta. Treat only adjacent identity
             # matches as replay duplicates so identical answers in separate
             # user turns remain visible.
+            continue
+        if key is not None and key in seen:
+            # General dedup: skip any message whose identity is already in the
+            # transcript. Catches duplicates that aren't adjacent and aren't
+            # the current user turn — prevents agent context pollution.
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
@@ -4163,6 +4188,10 @@ def _run_agent_streaming(
                 ),
                 msg_text,
             )
+            # Dedup before feeding to agent — merge_session_messages_append_only
+            # can produce duplicates when context_messages and state.db share
+            # messages with different timestamps.
+            _previous_context_messages = _deduplicate_context_messages(_previous_context_messages)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -4322,7 +4351,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _result_messages,
                 )
-                s.context_messages = _next_context_messages
+                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
@@ -4465,7 +4494,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -5281,7 +5310,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
