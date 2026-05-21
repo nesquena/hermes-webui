@@ -3743,6 +3743,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-run-head{display:flex;align-items:center;justify-content:space-between;cursor:pointer;font-size:12px;color:var(--muted);}
 .detail-run-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}
 .detail-run-body{display:none;margin-top:6px;font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.5;max-height:260px;overflow-y:auto;background:var(--sidebar);border:1px solid var(--border);border-radius:6px;padding:8px 10px;}
+.detail-run-body-actions{display:flex;justify-content:flex-end;margin-bottom:8px;}
+.detail-run-download{font-size:12px;color:var(--accent-text);text-decoration:none;}
+.detail-run-download:hover{text-decoration:underline;}
 .detail-run-item.open .detail-run-body{display:block;}
 .detail-run-body.expanded{max-height:none;overflow-y:visible;}
 .cron-run-usage-strip{display:inline-flex;align-items:center;gap:4px;margin-left:8px;color:var(--text-secondary);font-size:11px;opacity:.72;white-space:nowrap;}

@@ -104,12 +104,23 @@ def test_crons_output_limit_param(cleanup_test_sessions):
     # 404 or 200 with empty -- both acceptable for nonexistent job
     assert status in (200, 404)
 
+def test_cron_output_raw_requires_file(cleanup_test_sessions):
+    try:
+        data, status = get("/api/crons/output/raw?job_id=nonexistent")
+        assert status == 400
+        assert "file required" in data["error"]
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+        body = json.loads(e.read())
+        assert "file required" in body["error"]
+
 def test_cron_history_button_in_panels_js(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
     # After the main-view refactor, cron runs load inline into the detail card
     # via _loadCronDetailRuns() instead of a separate "All runs" button.
     assert "_loadCronDetailRuns" in src
     assert "cron_last_output" in src  # i18n key used by the runs card
+    assert "/api/crons/output/raw" in src
 
 def test_cron_output_snippet_helper(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
@@ -182,6 +193,31 @@ def test_cron_output_window_without_response_uses_tail(cleanup_test_sessions):
     assert len(window) == 8000
     assert window.endswith("tail result")
     assert "old prompt" not in window
+
+
+def test_resolve_cron_output_file_rejects_traversal(cleanup_test_sessions):
+    from api.routes import _resolve_cron_output_file
+    import pytest
+
+    with pytest.raises(ValueError):
+        _resolve_cron_output_file("job123", "../secret.txt")
+
+
+def test_cron_output_raw_reads_full_file(cleanup_test_sessions):
+    from pathlib import Path
+    import os
+
+    job_id = "test-raw-job"
+    out_dir = Path(os.environ["HERMES_HOME"]) / "cron" / "output" / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "2026-05-20_19-42-00.md"
+    content = "# Cron Job\n\n## Response\n" + ("line\n" * 400)
+    target.write_text(content, encoding="utf-8")
+
+    data, status = get(f"/api/crons/output/raw?job_id={urllib.parse.quote(job_id)}&file={urllib.parse.quote(target.name)}")
+    assert status == 200
+    assert data["filename"] == target.name
+    assert data["content"] == content
 
 # ── Tool card polish ───────────────────────────────────────────────────────
 

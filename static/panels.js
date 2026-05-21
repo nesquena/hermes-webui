@@ -658,29 +658,25 @@ async function _loadRunContent(jobId, filename, runId){
       body.textContent = data.error;
       return;
     }
-    // Render markdown content using the same renderer as chat messages
+    const rawUrl = `/api/crons/output/raw?job_id=${encodeURIComponent(jobId)}&file=${encodeURIComponent(filename)}&download=1`;
+    const actions = document.createElement('div');
+    actions.className = 'detail-run-body-actions';
+    actions.innerHTML = `<a class="detail-run-download" href="${rawUrl}" download="${esc(filename)}">Download raw</a>`;
+    const content = document.createElement('div');
     if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(data.snippet || data.content);
+      content.innerHTML = renderMd(data.content || data.snippet);
     } else {
-      body.textContent = data.snippet || data.content;
+      content.textContent = data.content || data.snippet;
     }
+    body.innerHTML = '';
+    body.appendChild(actions);
+    body.appendChild(content);
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
       const usage = document.createElement('div');
       usage.className = 'cron-run-usage-strip cron-run-usage-footer';
       usage.textContent = usageStrip;
       body.appendChild(usage);
-    }
-    // Show "View full output" button if content was truncated
-    if (data.content && data.snippet && data.content.length > data.snippet.length) {
-      const btn = document.createElement('button');
-      btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
-      btn.textContent = t('cron_view_full_output') || 'View full output';
-      btn.onclick = () => {
-        body.innerHTML = renderMd ? renderMd(data.content) : '';
-        btn.remove();
-      };
-      body.appendChild(btn);
     }
   } catch(e) {
     body.textContent = 'Error: ' + e.message;
