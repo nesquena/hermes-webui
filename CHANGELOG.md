@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent stale chat HTML from being reused after session switches when the
+  message count stays the same but the visible transcript content or compression
+  anchor changes.
+
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 

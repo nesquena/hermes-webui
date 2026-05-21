@@ -5537,19 +5537,72 @@ function renderCompressionUi(){
   el.style.display='none';
 }
 // Session render cache: avoids full markdown+DOM rebuild when switching back
-// to a session that was already rendered with the same message count.
+// to a session that was already rendered with the same visible transcript.
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
-//
-// Known limitation: cache key is session_id + message count. Edits and retries
-// that mutate message content without changing the count will serve stale HTML
-// on back-navigation until the user triggers an in-session update. Acceptable
-// for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+}
+
+function _messageRenderHash(value){
+  const s=String(value||'');
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){
+    h^=s.charCodeAt(i);
+    h=Math.imul(h,16777619);
+  }
+  return `${s.length}:${h>>>0}`;
+}
+function _messageRenderCachePart(m){
+  if(!m||typeof m!=='object') return 'null';
+  let text='';
+  try{text=msgContent(m);}
+  catch(_){text=typeof m.content==='string'?m.content:JSON.stringify(m.content||'');}
+  const attachments=Array.isArray(m.attachments)?m.attachments.map(a=>typeof a==='string'?a:(a&&(a.name||a.filename||a.path))||'').join(','):'';
+  const toolCalls=Array.isArray(m.tool_calls)
+    ? m.tool_calls.map(tc=>{
+        const fn=tc&&(tc.function||tc);
+        return `${tc&&(tc.id||tc.call_id)||''}:${fn&&(fn.name||'')}:${_messageRenderHash(fn&&(fn.arguments||fn.input||''))}`;
+      }).join(',')
+    : '';
+  const contentShape=Array.isArray(m.content)
+    ? m.content.map(p=>p&&p.type||'').join(',')
+    : typeof m.content;
+  const rawContentHash=_messageRenderHash(
+    typeof m.content==='string' ? m.content : JSON.stringify(m.content||'')
+  );
+  return [
+    m.id||m.message_id||'',
+    m.role||'',
+    m.timestamp||m._ts||'',
+    m.tool_call_id||m.tool_use_id||'',
+    m.tool_name||m.name||'',
+    _messageRenderHash(text),
+    rawContentHash,
+    contentShape,
+    attachments,
+    toolCalls,
+    m._live?'live':'',
+    m._pending?'pending':'',
+    m._statusCard?_messageRenderHash(JSON.stringify(m._statusCard)):'',
+    m.reasoning?_messageRenderHash(m.reasoning):'',
+  ].join('\x1f');
+}
+function _messageRenderCacheSignature(messages, renderWindowSize){
+  const session=S.session||{};
+  const anchor={
+    truncated:!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated),
+    oldestIdx:typeof _oldestIdx!=='undefined'?_oldestIdx:0,
+    renderWindowSize,
+    compressionAnchorVisibleIdx:session.compression_anchor_visible_idx,
+    compressionAnchorMessageKey:session.compression_anchor_message_key||null,
+    compressionAnchorSummary:session.compression_anchor_summary||'',
+  };
+  const rows=(Array.isArray(messages)?messages:[]).map(_messageRenderCachePart).join('\x1e');
+  return `${_messageRenderHash(JSON.stringify(anchor))}:${_messageRenderHash(rows)}`;
 }
 
 function _clipCliToolSnippet(text, maxLen=20000){
@@ -5702,6 +5755,7 @@ function renderMessages(options){
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
   );
+  const cacheSignature=_messageRenderCacheSignature(S.messages, renderWindowSize);
 
   // Fast path: switching back to a previously rendered session with same count.
   // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
@@ -5713,7 +5767,7 @@ function renderMessages(options){
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===cacheSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
@@ -6324,7 +6378,7 @@ function renderMessages(options){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:cacheSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
