@@ -7803,11 +7803,13 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     widgets[idx] = widget
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
+    progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
+        "progress_event": progress_event,
     }
 
 
@@ -7829,11 +7831,13 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     space["widgets"] = widgets
     detail_reason = _context_value(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
+    progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
+        "progress_event": progress_event,
     }
 
 
@@ -8446,6 +8450,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "repair",
         "recovery.disable",
         "recovery.enable",
+        "recovery.widget.disable",
+        "recovery.widget.enable",
         "save-meta",
         "save-layout",
         "shared-slot.set",
@@ -8486,7 +8492,7 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
 def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery admin toggles."""
     safe_action = str(action or "").strip().lower()
-    if safe_action not in {"disable", "enable"}:
+    if safe_action not in {"disable", "enable", "widget.disable", "widget.enable"}:
         safe_action = "toggle"
     return _record_space_tool_progress_event(space_id, run_prefix=f"recovery.{safe_action}")
 

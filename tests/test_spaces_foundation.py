@@ -2403,6 +2403,65 @@ def test_space_recovery_primitives_record_metadata_only_progress_events(monkeypa
     assert "renderer" not in serialized
 
 
+def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-recovery-progress-lab", "name": "Widget Recovery Progress Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-panel",
+            "kind": "html",
+            "title": "Broken Panel",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.admin.disable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "broken-panel",
+            "reason": "broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    enabled = spaces.run_space_tool(
+        "space.admin.enable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "broken-panel",
+            "reason": "safe recovery complete after SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+        },
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id=created["space_id"])
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled, "progress": scoped_progress}, sort_keys=True).lower()
+
+    assert disabled["ok"] is True
+    assert enabled["ok"] is True
+    assert disabled["progress_event"]["event_type"] == "tool.completed"
+    assert disabled["progress_event"]["family"] == "tool"
+    assert disabled["progress_event"]["run_id"] == "recovery.widget.disable:widget-recovery-progress-lab"
+    assert disabled["progress_event"]["space_id"] == created["space_id"]
+    assert enabled["progress_event"]["event_type"] == "tool.completed"
+    assert enabled["progress_event"]["family"] == "tool"
+    assert enabled["progress_event"]["run_id"] == "recovery.widget.enable:widget-recovery-progress-lab"
+    assert enabled["progress_event"]["space_id"] == created["space_id"]
+    assert disabled["progress_event"].get("event_id") != enabled["progress_event"].get("event_id")
+    assert scoped_progress["recent_event_count"] == 2
+    assert scoped_progress["recent_family_counts"] == {"tool": 2}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "recovery.widget.enable:widget-recovery-progress-lab",
+        "recovery.widget.disable:widget-recovery-progress-lab",
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
 def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-toggle-widgets-lab", "name": "Source Toggle Widgets Lab"})
@@ -15356,11 +15415,13 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     from api.capy_progress import progress_status
 
     progress = progress_status(space_id=created["space_id"])
-    assert progress["recent_event_count"] == 1
-    assert progress["recent_family_counts"] == {"tool": 1}
+    assert progress["recent_event_count"] == 2
+    assert progress["recent_family_counts"] == {"tool": 2}
     assert progress["recent_events"][0]["event_type"] == "tool.completed"
     assert progress["recent_events"][0]["run_id"] == "repair:repair-widget-route"
     assert progress["recent_events"][0]["space_id"] == created["space_id"]
+    assert progress["recent_events"][1]["run_id"] == "recovery.widget.disable:repair-widget-route"
+    assert progress["recent_events"][1]["space_id"] == created["space_id"]
 
     serialized_body = json.dumps(body).lower()
     assert "secret_value_do_not_leak" not in serialized_body

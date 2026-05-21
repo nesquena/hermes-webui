@@ -124,6 +124,7 @@ Delivered:
 - Creator-loop sandbox previews now emit metadata-only `tool.completed` progress events keyed by their opaque preview receipt ids, so the product progress stream reflects creator preview activity before commit without storing raw prompts, generated widget bodies, renderer/source fields, API-auth data, script markers, or credentials.
 - Shared data slot set/delete tool actions now emit metadata-only `tool.completed` progress events using safe `shared-slot.*` run ids, so Space cooperation/data handoff activity appears in Space-scoped progress without exposing slot values, renderer/source fields, API-auth fields, prompts, or credentials.
 - Source-style widget upsert tool actions now emit metadata-only `tool.completed` progress events with safe `widget.upsert:<space_id>` run ids, so agent-driven Space construction appears in Space-scoped progress without storing widget bodies, renderer/source/API-auth fields, prompts, scripts, or credentials.
+- Recovery widget quarantine/enable tool actions now emit metadata-only `tool.completed` progress events with safe `recovery.widget.*:<space_id>` run ids, so Space-scoped progress reflects recovery admin widget toggles without exposing disabled widget bodies, renderer/source fields, prompts, scripts, or credentials.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.
@@ -152,7 +153,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Expand due-job scheduler/cron coverage and source-specific fetchers now that the safe metadata-only refresh worker and manual trigger path exist; keep raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
-   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, individual Browser Surface demo smokes, and source-style layout-repair actions now cover the first workflow/gate/ingest/run/browser/repair producers.
+   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, individual Browser Surface demo smokes, source-style layout-repair actions, shared-data/widget-upsert actions, and recovery widget toggles now cover the first workflow/gate/ingest/run/browser/repair/cooperation/construction/recovery producers.
 
 ---
 
@@ -214,7 +215,7 @@ The first roadmap pass has now delivered the Memory Tree module, source/job sche
 - **Compaction execution path:** `api/capy_compaction.py` now backs run-all, individual-demo, creator preview/commit, active-context, and scoped-progress receipts; remaining long tool/subagent/browser/development/recovery outputs still need product-visible compaction integration where useful.
 - **Source refresh worker:** Metadata-only `source.refresh` jobs can now be consumed safely and emit progress events; remaining work is broadening production scheduler/cron coverage and source-specific fetchers around the existing manual trigger path.
 - **Per-action policy/preflight:** Product-home policy visibility exists, and creator/context/repair/runtime/source-refresh boundaries have initial pass/warn/block receipts; remaining high-risk browser/development/recovery/tool boundaries need equivalent action-policy evidence.
-- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, and source-style layout-repair events now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
+- **Progress producers:** Structured progress recording/status/card exist, and Research Harness progress updates, creator visual-QA commits, Memory Tree source-refresh ingest, demo-suite run events, source-style layout-repair events, shared-data/widget-upsert actions, and recovery widget toggles now emit metadata-only events; more real long-running browser/development/repair workflows should emit events.
 
 ---
 
