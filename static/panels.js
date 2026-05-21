@@ -658,11 +658,14 @@ async function _loadRunContent(jobId, filename, runId){
       body.textContent = data.error;
       return;
     }
+    const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
+    const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+    body.classList.toggle('expanded', expanded);
     // Render markdown content using the same renderer as chat messages
     if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(data.snippet || data.content);
+      body.innerHTML = renderMd(output);
     } else {
-      body.textContent = data.snippet || data.content;
+      body.textContent = output;
     }
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
@@ -671,13 +674,15 @@ async function _loadRunContent(jobId, filename, runId){
       usage.textContent = usageStrip;
       body.appendChild(usage);
     }
-    // Show "View full output" button if content was truncated
-    if (data.content && data.snippet && data.content.length > data.snippet.length) {
+    // Show "View full output" button only for collapsed previews. Expanded rows render the full body inline.
+    if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
       const btn = document.createElement('button');
       btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
       btn.textContent = t('cron_view_full_output') || 'View full output';
       btn.onclick = () => {
-        body.innerHTML = renderMd ? renderMd(data.content) : '';
+        _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
+        body.classList.add('expanded');
+        body.innerHTML = renderMd ? renderMd(data.content) : data.content;
         btn.remove();
       };
       body.appendChild(btn);
@@ -4521,12 +4526,43 @@ function _refreshProfileSwitchBackground(gen){
   }).catch(function(){});
 }
 
+function refreshQuickProfileSelect(data){
+  const sel = $('sidebarProfileSelect');
+  if(!sel || !data) return;
+  const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+    ? S.activeProfile
+    : (data.active || 'default');
+  sel.innerHTML = '';
+  for(const p of profiles){
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    opt.textContent = p.is_default ? `${p.name} (default)` : p.name;
+    sel.appendChild(opt);
+  }
+  if(!profiles.some(p => p.name === active)){
+    const opt = document.createElement('option');
+    opt.value = active;
+    opt.textContent = active;
+    sel.appendChild(opt);
+  }
+  sel.value = active;
+  sel.disabled = profiles.length <= 1;
+}
+
+function refreshQuickProfileSelectFromApi(){
+  const sel = $('sidebarProfileSelect');
+  if(!sel) return;
+  api('/api/profiles').then(refreshQuickProfileSelect).catch(()=>{});
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
   try {
     const data = await api('/api/profiles');
     _profilesCache = data;
+    refreshQuickProfileSelect(data);
     panel.innerHTML = '';
     const explainer = document.createElement('div');
     explainer.className = 'profile-card profile-help-card';
@@ -4712,6 +4748,7 @@ function renderProfileDropdown(data) {
   const dd = $('profileDropdown');
   if (!dd) return;
   dd.innerHTML = '';
+  refreshQuickProfileSelect(data);
   const profiles = data.profiles || [];
   const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
@@ -4784,6 +4821,8 @@ async function switchToProfile(name) {
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
+  const quickSel = $('sidebarProfileSelect');
+  if(quickSel) quickSel.value = name;
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
 
@@ -4800,6 +4839,7 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
+    if(quickSel) quickSel.value = S.activeProfile;
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -4905,6 +4945,7 @@ async function switchToProfile(name) {
   } catch (e) {
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration && quickSel) quickSel.value = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
   } finally {
     // Always remove loading indicator regardless of success or failure

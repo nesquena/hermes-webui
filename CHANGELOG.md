@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a sidebar quick profile switcher so profiles can be changed without opening an active chat or the Profiles panel.
+- Add a workspace-panel Artifacts tab that lists files mentioned, edited, or created during the active session and opens them in the existing preview flow.
+
+### Changed
+
+- Session-list SSE reconnects now use bounded jitter/backoff instead of a fixed 5-second retry, reducing reconnect bursts after restarts or network drops.
+- Expanded cron run rows now render the full output inline immediately; the truncated preview remains only for collapsed rows.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
