@@ -1387,7 +1387,7 @@ async function _loadOlderMessages() {
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
     }).length;
-    _messageRenderWindowSize=_currentMessageRenderWindowSize()+addedRenderable;
+    _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     renderMessages({ preserveScroll: true });
