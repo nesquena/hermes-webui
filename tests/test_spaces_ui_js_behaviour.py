@@ -206,6 +206,45 @@ global.fetch = async function(path, opts = {}) {
     return response({ available: true, local_only: true, status: 'ready', active_run_count: 0, recent_event_count: 0, event_families: ['run', 'tool'], supported_event_types: ['run.started', 'tool.started', 'tool.completed'], redaction_status: 'metadata_only' });
   }
   if (path === 'api/capy-progress/status?space_id=lab') {
+    if (scenario === 'openSpaceDetailMismatchedProgressScope') {
+      return response({
+        unavailable: true,
+        local_only: true,
+        metadata_only: true,
+        space_id: 'other-lab',
+        active_run_count: 9,
+        recent_event_count: 9,
+        recent_events: [
+          { event_id: 'evt-other', event_type: 'tool.completed', family: 'tool', run_id: 'research:other-lab', space_id: 'other-lab', created_at: '2026-05-19T08:12:30Z' },
+        ],
+        output_compaction: {
+          original_chars: 99999,
+          compacted_chars: 111,
+          redaction_status: 'redacted',
+          rules_applied: ['cap_section_chars', 'retain_artifact_handles'],
+          retained_artifact_handles: [{ kind: 'artifact', handle: 'artifact:other-space.md', label: 'Other space summary' }],
+        },
+      });
+    }
+    if (scenario === 'openSpaceDetailMissingProgressScope') {
+      return response({
+        available: true,
+        local_only: true,
+        metadata_only: true,
+        active_run_count: 5,
+        recent_event_count: 5,
+        recent_events: [
+          { event_id: 'evt-aggregate', event_type: 'tool.completed', family: 'tool', run_id: 'research:aggregate', created_at: '2026-05-19T08:12:30Z' },
+        ],
+        output_compaction: {
+          original_chars: 55555,
+          compacted_chars: 222,
+          redaction_status: 'redacted',
+          rules_applied: ['cap_section_chars', 'retain_artifact_handles'],
+          retained_artifact_handles: [{ kind: 'artifact', handle: 'artifact:aggregate.md', label: 'Aggregate summary' }],
+        },
+      });
+    }
     return response({
       available: true,
       local_only: true,
@@ -221,6 +260,18 @@ global.fetch = async function(path, opts = {}) {
         { event_id: 'evt-qa-lab', event_type: 'space.visual_qa.completed', family: 'space.visual_qa', run_id: 'creator:lab', space_id: 'lab', created_at: '2026-05-19T08:11:30Z' },
         { event_id: 'renderer/../bad', event_type: 'renderer.source', family: 'renderer', run_id: 'SECRET_VALUE_DO_NOT_LEAK', space_id: 'lab', created_at: '<script>bad()</script>' },
       ],
+      output_compaction: {
+        original_chars: 18000,
+        compacted_chars: 3000,
+        redaction_status: 'redacted',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers', 'retain_artifact_handles', 'unknown_safe_rule'],
+        retained_artifact_handles: [
+          { kind: 'artifact', handle: 'artifact:progress-summary.md', label: 'Progress summary' },
+          { kind: 'artifact', handle: '/Users/bschmidy10/.ssh/id_rsa', label: 'SECRET_VALUE_DO_NOT_LEAK' },
+          { kind: 'artifact', handle: '/opt/app/config.json', label: 'Absolute path' },
+          { kind: 'artifact', handle: 'artifact:script.js', label: 'script' },
+        ],
+      },
       redaction_status: 'metadata_only',
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
@@ -2471,7 +2522,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runAllDemoSmokes', {});
-  } else if (scenario === 'openSpaceDetail' || scenario === 'openSpaceDetailUnsafeRevisionEventId' || scenario === 'openSpaceDetailUnownedRevisionSummary') {
+  } else if (scenario === 'openSpaceDetail' || scenario === 'openSpaceDetailUnsafeRevisionEventId' || scenario === 'openSpaceDetailUnownedRevisionSummary' || scenario === 'openSpaceDetailMismatchedProgressScope' || scenario === 'openSpaceDetailMissingProgressScope') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
   } else if (scenario === 'openSpaceCanvasRecovery' || scenario === 'recoveryUnsafeRevisionEventId') {
@@ -3171,6 +3222,55 @@ def test_spaces_ui_open_space_renders_space_progress_events_card(driver_path):
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
     assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+
+
+def test_spaces_ui_open_space_progress_card_shows_compaction_evidence_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+    html = out["rootHtml"]
+
+    assert "Space progress" in html
+    assert "Compaction evidence" in html
+    assert "Original output: 18000 chars" in html
+    assert "Compacted output: 3000 chars" in html
+    assert "Redaction: redacted" in html
+    assert "Rules: cap_section_chars, redact_unsafe_markers, retain_artifact_handles" in html
+    assert "unknown_safe_rule" not in html
+    assert "artifact:progress-summary.md" in html
+    assert "/Users/" not in html
+    assert "/opt/app/config.json" not in html
+    assert "artifact:script.js" not in html
+    assert ">script<" not in html
+    assert "file:/" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+
+
+def test_spaces_ui_open_space_progress_refuses_mismatched_compaction_scope(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetailMismatchedProgressScope")
+    html = out["rootHtml"]
+
+    assert "Space progress" in html
+    assert "Scoped progress unavailable; refusing aggregate stream." in html
+    assert "0 active runs" in html
+    assert "0 recent events" in html
+    assert "Compaction evidence" not in html
+    assert "artifact:other-space.md" not in html
+    assert "research:other-lab" not in html
+
+
+def test_spaces_ui_open_space_progress_refuses_missing_scoped_compaction_receipt(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetailMissingProgressScope")
+    html = out["rootHtml"]
+
+    assert "Space progress" in html
+    assert "Scoped progress unavailable; refusing aggregate stream." in html
+    assert "0 active runs" in html
+    assert "0 recent events" in html
+    assert "Compaction evidence" not in html
+    assert "artifact:aggregate.md" not in html
+    assert "research:aggregate" not in html
 
 
 def test_spaces_ui_canvas_widgets_are_css_resizable():

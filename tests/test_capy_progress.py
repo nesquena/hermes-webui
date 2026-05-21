@@ -263,6 +263,34 @@ def test_progress_status_returns_bounded_recent_event_stream_metadata_only(monke
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_progress_status_returns_metadata_only_output_compaction_receipt(monkeypatch, tmp_path):
+    log_path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+    rows = [
+        {"event_id": "evt-001", "event_type": "tool.completed", "run_id": "research:lab", "space_id": "lab", "created_at": "2026-05-18T00:00:00Z"},
+        {"event_id": "evt-002", "event_type": "space.visual_qa.completed", "run_id": "creator:lab", "space_id": "lab", "created_at": "2026-05-18T00:00:01Z"},
+        {"event_id": "renderer/../event", "event_type": "renderer.source", "run_id": "SECRET_VALUE_DO_NOT_LEAK", "space_id": "lab", "created_at": "<script>bad()</script>"},
+    ]
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    status = progress_status(space_id="lab")
+    receipt = status["output_compaction"]
+    serialized = json.dumps(status, sort_keys=True).lower()
+
+    assert receipt["tool"] == "capy-progress"
+    assert receipt["original_chars"] > 0
+    assert receipt["compacted_chars"] > 0
+    assert receipt["redaction_status"] in {"none", "redacted"}
+    assert "retain_artifact_handles" in receipt["rules_applied"]
+    assert receipt["retained_artifact_handles"] == [
+        {"kind": "artifact", "handle": "progress:recent-events", "label": "Recent progress events"}
+    ]
+    assert "text" not in receipt
+    assert "renderer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_progress_status_scopes_before_bounding_recent_events(monkeypatch, tmp_path):
     log_path = tmp_path / "events.jsonl"
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))

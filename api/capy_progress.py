@@ -257,11 +257,39 @@ def _recent_events(events: list[dict[str, Any]]) -> list[dict[str, str]]:
     return recent
 
 
+def _progress_output_compaction(events: list[dict[str, Any]], recent_events: list[dict[str, str]]) -> dict[str, Any]:
+    if not events:
+        return {}
+    from api.capy_compaction import compact_output
+
+    output = json.dumps(
+        {
+            "recent_event_count": len(events),
+            "recent_events": recent_events,
+            "recent_family_counts": _recent_family_counts(events),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    receipt = compact_output(
+        output,
+        tool="capy-progress",
+        command="progress_status",
+        max_chars=200,
+        artifact_handles=[
+            {"kind": "artifact", "handle": "progress:recent-events", "label": "Recent progress events"}
+        ],
+    )
+    receipt.pop("text", None)
+    return receipt
+
+
 def progress_status(space_id: str | None = None) -> dict[str, Any]:
     """Return local-only progress event capability/status metadata."""
     scoped_space_id = _normalize_scoped_space_id(space_id) if space_id is not None else ""
     events = _read_events(space_id=scoped_space_id or None)
     last_event_at = events[-1]["created_at"] if events else ""
+    recent_events = _recent_events(events)
     status = {
         "available": True,
         "local_only": True,
@@ -271,12 +299,15 @@ def progress_status(space_id: str | None = None) -> dict[str, Any]:
         "recent_event_count": len(events),
         "recent_event_types": _recent_event_types(events),
         "recent_family_counts": _recent_family_counts(events),
-        "recent_events": _recent_events(events),
+        "recent_events": recent_events,
         "last_event_at": last_event_at,
         "event_families": list(_EVENT_FAMILIES),
         "supported_event_types": list(_SUPPORTED_EVENT_TYPES),
         "redaction_status": "metadata_only",
     }
+    output_compaction = _progress_output_compaction(events, recent_events)
+    if output_compaction:
+        status["output_compaction"] = output_compaction
     if scoped_space_id:
         status["space_id"] = scoped_space_id
     return status

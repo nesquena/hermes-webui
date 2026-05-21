@@ -673,7 +673,7 @@
     }).filter(Boolean);
     const artifacts = Array.isArray(data.retained_artifact_handles) ? data.retained_artifact_handles : [];
     const unsafeEvidenceText = function(value){
-      return /\/Users\/|\/home\/|\/root\/|\/private\/|\/var\/|\/tmp\/|\/etc\/|~\/|[A-Za-z]:\\|:\/\/|file:\/|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(String(value || ''));
+      return /(^\/)|\/Users\/|\/home\/|\/root\/|\/private\/|\/var\/|\/tmp\/|\/etc\/|~\/|[A-Za-z]:\\|:\/\/|file:\/|api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|(?:^|[_\-\s<>.:/])(?:html|script|source|data|body|code)(?:$|[_\-\s<>.:/])|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(String(value || ''));
     };
     const artifactRows = artifacts.slice(0, 8).map(function(item){
       const entry = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
@@ -1263,7 +1263,7 @@
     const safeFamilies = {'run': true, 'tool': true, 'subagent': true, 'taskboard': true, 'memory.ingest': true, 'space.visual_qa': true};
     const expected = safePathIdText(expectedSpaceId || '') || '';
     const returned = safePathIdText(progressData && progressData.space_id ? progressData.space_id : '') || '';
-    const scopeInvalid = expected && !progressData.unavailable && returned !== expected;
+    const scopeInvalid = expected && ((returned && returned !== expected) || (!returned && !progressData.unavailable));
     const events = scopeInvalid ? [] : (Array.isArray(progressData && progressData.recent_events) ? progressData.recent_events.slice(0, 6) : []);
     const rows = events.map(function(event){
       if (!event || typeof event !== 'object' || Array.isArray(event)) return '';
@@ -1281,10 +1281,11 @@
     const activeRunLabel = activeRunCount+' active run'+(activeRunCount === 1 ? '' : 's');
     const recentEventLabel = recentEventCount+' recent event'+(recentEventCount === 1 ? '' : 's');
     const status = scopeInvalid ? 'Scoped progress unavailable; refusing aggregate stream.' : (unavailable ? 'Progress route unavailable; continuing without stream.' : 'Local-only progress stream');
+    const compactionEvidence = scopeInvalid ? '' : renderCompactionEvidence(progressData && (progressData.output_compaction || progressData.compaction));
     return '<div class="capy-spaces-card capy-spaces-progress-context"><h3>Space progress</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(status)+' · metadata-only events · generated bodies and credentials remain redacted.</div>' +
       '<div class="capy-spaces-muted">'+escapeHtml(activeRunLabel)+' · '+escapeHtml(recentEventLabel)+'</div>' +
-      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+      '<div class="capy-spaces-widget-list">'+rows+'</div>'+compactionEvidence+'</div>';
   }
 
   function renderSpaceAgentCanvasShell(space, widgets){
