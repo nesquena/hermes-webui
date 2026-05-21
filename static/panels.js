@@ -658,11 +658,14 @@ async function _loadRunContent(jobId, filename, runId){
       body.textContent = data.error;
       return;
     }
+    const expanded = _cronExpansionGet(_cronRunExpandKey(jobId, filename));
+    const output = expanded ? (data.content || data.snippet || '') : (data.snippet || data.content || '');
+    body.classList.toggle('expanded', expanded);
     // Render markdown content using the same renderer as chat messages
     if (typeof renderMd === 'function') {
-      body.innerHTML = renderMd(data.snippet || data.content);
+      body.innerHTML = renderMd(output);
     } else {
-      body.textContent = data.snippet || data.content;
+      body.textContent = output;
     }
     const usageStrip = _formatCronRunUsageStrip(data.usage);
     if (usageStrip) {
@@ -671,13 +674,15 @@ async function _loadRunContent(jobId, filename, runId){
       usage.textContent = usageStrip;
       body.appendChild(usage);
     }
-    // Show "View full output" button if content was truncated
-    if (data.content && data.snippet && data.content.length > data.snippet.length) {
+    // Show "View full output" button only for collapsed previews. Expanded rows render the full body inline.
+    if (!expanded && data.content && data.snippet && data.content.length > data.snippet.length) {
       const btn = document.createElement('button');
       btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
       btn.textContent = t('cron_view_full_output') || 'View full output';
       btn.onclick = () => {
-        body.innerHTML = renderMd ? renderMd(data.content) : '';
+        _cronExpansionSet(_cronRunExpandKey(jobId, filename), true);
+        body.classList.add('expanded');
+        body.innerHTML = renderMd ? renderMd(data.content) : data.content;
         btn.remove();
       };
       body.appendChild(btn);

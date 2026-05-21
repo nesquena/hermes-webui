@@ -2112,6 +2112,16 @@ let _sessionEventsSSE = null;
 let _sessionEventsRefreshTimer = 0;
 let _sessionEventsReconnectTimer = 0;
 let _sessionEventsNeedsRefreshOnOpen = false;
+let _sessionEventsReconnectAttempt = 0;
+const _sessionEventsReconnectBaseMs = 5000;
+const _sessionEventsReconnectMaxMs = 30000;
+
+function _sessionEventsReconnectDelayMs(){
+  const attempt = Math.max(0, Number(_sessionEventsReconnectAttempt || 0));
+  const base = Math.min(_sessionEventsReconnectMaxMs, _sessionEventsReconnectBaseMs * Math.pow(2, attempt));
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.35)));
+  return Math.min(_sessionEventsReconnectMaxMs, Math.floor(base * 0.75) + jitter);
+}
 let _sessionListRefreshInFlight = false;
 let _sessionListRefreshPendingReason = '';
 
@@ -2233,6 +2243,7 @@ function ensureSessionEventsSSE(){
     // Same-origin relative URL preserves subpath mounts and normal WebUI cookies.
     _sessionEventsSSE = new EventSource('api/sessions/events');
     _sessionEventsSSE.onopen = () => {
+      _sessionEventsReconnectAttempt = 0;
       if(!_sessionEventsNeedsRefreshOnOpen) return;
       _sessionEventsNeedsRefreshOnOpen = false;
       void refreshSessionList('reconnect');
@@ -2244,10 +2255,12 @@ function ensureSessionEventsSSE(){
       _sessionEventsNeedsRefreshOnOpen = true;
       _closeSessionEventsSSE();
       if(_sessionEventsReconnectTimer) return;
+      const delayMs = _sessionEventsReconnectDelayMs();
+      _sessionEventsReconnectAttempt = Math.min(_sessionEventsReconnectAttempt + 1, 6);
       _sessionEventsReconnectTimer = setTimeout(() => {
         _sessionEventsReconnectTimer = 0;
         ensureSessionEventsSSE();
-      }, 5000);
+      }, delayMs);
     };
   }catch(e){
     _closeSessionEventsSSE();
