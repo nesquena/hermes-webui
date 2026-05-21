@@ -5,10 +5,25 @@ MESSAGES_JS = Path("static/messages.js").read_text(encoding="utf-8")
 CHANGELOG = Path("CHANGELOG.md").read_text(encoding="utf-8")
 
 
+def _extract_function(source: str, signature: str) -> str:
+    start = source.index(signature)
+    # Look for the function body's opening brace, not an object literal inside
+    # a default argument such as `options={}`.
+    brace = source.index("{\n", start)
+    depth = 0
+    for idx in range(brace, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise AssertionError(f"Function body not closed for {signature}")
+
+
 def _new_session_function() -> str:
-    start = SESSIONS_JS.index("async function newSession")
-    end = SESSIONS_JS.index("async function loadSession", start)
-    return SESSIONS_JS[start:end]
+    return _extract_function(SESSIONS_JS, "async function newSession")
 
 
 def test_new_chat_syncs_model_picker_when_default_provider_changes_but_model_id_matches():
