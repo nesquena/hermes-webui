@@ -2286,8 +2286,68 @@ def _strip_replayed_prefix(existing_messages, candidates):
     return candidates
 
 
-def _dedupe_replayed_active_context(previous_context, result_messages):
-    """Keep model context append-only without re-appending a replayed tail."""
+def _looks_like_replayed_session_arc_summary(previous_msg, candidate_msg):
+    """Return True for repeated LCM/session summaries with refreshed hints.
+
+    LCM summary cards can be re-injected with the same long recovered context
+    and a different tail such as an expand hint. Exact identity misses those,
+    but appending both copies bloats every later model prompt.
+    """
+    if not isinstance(previous_msg, dict) or not isinstance(candidate_msg, dict):
+        return False
+    if previous_msg.get('role') != candidate_msg.get('role'):
+        return False
+    previous_text = " ".join(_message_text(previous_msg.get('content', '')).split())
+    candidate_text = " ".join(_message_text(candidate_msg.get('content', '')).split())
+    if len(previous_text) < 2000 or len(candidate_text) < 2000:
+        return False
+    marker = '[Session Arc Summary'
+    if not previous_text.startswith(marker) or not candidate_text.startswith(marker):
+        return False
+    return previous_text[:1500] == candidate_text[:1500]
+
+
+def _strip_replayed_context_items(existing_messages, candidates):
+    """Drop replayed non-adjacent context blocks before persisting context."""
+    existing_messages = list(existing_messages or [])
+    candidates = list(candidates or [])
+    if not existing_messages or not candidates:
+        return candidates
+
+    existing_keys = [_message_replay_key(m) for m in existing_messages]
+    candidate_keys = [_message_replay_key(m) for m in candidates]
+    existing_large = [m for m in existing_messages if isinstance(m, dict)]
+    cleaned = []
+    idx = 0
+    min_block = 3
+    while idx < len(candidates):
+        msg = candidates[idx]
+        if any(_looks_like_replayed_session_arc_summary(prev, msg) for prev in existing_large):
+            idx += 1
+            continue
+
+        best = 0
+        for start in range(len(existing_keys)):
+            length = 0
+            while (
+                idx + length < len(candidate_keys)
+                and start + length < len(existing_keys)
+                and candidate_keys[idx + length] == existing_keys[start + length]
+            ):
+                length += 1
+            if length > best:
+                best = length
+        if best >= min_block:
+            idx += best
+            continue
+
+        cleaned.append(msg)
+        idx += 1
+    return cleaned
+
+
+def _dedupe_replayed_context_messages(previous_context, result_messages):
+    """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not previous_context or not result_messages:
@@ -2295,7 +2355,14 @@ def _dedupe_replayed_active_context(previous_context, result_messages):
     if not _messages_have_prefix(result_messages, previous_context):
         return result_messages
     candidates = result_messages[len(previous_context):]
-    return previous_context + _strip_replayed_prefix(previous_context, candidates)
+    candidates = _strip_replayed_prefix(previous_context, candidates)
+    candidates = _strip_replayed_context_items(previous_context, candidates)
+    return previous_context + candidates
+
+
+def _dedupe_replayed_active_context(previous_context, result_messages):
+    """Keep model context append-only without re-appending a replayed tail."""
+    return _dedupe_replayed_context_messages(previous_context, result_messages)
 
 
 def _is_context_compression_marker(msg):
@@ -4451,7 +4518,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _result_messages,
                 )
-                _next_context_messages = _dedupe_replayed_active_context(
+                _next_context_messages = _dedupe_replayed_context_messages(
                     _previous_context_messages,
                     _next_context_messages,
                 )
@@ -4598,7 +4665,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
-                                _next_context_messages = _dedupe_replayed_active_context(
+                                _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
@@ -5418,7 +5485,7 @@ def _run_agent_streaming(
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
-                                _next_context_messages = _dedupe_replayed_active_context(
+                                _next_context_messages = _dedupe_replayed_context_messages(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )

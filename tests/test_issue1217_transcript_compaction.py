@@ -6,6 +6,7 @@ from api.streaming import (
     _assistant_reply_added_after_current_turn,
     _context_messages_for_new_turn,
     _dedupe_replayed_active_context,
+    _dedupe_replayed_context_messages,
     _merge_display_messages_after_agent_result,
     _new_turn_context_from_messages,
     _sanitize_messages_for_api,
@@ -307,6 +308,66 @@ def test_repeated_user_text_after_compaction_is_not_dropped():
         "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
         "continue",
         "new answer",
+    ]
+
+
+def test_near_duplicate_session_arc_summary_is_not_replayed_in_context():
+    summary_a = {
+        "role": "user",
+        "content": "[Session Arc Summary (d1, node 39)]\n"
+        + "same recovered LCM context\n" * 260
+        + "expand hint: old node",
+    }
+    summary_b = {
+        "role": "user",
+        "content": "[Session Arc Summary (d1, node 39)]\n"
+        + "same recovered LCM context\n" * 260
+        + "expand hint: refreshed node",
+    }
+    previous_context = [summary_a, {"role": "user", "content": "choose agent"}]
+    result_messages = previous_context + [
+        {"role": "assistant", "content": "agent answer"},
+        summary_b,
+        {"role": "user", "content": "next question"},
+    ]
+
+    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+
+    assert [m["content"] for m in next_context] == [
+        summary_a["content"],
+        "choose agent",
+        "agent answer",
+        "next question",
+    ]
+
+
+def test_non_adjacent_replayed_context_block_is_not_appended_again():
+    previous_context = [
+        {"role": "user", "content": "older setup"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    result_messages = previous_context + [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+        {"role": "user", "content": "next question"},
+    ]
+
+    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+
+    assert [m["content"] for m in next_context] == [
+        "older setup",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "[CONTEXT COMPACTION — REFERENCE ONLY] compacted",
+        "next question",
     ]
 
 
