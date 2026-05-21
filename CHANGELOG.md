@@ -6,7 +6,7 @@
 ### Changed
 
 - Session-list SSE reconnects now use bounded jitter/backoff instead of a fixed 5-second retry, reducing reconnect bursts after restarts or network drops.
-- Expanded cron run rows now render the full output inline immediately; the truncated preview remains only for collapsed rows.
+- Expanded cron run rows now render the full output inline immediately; the truncated preview remains only for collapsed rows, and the full-output fallback no longer drops content when Markdown rendering is unavailable.
 
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
