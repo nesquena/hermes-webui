@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a sidebar quick profile switcher so profiles can be changed without opening an active chat or the Profiles panel.
+
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
