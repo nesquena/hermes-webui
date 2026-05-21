@@ -47,19 +47,19 @@ class TestProfileDefaultWorkspacePersistence:
             "newSession must null S._profileSwitchWorkspace after consuming it"
         )
 
-    def test_new_session_still_inherits_default_workspace(self):
-        """newSession must still pass a workspace to /api/session/new —
-        now via the _profileSwitchWorkspace → current session → _profileDefaultWorkspace chain."""
+    def test_new_session_does_not_inherit_persistent_default_workspace(self):
+        """Normal newSession must not post stale restored/settings workspace state."""
         src = read('static/sessions.js')
         m = re.search(r'async function newSession\(.*?\n\}', src, re.DOTALL)
         assert m
         fn = m.group(0)
-        # inheritWs must be computed and passed to /api/session/new
-        assert 'inheritWs' in fn or 'inherit' in fn.lower(), (
-            "newSession must compute an inheritWs from switch/current/default workspace"
+        compact = ''.join(fn.split())
+        assert '_profileDefaultWorkspace' not in fn, (
+            "normal newSession must not read the persistent settings default; "
+            "omitting workspace lets the backend use get_last_workspace()"
         )
-        assert '_profileDefaultWorkspace' in fn, (
-            "newSession must fall through to S._profileDefaultWorkspace as last resort"
+        assert 'S.session?S.session.workspace' not in compact, (
+            "normal newSession must not inherit a restored session workspace implicitly"
         )
 
 
@@ -95,16 +95,16 @@ class TestProfileSwitchWorkspaceSetter:
 
 
     def test_switch_to_workspace_clears_profile_switch_workspace(self):
-        """Opus Q4: when the user manually changes workspace, the pending one-shot
-        switch flag should be cleared so a subsequent newSession() inherits the
-        user's explicit choice rather than the stale profile-switch default."""
+        """When the user manually changes workspace, the pending one-shot switch
+        flag should be cleared so a subsequent newSession() can use backend last
+        workspace state rather than a stale profile-switch default."""
         src = read('static/panels.js')
         m = re.search(r'async function switchToWorkspace\(.*?\n\}', src, re.DOTALL)
         assert m, "switchToWorkspace not found"
         fn = m.group(0)
         assert '_profileSwitchWorkspace=null' in fn or '_profileSwitchWorkspace = null' in fn, (
             "switchToWorkspace must null S._profileSwitchWorkspace after a manual switch "
-            "so the next newSession() inherits the user's explicit workspace choice"
+            "so the next newSession() uses backend last-workspace resolution"
         )
 
 

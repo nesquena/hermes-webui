@@ -25,7 +25,7 @@ def test_workspace_dropdown_exposes_new_worktree_conversation_action():
     src = read("static/panels.js")
     assert "workspace_new_worktree_conversation" in src
     assert "workspace_new_worktree_conversation_meta" in src
-    assert "newSession(false,{worktree:true})" in src
+    assert "newSession(false,{worktree:true,workspace:worktreeBase})" in src
     assert "li('git-branch',12)" in src
 
 
