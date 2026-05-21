@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid serving stale cached chat HTML after same-count transcript or settled tool-card metadata updates. The session render cache now keys on a lightweight render-input signature instead of message count alone, so switching back to a session rebuilds the transcript when persisted assistant content or tool-call snippets changed.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
