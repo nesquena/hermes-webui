@@ -1512,7 +1512,12 @@ def _resolve_compatible_session_model_state(
         # qualifier — qualified strings require the catalog to decide whether
         # the qualifier matches the active provider (see slow path below).
         bare_model, explicit_provider = _split_provider_qualified_model(model)
-        if not explicit_provider:
+        model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
+        stale_codex_openai_slash_id = (
+            requested_provider == "openai-codex"
+            and model_prefix == "openai"
+        )
+        if not explicit_provider and not stale_codex_openai_slash_id:
             return model, requested_provider, False
 
     catalog = get_available_models()
@@ -1533,7 +1538,14 @@ def _resolve_compatible_session_model_state(
 
     bare_for_context, explicit_provider = _split_provider_qualified_model(model)
     if requested_provider and not explicit_provider:
-        return model, requested_provider, False
+        model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
+        stale_codex_openai_slash_id = (
+            raw_active_provider == "openai-codex"
+            and requested_provider == "openai-codex"
+            and model_prefix == "openai"
+        )
+        if not stale_codex_openai_slash_id:
+            return model, requested_provider, False
 
     if model.startswith("@") and ":" in model:
         provider_raw = explicit_provider or ""
@@ -1643,7 +1655,7 @@ def _resolve_compatible_session_model_state(
     if (
         raw_active_provider == "openai-codex"
         and model_provider == "openai"
-        and requested_provider is None
+        and requested_provider in {None, "openai-codex"}
         and default_model
     ):
         # Persist provider_context = "openai-codex" unconditionally on this
