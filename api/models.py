@@ -2928,14 +2928,13 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) ->
     return msgs
 
 
-def get_state_db_session_summary(sid) -> dict:
+def get_state_db_session_summary(sid, *, after_timestamp=None) -> dict:
     """Return cheap message count/max timestamp for one state.db session.
 
     This is intentionally narrower than ``get_state_db_session_messages`` for
     metadata-only WebUI polling: callers only need a staleness signal, not a
     fully materialized transcript with tool/reasoning metadata.
     """
-    import os
     try:
         import sqlite3
     except ImportError:
@@ -2953,13 +2952,21 @@ def get_state_db_session_summary(sid) -> dict:
             available = {str(row['name']) for row in cur.fetchall()}
             if not {'session_id', 'timestamp'}.issubset(available):
                 return {}
+            params = [str(sid)]
+            timestamp_filter = ""
+            if after_timestamp is not None:
+                try:
+                    timestamp_filter = " AND timestamp > ?"
+                    params.append(float(after_timestamp))
+                except (TypeError, ValueError):
+                    timestamp_filter = ""
             cur.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
                 FROM messages
-                WHERE session_id = ?
+                WHERE session_id = ?{timestamp_filter}
                 """,
-                (str(sid),),
+                tuple(params),
             )
             row = cur.fetchone()
             if not row:
