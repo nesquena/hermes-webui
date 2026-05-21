@@ -1467,6 +1467,14 @@ function _sessionSnapshotById(sid){
 function _pinnedSessionCount(){
   return (_allSessions||[]).filter(s=>s&&s.pinned&&!s.archived).length;
 }
+function _pinnedSessionsLimit(){
+  const limit=parseInt(window._pinnedSessionsLimit||3,10);
+  return (Number.isFinite(limit)&&limit>0)?limit:3;
+}
+function _pinnedSessionsLimitMessage(){
+  const limit=_pinnedSessionsLimit();
+  return `Only ${limit} conversations can be pinned. Unpin one before pinning another.`;
+}
 function _worktreeSessionCount(ids){
   return (ids||[]).reduce((count,sid)=>{
     const session=_sessionSnapshotById(sid);
@@ -1777,15 +1785,15 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=3;
+  const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=_pinnedSessionsLimit();
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
-    pinLimitReached?'Only 3 conversations can be pinned':(session.pinned?t('session_unpin_desc'):t('session_pin_desc')),
+    pinLimitReached?_pinnedSessionsLimitMessage():(session.pinned?t('session_unpin_desc'):t('session_pin_desc')),
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
       if(pinLimitReached){
-        if(typeof showToast==='function') showToast('Only 3 conversations can be pinned. Unpin one before pinning another.',3000,'error');
+        if(typeof showToast==='function') showToast(_pinnedSessionsLimitMessage(),3000,'error');
         return;
       }
       const newPinned=!session.pinned;

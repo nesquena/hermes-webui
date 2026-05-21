@@ -5755,8 +5755,9 @@ def handle_post(handler, parsed) -> bool:
                     if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
                 )
                 pinned_ids.discard(body["session_id"])
-                if len(pinned_ids) >= 3:
-                    return bad(handler, "Up to 3 sessions can be pinned. Unpin one before pinning another.", 400)
+                pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
+                if len(pinned_ids) >= pinned_sessions_limit:
+                    return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
                 # Mark in-memory pin state under LOCK so concurrent pin
                 # requests see the increment immediately, even before
                 # save() finishes flushing to disk.

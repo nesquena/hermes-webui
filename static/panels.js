@@ -5435,6 +5435,8 @@ function _preferencesPayloadFromUi(){
   if(notifCb) payload.notifications_enabled=notifCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
+  const pinnedLimitField=$('settingsPinnedSessionsLimit');
+  if(pinnedLimitField) payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10);
   const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
   if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
   const busyInputModeSel=$('settingsBusyInputMode');
@@ -5486,6 +5488,7 @@ async function _autosavePreferencesSettings(payload){
       if(typeof renderMessages==='function') renderMessages();
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
+    if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
     if(payload&&payload.show_tps!==undefined){
       window._showTps=!!(saved&&saved.show_tps);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
@@ -5677,6 +5680,13 @@ async function loadSettingsPanel(){
     }
     const showTpsCb=$('settingsShowTps');
     if(showTpsCb){showTpsCb.checked=!!settings.show_tps;showTpsCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const pinnedLimitField=$('settingsPinnedSessionsLimit');
+    if(pinnedLimitField){
+      pinnedLimitField.value=parseInt(settings.pinned_sessions_limit||3,10)||3;
+      window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;
+      pinnedLimitField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      pinnedLimitField.addEventListener('input',()=>{window._pinnedSessionsLimit=parseInt(pinnedLimitField.value,10)||3;_schedulePreferencesAutosave();},{once:false});
+    }
     const fadeTextCb=$('settingsFadeTextEffect');
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
@@ -6582,6 +6592,7 @@ async function saveSettings(andClose){
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
+  const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
@@ -6606,6 +6617,7 @@ async function saveSettings(andClose){
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
+  body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;

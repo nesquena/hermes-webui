@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a Settings → Preferences control for the maximum number of pinned sidebar conversations. The default remains 3, but power users can raise the cap without editing code; backend and frontend guards now read the same persisted setting.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
