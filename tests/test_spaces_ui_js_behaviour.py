@@ -405,6 +405,14 @@ global.fetch = async function(path, opts = {}) {
         },
       } : undefined,
       research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
+      context_status: {
+        available: true,
+        metadata_only: true,
+        local_only: true,
+        memory: { available: true, source_count: 2, chunk_count: 7, stale_source_count: 0, refresh_job_count: 1, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        policy: { available: true, mode: 'supervised', label: 'Supervised', prompt_preflight_status: 'required', model_hint_count: 6, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress: { available: true, recent_event_count: 3, active_run_count: 0, recent_family_counts: { run: 1, tool: 1, 'memory.ingest': 1, unsafe: 99 }, source: 'SECRET_SOURCE' },
+      },
     });
   }
   if (path === 'api/spaces/demo/run-all') {
@@ -4850,6 +4858,13 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "Widget request: show it to me in a widget" in out["rootHtml"]
     assert "Widget after reload: verified" in out["rootHtml"]
     assert "Network mode: agent-mediated" in out["rootHtml"]
+    assert "Context layer status" in out["rootHtml"]
+    assert "Memory: 2 sources · 7 chunks · 0 stale · 1 refresh jobs" in out["rootHtml"]
+    assert "Autonomy: Supervised · Preflight: required · Model hints: 6" in out["rootHtml"]
+    assert "Progress: 3 recent events · 0 active runs" in out["rootHtml"]
+    assert "Families: run 1, tool 1, memory.ingest 1" in out["rootHtml"]
+    assert "unsafe 99" not in out["rootHtml"]
+    assert "SECRET_SOURCE" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

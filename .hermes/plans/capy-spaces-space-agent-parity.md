@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, Space demo-suite run progress events, individual browser demo smoke run progress events, source-style layout-repair progress events, and active-context tool progress events are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: Capy Memory Tree, output compaction helper, run-all demo compaction receipt, source registry/freshness, local knowledge source registration, automatic Memory Tree artifact ingestion at Space manifest/revision/rollback/repair/widget-event/visual-QA boundaries, product-home autonomy policy, creator-preview and creator-commit per-action autonomy/prompt-preflight receipts, Space detail/creator memory assist, product-home plus Space-detail structured progress cards, Research Harness progress-event producer coverage, creator visual-QA commit progress events, Memory Tree source-refresh ingest progress events, Space demo-suite run progress events, individual browser demo smoke run progress events, source-style layout-repair progress events, active-context tool progress events, and individual demo smoke context-status receipts are implemented as metadata-only MVP surfaces; this plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -36,6 +36,11 @@ Roadmap priority for upcoming autonomous sprints:
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): show single demo context status`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving an individual demo smoke receipt renders the shared metadata-only `Context layer status` card already used by run-all suite receipts.
+  - Reused `renderContextLayerStatus(...)` inside `renderDemoSmokeResult(...)` so single-demo receipts expose bounded Memory, Autonomy/Preflight/Model hints, Progress, and allow-listed family counts without raw prompts, renderer/source fields, API-auth fields, unsafe progress families, scripts, or secret-looking fixture markers.
+  - Validation at completion: focused RED failed before implementation (`Context layer status` missing from the single-demo receipt); focused GREEN passed; focused single-demo + run-all UI regressions passed (`2 passed`); full Spaces UI JS behavior suite passed (`191 passed`); `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and `/tmp` real-static Visual/UI QA passed with metadata-only leak checks. Screenshot artifact: `/tmp/capy-single-demo-context-status-qa.png`.
 
 - `feat(spaces): record active context progress events`
   - Added RED/GREEN backend coverage proving `space.current.context` / `space.context` / `space.current.prompt_context` returns a metadata-only `tool.completed` progress receipt after successful active context retrieval.

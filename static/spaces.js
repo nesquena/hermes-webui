@@ -778,6 +778,7 @@
     const musicPreview = renderMusicSmokePreview(musicFlow);
     const researchPreview = demo === 'demo_research_harness_pdf_export' ? renderResearchHarnessSmokePreview(data) : '';
     const compactionPreview = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
+    const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const hasNotesPreview = !!notesPreview;
     const hasKanbanPreview = !!kanbanPreview;
@@ -795,7 +796,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+compactionPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+compactionPreview+contextStatus+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
