@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent `/api/session` display merges from appending restamped `state.db` replay rows after the sidecar tail when those rows are already visible in the sidecar. This keeps compressed sessions from appearing to end on an old user prompt even though the assistant answer is persisted earlier in the transcript.
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)
 
