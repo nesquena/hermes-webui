@@ -2970,22 +2970,30 @@ def get_state_db_session_summary(sid, *, after_timestamp=None) -> dict:
             available = {str(row['name']) for row in cur.fetchall()}
             if not {'session_id', 'timestamp'}.issubset(available):
                 return {}
-            params = [str(sid)]
-            timestamp_filter = ""
+            after_ts = None
             if after_timestamp is not None:
                 try:
-                    timestamp_filter = " AND timestamp > ?"
-                    params.append(float(after_timestamp))
+                    after_ts = float(after_timestamp)
                 except (TypeError, ValueError):
-                    timestamp_filter = ""
-            cur.execute(
-                f"""
-                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
-                FROM messages
-                WHERE session_id = ?{timestamp_filter}
-                """,
-                tuple(params),
-            )
+                    after_ts = None
+            if after_ts is None:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                    FROM messages
+                    WHERE session_id = ?
+                    """,
+                    (str(sid),),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
+                    FROM messages
+                    WHERE session_id = ? AND timestamp > ?
+                    """,
+                    (str(sid), after_ts),
+                )
             row = cur.fetchone()
             if not row:
                 return {}

@@ -2004,6 +2004,44 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+def _message_summary(messages) -> dict:
+    messages = list(messages or [])
+    last_message_at = 0.0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        try:
+            last_message_at = max(last_message_at, float(msg.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _metadata_only_message_summary(sid: str) -> dict:
+    """Return the cheap message summary used by metadata-only session loads."""
+    sidecar_session = Session.load(sid)
+    sidecar_messages = []
+    if sidecar_session:
+        sidecar_messages = getattr(sidecar_session, "messages", []) or []
+    sidecar_summary = _message_summary(sidecar_messages)
+    state_db_summary = get_state_db_session_summary(
+        sid,
+        after_timestamp=sidecar_summary["last_message_at"] or None,
+    )
+    try:
+        sidecar_summary["message_count"] += max(0, int(state_db_summary.get("message_count") or 0))
+    except (TypeError, ValueError):
+        pass
+    try:
+        sidecar_summary["last_message_at"] = max(
+            sidecar_summary["last_message_at"],
+            float(state_db_summary.get("last_message_at") or 0),
+        )
+    except (TypeError, ValueError):
+        pass
+    return sidecar_summary
+
+
 def _session_requires_cli_metadata_lookup(session) -> bool:
     """Return True when a sidecar/session row still needs CLI metadata.
 
@@ -3752,8 +3790,7 @@ def handle_get(handler, parsed) -> bool:
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
-            state_db_summary = {}
-            sidecar_metadata_messages = None
+            metadata_summary = None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
@@ -3764,25 +3801,7 @@ def handle_get(handler, parsed) -> bool:
                 # only after the newest sidecar timestamp so stale rows that
                 # the merge intentionally filters out do not make sidebar
                 # polling think the transcript is always newer.
-                sidecar_metadata_session = Session.load(sid)
-                sidecar_metadata_messages = (
-                    getattr(sidecar_metadata_session, "messages", []) or []
-                    if sidecar_metadata_session
-                    else []
-                )
-                _sidecar_last = 0
-                try:
-                    _sidecar_last = max(
-                        float((m or {}).get("timestamp") or 0)
-                        for m in sidecar_metadata_messages
-                        if isinstance(m, dict)
-                    ) if sidecar_metadata_messages else 0
-                except (TypeError, ValueError):
-                    _sidecar_last = 0
-                state_db_summary = get_state_db_session_summary(
-                    sid,
-                    after_timestamp=_sidecar_last if _sidecar_last else None,
-                )
+                metadata_summary = _metadata_only_message_summary(sid)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3812,41 +3831,16 @@ def handle_get(handler, parsed) -> bool:
                     sidecar_messages = getattr(s, "messages", []) or []
                     _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
                 else:
-                    _metadata_sidecar = sidecar_metadata_messages
-                    if _metadata_sidecar is None:
-                        _metadata_sidecar = getattr(s, "messages", []) or []
-                    _summary_message_count = len(_metadata_sidecar)
-                    try:
-                        _summary_last_message_at = max(
-                            float((m or {}).get("timestamp") or 0)
-                            for m in _metadata_sidecar
-                            if isinstance(m, dict)
-                        ) if _metadata_sidecar else 0
-                    except (TypeError, ValueError):
-                        _summary_last_message_at = 0
-                    try:
-                        _summary_message_count += max(0, int(state_db_summary.get("message_count") or 0))
-                    except (TypeError, ValueError):
-                        pass
-                    try:
-                        _summary_last_message_at = max(
-                            _summary_last_message_at,
-                            float(state_db_summary.get("last_message_at") or 0),
-                        )
-                    except (TypeError, ValueError):
-                        pass
+                    if metadata_summary is None:
+                        metadata_summary = _message_summary(getattr(s, "messages", []) or [])
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
                     _all_msgs = []
             if not load_messages:
-                if not (not is_messaging_session and not cli_messages):
-                    _summary_message_count = len(_all_msgs)
-                    try:
-                        _summary_last_message_at = max(
-                            float((m or {}).get("timestamp") or 0)
-                            for m in _all_msgs
-                            if isinstance(m, dict)
-                        ) if _all_msgs else 0
-                    except (TypeError, ValueError):
-                        _summary_last_message_at = 0
+                if metadata_summary is None:
+                    metadata_summary = _message_summary(_all_msgs)
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
                 if _summary_message_count == 0:
                     # Legacy session with no loaded sidecar and no state.db summary —
                     # fall back to the persisted metadata count from session JSON.
