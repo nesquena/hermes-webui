@@ -4837,10 +4837,20 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
     assert single["widget"]["id"] == "weather-card"
     assert single["widget"]["kind"] == "weather"
     assert single["widget"]["metadata"]["weather"] == {"location": "Prague"}
+    assert single["progress_event"]["event_type"] == "tool.completed"
+    assert single["progress_event"]["family"] == "tool"
+    assert single["progress_event"]["run_id"] == "widget.upsert:source-widget-lab"
+    assert single["progress_event"]["space_id"] == created["space_id"]
+    assert single["progress_event"]["redaction_status"] == "metadata_only"
     assert bulk["ok"] is True
     assert bulk["action"] == "space.spaces.upsertwidgets"
     assert bulk["widget_count"] == 1
     assert bulk["widgets"][0]["id"] == "research-notes"
+    assert bulk["progress_event"]["event_type"] == "tool.completed"
+    assert bulk["progress_event"]["family"] == "tool"
+    assert bulk["progress_event"]["run_id"] == "widget.upsert:source-widget-lab"
+    assert bulk["progress_event"]["space_id"] == created["space_id"]
+    assert bulk["progress_event"]["redaction_status"] == "metadata_only"
     assert stored_weather["kind"] == "weather"
     assert stored_weather["weather"] == {"location": "Prague"}
     assert stored_notes["notes"] == {"body": "Safe summary"}

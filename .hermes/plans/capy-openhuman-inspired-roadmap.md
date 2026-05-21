@@ -123,6 +123,7 @@ Delivered:
 - Source-style `space.spaces.repairLayout` now emits metadata-only `tool.completed` progress events with Space-scoped run ids and fallback-safe receipts, giving the progress stream its first direct layout-repair producer without exposing renderer/source/API-auth fields, prompts, script markers, or exception text.
 - Creator-loop sandbox previews now emit metadata-only `tool.completed` progress events keyed by their opaque preview receipt ids, so the product progress stream reflects creator preview activity before commit without storing raw prompts, generated widget bodies, renderer/source fields, API-auth data, script markers, or credentials.
 - Shared data slot set/delete tool actions now emit metadata-only `tool.completed` progress events using safe `shared-slot.*` run ids, so Space cooperation/data handoff activity appears in Space-scoped progress without exposing slot values, renderer/source fields, API-auth fields, prompts, or credentials.
+- Source-style widget upsert tool actions now emit metadata-only `tool.completed` progress events with safe `widget.upsert:<space_id>` run ids, so agent-driven Space construction appears in Space-scoped progress without storing widget bodies, renderer/source/API-auth fields, prompts, scripts, or credentials.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.

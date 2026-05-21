@@ -5021,6 +5021,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             result = upsert_widget(space_id, widget)
             saved_widgets.append(read_widget_detail(space_id, result["widget"]["id"]))
             revision_event_ids.append(result["revision_event_id"])
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.upsert")
         response: dict[str, Any] = {
             "ok": True,
             "action": name,
@@ -5028,6 +5029,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": saved_widgets,
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
+            "progress_event": progress_event,
         }
         if name.endswith("upsertwidget") and saved_widgets:
             response["widget"] = saved_widgets[0]
@@ -8448,6 +8450,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-layout",
         "shared-slot.set",
         "shared-slot.delete",
+        "widget.upsert",
     }:
         safe_prefix = "tool"
     run_id = f"{safe_prefix}:{sid}"
