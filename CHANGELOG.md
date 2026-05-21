@@ -5,7 +5,7 @@
 
 ### Added
 
-- Add a workspace-panel Artifacts tab that lists files mentioned, edited, or created during the active session and opens them in the existing preview flow.
+- Add a workspace-panel Artifacts tab that lists files detected from the active session’s tool calls and transcript, filters dependency/build noise, and opens entries in the existing preview flow.
 
 
 ## [v0.51.103] — 2026-05-21 — Release CA (stage-396 — 1-PR follow-on — Settings → Plugins distinguishes exclusive/provider activation)

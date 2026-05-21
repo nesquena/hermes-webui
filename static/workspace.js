@@ -124,17 +124,26 @@ function switchWorkspacePanelTab(tab){
   if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
 }
 
-function _artifactCandidatesFromText(text){
+const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
+const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+
+function _normalizeArtifactPath(path){
+  if(!path) return '';
+  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(!path || path.length > 240 || path.includes('://')) return '';
+  if(ARTIFACT_IGNORE_RE.test(path)) return '';
+  if(!/[./]/.test(path)) return '';
+  return path;
+}
+
+function _artifactCandidatesFromText(text, kind='referenced'){
   if(!text || typeof text !== 'string') return [];
   const out = [];
   const seen = new Set();
-  const add = (path, kind='referenced') => {
-    if(!path) return;
-    path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
-    if(!path || path.length > 240 || path.includes('://')) return;
-    if(!/[./]/.test(path)) return;
-    if(seen.has(path)) return;
-    seen.add(path); out.push({path, kind});
+  const add = (path, source=kind) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); out.push({path, kind:source});
   };
   const fenced = /```(?:diff|patch)?\n[\s\S]*?```/gi;
   let m;
@@ -153,24 +162,44 @@ function _artifactCandidatesFromText(text){
   return out;
 }
 
+function _artifactCandidatesFromToolCall(tc){
+  if(!tc) return [];
+  const name = String(tc.name || '').replace(/^functions\./,'');
+  const args = tc.arguments || tc.args || tc.input || {};
+  const result = tc.result || tc.output || tc.snippet || '';
+  const out = [];
+  const add = (path, source=name || 'tool') => {
+    path = _normalizeArtifactPath(path);
+    if(path) out.push({path, kind:source});
+  };
+  if(args && typeof args === 'object'){
+    for(const key of ['path','file_path','source','destination']) add(args[key]);
+    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
+    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
+  }
+  const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
+  for(const a of _artifactCandidatesFromText(resultText, name || 'tool')) out.push(a);
+  if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
+    const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
+    for(const a of _artifactCandidatesFromText(argsText, name || 'tool')) out.push(a);
+  }
+  return out;
+}
+
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
+    path = _normalizeArtifactPath(path);
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
+  for(const tc of (S.toolCalls || [])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+  }
   for(const msg of (S.messages || [])){
     const text = msg && (msg.content || msg.text || msg.message || '');
     for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
-  }
-  for(const tc of (S.toolCalls || [])){
-    const args = tc && (tc.arguments || tc.args || tc.input);
-    const result = tc && (tc.result || tc.output || '');
-    for(const source of [args, result]){
-      const text = typeof source === 'string' ? source : (source ? JSON.stringify(source) : '');
-      for(const a of _artifactCandidatesFromText(text)) push(a.path, tc.name || a.kind);
-    }
   }
   return items.slice(0, 50);
 }
