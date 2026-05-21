@@ -8124,7 +8124,7 @@ def _action_policy_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str
 
     raw_gates_value = receipt.get("approval_gates")
     raw_gates: list[Any] = raw_gates_value if isinstance(raw_gates_value, list) else []
-    return {
+    summary = {
         "available": bool(receipt.get("available")),
         "action": _widget_event_label_summary(receipt.get("action"), 120),
         "mode": _widget_event_label_summary(receipt.get("mode"), 80),
@@ -8136,6 +8136,23 @@ def _action_policy_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str
         "metadata_only": bool(receipt.get("metadata_only")),
         "local_only": bool(receipt.get("local_only")),
     }
+    raw_route = receipt.get("model_route") if isinstance(receipt.get("model_route"), dict) else None
+    if raw_route and raw_route.get("metadata_only") is True:
+        from api.capy_policy import safe_model_route_field
+
+        route_hint = safe_model_route_field(raw_route.get("hint"))
+        route_label = safe_model_route_field(raw_route.get("label"))
+        route_provider = safe_model_route_field(raw_route.get("resolved_provider"))
+        route_model = safe_model_route_field(raw_route.get("resolved_model"))
+        if route_hint and route_label and route_provider and route_model:
+            summary["model_route"] = {
+                "hint": route_hint,
+                "label": route_label,
+                "resolved_provider": route_provider,
+                "resolved_model": route_model,
+                "metadata_only": True,
+            }
+    return summary
 
 
 def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:

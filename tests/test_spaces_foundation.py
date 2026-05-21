@@ -2751,6 +2751,13 @@ def test_creator_preview_returns_committable_receipt_for_ui_without_persistence(
         "approval_gates": ["creator_commit"],
         "prompt_preflight_status": "pass",
         "model_route_hint": "hint:reasoning",
+        "model_route": {
+            "hint": "hint:reasoning",
+            "label": "Reasoning",
+            "resolved_provider": "current Hermes provider",
+            "resolved_model": "configured reasoning model",
+            "metadata_only": True,
+        },
         "metadata_only": True,
         "local_only": True,
     }
@@ -2849,6 +2856,13 @@ def test_creator_commit_returns_preview_preflight_and_policy_receipts_metadata_o
         "approval_gates": ["creator_commit"],
         "prompt_preflight_status": "pass",
         "model_route_hint": "hint:reasoning",
+        "model_route": {
+            "hint": "hint:reasoning",
+            "label": "Reasoning",
+            "resolved_provider": "current Hermes provider",
+            "resolved_model": "configured reasoning model",
+            "metadata_only": True,
+        },
         "metadata_only": True,
         "local_only": True,
     }
@@ -5652,6 +5666,13 @@ def test_queue_widget_event_records_metadata_only_prompt_preflight_receipt(monke
         "approval_gates": ["generated_widget_execution"],
         "prompt_preflight_status": "pass",
         "model_route_hint": "hint:reasoning",
+        "model_route": {
+            "hint": "hint:reasoning",
+            "label": "Reasoning",
+            "resolved_provider": "current Hermes provider",
+            "resolved_model": "configured reasoning model",
+            "metadata_only": True,
+        },
         "metadata_only": True,
         "local_only": True,
     }
@@ -5665,6 +5686,53 @@ def test_queue_widget_event_records_metadata_only_prompt_preflight_receipt(monke
     assert "renderer" not in serialized
     assert "apikey" not in serialized
 
+
+def test_widget_event_summary_omits_unsafe_model_route_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "unsafe-route-event-lab", "name": "Unsafe Route Event Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "research-card", "kind": "prompt", "title": "Research Card"})
+
+    spaces._record_event(
+        created["space_id"],
+        "widget.event.queued",
+        {
+            "widget_id": "research-card",
+            "event_name": "agent.prompt",
+            "status": "queued",
+            "prompt_preview": "[REDACTED]",
+            "payload_summary": {},
+            "autonomy_policy": {
+                "available": True,
+                "action": "space.widget.event",
+                "mode": "supervised",
+                "label": "Supervised",
+                "approval_required": True,
+                "approval_gates": ["generated_widget_execution"],
+                "prompt_preflight_status": "pass",
+                "model_route_hint": "hint:summarize",
+                "model_route": {
+                    "hint": "hint:summarize",
+                    "label": "Summarize",
+                    "resolved_provider": "on   click handler",
+                    "resolved_model": "raw   code",
+                    "metadata_only": True,
+                },
+                "metadata_only": True,
+                "local_only": True,
+            },
+        },
+        event_id="unsafe-route-event",
+    )
+
+    events = spaces.list_widget_events(created["space_id"], "research-card")
+
+    assert len(events) == 1
+    assert events[0]["autonomy_policy"]["model_route_hint"] == "hint:summarize"
+    assert "model_route" not in events[0]["autonomy_policy"]
+    serialized = json.dumps(events, sort_keys=True).lower()
+    assert "onclick handler" not in serialized
+    assert "on   click handler" not in serialized
+    assert "raw   code" not in serialized
 
 
 def test_queue_widget_event_records_metadata_only_agent_prompt_progress_event(monkeypatch, tmp_path):

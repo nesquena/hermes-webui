@@ -154,7 +154,7 @@ global.fetch = async function(path, opts = {}) {
     return response({ available: true, local_only: true, db_exists: true, source_count: 1, chunk_count: 1, stale_source_count: 0, last_error_count: 0 });
   }
   if (path === 'api/capy-policy/status') {
-    if (scenario === 'productHomePolicyStatus') {
+    if (scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews') {
       return response({
         available: true,
         mode: 'semi_autonomous',
@@ -167,7 +167,7 @@ global.fetch = async function(path, opts = {}) {
           default_hint: 'hint:reasoning',
           supported_hints: ['hint:reasoning', 'hint:code', 'hint:local', 'hint:evil'],
           route_previews: [
-            { hint: 'hint:reasoning', label: 'Reasoning', resolved_provider: 'OpenAI', resolved_model: 'GPT-5.5' },
+            { hint: 'hint:reasoning', label: 'Reasoning', resolved_provider: scenario === 'productHomePolicyUnsafeRoutePreviews' ? 'OpenAI xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx SECRET_VALUE_DO_NOT_LEAK' : 'OpenAI', resolved_model: scenario === 'productHomePolicyUnsafeRoutePreviews' ? 'data:text/html' : 'GPT-5.5' },
             { hint: 'hint:local', label: 'Local', resolved_provider: 'LM Studio', resolved_model: 'Local summarizer' },
             { hint: 'hint:evil', label: 'renderer <script>bad()</script>', resolved_provider: 'SECRET_VALUE_DO_NOT_LEAK', resolved_model: 'api_key' },
           ],
@@ -774,7 +774,17 @@ global.fetch = async function(path, opts = {}) {
           approval_required: true,
           approval_gates: ['creator_commit', 'generated_widget_execution', 'renderer'],
           prompt_preflight_status: 'pass',
-          model_route_hint: 'hint:reasoning',
+          model_route_hint: scenario === 'creatorPreviewMissingModelRouteHint' ? 'hint:<script>SECRET_VALUE_DO_NOT_LEAK</script>' : 'hint:summarize',
+          model_route: {
+            hint: 'hint:summarize',
+            label: 'Summarize',
+            resolved_provider: scenario === 'creatorPreviewUnsafeModelRoute' ? 'Local summary provider xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx SECRET_VALUE_DO_NOT_LEAK' : (scenario === 'creatorPreviewOverlongModelRoute' ? 'Local summary provider xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' : (scenario === 'creatorPreviewApiKeyModelRoute' ? 'api key abcdef' : (scenario === 'creatorPreviewRawCodeModelRoute' ? 'on   click handler' : 'Local summary provider'))),
+            resolved_model: scenario === 'creatorPreviewUnsafeModelRoute' ? 'github...fghi' : (scenario === 'creatorPreviewCredentialModelRoute' ? 'accessToken abcdefgh' : (scenario === 'creatorPreviewRawCodeModelRoute' ? 'onclick handler' : 'Summary model')),
+            metadata_only: true,
+            renderer: '<script>bad()</script>',
+            source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
+            api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+          },
           raw_prompt: body.prompt,
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
           renderer: '<script>bad()</script>',
@@ -1722,7 +1732,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomeProgressStatus') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews' || scenario === 'productHomeProgressStatus') {
     await window.loadCapySpaces();
   } else if (scenario === 'productHomeMemoryRefreshAction') {
     await window.loadCapySpaces();
@@ -3018,7 +3028,7 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
-  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure' || scenario === 'creatorPreviewMemoryAssist') {
+  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure' || scenario === 'creatorPreviewMemoryAssist' || scenario === 'creatorPreviewUnsafeModelRoute' || scenario === 'creatorPreviewCredentialModelRoute' || scenario === 'creatorPreviewApiKeyModelRoute' || scenario === 'creatorPreviewRawCodeModelRoute' || scenario === 'creatorPreviewMissingModelRouteHint' || scenario === 'creatorPreviewOverlongModelRoute') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
@@ -6520,7 +6530,7 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Mode: Semi-autonomous" in out["rootHtml"]
     assert "Approval required: yes" in out["rootHtml"]
     assert "Creator commit approval" in out["rootHtml"]
-    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Model route hint: hint:summarize" in out["rootHtml"]
     assert "metadata-only" in out["rootHtml"]
     assert "local-only" in out["rootHtml"]
     assert "raw prompt not stored" in out["rootHtml"]
@@ -6530,6 +6540,110 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "api_key" not in out["rootHtml"].lower()
     assert "raw_prompt" not in out["rootHtml"]
     assert "generated_code" not in out["rootHtml"]
+
+
+def test_creator_preview_action_policy_renders_selected_model_route_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewGate")
+    html = out["rootHtml"]
+
+    assert "Action policy" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "Model route: Summarize · Local summary provider · Summary model" in html
+    assert "metadata-only" in html
+    assert "local-only" in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
+    assert "generated renderer source" not in html.lower()
+    assert "api_key" not in html.lower()
+
+
+def test_creator_preview_action_policy_omits_truncated_or_credential_shaped_model_route(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewUnsafeModelRoute")
+    html = out["rootHtml"]
+
+    assert "Action policy" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "Model route:" not in html
+    assert "Local summary provider" not in html
+    assert "github_pat_0123456789_abcdefghi" not in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
+    assert "api_key" not in html.lower()
+
+    credential_out = _run_spaces_scenario(driver_path, "creatorPreviewCredentialModelRoute")
+    credential_html = credential_out["rootHtml"]
+
+    assert "Action policy" in credential_html
+    assert "Model route hint: hint:summarize" in credential_html
+    assert "Model route:" not in credential_html
+    assert "Local summary provider" not in credential_html
+    assert "api key abcdef" not in credential_html
+    assert "accessToken" not in credential_html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in credential_html
+    assert "<script>" not in credential_html
+    assert "renderer" not in credential_html
+    assert "api_key" not in credential_html.lower()
+
+    api_key_out = _run_spaces_scenario(driver_path, "creatorPreviewApiKeyModelRoute")
+    api_key_html = api_key_out["rootHtml"]
+
+    assert "Action policy" in api_key_html
+    assert "Model route hint: hint:summarize" in api_key_html
+    assert "Model route:" not in api_key_html
+    assert "api key abcdef" not in api_key_html
+    assert "Summary model" not in api_key_html
+
+    raw_code_out = _run_spaces_scenario(driver_path, "creatorPreviewRawCodeModelRoute")
+    raw_code_html = raw_code_out["rootHtml"]
+
+    assert "Action policy" in raw_code_html
+    assert "Model route hint: hint:summarize" in raw_code_html
+    assert "Model route:" not in raw_code_html
+    assert "onclick handler" not in raw_code_html
+    assert "on   click handler" not in raw_code_html
+
+
+def test_creator_preview_action_policy_requires_matching_model_route_hint(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewMissingModelRouteHint")
+    html = out["rootHtml"]
+
+    assert "Action policy" in html
+    assert "Model route hint:" not in html
+    assert "Model route:" not in html
+    assert "Local summary provider" not in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
+    assert "api_key" not in html.lower()
+
+
+def test_creator_preview_action_policy_omits_overlong_model_route_fields(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewOverlongModelRoute")
+    html = out["rootHtml"]
+
+    assert "Action policy" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "Model route:" not in html
+    assert "Local summary provider" not in html
+    assert "Summary model" not in html
+
+
+def test_spaces_ui_product_home_omits_unsafe_or_truncated_route_preview_labels(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomePolicyUnsafeRoutePreviews")
+    html = out["rootHtml"]
+
+    assert "Autonomy policy" in html
+    assert "Model route hint: hint:reasoning" in html
+    assert "Local route: LM Studio / Local summarizer" in html
+    assert "Reasoning route:" not in html
+    assert "OpenAI" not in html
+    assert "data:text/html" not in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
+    assert "api_key" not in html.lower()
 
 
 def test_creator_preview_renders_relevant_memory_assist_safely(driver_path):

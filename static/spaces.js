@@ -429,11 +429,41 @@
     return list.map(function(item){
       const hint = safeModelRouteHint(item && item.hint);
       if (!hint) return '';
-      const provider = safeDisplayMetadataText(item && item.resolved_provider, '');
-      const model = safeDisplayMetadataText(item && item.resolved_model, '');
-      if (!provider || !model || provider === '[REDACTED]' || model === '[REDACTED]') return '';
+      const provider = safeModelRouteField(item && item.resolved_provider);
+      const model = safeModelRouteField(item && item.resolved_model);
+      if (!provider || !model) return '';
       return labelByHint[hint] + ' route: ' + provider + ' / ' + model;
     }).filter(Boolean);
+  }
+
+  function safeModelRouteField(value){
+    const raw = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    if (raw.length > 80) return '';
+    const scan = raw.replace(/tokenization/ig, '');
+    const unsafeRoutePattern = /(api[_ -]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|access[_ -]?token|bearer[_ -]?token|refresh[_ -]?token|id[_ -]?token|(?:^|[^A-Za-z0-9])(?:token|html|script|data)(?:$|[^A-Za-z0-9])|<script|<\/script|javascript:|on[_ -]*(?:abort|click|mouseover|mouseout|change|submit|focus|blur|input|keydown|keyup|load|error)\b|renderer|raw[ _-]?(?:prompt|code)|generated[ _-]?(?:code|(?:widget[ _-]?)?body)|source\b|sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_.]{4,}|github\.{2,}[A-Za-z0-9_.-]*|github_pat_[A-Za-z0-9_.]{8,}|gh[ousr]_[A-Za-z0-9_]{8,}|AKIA[A-Z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{8,}|hf_[A-Za-z0-9_]{8,})/i;
+    if (unsafeRoutePattern.test(scan)) return '';
+    return /^[A-Za-z0-9][A-Za-z0-9 ._:/()+-]{0,79}$/.test(raw) ? raw : '';
+  }
+
+  function safeSelectedModelRoutePreview(route, selectedHint){
+    const data = route && typeof route === 'object' && !Array.isArray(route) ? route : null;
+    if (!data || data.metadata_only !== true) return '';
+    const hint = safeModelRouteHint(data.hint);
+    const expectedHint = safeModelRouteHint(selectedHint);
+    if (!hint || !expectedHint || hint !== expectedHint) return '';
+    const labelByHint = {
+      'hint:reasoning': 'Reasoning',
+      'hint:fast': 'Fast',
+      'hint:summarize': 'Summarize',
+      'hint:code': 'Code',
+      'hint:vision': 'Vision',
+      'hint:local': 'Local'
+    };
+    const provider = safeModelRouteField(data.resolved_provider);
+    const model = safeModelRouteField(data.resolved_model);
+    if (!provider || !model) return '';
+    return labelByHint[hint] + ' · ' + provider + ' · ' + model;
   }
 
   function safeNonNegativeCount(value){
@@ -1097,6 +1127,7 @@
     const gates = safePolicyGateLabels(data.approval_gates);
     const promptStatus = safeDisplayMetadataText(data.prompt_preflight_status || 'required', 'required') || 'required';
     const routeHint = safeModelRouteHint(data.model_route_hint || '');
+    const selectedRoute = safeSelectedModelRoutePreview(data.model_route, routeHint);
     const flags = [];
     if (data.metadata_only === true) flags.push('metadata-only');
     if (data.local_only === true) flags.push('local-only');
@@ -1104,6 +1135,7 @@
       '<div class="capy-spaces-muted">Mode: '+escapeHtml(label)+' · Approval required: '+approvalRequired+' · Prompt preflight: '+escapeHtml(promptStatus)+'</div>' +
       '<div class="capy-spaces-muted">Gates: '+escapeHtml(gates.join(', '))+'</div>' +
       (routeHint ? '<div class="capy-spaces-muted">Model route hint: '+escapeHtml(routeHint)+'</div>' : '') +
+      (selectedRoute ? '<div class="capy-spaces-muted">Model route: '+escapeHtml(selectedRoute)+'</div>' : '') +
       (flags.length ? '<div class="capy-spaces-muted">'+escapeHtml(flags.join(' · '))+'</div>' : '') +
       '</div>';
   }

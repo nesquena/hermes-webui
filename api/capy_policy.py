@@ -129,26 +129,32 @@ def _configured_mode() -> str:
 
 
 def _unsafe_public_text(text: str) -> bool:
-    lowered = text.lower()
+    lowered = re.sub(r"\s+", " ", text.lower()).strip()
     if "tokenization" in lowered:
         lowered = lowered.replace("tokenization", "")
     if "source code" in lowered:
         return True
     return bool(re.search(
-        r"<\s*script\b|renderer\b|source\b|api[_\s-]?key|api[_\s-]?auth|authorization|bearer\b|secret|password|credential|raw[_\s-]?prompt|generated[_\s-]*(?:widget[_\s-]*)?(?:body|code)",
+        r"<\s*script\b|javascript:|on[_\s-]*(?:abort|click|mouseover|mouseout|change|submit|focus|blur|input|keydown|keyup|load|error)\b|renderer\b|source\b|api[_\s-]?key|api[_\s-]?auth|authorization|bearer\b|secret|password|credential|cookie\b|access[_\s-]?token|bearer[_\s-]?token|refresh[_\s-]?token|id[_\s-]?token|(?:^|[^a-z0-9])(?:token|html|script|data)(?:$|[^a-z0-9])|raw[_\s-]?(?:prompt|code)|generated[_\s-]*(?:widget[_\s-]*)?(?:body|code)|sk-[a-z0-9_-]{8,}|ghp_[a-z0-9_.]{4,}|github\.{2,}[a-z0-9_.-]*|github_pat_[a-z0-9_.]{8,}|gh[ousr]_[a-z0-9_]{8,}|akia[a-z0-9]{12,}|xox[baprs]-[a-z0-9-]{8,}|hf_[a-z0-9_]{8,}",
         lowered,
     ))
 
 
-def _safe_route_text(value: Any, fallback: str) -> str:
+def safe_model_route_field(value: Any) -> str | None:
+    """Return a product-visible model-route field, or None when unsafe."""
+
     text = str(value or "").strip()
     if not text or len(text) > 80:
-        return fallback
+        return None
     if _unsafe_public_text(text):
-        return fallback
+        return None
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._:/()+-]{0,79}", text):
-        return fallback
+        return None
     return text
+
+
+def _safe_route_text(value: Any, fallback: str) -> str:
+    return safe_model_route_field(value) or fallback
 
 
 def _configured_model_routes() -> Dict[str, Any]:
@@ -215,6 +221,30 @@ def policy_status() -> Dict[str, Any]:
     }
 
 
+def _selected_model_route_preview(model_routing: Dict[str, Any], hint: str) -> Dict[str, Any] | None:
+    selected_hint = hint if hint in _MODEL_HINT_ORDER else model_routing.get("default_hint", "hint:reasoning")
+    if selected_hint not in _MODEL_HINT_DEFAULTS:
+        selected_hint = "hint:reasoning"
+    defaults = _MODEL_HINT_DEFAULTS[selected_hint]
+    configured = _configured_model_routes()
+    override = configured.get(selected_hint)
+    if not isinstance(override, dict):
+        override = {}
+    provider_source = override.get("provider") or override.get("resolved_provider") or defaults["resolved_provider"]
+    model_source = override.get("model") or override.get("resolved_model") or defaults["resolved_model"]
+    provider = safe_model_route_field(provider_source)
+    model = safe_model_route_field(model_source)
+    if not provider or not model:
+        return None
+    return {
+        "hint": selected_hint,
+        "label": defaults["label"],
+        "resolved_provider": provider,
+        "resolved_model": model,
+        "metadata_only": True,
+    }
+
+
 def action_policy_receipt(
     action: str,
     *,
@@ -229,9 +259,10 @@ def action_policy_receipt(
     gates = [gate for gate in _APPROVAL_GATES if gate in requested_gates]
     if not gates:
         gates = ["creator_commit"]
-    hint = model_route_hint if model_route_hint in _MODEL_HINT_ORDER else status["model_routing"]["default_hint"]
+    routing = status["model_routing"]
+    hint = model_route_hint if model_route_hint in _MODEL_HINT_ORDER else routing["default_hint"]
     preflight = prompt_preflight_status if prompt_preflight_status in {"pass", "warn", "block", "required"} else "required"
-    return {
+    receipt = {
         "available": True,
         "action": _safe_route_text(action, "capy.action"),
         "mode": status["mode"],
@@ -243,6 +274,10 @@ def action_policy_receipt(
         "metadata_only": True,
         "local_only": True,
     }
+    selected_route = _selected_model_route_preview(routing, hint)
+    if selected_route:
+        receipt["model_route"] = selected_route
+    return receipt
 
 
 def _normalized_boundary(boundary: Any) -> str:

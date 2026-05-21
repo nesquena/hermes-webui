@@ -149,6 +149,157 @@ def test_model_routing_status_uses_configured_hints_without_exposing_secrets(mon
     assert "<script" not in serialized
 
 
+def test_action_policy_receipt_includes_safe_selected_model_route_preview(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "Local summary provider",
+            "model": "Summary model",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        "hint:code": {
+            "provider": "renderer <script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "model": "source api_key SECRET_VALUE_DO_NOT_LEAK",
+            "source": "generated renderer source SECRET_VALUE_DO_NOT_LEAK",
+        },
+    }))
+
+    receipt = action_policy_receipt(
+        "space.creator.preview",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="pass",
+        model_route_hint="hint:summarize",
+    )
+
+    assert receipt["model_route_hint"] == "hint:summarize"
+    assert receipt["model_route"] == {
+        "hint": "hint:summarize",
+        "label": "Summarize",
+        "resolved_provider": "Local summary provider",
+        "resolved_model": "Summary model",
+        "metadata_only": True,
+    }
+
+    hostile_receipt = action_policy_receipt(
+        "space.creator.preview",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="pass",
+        model_route_hint="hint:code",
+    )
+    assert hostile_receipt["model_route_hint"] == "hint:code"
+    assert "model_route" not in hostile_receipt
+
+    unknown_receipt = action_policy_receipt(
+        "space.creator.preview",
+        model_route_hint="hint:<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+    )
+    assert unknown_receipt["model_route_hint"] == "hint:reasoning"
+    assert unknown_receipt["model_route"]["hint"] == "hint:reasoning"
+    assert unknown_receipt["model_route"]["metadata_only"] is True
+
+    serialized = json.dumps([receipt, hostile_receipt, unknown_receipt], sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_action_policy_receipt_rejects_credential_shaped_model_route_preview(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "ghp_01...ghij",
+            "model": "github...fghi",
+        },
+        "hint:fast": {
+            "provider": "accessToken abcdefgh",
+            "model": "bearerToken abcdefgh",
+        },
+    }))
+
+    receipt = action_policy_receipt(
+        "space.creator.preview",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="pass",
+        model_route_hint="hint:summarize",
+    )
+
+    assert "model_route" not in receipt
+    serialized = json.dumps(receipt, sort_keys=True).lower()
+    assert "ghp_01...ghij" not in serialized
+    assert "github...fghi" not in serialized
+
+    camel_case_receipt = action_policy_receipt(
+        "space.creator.preview",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="pass",
+        model_route_hint="hint:fast",
+    )
+    assert "model_route" not in camel_case_receipt
+    serialized = json.dumps(camel_case_receipt, sort_keys=True).lower()
+    assert "accesstoken" not in serialized
+    assert "bearertoken" not in serialized
+
+
+def test_action_policy_receipt_rejects_source_and_token_route_terms(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "data:text/html",
+            "model": "access_token abcdefgh",
+        },
+        "hint:local": {
+            "provider": "script:loader",
+            "model": "cookie jar",
+        },
+    }))
+
+    summarize = action_policy_receipt("space.creator.preview", model_route_hint="hint:summarize")
+    local = action_policy_receipt("space.creator.preview", model_route_hint="hint:local")
+
+    assert "model_route" not in summarize
+    assert "model_route" not in local
+    serialized = json.dumps([summarize, local], sort_keys=True).lower()
+    assert "data:text/html" not in serialized
+    assert "access_token" not in serialized
+    assert "script:loader" not in serialized
+    assert "cookie jar" not in serialized
+
+
+def test_action_policy_receipt_omits_javascript_event_handler_model_route_terms(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "javascript:alert",
+            "model": "onload handler",
+        },
+        "hint:local": {
+            "provider": "on   click handler",
+            "model": "raw   code",
+        },
+        "hint:fast": {
+            "provider": "api   key abcdef",
+            "model": "api   auth abcdef",
+        },
+    }))
+
+    receipt = action_policy_receipt("space.creator.preview", model_route_hint="hint:summarize")
+    raw_code_receipt = action_policy_receipt("space.creator.preview", model_route_hint="hint:local")
+    spaced_credential_receipt = action_policy_receipt("space.creator.preview", model_route_hint="hint:fast")
+
+    assert receipt["model_route_hint"] == "hint:summarize"
+    assert "model_route" not in receipt
+    assert raw_code_receipt["model_route_hint"] == "hint:local"
+    assert "model_route" not in raw_code_receipt
+    assert spaced_credential_receipt["model_route_hint"] == "hint:fast"
+    assert "model_route" not in spaced_credential_receipt
+    serialized = json.dumps([receipt, raw_code_receipt, spaced_credential_receipt], sort_keys=True).lower()
+    assert "javascript:alert" not in serialized
+    assert "onload handler" not in serialized
+    assert "onclick handler" not in serialized
+    assert "on   click handler" not in serialized
+    assert "raw   code" not in serialized
+    assert "api   key" not in serialized
+    assert "api   auth" not in serialized
+
+
 def test_action_policy_receipt_bounds_and_deduplicates_gates_without_leaking_hostile_fields(monkeypatch):
     monkeypatch.setenv("CAPY_AUTONOMY_MODE", "semi_autonomous")
 
