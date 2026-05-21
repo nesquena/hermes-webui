@@ -595,6 +595,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
   let _smdWrittenText='';  // exact displayText snapshot used for prefix-alignment checks
+  let _streamingKatexTimer=null; // throttles live KaTeX scans while smd writes deltas
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
@@ -940,6 +941,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Helper: end the current smd parser (flushes remaining state) and null it out.
   function _smdEndParser(){
+    if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}
     if(_smdParser&&window.smd){
       try{window.smd.parser_end(_smdParser);}catch(_){}
       // parser_end may flush remaining markdown that creates new links/images —
@@ -949,6 +951,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
+  }
+  function _scheduleStreamingKatex(){
+    if(_streamingKatexTimer) return;
+    _streamingKatexTimer=setTimeout(()=>{
+      _streamingKatexTimer=null;
+      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody);
+    },150);
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
@@ -974,6 +983,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // streaming-markdown does NOT sanitize URL schemes. The default live path
     // scans after writes; fade mode blocks unsafe href/src in its renderer.set_attr.
     if(assistantBody&&!fade){_sanitizeSmdLinks(assistantBody);}
+    _scheduleStreamingKatex();
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
