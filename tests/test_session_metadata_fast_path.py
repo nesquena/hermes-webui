@@ -62,7 +62,7 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
     assert "if(s.default_model){" in src
     assert "window._defaultModel=s.default_model;" in src
-    assert "const _hydrateBootModelDropdown=()=>populateModelDropdown().then" in src
+    assert "const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then" in src
     assert "window._modelDropdownReady=null;" in src
     assert "window._ensureModelDropdownReady=_startBootModelDropdown;" in src
     assert "await populateModelDropdown()" not in src

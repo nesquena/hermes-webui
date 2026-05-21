@@ -1462,12 +1462,8 @@ function applyBotName(){
       if(sel&&typeof _applyModelToDropdown==='function'){
         // Fresh page boot must prefer the profile/server default over stale
         // browser-persisted model state. A restored session can still apply its
-        // own persisted model later through loadSession().
-        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else {
-          localStorage.removeItem('hermes-webui-model');
-          localStorage.removeItem('hermes-webui-model-state');
-        }
+        // own persisted model later through loadSession(). Preserve the browser
+        // keys for legacy/no-default fallback paths instead of deleting them.
         const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
         if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
           existingDefaultOpt.dataset.provider=window._activeProvider;
@@ -1575,7 +1571,7 @@ function applyBotName(){
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
