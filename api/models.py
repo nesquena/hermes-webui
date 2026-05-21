@@ -3043,6 +3043,58 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return False
 
 
+def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
+    """Return only state.db rows that are newer than model-facing context.
+
+    `context_messages` is the authoritative model-facing prefix. state.db may
+    contain a mirrored copy of that prefix with fresh timestamps, especially for
+    LCM/continuation sessions. Appending the whole state transcript to a clean
+    sidecar context replays old context into the next runtime prompt.
+    """
+    sidecar_context = list(sidecar_context or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_context or not state_messages:
+        return state_messages
+
+    sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
+    state_keys = [_session_message_content_key(m) for m in state_messages]
+    max_offset = min(len(sidecar_keys), len(state_keys))
+    best_len = 0
+    for offset in range(max_offset):
+        length = 0
+        while (
+            offset + length < len(sidecar_keys)
+            and length < len(state_keys)
+            and sidecar_keys[offset + length] == state_keys[length]
+        ):
+            length += 1
+        if length > best_len:
+            best_len = length
+
+    # Require at least two mirrored rows. A single repeated short user message
+    # is not enough evidence that state.db starts with a mirrored context
+    # segment, but small recovered contexts often contain only a compact summary
+    # and one follow-up row; those should still use the delta path.
+    if best_len < 2:
+        return state_messages
+
+    sidecar_key_set = set(sidecar_keys)
+    last_represented_state_index = best_len - 1
+    for idx, key in enumerate(state_keys[best_len:], start=best_len):
+        if key in sidecar_key_set:
+            last_represented_state_index = idx
+
+    delta = []
+    for msg, key in zip(
+        state_messages[last_represented_state_index + 1:],
+        state_keys[last_represented_state_index + 1:],
+    ):
+        if key in sidecar_key_set:
+            continue
+        delta.append(msg)
+    return delta
+
+
 def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows."""
     sidecar_messages = list(sidecar_messages or [])
@@ -3131,6 +3183,8 @@ def reconciled_state_db_messages_for_session(
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    if prefer_context and local_messages:
+        state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(local_messages, state_messages)
 
 
